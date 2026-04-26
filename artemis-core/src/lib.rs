@@ -3,6 +3,7 @@ pub mod errors;
 pub mod mock;
 pub mod provider;
 pub mod streaming;
+pub mod transport;
 pub mod types;
 
 use errors::py_exc;
