@@ -178,7 +178,7 @@ impl ToolDefinition {
 
 /// The type of API transport to use for a provider.
 #[pyclass(from_py_object)]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TransportType {
     #[serde(rename = "chat_completions")]
     ChatCompletions,

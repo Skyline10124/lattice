@@ -8,6 +8,10 @@
 //! - `denormalize_stream_chunk`: provider SSE event → internal [`StreamEvent`]
 
 pub mod anthropic;
+pub mod chat_completions;
+pub mod dispatcher;
+pub mod gemini;
+pub mod openai_compat;
 
 use crate::streaming::StreamEvent;
 use crate::types::{Message, ToolCall, ToolDefinition};
@@ -69,3 +73,8 @@ pub trait Transport: Send + Sync {
         data: &Value,
     ) -> Vec<StreamEvent>;
 }
+
+pub use chat_completions::{ChatCompletionsTransport, Transport as ChatTransport, TransportError};
+pub use dispatcher::TransportDispatcher;
+pub use gemini::GeminiTransport;
+pub use openai_compat::OpenAICompatTransport;
