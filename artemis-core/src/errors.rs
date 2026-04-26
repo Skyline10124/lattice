@@ -738,6 +738,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Python runtime (run via Python integration tests)"]
     fn test_py_err_network_roundtrip() {
         let err = ArtemisError::Network {
             message: "timeout".into(),
@@ -759,6 +760,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Python runtime (run via Python integration tests)"]
     fn test_py_err_all_exception_types_roundtrip() {
         with_python(|py| {
             let cases: Vec<(ArtemisError, &str)> = vec![
@@ -841,6 +843,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Python runtime (run via Python integration tests)"]
     fn test_exception_hierarchy() {
         with_python(|py| {
             // Check that all exception types share the ArtemisError base.
