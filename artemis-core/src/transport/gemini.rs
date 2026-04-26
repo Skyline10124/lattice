@@ -1,8 +1,7 @@
 //! Gemini transport — message normalizer for Google's `generateContent` API format.
 //!
-//! Converts between Artemis internal types ([`Message`], [`ToolDefinition`],
-//! [`ChatResponse`]) and the Gemini-native JSON schema used by
-//! `models/{model}:generateContent`.
+//! Converts between Artemis internal types ([`ChatRequest`], [`ChatResponse`])
+//! and the Gemini-native JSON schema used by `models/{model}:generateContent`.
 //!
 //! Key differences from OpenAI's Chat Completions format:
 //!
@@ -17,43 +16,14 @@
 //! - Finish reasons are upper-case: `"STOP"`, `"MAX_TOKENS"`, `"SAFETY"`,
 //!   `"RECITATION"`, `"OTHER"`
 
-use crate::provider::ChatResponse;
+use std::collections::HashMap;
+
+use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::TokenUsage;
-use crate::types::{Message, Role, ToolCall, ToolDefinition};
+use crate::transport::chat_completions::{Transport, TransportError};
+use crate::types::Role;
 use serde_json::{json, Value};
 use uuid::Uuid;
-
-// ---------------------------------------------------------------------------
-// Transport trait
-// ---------------------------------------------------------------------------
-
-/// Interface for converting between internal types and a provider's API format.
-///
-/// Each transport handles normalization (internal → API) and denormalization
-/// (API → internal) for one API format.
-pub trait Transport: Send + Sync {
-    /// Convert a list of internal messages into the provider's request body
-    /// (the `contents` array and any extra top-level fields like
-    /// `systemInstruction`).
-    ///
-    /// Returns `(contents, extra_fields)` where `extra_fields` is a JSON
-    /// object that may contain `systemInstruction` and other non-contents
-    /// top-level keys.
-    fn normalize_messages(&self, messages: &[Message]) -> (Value, Value);
-
-    /// Convert a list of tool definitions into the provider's tools format.
-    fn normalize_tools(&self, tools: &[ToolDefinition]) -> Value;
-
-    /// Parse a full (non-streaming) response from the provider into our
-    /// internal [`ChatResponse`].
-    fn denormalize_response(&self, response: &Value) -> ChatResponse;
-
-    /// Parse a single streaming chunk from the provider.
-    ///
-    /// Returns a list of [`StreamChunk`] items extracted from this chunk
-    /// (Gemini can emit multiple parts per candidate).
-    fn denormalize_stream_chunk(&self, chunk: &Value) -> Vec<StreamChunk>;
-}
 
 // ---------------------------------------------------------------------------
 // Stream chunk (lightweight intermediate for streaming)
@@ -62,24 +32,15 @@ pub trait Transport: Send + Sync {
 /// A single piece of content extracted from a streaming chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamChunk {
-    /// A text token.
     Token { content: String },
-
-    /// A reasoning/thinking token.
     Thinking { content: String },
-
-    /// A tool call delta (may arrive incrementally).
     ToolCallDelta {
         index: usize,
         id: String,
         name: String,
         arguments: String,
     },
-
-    /// The stream is done.
     Done { finish_reason: String },
-
-    /// Token usage reported in the final chunk.
     Usage { usage: TokenUsage },
 }
 
@@ -88,11 +49,24 @@ pub enum StreamChunk {
 // ---------------------------------------------------------------------------
 
 /// Message-format normalizer for the Gemini `generateContent` API.
-pub struct GeminiTransport;
+pub struct GeminiTransport {
+    base_url: String,
+    extra_headers: HashMap<String, String>,
+}
 
 impl GeminiTransport {
     pub fn new() -> Self {
-        GeminiTransport
+        Self {
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            extra_headers: HashMap::new(),
+        }
+    }
+
+    pub fn with_base_url(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            extra_headers: HashMap::new(),
+        }
     }
 
     /// Map Gemini finish reasons to our internal finish-reason strings.
@@ -113,21 +87,12 @@ impl GeminiTransport {
         }
     }
 
-    /// Generate a deterministic-ish tool call ID. Gemini doesn't provide
-    /// call IDs, so we synthesize them.
     fn generate_call_id() -> String {
         format!("call_{}", &Uuid::new_v4().to_string().replace("-", "")[..12])
     }
-}
 
-impl Default for GeminiTransport {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Transport for GeminiTransport {
-    fn normalize_messages(&self, messages: &[Message]) -> (Value, Value) {
+    /// Build the Gemini `contents` array and `systemInstruction` from internal messages.
+    fn build_contents(messages: &[crate::types::Message]) -> (Value, Option<Value>) {
         let mut system_parts: Vec<Value> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
 
@@ -144,10 +109,7 @@ impl Transport for GeminiTransport {
                         parts.push(json!({"text": msg.content}));
                     }
                     if !parts.is_empty() {
-                        contents.push(json!({
-                            "role": "user",
-                            "parts": parts,
-                        }));
+                        contents.push(json!({"role": "user", "parts": parts}));
                     }
                 }
                 Role::Assistant => {
@@ -159,11 +121,7 @@ impl Transport for GeminiTransport {
                         for tc in tool_calls {
                             let args: Value =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
-                            let args_obj = if args.is_object() {
-                                args
-                            } else {
-                                json!({"_value": args})
-                            };
+                            let args_obj = if args.is_object() { args } else { json!({"_value": args}) };
                             parts.push(json!({
                                 "functionCall": {
                                     "name": tc.function.name,
@@ -173,10 +131,7 @@ impl Transport for GeminiTransport {
                         }
                     }
                     if !parts.is_empty() {
-                        contents.push(json!({
-                            "role": "model",
-                            "parts": parts,
-                        }));
+                        contents.push(json!({"role": "model", "parts": parts}));
                     }
                 }
                 Role::Tool => {
@@ -184,49 +139,38 @@ impl Transport for GeminiTransport {
                         .name
                         .as_deref()
                         .unwrap_or(msg.tool_call_id.as_deref().unwrap_or("tool"));
-                    let response: Value = if msg.content.trim().starts_with('{')
-                        || msg.content.trim().starts_with('[')
-                    {
-                        serde_json::from_str(&msg.content).unwrap_or_else(|_| {
+                    let response: Value =
+                        if msg.content.trim().starts_with('{') || msg.content.trim().starts_with('[')
+                        {
+                            serde_json::from_str(&msg.content)
+                                .unwrap_or_else(|_| json!({"output": msg.content}))
+                        } else {
                             json!({"output": msg.content})
-                        })
-                    } else {
-                        json!({"output": msg.content})
-                    };
-                    let response_obj = if response.is_object() {
-                        response
-                    } else {
-                        json!({"output": response})
-                    };
+                        };
+                    let response_obj = if response.is_object() { response } else { json!({"output": response}) };
                     contents.push(json!({
                         "role": "user",
-                        "parts": [{
-                            "functionResponse": {
-                                "name": tool_name,
-                                "response": response_obj,
-                            }
-                        }],
+                        "parts": [{"functionResponse": {"name": tool_name, "response": response_obj}}],
                     }));
                 }
             }
         }
 
-        let mut extra = json!({});
-        if !system_parts.is_empty() {
-            extra["systemInstruction"] = json!({"parts": system_parts});
-        }
+        let system_instruction = if system_parts.is_empty() {
+            None
+        } else {
+            Some(json!({"parts": system_parts}))
+        };
 
-        (json!(contents), extra)
+        (json!(contents), system_instruction)
     }
 
-    fn normalize_tools(&self, tools: &[ToolDefinition]) -> Value {
+    /// Build the Gemini `tools` array from internal tool definitions.
+    fn build_tools(tools: &[crate::types::ToolDefinition]) -> Value {
         let declarations: Vec<Value> = tools
             .iter()
             .map(|td| {
-                let mut decl = json!({
-                    "name": td.name,
-                    "description": td.description,
-                });
+                let mut decl = json!({"name": td.name, "description": td.description});
                 if !td.parameters.is_null() && td.parameters != json!({}) {
                     decl["parameters"] = td.parameters.clone();
                 }
@@ -241,9 +185,13 @@ impl Transport for GeminiTransport {
         }
     }
 
-    fn denormalize_response(&self, response: &Value) -> ChatResponse {
-        let candidates = response.get("candidates").and_then(|c| c.as_array());
-        let (content_parts, finish_reason_raw) = match candidates {
+    /// Parse a full Gemini response into a ChatResponse.
+    fn parse_response(response: &Value) -> Result<ChatResponse, TransportError> {
+        let candidates = response
+            .get("candidates")
+            .and_then(|c| c.as_array());
+
+        let (content_parts, finish_reason_raw, model) = match candidates {
             Some(cands) if !cands.is_empty() => {
                 let cand = &cands[0];
                 let parts = cand
@@ -257,24 +205,23 @@ impl Transport for GeminiTransport {
                     .and_then(|r| r.as_str())
                     .unwrap_or("STOP")
                     .to_string();
-                (parts, reason)
+                (parts, reason, String::new())
             }
             _ => {
-                return ChatResponse {
+                return Ok(ChatResponse {
                     content: None,
                     tool_calls: None,
                     usage: None,
                     finish_reason: "stop".to_string(),
                     model: String::new(),
-                };
+                });
             }
         };
 
         let mut text_pieces: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut tool_calls: Vec<crate::types::ToolCall> = Vec::new();
 
         for part in &content_parts {
-            // Thinking/reasoning part — skip for content but don't error
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                 continue;
             }
@@ -284,8 +231,9 @@ impl Transport for GeminiTransport {
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
-                let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                tool_calls.push(ToolCall {
+                let args_str = serde_json::to_string(&args)
+                    .unwrap_or_else(|_| "{}".to_string());
+                tool_calls.push(crate::types::ToolCall {
                     id: Self::generate_call_id(),
                     function: crate::types::FunctionCall {
                         name: name.to_string(),
@@ -302,40 +250,26 @@ impl Transport for GeminiTransport {
             Self::map_finish_reason(&finish_reason_raw)
         };
 
-        let usage_meta = response.get("usageMetadata");
-        let usage = usage_meta.map(|u| TokenUsage {
-            prompt_tokens: u
-                .get("promptTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            completion_tokens: u
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            total_tokens: u
-                .get("totalTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
+        let usage = response.get("usageMetadata").map(|u| TokenUsage {
+            prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         });
 
-        ChatResponse {
-            content: if text_pieces.is_empty() {
-                None
-            } else {
-                Some(text_pieces.join(""))
-            },
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
+        Ok(ChatResponse {
+            content: if text_pieces.is_empty() { None } else { Some(text_pieces.join("")) },
+            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
             usage,
             finish_reason,
-            model: String::new(),
-        }
+            model,
+        })
     }
 
-    fn denormalize_stream_chunk(&self, chunk: &Value) -> Vec<StreamChunk> {
+    /// Parse a single streaming chunk from the Gemini API.
+    ///
+    /// Returns a list of [`StreamChunk`] items extracted from this chunk
+    /// (Gemini can emit multiple parts per candidate).
+    pub fn denormalize_stream_chunk(&self, chunk: &Value) -> Vec<StreamChunk> {
         let candidates = chunk.get("candidates").and_then(|c| c.as_array());
         let (content_parts, finish_reason_raw) = match candidates {
             Some(cands) if !cands.is_empty() => {
@@ -358,29 +292,21 @@ impl Transport for GeminiTransport {
         let mut results: Vec<StreamChunk> = Vec::new();
 
         for part in &content_parts {
-            // Thinking part
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    results.push(StreamChunk::Thinking {
-                        content: text.to_string(),
-                    });
+                    results.push(StreamChunk::Thinking { content: text.to_string() });
                 }
                 continue;
             }
-            // Text token
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
-                    results.push(StreamChunk::Token {
-                        content: text.to_string(),
-                    });
+                    results.push(StreamChunk::Token { content: text.to_string() });
                 }
             }
-            // Function call
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
-                let args_str =
-                    serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+                let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 results.push(StreamChunk::ToolCallDelta {
                     index: results.len(),
                     id: Self::generate_call_id(),
@@ -390,35 +316,76 @@ impl Transport for GeminiTransport {
             }
         }
 
-        // Finish reason
         if let Some(ref reason) = finish_reason_raw {
-            let mapped = Self::map_finish_reason(reason);
             results.push(StreamChunk::Done {
-                finish_reason: mapped,
+                finish_reason: Self::map_finish_reason(reason),
             });
         }
 
-        // Usage metadata (appears in final chunk)
         if let Some(u) = chunk.get("usageMetadata") {
             results.push(StreamChunk::Usage {
                 usage: TokenUsage {
-                    prompt_tokens: u
-                        .get("promptTokenCount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    completion_tokens: u
-                        .get("candidatesTokenCount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
-                    total_tokens: u
-                        .get("totalTokenCount")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32,
+                    prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 },
             });
         }
 
         results
+    }
+}
+
+impl Default for GeminiTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Transport for GeminiTransport {
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn extra_headers(&self) -> &HashMap<String, String> {
+        &self.extra_headers
+    }
+
+    fn api_mode(&self) -> &str {
+        "gemini"
+    }
+
+    fn normalize_request(&self, request: &ChatRequest) -> Result<Value, TransportError> {
+        let (contents, system_instruction) = Self::build_contents(&request.messages);
+        let mut body = json!({"contents": contents});
+
+        if let Some(sys) = system_instruction {
+            body["systemInstruction"] = sys;
+        }
+
+        let tools = Self::build_tools(&request.tools);
+        if let Some(tools_arr) = tools.as_array() {
+            if !tools_arr.is_empty() {
+                body["tools"] = tools;
+            }
+        }
+
+        let mut generation_config = json!({});
+        if let Some(temp) = request.temperature {
+            generation_config["temperature"] = json!(temp);
+        }
+        if let Some(max_tokens) = request.max_tokens {
+            generation_config["maxOutputTokens"] = json!(max_tokens);
+        }
+        if generation_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            body["generationConfig"] = generation_config;
+        }
+
+        Ok(body)
+    }
+
+    fn denormalize_response(&self, response: &Value) -> Result<ChatResponse, TransportError> {
+        Self::parse_response(response)
     }
 }
 
@@ -430,6 +397,24 @@ impl Transport for GeminiTransport {
 mod tests {
     use super::*;
     use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
+
+    fn make_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ChatRequest {
+        ChatRequest {
+            messages,
+            tools,
+            model: "gemini-2.5-flash".to_string(),
+            temperature: None,
+            max_tokens: None,
+            stream: false,
+            provider_config: crate::types::ProviderConfig {
+                name: "gemini".to_string(),
+                api_base: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                api_key: Some("test-key".to_string()),
+                transport: crate::types::TransportType::Gemini,
+                extra_headers: None,
+            },
+        }
+    }
 
     // ── normalize_messages ───────────────────────────────────────────
 
@@ -453,15 +438,13 @@ mod tests {
         ];
 
         let transport = GeminiTransport::new();
-        let (contents, extra) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        // System message should NOT appear in contents
-        let contents_arr = contents.as_array().unwrap();
-        assert_eq!(contents_arr.len(), 1);
-        assert_eq!(contents_arr[0]["role"], "user");
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
 
-        // System message should be in systemInstruction
-        let sys = &extra["systemInstruction"];
+        let sys = &body["systemInstruction"];
         assert!(sys.is_object());
         let sys_parts = sys["parts"].as_array().unwrap();
         assert_eq!(sys_parts.len(), 1);
@@ -479,18 +462,15 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let (contents, extra) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        let contents_arr = contents.as_array().unwrap();
-        assert_eq!(contents_arr.len(), 1);
-        assert_eq!(contents_arr[0]["role"], "user");
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
 
-        let parts = contents_arr[0]["parts"].as_array().unwrap();
+        let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0]["text"], "What is Rust?");
-
-        // No system instruction
-        assert!(extra.get("systemInstruction").is_none());
     }
 
     #[test]
@@ -510,20 +490,18 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let (contents, _) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        let contents_arr = contents.as_array().unwrap();
-        assert_eq!(contents_arr.len(), 1);
-        assert_eq!(contents_arr[0]["role"], "model");
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "model");
 
-        let parts = contents_arr[0]["parts"].as_array().unwrap();
-        // No text part since content is empty
+        let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 1);
 
         let fc = &parts[0]["functionCall"];
         assert_eq!(fc["name"], "get_weather");
         assert_eq!(fc["args"]["city"], "Tokyo");
-        // Gemini uses "args" (object), not "arguments" (string)
         assert!(fc["args"].is_object());
     }
 
@@ -538,19 +516,14 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let (contents, _) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        let contents_arr = contents.as_array().unwrap();
-        assert_eq!(contents_arr.len(), 1);
-        // Tool messages become "user" role in Gemini
-        assert_eq!(contents_arr[0]["role"], "user");
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0]["role"], "user");
 
-        let parts = contents_arr[0]["parts"].as_array().unwrap();
-        assert_eq!(parts.len(), 1);
-
-        let fr = &parts[0]["functionResponse"];
+        let fr = &contents[0]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "get_weather");
-        // The JSON content was parsed into the response object
         assert_eq!(fr["response"]["temperature"], 22);
         assert_eq!(fr["response"]["condition"], "sunny");
     }
@@ -575,7 +548,7 @@ mod tests {
         });
 
         let transport = GeminiTransport::new();
-        let response = transport.denormalize_response(&gemini_response);
+        let response = transport.denormalize_response(&gemini_response).unwrap();
 
         assert_eq!(response.content.as_deref(), Some("Hello! How can I help?"));
         assert!(response.tool_calls.is_none());
@@ -606,18 +579,78 @@ mod tests {
         });
 
         let transport = GeminiTransport::new();
-        let response = transport.denormalize_response(&gemini_response);
+        let response = transport.denormalize_response(&gemini_response).unwrap();
 
         assert!(response.content.is_none());
         let tool_calls = response.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
-        // Arguments should be a JSON string of the args object
-        let args: Value =
-            serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        let args: Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "Paris");
-        // finish_reason should be "tool_calls" when function calls are present
         assert_eq!(response.finish_reason, "tool_calls");
+    }
+
+    #[test]
+    fn test_denormalize_empty_response() {
+        let gemini_response = json!({"candidates": []});
+
+        let transport = GeminiTransport::new();
+        let response = transport.denormalize_response(&gemini_response).unwrap();
+
+        assert!(response.content.is_none());
+        assert!(response.tool_calls.is_none());
+        assert_eq!(response.finish_reason, "stop");
+    }
+
+    #[test]
+    fn test_denormalize_safety_finish() {
+        let gemini_response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "I can't"}],
+                    "role": "model"
+                },
+                "finishReason": "SAFETY"
+            }]
+        });
+
+        let transport = GeminiTransport::new();
+        let response = transport.denormalize_response(&gemini_response).unwrap();
+
+        assert_eq!(response.finish_reason, "content_filter");
+    }
+
+    #[test]
+    fn test_denormalize_recitation_finish() {
+        let gemini_response = json!({
+            "candidates": [{
+                "content": {"parts": [], "role": "model"},
+                "finishReason": "RECITATION"
+            }]
+        });
+
+        let transport = GeminiTransport::new();
+        let response = transport.denormalize_response(&gemini_response).unwrap();
+
+        assert_eq!(response.finish_reason, "content_filter");
+    }
+
+    #[test]
+    fn test_denormalize_max_tokens_finish() {
+        let gemini_response = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Once upon a"}],
+                    "role": "model"
+                },
+                "finishReason": "MAX_TOKENS"
+            }]
+        });
+
+        let transport = GeminiTransport::new();
+        let response = transport.denormalize_response(&gemini_response).unwrap();
+
+        assert_eq!(response.finish_reason, "length");
     }
 
     // ── normalize_tools ──────────────────────────────────────────────
@@ -637,15 +670,22 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let result = transport.normalize_tools(&tools);
+        let body = transport.normalize_request(&make_request(vec![], tools)).unwrap();
 
-        let tools_arr = result.as_array().unwrap();
+        let tools_arr = body["tools"].as_array().unwrap();
         assert_eq!(tools_arr.len(), 1);
         let decls = tools_arr[0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0]["name"], "search");
         assert_eq!(decls[0]["description"], "Search the web");
         assert!(decls[0]["parameters"].is_object());
+    }
+
+    #[test]
+    fn test_normalize_tools_empty() {
+        let transport = GeminiTransport::new();
+        let body = transport.normalize_request(&make_request(vec![], vec![])).unwrap();
+        assert!(body.get("tools").is_none());
     }
 
     // ── denormalize_stream_chunk ─────────────────────────────────────
@@ -665,12 +705,7 @@ mod tests {
         let results = transport.denormalize_stream_chunk(&chunk);
 
         assert_eq!(results.len(), 1);
-        assert_eq!(
-            results[0],
-            StreamChunk::Token {
-                content: "Hello".to_string()
-            }
-        );
+        assert_eq!(results[0], StreamChunk::Token { content: "Hello".to_string() });
     }
 
     #[test]
@@ -691,28 +726,15 @@ mod tests {
         let results = transport.denormalize_stream_chunk(&chunk);
 
         assert_eq!(results.len(), 2);
-        assert_eq!(
-            results[0],
-            StreamChunk::Thinking {
-                content: "Let me think...".to_string()
-            }
-        );
-        assert_eq!(
-            results[1],
-            StreamChunk::Token {
-                content: "The answer is 42".to_string()
-            }
-        );
+        assert_eq!(results[0], StreamChunk::Thinking { content: "Let me think...".to_string() });
+        assert_eq!(results[1], StreamChunk::Token { content: "The answer is 42".to_string() });
     }
 
     #[test]
     fn test_denormalize_stream_chunk_with_finish() {
         let chunk = json!({
             "candidates": [{
-                "content": {
-                    "parts": [],
-                    "role": "model"
-                },
+                "content": {"parts": [], "role": "model"},
                 "finishReason": "STOP"
             }],
             "usageMetadata": {
@@ -725,7 +747,6 @@ mod tests {
         let transport = GeminiTransport::new();
         let results = transport.denormalize_stream_chunk(&chunk);
 
-        // Should have Done + Usage
         assert!(results.len() >= 2);
         let has_done = results.iter().any(|r| matches!(r, StreamChunk::Done { .. }));
         let has_usage = results.iter().any(|r| matches!(r, StreamChunk::Usage { .. }));
@@ -743,54 +764,33 @@ mod tests {
         assert_eq!(GeminiTransport::map_finish_reason("RECITATION"), "content_filter");
         assert_eq!(GeminiTransport::map_finish_reason("OTHER"), "stop");
         assert_eq!(GeminiTransport::map_finish_reason("UNKNOWN"), "stop");
-        // Case insensitive
         assert_eq!(GeminiTransport::map_finish_reason("stop"), "stop");
+    }
+
+    // ── transport trait ──────────────────────────────────────────────
+
+    #[test]
+    fn test_api_mode() {
+        let transport = GeminiTransport::new();
+        assert_eq!(transport.api_mode(), "gemini");
+    }
+
+    #[test]
+    fn test_default_base_url() {
+        let transport = GeminiTransport::new();
+        assert_eq!(transport.base_url(), "https://generativelanguage.googleapis.com/v1beta");
+    }
+
+    #[test]
+    fn test_custom_base_url() {
+        let transport = GeminiTransport::with_base_url("https://custom.googleapis.com/v1");
+        assert_eq!(transport.base_url(), "https://custom.googleapis.com/v1");
     }
 
     // ── edge cases ───────────────────────────────────────────────────
 
     #[test]
-    fn test_denormalize_empty_response() {
-        let gemini_response = json!({
-            "candidates": []
-        });
-
-        let transport = GeminiTransport::new();
-        let response = transport.denormalize_response(&gemini_response);
-
-        assert!(response.content.is_none());
-        assert!(response.tool_calls.is_none());
-        assert_eq!(response.finish_reason, "stop");
-    }
-
-    #[test]
-    fn test_denormalize_safety_finish() {
-        let gemini_response = json!({
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": "I can't"}],
-                    "role": "model"
-                },
-                "finishReason": "SAFETY"
-            }]
-        });
-
-        let transport = GeminiTransport::new();
-        let response = transport.denormalize_response(&gemini_response);
-
-        assert_eq!(response.finish_reason, "content_filter");
-    }
-
-    #[test]
-    fn test_normalize_tools_empty() {
-        let transport = GeminiTransport::new();
-        let result = transport.normalize_tools(&[]);
-        assert_eq!(result, json!([]));
-    }
-
-    #[test]
     fn test_normalize_function_response_plain_text() {
-        // Tool result with plain text (not JSON) content
         let messages = vec![Message {
             role: Role::Tool,
             content: "The weather is sunny".to_string(),
@@ -800,16 +800,15 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let (contents, _) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        let fr = &contents.as_array().unwrap()[0]["parts"][0]["functionResponse"];
+        let fr = &body["contents"][0]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "get_weather");
-        // Plain text gets wrapped: {"output": "The weather is sunny"}
         assert_eq!(fr["response"]["output"], "The weather is sunny");
     }
 
     #[test]
-    fn test_denormalize_thinking_part_in_full_response() {
+    fn test_denormalize_thinking_part_skipped_in_content() {
         let gemini_response = json!({
             "candidates": [{
                 "content": {
@@ -824,9 +823,8 @@ mod tests {
         });
 
         let transport = GeminiTransport::new();
-        let response = transport.denormalize_response(&gemini_response);
+        let response = transport.denormalize_response(&gemini_response).unwrap();
 
-        // Thinking parts should be skipped in content
         assert_eq!(response.content.as_deref(), Some("The answer is 42"));
         assert_eq!(response.finish_reason, "stop");
     }
@@ -851,11 +849,32 @@ mod tests {
         ];
 
         let transport = GeminiTransport::new();
-        let (_, extra) = transport.normalize_messages(&messages);
+        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
 
-        let sys_parts = extra["systemInstruction"]["parts"].as_array().unwrap();
+        let sys_parts = body["systemInstruction"]["parts"].as_array().unwrap();
         assert_eq!(sys_parts.len(), 2);
         assert_eq!(sys_parts[0]["text"], "System part 1");
         assert_eq!(sys_parts[1]["text"], "System part 2");
+    }
+
+    #[test]
+    fn test_normalize_request_includes_generation_config() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: "Hello".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        let mut req = make_request(messages, vec![]);
+        req.temperature = Some(0.7);
+        req.max_tokens = Some(100);
+
+        let transport = GeminiTransport::new();
+        let body = transport.normalize_request(&req).unwrap();
+
+        assert_eq!(body["generationConfig"]["temperature"], 0.7);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 100);
     }
 }

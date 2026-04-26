@@ -4,7 +4,9 @@
 //! (e.g. OpenAI Chat Completions, Anthropic Messages, etc.).
 
 pub mod chat_completions;
+pub mod gemini;
 pub mod openai_compat;
 
 pub use chat_completions::{ChatCompletionsTransport, Transport, TransportError};
+pub use gemini::{GeminiTransport, StreamChunk};
 pub use openai_compat::OpenAICompatTransport;
