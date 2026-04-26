@@ -1,3 +1,7 @@
+pub mod provider;
+pub mod streaming;
+pub mod types;
+
 use pyo3::prelude::*;
 
 /// Add two integers together.
