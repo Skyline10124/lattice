@@ -1,4 +1,7 @@
+pub mod engine;
 pub mod errors;
+pub mod mock;
+pub mod provider;
 pub mod streaming;
 pub mod types;
 
@@ -42,5 +45,11 @@ fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::Message>()?;
     m.add_class::<types::ToolDefinition>()?;
     m.add_class::<types::TransportType>()?;
+
+    // ── Register engine types ────────────────────────────────────────
+    m.add_class::<engine::ArtemisEngine>()?;
+    m.add_class::<engine::Event>()?;
+    m.add_class::<engine::ToolCallInfo>()?;
+
     Ok(())
 }
