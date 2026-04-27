@@ -57,6 +57,7 @@ fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::ArtemisEngine>()?;
     m.add_class::<engine::Event>()?;
     m.add_class::<engine::ToolCallInfo>()?;
+    m.add_class::<engine::PyResolvedModel>()?;
 
     Ok(())
 }

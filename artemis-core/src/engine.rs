@@ -12,6 +12,51 @@ use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
+pub struct PyResolvedModel {
+    #[pyo3(get)]
+    pub canonical_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub api_key: Option<String>,
+    #[pyo3(get)]
+    pub base_url: String,
+    #[pyo3(get)]
+    pub api_protocol: String,
+    #[pyo3(get)]
+    pub api_model_id: String,
+    #[pyo3(get)]
+    pub context_length: u32,
+}
+
+#[pymethods]
+impl PyResolvedModel {
+    fn __repr__(&self) -> String {
+        format!(
+            "PyResolvedModel(canonical_id={}, provider={}, api_key={})",
+            self.canonical_id,
+            self.provider,
+            self.api_key.as_ref().map(|_| "***").unwrap_or("None"),
+        )
+    }
+}
+
+impl From<&ResolvedModel> for PyResolvedModel {
+    fn from(r: &ResolvedModel) -> Self {
+        PyResolvedModel {
+            canonical_id: r.canonical_id.clone(),
+            provider: r.provider.clone(),
+            api_key: r.api_key.clone(),
+            base_url: r.base_url.clone(),
+            api_protocol: format!("{:?}", r.api_protocol),
+            api_model_id: r.api_model_id.clone(),
+            context_length: r.context_length,
+        }
+    }
+}
+
+#[pyclass(from_py_object)]
+#[derive(Clone, Debug)]
 pub struct ToolCallInfo {
     #[pyo3(get, set)]
     pub id: String,
@@ -313,6 +358,60 @@ impl ArtemisEngine {
         }
 
         Ok(events)
+    }
+
+    fn register_model(
+        &self,
+        canonical_id: String,
+        display_name: String,
+        provider_id: String,
+        api_model_id: String,
+        base_url: String,
+        api_protocol_str: String,
+    ) -> PyResult<()> {
+        let api_protocol = ApiProtocol::from_str(&api_protocol_str);
+        let provider_entry = CatalogProviderEntry {
+            provider_id: provider_id.clone(),
+            api_model_id: api_model_id.clone(),
+            priority: 1,
+            weight: 1,
+            credential_keys: HashMap::new(),
+            base_url: Some(base_url.clone()),
+            api_protocol: api_protocol.clone(),
+            provider_specific: HashMap::new(),
+        };
+        let catalog_entry = ModelCatalogEntry {
+            canonical_id: canonical_id.clone(),
+            display_name,
+            description: String::new(),
+            context_length: 131072,
+            capabilities: vec![],
+            providers: vec![provider_entry],
+            aliases: vec![],
+        };
+
+        let provider = MockProvider::new(&canonical_id);
+        let model_entry = ModelEntry {
+            config: catalog_entry.clone(),
+            provider: Box::new(provider),
+        };
+
+        let mut registry = self.registry.lock().unwrap();
+        registry.register_catalog_entry(catalog_entry);
+        registry.register(&canonical_id, model_entry);
+        Ok(())
+    }
+
+    fn resolve_model(
+        &self,
+        model_name: &str,
+        provider_override: Option<&str>,
+    ) -> PyResult<PyResolvedModel> {
+        let registry = self.registry.lock().unwrap();
+        let resolved = registry
+            .resolve(model_name, provider_override)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(PyResolvedModel::from(&resolved))
     }
 
     fn list_models(&self) -> PyResult<Vec<String>> {

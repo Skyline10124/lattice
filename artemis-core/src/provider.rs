@@ -143,9 +143,14 @@ impl ModelRegistry {
         self.models.get(model_id)
     }
 
-    /// List all registered model IDs (sorted).
+    /// List all model IDs: catalog models from the router plus locally registered entries.
     pub fn list_models(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.models.keys().cloned().collect();
+        let mut ids = self.router.list_models();
+        for id in self.models.keys() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
         ids.sort();
         ids
     }
@@ -153,6 +158,20 @@ impl ModelRegistry {
     /// List models that have at least one provider with valid credentials.
     pub fn list_authenticated_models(&self) -> Vec<String> {
         self.router.list_authenticated_models()
+    }
+
+    /// Register a [`ModelCatalogEntry`] with the router (for name resolution).
+    pub fn register_catalog_entry(&mut self, entry: ModelCatalogEntry) {
+        self.router.register_model(entry);
+    }
+
+    /// Resolve a model name to a [`ResolvedModel`] using the router.
+    pub fn resolve(
+        &self,
+        model_name: &str,
+        provider_override: Option<&str>,
+    ) -> Result<ResolvedModel, ArtemisError> {
+        self.router.resolve(model_name, provider_override)
     }
 
     /// Resolve a model name to a [`ModelEntry`] + [`ResolvedModel`] using the router.
@@ -302,7 +321,7 @@ mod tests {
         registry.register("gamma", make_entry("gamma"));
 
         let ids = registry.list_models();
-        assert_eq!(ids.len(), 3);
+        assert!(ids.len() >= 3, "Should have at least 3 models (catalog + registered)");
         assert!(ids.contains(&"alpha".to_string()));
         assert!(ids.contains(&"beta".to_string()));
         assert!(ids.contains(&"gamma".to_string()));

@@ -160,7 +160,17 @@ impl ModelRouter {
             }
         }
 
-        self.resolve_permissive(model_name)
+        let best = &sorted_providers[0];
+        return Ok(ResolvedModel {
+            canonical_id: canonical_id.clone(),
+            provider: best.provider_id.clone(),
+            api_key: None,
+            base_url: best.base_url.clone().unwrap_or_default(),
+            api_protocol: best.api_protocol.clone(),
+            api_model_id: best.api_model_id.clone(),
+            context_length: entry.context_length,
+            provider_specific: best.provider_specific.clone(),
+        });
     }
 
     /// Check env vars for a provider entry's credential_keys.
@@ -584,10 +594,13 @@ mod tests {
         let router = ModelRouter::new();
         let result = router.resolve("claude-sonnet-4-6", None);
         assert!(
-            result.is_err(),
-            "Expected error when no credentials available, got: {:?}",
+            result.is_ok(),
+            "Should resolve metadata even without credentials, got: {:?}",
             result
         );
+        let resolved = result.unwrap();
+        assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
+        assert!(resolved.api_key.is_none(), "api_key should be None without credentials");
 
         for (k, v) in prev_keys {
             restore_env(&k, v);
