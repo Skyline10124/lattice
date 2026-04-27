@@ -5,6 +5,7 @@ pub mod errors;
 pub mod mock;
 pub mod provider;
 pub mod providers;
+pub mod retry;
 pub mod router;
 pub mod streaming;
 pub mod transport;
