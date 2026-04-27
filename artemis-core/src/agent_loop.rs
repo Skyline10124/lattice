@@ -6,6 +6,7 @@ use crate::types::{Message, Role, ToolCall, ToolDefinition};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct LoopConfig {
     pub max_iterations: u32,
     pub budget_tokens: u32,
@@ -20,6 +21,7 @@ impl Default for LoopConfig {
     }
 }
 
+#[derive(Clone)]
 pub enum LoopEvent {
     Token { content: String },
     ToolCallRequired { tool_calls: Vec<ToolCall> },
@@ -148,6 +150,53 @@ impl AgentLoop {
             iteration += 1;
         }
         events
+    }
+
+    /// Try providers in priority order, using fallback on failure.
+    pub fn run_with_fallback(
+        &self,
+        providers: Vec<&dyn Provider>,
+        resolved: ResolvedModel,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        config: LoopConfig,
+        _classifier: &crate::retry::ErrorClassifier,
+        policy: &crate::retry::RetryPolicy,
+    ) -> Vec<LoopEvent> {
+        let mut last_error: Option<String> = None;
+
+        for (i, provider) in providers.iter().enumerate() {
+            if self.interrupted.load(Ordering::SeqCst) {
+                return vec![LoopEvent::Interrupted];
+            }
+
+            let events = self.run(
+                *provider,
+                resolved.clone(),
+                messages.clone(),
+                tools.clone(),
+                config.clone(),
+            );
+
+            let has_error = events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Error { .. }));
+            if !has_error {
+                return events;
+            }
+
+            if let Some(LoopEvent::Error { message }) = events.last() {
+                last_error = Some(message.clone());
+            }
+
+            if i < providers.len() - 1 {
+                std::thread::sleep(policy.jittered_backoff(i as u32));
+            }
+        }
+
+        vec![LoopEvent::Error {
+            message: format!("All providers exhausted: {:?}", last_error),
+        }]
     }
 }
 

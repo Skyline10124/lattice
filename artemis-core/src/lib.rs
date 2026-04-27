@@ -9,7 +9,9 @@ pub mod providers;
 pub mod retry;
 pub mod router;
 pub mod streaming;
+pub mod streaming_bridge;
 pub mod tokens;
+pub mod tool_boundary;
 pub mod transport;
 pub mod types;
 
