@@ -310,6 +310,19 @@ impl ModelRouter {
         authenticated.sort();
         authenticated
     }
+
+    /// Normalize a canonical model ID to the provider-specific api_model_id.
+    /// Most models use the canonical_id directly, but some providers need prefixes or transformations.
+    pub fn normalize_model_for_provider(&self, canonical_id: &str, provider_id: &str) -> String {
+        if let Some(entry) = self.catalog.get_model(canonical_id) {
+            for pe in &entry.providers {
+                if pe.provider_id == provider_id {
+                    return pe.api_model_id.clone();
+                }
+            }
+        }
+        canonical_id.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -730,5 +743,13 @@ mod tests {
     fn test_normalize_model_id_double_slash() {
         let result = normalize_model_id("openrouter/anthropic/claude");
         assert!(!result.contains("openrouter"));
+    }
+
+    #[test]
+    fn test_normalize_model_for_provider() {
+        let router = ModelRouter::new();
+        // claude-sonnet-4-6 can be served by multiple providers with different api_model_ids
+        let result = router.normalize_model_for_provider("claude-sonnet-4-6", "nous");
+        assert_eq!(result, "anthropic/claude-sonnet-4.6"); // nous uses openrouter-style prefixes
     }
 }
