@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 pub mod catalog;
 pub mod engine;
+pub mod router;
 pub mod errors;
 pub mod mock;
 pub mod provider;
