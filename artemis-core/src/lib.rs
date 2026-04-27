@@ -1,10 +1,11 @@
 #![allow(deprecated)]
 pub mod catalog;
 pub mod engine;
-pub mod router;
 pub mod errors;
 pub mod mock;
 pub mod provider;
+pub mod providers;
+pub mod router;
 pub mod streaming;
 pub mod transport;
 pub mod types;
