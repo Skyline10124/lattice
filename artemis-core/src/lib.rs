@@ -21,6 +21,8 @@ use pyo3::prelude::*;
 /// Artemis Core - Rust backend for the Artemis agent platform.
 #[pymodule]
 fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("__version__", "0.1.0")?;
+
     // ── Register Python exception hierarchy ──────────────────────────
     m.add("ArtemisError", m.py().get_type::<py_exc::ArtemisError>())?;
     m.add("RateLimitError", m.py().get_type::<py_exc::RateLimitError>())?;

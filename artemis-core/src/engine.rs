@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
 
@@ -133,6 +134,7 @@ pub struct ArtemisEngine {
     runtime: Mutex<tokio::runtime::Runtime>,
     registry: Mutex<ModelRegistry>,
     state: Mutex<Option<EngineState>>,
+    interrupted: Arc<AtomicBool>,
 }
 
 #[pymethods]
@@ -146,6 +148,7 @@ impl ArtemisEngine {
             ),
             registry: Mutex::new(ModelRegistry::new(router)),
             state: Mutex::new(None),
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -200,6 +203,37 @@ impl ArtemisEngine {
     fn get_model(&self) -> PyResult<Option<String>> {
         let state = self.state.lock().unwrap();
         Ok(state.as_ref().and_then(|s| s.default_model.clone()))
+    }
+
+    #[pyo3(signature = (messages, tools, model = None))]
+    fn run_conversation(
+        &self,
+        py: Python<'_>,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        model: Option<&str>,
+    ) -> PyResult<Vec<Event>> {
+        if let Some(model_id) = model {
+            self.set_model(model_id)?;
+        }
+        self.run_once(py, messages, tools)
+    }
+
+    fn submit_tool_results(
+        &self,
+        py: Python<'_>,
+        results: Vec<(String, String)>,
+    ) -> PyResult<Vec<Event>> {
+        let mut all_events = Vec::new();
+        for (tool_call_id, result) in results {
+            let events = self.submit_tool_result(py, tool_call_id, result)?;
+            all_events.extend(events);
+        }
+        Ok(all_events)
+    }
+
+    fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
     }
 
     fn run_once(
@@ -402,6 +436,7 @@ impl ArtemisEngine {
         Ok(())
     }
 
+    #[pyo3(signature = (model_name, provider_override = None))]
     fn resolve_model(
         &self,
         model_name: &str,
