@@ -214,7 +214,7 @@ impl TransportType {
     }
 }
 
-/// Configuration for connecting to a model provider.
+/// Internal only. Use `ResolvedModel` for model-centric routing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ProviderConfig {
     pub name: String,
@@ -222,17 +222,6 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub transport: TransportType,
     pub extra_headers: Option<HashMap<String, String>>,
-}
-
-/// Configuration for a specific model.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ModelConfig {
-    pub model_id: String,
-    pub provider: String,
-    pub context_window: u32,
-    pub max_tokens: u32,
-    pub supports_streaming: bool,
-    pub supports_tools: bool,
 }
 
 #[cfg(test)]
@@ -372,21 +361,6 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: ProviderConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
-    }
-
-    #[test]
-    fn test_model_config_roundtrip() {
-        let config = ModelConfig {
-            model_id: "gpt-4o".into(),
-            provider: "openai".into(),
-            context_window: 128000,
-            max_tokens: 4096,
-            supports_streaming: true,
-            supports_tools: true,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: ModelConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, deserialized);
     }
 

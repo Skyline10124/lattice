@@ -278,7 +278,9 @@ impl Transport for ChatCompletionsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::ApiProtocol;
     use crate::types::{Message, Role, ToolDefinition};
+    use std::collections::HashMap;
 
     #[test]
     fn test_default_base_url() {
@@ -329,12 +331,15 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(100),
             stream: false,
-            provider_config: crate::types::ProviderConfig {
-                name: "openai".into(),
-                api_base: "https://api.openai.com/v1".into(),
+            resolved: crate::catalog::ResolvedModel {
+                canonical_id: "gpt-4o".into(),
+                provider: "openai".into(),
                 api_key: Some("sk-test".into()),
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "https://api.openai.com/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "gpt-4o".into(),
+                context_length: 128000,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -372,12 +377,15 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
-            provider_config: crate::types::ProviderConfig {
-                name: "openai".into(),
-                api_base: "https://api.openai.com/v1".into(),
+            resolved: crate::catalog::ResolvedModel {
+                canonical_id: "gpt-4o".into(),
+                provider: "openai".into(),
                 api_key: None,
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "https://api.openai.com/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "gpt-4o".into(),
+                context_length: 128000,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -404,12 +412,15 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: true,
-            provider_config: crate::types::ProviderConfig {
-                name: "openai".into(),
-                api_base: "https://api.openai.com/v1".into(),
+            resolved: crate::catalog::ResolvedModel {
+                canonical_id: "gpt-4o".into(),
+                provider: "openai".into(),
                 api_key: None,
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "https://api.openai.com/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "gpt-4o".into(),
+                context_length: 128000,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -503,12 +514,15 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
-            provider_config: crate::types::ProviderConfig {
-                name: "openai".into(),
-                api_base: "https://api.openai.com/v1".into(),
+            resolved: crate::catalog::ResolvedModel {
+                canonical_id: "gpt-4o".into(),
+                provider: "openai".into(),
                 api_key: None,
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "https://api.openai.com/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "gpt-4o".into(),
+                context_length: 128000,
+                provider_specific: HashMap::new(),
             },
         };
 

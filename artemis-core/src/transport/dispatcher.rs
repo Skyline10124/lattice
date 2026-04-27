@@ -209,7 +209,9 @@ impl Default for TransportDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{ApiProtocol, ResolvedModel};
     use crate::types::ProviderConfig;
+    use std::collections::HashMap;
 
     fn make_config(api_base: &str, transport: TransportType) -> ProviderConfig {
         ProviderConfig {
@@ -378,10 +380,16 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: Some(200),
             stream: false,
-            provider_config: make_config(
-                "https://api.anthropic.com",
-                TransportType::Anthropic,
-            ),
+            resolved: ResolvedModel {
+                canonical_id: "claude-3-opus".into(),
+                provider: "anthropic".into(),
+                api_key: None,
+                base_url: "https://api.anthropic.com".into(),
+                api_protocol: ApiProtocol::AnthropicMessages,
+                api_model_id: "claude-3-opus".into(),
+                context_length: 200000,
+                provider_specific: HashMap::new(),
+            },
         };
 
         let body = transport.normalize_request(&request).unwrap();

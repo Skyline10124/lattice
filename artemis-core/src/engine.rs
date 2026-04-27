@@ -1,11 +1,14 @@
 #![allow(deprecated)]
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use pyo3::prelude::*;
 
+use crate::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
 use crate::mock::MockProvider;
-use crate::provider::{ChatRequest, ChatResponse, ProviderRegistry};
-use crate::types::{FunctionCall, Message, ProviderConfig, Role, ToolCall, ToolDefinition, TransportType};
+use crate::provider::{ChatRequest, ChatResponse, ModelEntry, ModelRegistry};
+use crate::router::ModelRouter;
+use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
 #[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
@@ -77,13 +80,13 @@ impl Event {
 struct EngineState {
     tools: Vec<ToolDefinition>,
     last_response: Option<ChatResponse>,
-    default_provider: String,
+    default_model: Option<String>,
 }
 
 #[pyclass]
 pub struct ArtemisEngine {
     runtime: Mutex<tokio::runtime::Runtime>,
-    registry: Mutex<ProviderRegistry>,
+    registry: Mutex<ModelRegistry>,
     state: Mutex<Option<EngineState>>,
 }
 
@@ -91,11 +94,12 @@ pub struct ArtemisEngine {
 impl ArtemisEngine {
     #[new]
     fn new() -> Self {
+        let router = ModelRouter::new();
         ArtemisEngine {
             runtime: Mutex::new(
                 tokio::runtime::Runtime::new().expect("Failed to create tokio runtime")
             ),
-            registry: Mutex::new(ProviderRegistry::new()),
+            registry: Mutex::new(ModelRegistry::new(router)),
             state: Mutex::new(None),
         }
     }
@@ -111,8 +115,34 @@ impl ArtemisEngine {
                 },
             }])
             .with_final_content("Final response from mock!");
+        let entry = ModelEntry {
+            config: ModelCatalogEntry {
+                canonical_id: name.to_string(),
+                display_name: name.to_string(),
+                description: String::new(),
+                context_length: 131072,
+                capabilities: vec![],
+                providers: vec![CatalogProviderEntry {
+                    provider_id: "mock".to_string(),
+                    api_model_id: name.to_string(),
+                    priority: 1,
+                    weight: 1,
+                    credential_keys: HashMap::new(),
+                    base_url: Some("http://localhost".to_string()),
+                    api_protocol: ApiProtocol::OpenAiChat,
+                    provider_specific: HashMap::new(),
+                }],
+                aliases: vec![],
+            },
+            provider: Box::new(provider),
+        };
         let mut registry = self.registry.lock().unwrap();
-        registry.register(name, Box::new(provider));
+        registry.register(name, entry);
+        Ok(())
+    }
+
+    fn set_model(&self, _model: &str) -> PyResult<()> {
+        // TODO: implement model selection + re-resolution in T29 (agent loop)
         Ok(())
     }
 
@@ -122,40 +152,59 @@ impl ArtemisEngine {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> PyResult<Vec<Event>> {
-        let provider_name = {
+        let model_id = {
             let state = self.state.lock().unwrap();
             match state.as_ref() {
-                Some(s) => s.default_provider.clone(),
-                None => {
-                    let registry = self.registry.lock().unwrap();
-                    let names = registry.list();
-                    if names.is_empty() {
-                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                            "No providers registered",
-                        ));
-                    }
-                    names[0].clone()
-                }
+                Some(s) => s.default_model.clone(),
+                None => None,
             }
         };
 
-        let request = ChatRequest {
-            messages,
-            tools: tools.clone(),
-            model: "mock-model".to_string(),
-            temperature: None,
-            max_tokens: None,
-            stream: false,
-            provider_config: ProviderConfig {
-                name: provider_name.clone(),
-                api_base: "http://localhost".to_string(),
-                api_key: None,
-                transport: TransportType::ChatCompletions,
-                extra_headers: None,
-            },
+        let (model_id, resolved) = {
+            let registry = self.registry.lock().unwrap();
+            if let Some(ref mid) = model_id {
+                let entry = registry.get(mid).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Model '{}' not registered",
+                        mid
+                    ))
+                })?;
+                let resolved = ResolvedModel {
+                    canonical_id: mid.clone(),
+                    provider: "mock".to_string(),
+                    api_key: None,
+                    base_url: "http://localhost".to_string(),
+                    api_protocol: ApiProtocol::OpenAiChat,
+                    api_model_id: mid.clone(),
+                    context_length: entry.config.context_length,
+                    provider_specific: HashMap::new(),
+                };
+                Ok::<_, PyErr>((mid.clone(), resolved))
+            } else {
+                let ids = registry.list_models();
+                if ids.is_empty() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "No models registered",
+                    ));
+                }
+                let mid = ids[0].clone();
+                let resolved = ResolvedModel {
+                    canonical_id: mid.clone(),
+                    provider: "mock".to_string(),
+                    api_key: None,
+                    base_url: "http://localhost".to_string(),
+                    api_protocol: ApiProtocol::OpenAiChat,
+                    api_model_id: mid.clone(),
+                    context_length: 131072,
+                    provider_specific: HashMap::new(),
+                };
+                Ok((mid, resolved))
+            }?
         };
 
-        let response = self.block_on_provider_chat(py, &provider_name, request)?;
+        let request = ChatRequest::new(messages, tools.clone(), resolved);
+
+        let response = self.block_on_model_chat(py, &model_id, request)?;
 
         let events = response_to_events(&response);
 
@@ -164,7 +213,7 @@ impl ArtemisEngine {
             *state = Some(EngineState {
                 tools,
                 last_response: Some(response),
-                default_provider: provider_name,
+                default_model: Some(model_id),
             });
         }
 
@@ -177,11 +226,11 @@ impl ArtemisEngine {
         tool_call_id: String,
         result: String,
     ) -> PyResult<Vec<Event>> {
-        let (provider_name, tools, prev_messages) = {
+        let (model_id, tools, prev_messages) = {
             let state = self.state.lock().unwrap();
             match state.as_ref() {
                 Some(s) => (
-                    s.default_provider.clone(),
+                    s.default_model.clone(),
                     s.tools.clone(),
                     match s.last_response.as_ref() {
                         Some(resp) => {
@@ -213,23 +262,35 @@ impl ArtemisEngine {
             }
         };
 
-        let request = ChatRequest {
-            messages: prev_messages,
-            tools,
-            model: "mock-model".to_string(),
-            temperature: None,
-            max_tokens: None,
-            stream: false,
-            provider_config: ProviderConfig {
-                name: provider_name.clone(),
-                api_base: "http://localhost".to_string(),
+        let model_id = model_id.ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "No default model set — call run_once() first",
+            )
+        })?;
+
+        let resolved = {
+            let registry = self.registry.lock().unwrap();
+            let entry = registry.get(&model_id).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Model '{}' not registered",
+                    model_id
+                ))
+            })?;
+            ResolvedModel {
+                canonical_id: model_id.clone(),
+                provider: "mock".to_string(),
                 api_key: None,
-                transport: TransportType::ChatCompletions,
-                extra_headers: None,
-            },
+                base_url: "http://localhost".to_string(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: model_id.clone(),
+                context_length: entry.config.context_length,
+                provider_specific: HashMap::new(),
+            }
         };
 
-        let response = self.block_on_provider_chat(py, &provider_name, request)?;
+        let request = ChatRequest::new(prev_messages, tools, resolved);
+
+        let response = self.block_on_model_chat(py, &model_id, request)?;
 
         let events = response_to_events(&response);
 
@@ -244,24 +305,28 @@ impl ArtemisEngine {
     }
 
     fn list_providers(&self) -> Vec<String> {
-        self.registry.lock().unwrap().list()
+        self.list_models()
     }
 }
 
 impl ArtemisEngine {
-    fn block_on_provider_chat(
+    fn list_models(&self) -> Vec<String> {
+        self.registry.lock().unwrap().list_models()
+    }
+
+    fn block_on_model_chat(
         &self,
         _py: Python<'_>,
-        provider_name: &str,
+        model_id: &str,
         request: ChatRequest,
     ) -> PyResult<ChatResponse> {
         let rt = self.runtime.lock().unwrap();
         let registry = self.registry.lock().unwrap();
-        let provider = registry.get(provider_name)
+        let entry = registry.get(model_id)
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Provider '{}' not found", provider_name),
+                format!("Model '{}' not found", model_id),
             ))?;
-        rt.block_on(provider.chat(request))
+        rt.block_on(entry.provider.chat(request))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 }

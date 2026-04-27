@@ -214,30 +214,32 @@ impl MockTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCall, Message, ProviderConfig, Role, TransportType};
+    use crate::catalog::{ApiProtocol, ResolvedModel};
+    use crate::types::{FunctionCall, Message, Role};
+    use std::collections::HashMap;
 
     fn make_request() -> ChatRequest {
-        ChatRequest {
-            messages: vec![Message {
+        let resolved = ResolvedModel {
+            canonical_id: "mock-model".to_string(),
+            provider: "mock".to_string(),
+            api_key: None,
+            base_url: "http://localhost".to_string(),
+            api_protocol: ApiProtocol::OpenAiChat,
+            api_model_id: "mock-model".to_string(),
+            context_length: 131072,
+            provider_specific: HashMap::new(),
+        };
+        ChatRequest::new(
+            vec![Message {
                 role: Role::User,
                 content: "test".to_string(),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
             }],
-            tools: vec![],
-            model: "mock-model".to_string(),
-            temperature: None,
-            max_tokens: None,
-            stream: false,
-            provider_config: ProviderConfig {
-                name: "mock".to_string(),
-                api_base: "http://localhost".to_string(),
-                api_key: None,
-                transport: TransportType::ChatCompletions,
-                extra_headers: None,
-            },
-        }
+            vec![],
+            resolved,
+        )
     }
 
     #[tokio::test]

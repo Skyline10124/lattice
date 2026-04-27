@@ -6,6 +6,7 @@
 //!
 //! All tests use mock JSON data — no network calls.
 
+use artemis_core::catalog::{ApiProtocol, ResolvedModel};
 use artemis_core::provider::ChatRequest;
 use artemis_core::streaming::StreamEvent;
 use artemis_core::transport::anthropic::AnthropicTransport;
@@ -26,26 +27,25 @@ use std::collections::HashMap;
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn make_provider_config(transport: TransportType) -> ProviderConfig {
-    ProviderConfig {
-        name: "test".to_string(),
-        api_base: "https://api.test.com/v1".to_string(),
+fn make_resolved(provider: &str, api_protocol: ApiProtocol, base_url: &str) -> ResolvedModel {
+    ResolvedModel {
+        canonical_id: "test-model".to_string(),
+        provider: provider.to_string(),
         api_key: Some("sk-test".to_string()),
-        transport,
-        extra_headers: None,
+        base_url: base_url.to_string(),
+        api_protocol,
+        api_model_id: "test-model".to_string(),
+        context_length: 131072,
+        provider_specific: HashMap::new(),
     }
 }
 
 fn make_chat_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ChatRequest {
-    ChatRequest {
-        messages,
-        tools,
-        model: "test-model".to_string(),
-        temperature: None,
-        max_tokens: None,
-        stream: false,
-        provider_config: make_provider_config(TransportType::ChatCompletions),
-    }
+    ChatRequest::new(messages, tools, make_resolved(
+        "test",
+        ApiProtocol::OpenAiChat,
+        "https://api.test.com/v1",
+    ))
 }
 
 fn sample_messages() -> Vec<Message> {
@@ -1276,12 +1276,15 @@ mod dispatcher {
             temperature: Some(0.7),
             max_tokens: Some(200),
             stream: false,
-            provider_config: ProviderConfig {
-                name: "anthropic".to_string(),
-                api_base: "https://api.anthropic.com".to_string(),
+            resolved: ResolvedModel {
+                canonical_id: "claude-3-opus".into(),
+                provider: "anthropic".into(),
                 api_key: None,
-                transport: TransportType::Anthropic,
-                extra_headers: None,
+                base_url: "https://api.anthropic.com".into(),
+                api_protocol: ApiProtocol::AnthropicMessages,
+                api_model_id: "claude-3-opus".into(),
+                context_length: 200000,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -1322,12 +1325,15 @@ mod dispatcher {
             temperature: Some(0.5),
             max_tokens: Some(150),
             stream: false,
-            provider_config: ProviderConfig {
-                name: "gemini".to_string(),
-                api_base: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            resolved: ResolvedModel {
+                canonical_id: "gemini-2.5-flash".into(),
+                provider: "gemini".into(),
                 api_key: None,
-                transport: TransportType::Gemini,
-                extra_headers: None,
+                base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+                api_protocol: ApiProtocol::GeminiGenerateContent,
+                api_model_id: "gemini-2.5-flash".into(),
+                context_length: 1048576,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -1373,7 +1379,11 @@ mod dispatcher {
             temperature: Some(0.3),
             max_tokens: Some(100),
             stream: false,
-            provider_config: make_provider_config(TransportType::ChatCompletions),
+            resolved: make_resolved(
+                "openai",
+                ApiProtocol::OpenAiChat,
+                "https://api.openai.com/v1",
+            ),
         };
 
         let body = transport.normalize_request(&request).unwrap();

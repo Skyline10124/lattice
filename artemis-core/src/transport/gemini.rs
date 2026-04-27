@@ -397,7 +397,9 @@ impl Transport for GeminiTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{ApiProtocol, ResolvedModel};
     use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
+    use std::collections::HashMap;
 
     fn make_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ChatRequest {
         ChatRequest {
@@ -407,12 +409,15 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
-            provider_config: crate::types::ProviderConfig {
-                name: "gemini".to_string(),
-                api_base: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                api_key: Some("test-key".to_string()),
-                transport: crate::types::TransportType::Gemini,
-                extra_headers: None,
+            resolved: ResolvedModel {
+                canonical_id: "gemini-2.5-flash".into(),
+                provider: "gemini".into(),
+                api_key: Some("test-key".into()),
+                base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+                api_protocol: ApiProtocol::GeminiGenerateContent,
+                api_model_id: "gemini-2.5-flash".into(),
+                context_length: 1048576,
+                provider_specific: HashMap::new(),
             },
         }
     }

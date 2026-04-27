@@ -78,6 +78,8 @@ impl Transport for OpenAICompatTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{ApiProtocol, ResolvedModel};
+    use std::collections::HashMap;
 
     #[test]
     fn test_default_base_url() {
@@ -164,12 +166,15 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: None,
             stream: false,
-            provider_config: crate::types::ProviderConfig {
-                name: "ollama".into(),
-                api_base: "http://localhost:11434/v1".into(),
+            resolved: ResolvedModel {
+                canonical_id: "llama3".into(),
+                provider: "ollama".into(),
                 api_key: None,
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "http://localhost:11434/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "llama3".into(),
+                context_length: 131072,
+                provider_specific: HashMap::new(),
             },
         };
 
@@ -218,12 +223,15 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: true,
-            provider_config: crate::types::ProviderConfig {
-                name: "groq".into(),
-                api_base: "https://api.groq.com/openai/v1".into(),
+            resolved: ResolvedModel {
+                canonical_id: "llama-3".into(),
+                provider: "groq".into(),
                 api_key: Some("gsk_test".into()),
-                transport: crate::types::TransportType::ChatCompletions,
-                extra_headers: None,
+                base_url: "https://api.groq.com/openai/v1".into(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: "llama-3".into(),
+                context_length: 131072,
+                provider_specific: HashMap::new(),
             },
         };
 
