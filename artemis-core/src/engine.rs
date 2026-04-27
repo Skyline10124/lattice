@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::sync::Mutex;
 
 use pyo3::prelude::*;

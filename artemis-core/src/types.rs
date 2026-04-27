@@ -1,6 +1,9 @@
+#![allow(deprecated)]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+pub use crate::catalog::ApiProtocol;
 
 /// The role of a message participant in a conversation.
 #[pyclass(from_py_object)]
@@ -178,6 +181,7 @@ impl ToolDefinition {
 
 /// The type of API transport to use for a provider.
 #[pyclass(from_py_object)]
+#[deprecated(since = "0.2.0", note = "Use ApiProtocol instead. TransportType is provider-centric and will be removed in T17.")]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TransportType {
     #[serde(rename = "chat_completions")]

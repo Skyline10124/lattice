@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Transport dispatcher — maps [`TransportType`] to concrete [`Transport`] implementations.
 //!
 //! The dispatcher provides:

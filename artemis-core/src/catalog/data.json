@@ -1,0 +1,3755 @@
+{
+  "models": [
+    {
+      "canonical_id": "kimi-k2.6",
+      "display_name": "Kimi K2.6",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "moonshotai/kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "moonshotai/kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding-cn",
+          "api_model_id": "kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "moonshot",
+          "api_model_id": "kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "moonshotai/Kimi-K2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "moonshotai/kimi-k2.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "deepseek-v4-pro",
+      "display_name": "Deepseek V4 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "deepseek/deepseek-v4-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "deepseek",
+          "api_model_id": "deepseek-v4-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DEEPSEEK_API_KEY"
+          },
+          "base_url": "https://api.deepseek.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "deepseek-v4-flash",
+      "display_name": "Deepseek V4 Flash",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "deepseek/deepseek-v4-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "deepseek",
+          "api_model_id": "deepseek-v4-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DEEPSEEK_API_KEY"
+          },
+          "base_url": "https://api.deepseek.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "mimo-v2.5-pro",
+      "display_name": "Mimo V2.5 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "xiaomi/mimo-v2.5-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "xiaomi",
+          "api_model_id": "mimo-v2.5-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XIAOMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "mimo-v2.5-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "mimo-v2.5",
+      "display_name": "Mimo V2.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "xiaomi/mimo-v2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "xiaomi",
+          "api_model_id": "mimo-v2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XIAOMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "mimo-v2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-7",
+      "display_name": "Claude Opus 4 7",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "anthropic/claude-opus-4.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-opus-4-7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "anthropic/claude-opus-4.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-6",
+      "display_name": "Claude Opus 4 6",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "anthropic/claude-opus-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-opus-4-6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-opus-4-6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kilocode",
+          "api_model_id": "anthropic/claude-opus-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KILO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "anthropic/claude-opus-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-sonnet-4-6",
+      "display_name": "Claude Sonnet 4 6",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "anthropic/claude-sonnet-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "claude-sonnet-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-sonnet-4-6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-sonnet-4-6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kilocode",
+          "api_model_id": "anthropic/claude-sonnet-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KILO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "anthropic/claude-sonnet-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-sonnet-4-5",
+      "display_name": "Claude Sonnet 4 5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "anthropic/claude-sonnet-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "claude-sonnet-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-sonnet-4-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-haiku-4-5",
+      "display_name": "Claude Haiku 4 5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "anthropic/claude-haiku-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "claude-haiku-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-haiku-4-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "anthropic/claude-haiku-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.5",
+      "display_name": "Gpt 5.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "openai/gpt-5.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.4-mini",
+      "display_name": "Gpt 5.4 Mini",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "openai/gpt-5.4-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-5.4-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-5.4-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "openai/gpt-5.4-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.3-codex",
+      "display_name": "Gpt 5.3 Codex",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "openai/gpt-5.3-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-5.3-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-5.3-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.3-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "openai/gpt-5.3-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3-pro-preview",
+      "display_name": "Gemini 3 Pro Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "google/gemini-3-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gemini-3-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "gemini",
+          "api_model_id": "gemini-3-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "GEMINI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "google-gemini-cli",
+          "api_model_id": "gemini-3-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {},
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kilocode",
+          "api_model_id": "google/gemini-3-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KILO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3-flash-preview",
+      "display_name": "Gemini 3 Flash Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "google/gemini-3-flash-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gemini-3-flash-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "gemini",
+          "api_model_id": "gemini-3-flash-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "GEMINI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "google-gemini-cli",
+          "api_model_id": "gemini-3-flash-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {},
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kilocode",
+          "api_model_id": "google/gemini-3-flash-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KILO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3.1-pro-preview",
+      "display_name": "Gemini 3.1 Pro Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "google/gemini-3.1-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gemini-3.1-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "gemini",
+          "api_model_id": "gemini-3.1-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "GEMINI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "google-gemini-cli",
+          "api_model_id": "gemini-3.1-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {},
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "google/gemini-3.1-pro-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3.1-flash-lite-preview",
+      "display_name": "Gemini 3.1 Flash Lite Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "google/gemini-3.1-flash-lite-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "gemini",
+          "api_model_id": "gemini-3.1-flash-lite-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "GEMINI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "gemini_generate_content",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "google/gemini-3.1-flash-lite-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3.5-plus-02-15",
+      "display_name": "Qwen3.5 Plus 02 15",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "qwen/qwen3.5-plus-02-15",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3.5-35b-a3b",
+      "display_name": "Qwen3.5 35B A3B",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "qwen/qwen3.5-35b-a3b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "Qwen/Qwen3.5-35B-A3B",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "step-3.5-flash",
+      "display_name": "Step 3.5 Flash",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "stepfun/step-3.5-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "stepfun",
+          "api_model_id": "step-3.5-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "STEPFUN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2.7",
+      "display_name": "Minimax M2.7",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "minimax/minimax-m2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax",
+          "api_model_id": "MiniMax-M2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax-cn",
+          "api_model_id": "MiniMax-M2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "minimax-m2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "minimax-m2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "minimax/minimax-m2.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2.5",
+      "display_name": "Minimax M2.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "minimax/minimax-m2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "minimaxai/minimax-m2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax",
+          "api_model_id": "MiniMax-M2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax-cn",
+          "api_model_id": "MiniMax-M2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "minimax-m2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "minimax-m2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "MiniMax-M2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "MiniMaxAI/MiniMax-M2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2.5:free",
+      "display_name": "Minimax M2.5:Free",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "minimax/minimax-m2.5:free",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-5.1",
+      "display_name": "Glm 5.1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "z-ai/glm-5.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-5.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "glm-5.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "zai/glm-5.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-5v-turbo",
+      "display_name": "Glm 5V Turbo",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "z-ai/glm-5v-turbo",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-5v-turbo",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-5-turbo",
+      "display_name": "Glm 5 Turbo",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "z-ai/glm-5-turbo",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-5-turbo",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "grok-4.20-beta",
+      "display_name": "Grok 4.20 Beta",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "x-ai/grok-4.20-beta",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "nemotron-3-super-120b-a12b",
+      "display_name": "Nemotron 3 Super 120B A12B",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "nvidia/nemotron-3-super-120b-a12b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "nvidia/nemotron-3-super-120b-a12b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "trinity-large-thinking",
+      "display_name": "Trinity Large Thinking",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "arcee-ai/trinity-large-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "arcee",
+          "api_model_id": "trinity-large-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ARCEE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.5-pro",
+      "display_name": "Gpt 5.5 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "openai/gpt-5.5-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.4-nano",
+      "display_name": "Gpt 5.4 Nano",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nous",
+          "api_model_id": "openai/gpt-5.4-nano",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NOUS_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.4",
+      "display_name": "Gpt 5.4",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-5.4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-5.4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kilocode",
+          "api_model_id": "openai/gpt-5.4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KILO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "openai/gpt-5.4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5-mini",
+      "display_name": "Gpt 5 Mini",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-5-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-5-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.2-codex",
+      "display_name": "Gpt 5.2 Codex",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-5.2-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-5.2-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.2-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-4.1",
+      "display_name": "Gpt 4.1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-4.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-4.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-4o",
+      "display_name": "Gpt 4O",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-4o",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-4o",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-4o-mini",
+      "display_name": "Gpt 4O Mini",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "openai",
+          "api_model_id": "gpt-4o-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENAI_API_KEY"
+          },
+          "base_url": "https://api.openai.com/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gpt-4o-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.1-codex-max",
+      "display_name": "Gpt 5.1 Codex Max",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.1-codex-max",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.1-codex-mini",
+      "display_name": "Gpt 5.1 Codex Mini",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.1-codex-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "copilot-acp",
+      "display_name": "Copilot Acp",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "copilot-acp",
+          "api_model_id": "copilot-acp",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-sonnet-4",
+      "display_name": "Claude Sonnet 4",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "copilot",
+          "api_model_id": "claude-sonnet-4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-sonnet-4",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-2.5-pro",
+      "display_name": "Gemini 2.5 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "copilot",
+          "api_model_id": "gemini-2.5-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "grok-code-fast-1",
+      "display_name": "Grok Code Fast 1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "copilot",
+          "api_model_id": "grok-code-fast-1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "token": "GITHUB_TOKEN"
+          },
+          "base_url": "https://api.githubcopilot.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-5",
+      "display_name": "Glm 5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "glm-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "glm-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "glm-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "zai-org/GLM-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-4.7",
+      "display_name": "Glm 4.7",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-4.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "glm-4.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "glm-4.7",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-4.5",
+      "display_name": "Glm 4.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-4.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-4.5-flash",
+      "display_name": "Glm 4.5 Flash",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "zai",
+          "api_model_id": "glm-4.5-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ZAI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "grok-4.20-reasoning",
+      "display_name": "Grok 4.20 Reasoning",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "xai",
+          "api_model_id": "grok-4.20-reasoning",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XAI_API_KEY"
+          },
+          "base_url": "https://api.x.ai/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "xai/grok-4.20-reasoning",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "grok-4-1-fast-reasoning",
+      "display_name": "Grok 4 1 Fast Reasoning",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "xai",
+          "api_model_id": "grok-4-1-fast-reasoning",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XAI_API_KEY"
+          },
+          "base_url": "https://api.x.ai/v1",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "nemotron-3-nano-30b-a3b",
+      "display_name": "Nemotron 3 Nano 30B A3B",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "nvidia/nemotron-3-nano-30b-a3b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "llama-3.3-nemotron-super-49b-v1.5",
+      "display_name": "Llama 3.3 Nemotron Super 49B V1.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3.5-397b-a17b",
+      "display_name": "Qwen3.5 397B A17B",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "qwen/qwen3.5-397b-a17b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "Qwen/Qwen3.5-397B-A17B",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "deepseek-v3.2",
+      "display_name": "Deepseek V3.2",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "deepseek-ai/deepseek-v3.2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "deepseek-ai/DeepSeek-V3.2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm5",
+      "display_name": "Glm5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "z-ai/glm5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-oss-120b",
+      "display_name": "Gpt Oss 120B",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "nvidia",
+          "api_model_id": "openai/gpt-oss-120b",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "NVIDIA_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2.5",
+      "display_name": "Kimi K2.5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding-cn",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "moonshot",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "kimi-k2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "moonshotai/Kimi-K2.5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-for-coding",
+      "display_name": "Kimi For Coding",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-for-coding",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2-thinking",
+      "display_name": "Kimi K2 Thinking",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding-cn",
+          "api_model_id": "kimi-k2-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "moonshot",
+          "api_model_id": "kimi-k2-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "kimi-k2-thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "moonshotai/Kimi-K2-Thinking",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2-thinking-turbo",
+      "display_name": "Kimi K2 Thinking Turbo",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2-thinking-turbo",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2-turbo-preview",
+      "display_name": "Kimi K2 Turbo Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2-turbo-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding-cn",
+          "api_model_id": "kimi-k2-turbo-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "moonshot",
+          "api_model_id": "kimi-k2-turbo-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2-0905-preview",
+      "display_name": "Kimi K2 0905 Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "kimi-coding",
+          "api_model_id": "kimi-k2-0905-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "KIMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "kimi-coding-cn",
+          "api_model_id": "kimi-k2-0905-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "moonshot",
+          "api_model_id": "kimi-k2-0905-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MOONSHOT_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "step-3.5-flash-2603",
+      "display_name": "Step 3.5 Flash 2603",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "stepfun",
+          "api_model_id": "step-3.5-flash-2603",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "STEPFUN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2.1",
+      "display_name": "Minimax M2.1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "minimax",
+          "api_model_id": "MiniMax-M2.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax-cn",
+          "api_model_id": "MiniMax-M2.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "minimax-m2.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2",
+      "display_name": "Minimax M2",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "minimax",
+          "api_model_id": "MiniMax-M2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "minimax-cn",
+          "api_model_id": "MiniMax-M2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "MINIMAX_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-5-20251101",
+      "display_name": "Claude Opus 4 5 20251101",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-opus-4-5-20251101",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-sonnet-4-5-20250929",
+      "display_name": "Claude Sonnet 4 5 20250929",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-sonnet-4-5-20250929",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-20250514",
+      "display_name": "Claude Opus 4 20250514",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-opus-4-20250514",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-sonnet-4-20250514",
+      "display_name": "Claude Sonnet 4 20250514",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-sonnet-4-20250514",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-haiku-4-5-20251001",
+      "display_name": "Claude Haiku 4 5 20251001",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "anthropic",
+          "api_model_id": "claude-haiku-4-5-20251001",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ANTHROPIC_API_KEY"
+          },
+          "base_url": "https://api.anthropic.com",
+          "api_protocol": "anthropic_messages",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "deepseek-chat",
+      "display_name": "Deepseek Chat",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "deepseek",
+          "api_model_id": "deepseek-chat",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DEEPSEEK_API_KEY"
+          },
+          "base_url": "https://api.deepseek.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "deepseek-reasoner",
+      "display_name": "Deepseek Reasoner",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "deepseek",
+          "api_model_id": "deepseek-reasoner",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DEEPSEEK_API_KEY"
+          },
+          "base_url": "https://api.deepseek.com",
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "mimo-v2-pro",
+      "display_name": "Mimo V2 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "xiaomi",
+          "api_model_id": "mimo-v2-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XIAOMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "mimo-v2-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "mimo-v2-omni",
+      "display_name": "Mimo V2 Omni",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "xiaomi",
+          "api_model_id": "mimo-v2-omni",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XIAOMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "mimo-v2-omni",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "mimo-v2-flash",
+      "display_name": "Mimo V2 Flash",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "xiaomi",
+          "api_model_id": "mimo-v2-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "XIAOMI_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "huggingface",
+          "api_model_id": "XiaomiMiMo/MiMo-V2-Flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "HF_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "trinity-large-preview",
+      "display_name": "Trinity Large Preview",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "arcee",
+          "api_model_id": "trinity-large-preview",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ARCEE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "trinity-mini",
+      "display_name": "Trinity Mini",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "arcee",
+          "api_model_id": "trinity-mini",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "ARCEE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.4-pro",
+      "display_name": "Gpt 5.4 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.4-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.2",
+      "display_name": "Gpt 5.2",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.1",
+      "display_name": "Gpt 5.1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5.1-codex",
+      "display_name": "Gpt 5.1 Codex",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5.1-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5",
+      "display_name": "Gpt 5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5-codex",
+      "display_name": "Gpt 5 Codex",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5-codex",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gpt-5-nano",
+      "display_name": "Gpt 5 Nano",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gpt-5-nano",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-5",
+      "display_name": "Claude Opus 4 5",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-opus-4-5",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-opus-4-1",
+      "display_name": "Claude Opus 4 1",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-opus-4-1",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "claude-3-5-haiku",
+      "display_name": "Claude 3 5 Haiku",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "claude-3-5-haiku",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3.1-pro",
+      "display_name": "Gemini 3.1 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gemini-3.1-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3-pro",
+      "display_name": "Gemini 3 Pro",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gemini-3-pro",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "gemini-3-flash",
+      "display_name": "Gemini 3 Flash",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "gemini-3-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "google/gemini-3-flash",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "minimax-m2.5-free",
+      "display_name": "Minimax M2.5 Free",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "minimax-m2.5-free",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "glm-4.6",
+      "display_name": "Glm 4.6",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "glm-4.6",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "kimi-k2",
+      "display_name": "Kimi K2",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "kimi-k2",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3-coder",
+      "display_name": "Qwen3 Coder",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "qwen3-coder",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "big-pickle",
+      "display_name": "Big Pickle",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-zen",
+          "api_model_id": "big-pickle",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_ZEN_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3.6-plus",
+      "display_name": "Qwen3.6 Plus",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "qwen3.6-plus",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "ai-gateway",
+          "api_model_id": "alibaba/qwen3.6-plus",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "AI_GATEWAY_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3.5-plus",
+      "display_name": "Qwen3.5 Plus",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "opencode-go",
+          "api_model_id": "qwen3.5-plus",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "OPENCODE_GO_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        },
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "qwen3.5-plus",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3-coder-plus",
+      "display_name": "Qwen3 Coder Plus",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "qwen3-coder-plus",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "canonical_id": "qwen3-coder-next",
+      "display_name": "Qwen3 Coder Next",
+      "description": "",
+      "context_length": 0,
+      "capabilities": [],
+      "providers": [
+        {
+          "provider_id": "alibaba",
+          "api_model_id": "qwen3-coder-next",
+          "priority": 1,
+          "weight": 1,
+          "credential_keys": {
+            "api_key": "DASHSCOPE_API_KEY"
+          },
+          "base_url": null,
+          "api_protocol": "chat_completions",
+          "provider_specific": {}
+        }
+      ],
+      "aliases": []
+    }
+  ],
+  "aliases": {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+    "haiku": "claude-3-5-haiku",
+    "sonnet4": "claude-sonnet-4-6",
+    "opus4": "claude-opus-4-6",
+    "haiku4": "claude-haiku-4-5",
+    "claude": "claude-sonnet-4-6",
+    "claude-sonnet": "claude-sonnet-4-6",
+    "claude-opus": "claude-opus-4-6",
+    "claude-haiku": "claude-haiku-4-5",
+    "gpt4o": "gpt-4o",
+    "gpt4": "gpt-4o",
+    "gpt5": "gpt-5.4",
+    "gpt-5": "gpt-5.4",
+    "flash": "gemini-3-flash",
+    "gemini": "gemini-3-pro-preview",
+    "pro": "gemini-3-pro-preview",
+    "deepseek": "deepseek-v4-pro",
+    "deep-seek": "deepseek-v4-pro",
+    "r1": "deepseek-reasoner",
+    "kimi": "kimi-k2.6",
+    "moonshot": "kimi-k2.6",
+    "grok": "grok-4.20-reasoning",
+    "xai": "grok-4.20-reasoning",
+    "glm": "glm-5.1",
+    "zai": "glm-5.1",
+    "zhipu": "glm-5.1",
+    "mimo": "mimo-v2.5-pro",
+    "xiaomi": "mimo-v2.5-pro",
+    "minimax": "minimax-m2.7",
+    "qwen": "qwen3.5-plus-02-15",
+    "dashscope": "qwen3.5-plus-02-15",
+    "aliyun": "qwen3.5-plus-02-15",
+    "step": "step-3.5-flash",
+    "stepfun": "step-3.5-flash",
+    "nemotron": "nemotron-3-super-120b-a12b",
+    "arcee": "trinity-large-thinking"
+  },
+  "provider_defaults": {
+    "anthropic": {
+      "api_protocol": "anthropic_messages",
+      "credential_keys": {
+        "api_key": "ANTHROPIC_API_KEY"
+      },
+      "base_url": "https://api.anthropic.com"
+    },
+    "openai": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "OPENAI_API_KEY"
+      },
+      "base_url": "https://api.openai.com/v1"
+    },
+    "openai-codex": {
+      "api_protocol": "codex_responses",
+      "credential_keys": {
+        "api_key": "OPENAI_API_KEY"
+      },
+      "base_url": "https://api.openai.com/v1"
+    },
+    "gemini": {
+      "api_protocol": "gemini_generate_content",
+      "credential_keys": {
+        "api_key": "GEMINI_API_KEY"
+      },
+      "base_url": ""
+    },
+    "google-gemini-cli": {
+      "api_protocol": "gemini_generate_content",
+      "credential_keys": {},
+      "base_url": ""
+    },
+    "deepseek": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "DEEPSEEK_API_KEY"
+      },
+      "base_url": "https://api.deepseek.com"
+    },
+    "xai": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "XAI_API_KEY"
+      },
+      "base_url": "https://api.x.ai/v1"
+    },
+    "zai": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "ZAI_API_KEY"
+      },
+      "base_url": ""
+    },
+    "nous": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "NOUS_API_KEY"
+      },
+      "base_url": ""
+    },
+    "copilot": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "token": "GITHUB_TOKEN"
+      },
+      "base_url": "https://api.githubcopilot.com"
+    },
+    "copilot-acp": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "token": "GITHUB_TOKEN"
+      },
+      "base_url": ""
+    },
+    "minimax": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "MINIMAX_API_KEY"
+      },
+      "base_url": ""
+    },
+    "minimax-cn": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "MINIMAX_API_KEY"
+      },
+      "base_url": ""
+    },
+    "xiaomi": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "XIAOMI_API_KEY"
+      },
+      "base_url": ""
+    },
+    "stepfun": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "STEPFUN_API_KEY"
+      },
+      "base_url": ""
+    },
+    "kimi-coding": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "KIMI_API_KEY"
+      },
+      "base_url": ""
+    },
+    "kimi-coding-cn": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "MOONSHOT_API_KEY"
+      },
+      "base_url": ""
+    },
+    "moonshot": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "MOONSHOT_API_KEY"
+      },
+      "base_url": ""
+    },
+    "arcee": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "ARCEE_API_KEY"
+      },
+      "base_url": ""
+    },
+    "nvidia": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "NVIDIA_API_KEY"
+      },
+      "base_url": ""
+    },
+    "huggingface": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "HF_API_KEY"
+      },
+      "base_url": ""
+    },
+    "alibaba": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "DASHSCOPE_API_KEY"
+      },
+      "base_url": ""
+    },
+    "bedrock": {
+      "api_protocol": "bedrock_converse",
+      "credential_keys": {},
+      "base_url": ""
+    },
+    "azure-foundry": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "AZURE_FOUNDRY_API_KEY"
+      },
+      "base_url": ""
+    },
+    "kilocode": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "KILO_API_KEY"
+      },
+      "base_url": ""
+    },
+    "opencode-zen": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "OPENCODE_ZEN_API_KEY"
+      },
+      "base_url": ""
+    },
+    "opencode-go": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "OPENCODE_GO_API_KEY"
+      },
+      "base_url": ""
+    },
+    "ai-gateway": {
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "AI_GATEWAY_API_KEY"
+      },
+      "base_url": ""
+    }
+  }
+}

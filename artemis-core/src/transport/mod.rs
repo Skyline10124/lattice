@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Provider transport layer — format conversion between internal types
 //! and provider-specific API shapes.
 //!

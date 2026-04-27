@@ -1,0 +1,95 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use super::types::*;
+
+pub struct Catalog {
+    models: HashMap<String, ModelCatalogEntry>,
+    aliases: HashMap<String, String>,
+    provider_defaults: HashMap<String, ProviderDefaults>,
+}
+
+static CATALOG: OnceLock<Catalog> = OnceLock::new();
+
+impl Catalog {
+    pub fn get() -> &'static Catalog {
+        CATALOG.get_or_init(|| {
+            let data = include_str!("data.json");
+            let catalog_data: CatalogData =
+                serde_json::from_str(data).expect("Failed to deserialize catalog data.json");
+            Catalog::from_data(catalog_data)
+        })
+    }
+
+    fn from_data(data: CatalogData) -> Self {
+        let models: HashMap<String, ModelCatalogEntry> = data.models.into_iter()
+            .map(|m| (m.canonical_id.clone(), m)).collect();
+        Catalog { models, aliases: data.aliases, provider_defaults: data.provider_defaults }
+    }
+
+    pub fn get_model(&self, canonical_id: &str) -> Option<&ModelCatalogEntry> {
+        self.models.get(canonical_id)
+    }
+
+    pub fn list_models(&self) -> Vec<&String> {
+        self.models.keys().collect()
+    }
+
+    pub fn get_provider_defaults(&self, provider_id: &str) -> Option<&ProviderDefaults> {
+        self.provider_defaults.get(provider_id)
+    }
+
+    pub fn resolve_alias(&self, alias: &str) -> Option<&String> {
+        self.aliases.get(alias)
+    }
+
+    pub fn aliases(&self) -> &HashMap<String, String> { &self.aliases }
+    pub fn provider_defaults(&self) -> &HashMap<String, ProviderDefaults> { &self.provider_defaults }
+    pub fn model_count(&self) -> usize { self.models.len() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_catalog_loads() {
+        let catalog = Catalog::get();
+        assert!(catalog.model_count() > 50, "Expected >50 models, got {}", catalog.model_count());
+    }
+
+    #[test]
+    fn test_get_model_claude_sonnet() {
+        let catalog = Catalog::get();
+        let model = catalog.get_model("claude-sonnet-4-6")
+            .expect("claude-sonnet-4-6 should exist in catalog");
+        assert!(!model.providers.is_empty(), "claude-sonnet-4-6 should have providers");
+        assert_eq!(model.providers[0].provider_id, "nous", "First provider should be nous (highest priority)");
+    }
+
+    #[test]
+    fn test_resolve_alias_sonnet() {
+        let catalog = Catalog::get();
+        let resolved = catalog.resolve_alias("sonnet");
+        assert!(resolved.is_some(), "alias 'sonnet' should resolve");
+    }
+
+    #[test]
+    fn test_provider_defaults_anthropic() {
+        let catalog = Catalog::get();
+        let defaults = catalog.get_provider_defaults("anthropic");
+        assert!(defaults.is_some(), "anthropic should have provider defaults");
+    }
+
+    #[test]
+    fn test_api_protocol_from_str() {
+        assert_eq!(ApiProtocol::from_str("chat_completions"), ApiProtocol::OpenAiChat);
+        assert_eq!(ApiProtocol::from_str("anthropic"), ApiProtocol::AnthropicMessages);
+        assert_eq!(ApiProtocol::from_str("gemini"), ApiProtocol::GeminiGenerateContent);
+    }
+
+    #[test]
+    fn test_api_protocol_custom_variant() {
+        let custom = ApiProtocol::from_str("acp");
+        assert_eq!(custom, ApiProtocol::Custom("acp".to_string()));
+    }
+}

@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use serde_json::{json, Value};
 
 use crate::streaming::{StreamEvent, TokenUsage};

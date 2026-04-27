@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+pub mod catalog;
 pub mod engine;
 pub mod errors;
 pub mod mock;

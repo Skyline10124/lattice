@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 //! Integration tests for all transport implementations.
 //!
 //! Verifies the complete message pipeline end-to-end:
