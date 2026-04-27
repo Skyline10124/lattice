@@ -75,6 +75,10 @@ impl MockProvider {
         self
     }
 
+    pub fn set_response(&mut self, content: &str) {
+        self.first_content = content.to_string();
+    }
+
     /// Set a simulated delay for each response.
     pub fn with_delay(mut self, delay: Duration) -> Self {
         self.delay = delay;

@@ -1,4 +1,5 @@
 #![allow(deprecated)]
+pub mod agent_loop;
 pub mod catalog;
 pub mod engine;
 pub mod errors;
