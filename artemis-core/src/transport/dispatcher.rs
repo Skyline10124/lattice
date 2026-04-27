@@ -1,25 +1,22 @@
-#![allow(deprecated)]
-//! Transport dispatcher — maps [`TransportType`] to concrete [`Transport`] implementations.
+//! Transport dispatcher — maps [`ApiProtocol`] to concrete [`Transport`] implementations.
 //!
-//! The dispatcher provides:
-//! - **Explicit dispatch**: select a transport by [`TransportType`]
-//! - **Auto-detection**: infer [`TransportType`] from a [`ProviderConfig`]'s `api_base` URL
-//! - **Combined**: `dispatch_for_config` auto-detects then dispatches
+//! The dispatcher provides protocol-driven routing: given a [`ResolvedModel`]
+//! (which carries an [`ApiProtocol`]), the dispatcher returns the appropriate
+//! transport for format normalization/denormalization.
 //!
 //! Default transports registered in [`TransportDispatcher::new()`]:
-//! - [`ChatCompletionsTransport`] for `TransportType::ChatCompletions`
-//! - [`AnthropicDispatchTransport`] for `TransportType::Anthropic`
-//! - [`GeminiTransport`] for `TransportType::Gemini`
+//! - [`ChatCompletionsTransport`] for `ApiProtocol::OpenAiChat`
+//! - [`AnthropicDispatchTransport`] for `ApiProtocol::AnthropicMessages`
+//! - [`GeminiTransport`] for `ApiProtocol::GeminiGenerateContent`
 
 use std::collections::HashMap;
 
+use crate::catalog::{ApiProtocol, ResolvedModel};
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::transport::Transport as FormatTransport;
 use crate::transport::anthropic::AnthropicTransport;
 use crate::transport::chat_completions::{ChatCompletionsTransport, Transport, TransportError};
 use crate::transport::gemini::GeminiTransport;
-use crate::types::TransportType;
-use crate::types::ProviderConfig;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — bridges AnthropicTransport to the Transport trait
@@ -110,89 +107,58 @@ impl Transport for AnthropicDispatchTransport {
 // TransportDispatcher
 // ---------------------------------------------------------------------------
 
-/// Dispatcher that maps [`TransportType`] → concrete [`Transport`] implementation.
+/// Dispatcher that maps [`ApiProtocol`] → concrete [`Transport`] implementation.
 ///
-/// Supports explicit dispatch, auto-detection from [`ProviderConfig`], and
-/// combined auto-detect-then-dispatch.
+/// Uses the model catalog's [`ApiProtocol`] as the key, routing requests through
+/// the appropriate transport for format normalization/denormalization.
 pub struct TransportDispatcher {
-    transports: HashMap<TransportType, Box<dyn Transport>>,
+    transports: HashMap<ApiProtocol, Box<dyn Transport>>,
 }
 
 impl TransportDispatcher {
     /// Create a dispatcher pre-loaded with the three default transports:
-    /// ChatCompletions, Anthropic, and Gemini.
+    /// OpenAiChat (ChatCompletions), AnthropicMessages, and GeminiGenerateContent.
     pub fn new() -> Self {
         let mut dispatcher = Self {
             transports: HashMap::new(),
         };
         dispatcher.register(
-            TransportType::ChatCompletions,
-            Box::new(ChatCompletionsTransport::new()),
+            ApiProtocol::OpenAiChat,
+            Box::new(ChatCompletionsTransport::default()),
         );
         dispatcher.register(
-            TransportType::Anthropic,
+            ApiProtocol::AnthropicMessages,
             Box::new(AnthropicDispatchTransport::new()),
         );
         dispatcher.register(
-            TransportType::Gemini,
+            ApiProtocol::GeminiGenerateContent,
             Box::new(GeminiTransport::new()),
         );
         dispatcher
     }
 
-    /// Register a custom transport for the given [`TransportType`].
+    /// Register a custom transport for the given [`ApiProtocol`].
     ///
-    /// If a transport was already registered for this type, it is replaced.
-    pub fn register(&mut self, transport_type: TransportType, transport: Box<dyn Transport>) {
-        self.transports.insert(transport_type, transport);
+    /// If a transport was already registered for this protocol, it is replaced.
+    pub fn register(&mut self, protocol: ApiProtocol, transport: Box<dyn Transport>) {
+        self.transports.insert(protocol, transport);
     }
 
-    /// Look up a transport by its [`TransportType`].
+    /// Look up a transport by its [`ApiProtocol`].
     ///
-    /// Returns `Err` if no transport is registered for the given type.
-    pub fn dispatch(&self, transport_type: &TransportType) -> Result<&dyn Transport, TransportError> {
-        self.transports
-            .get(transport_type)
-            .map(|t| t.as_ref())
-            .ok_or_else(|| {
-                TransportError::UnexpectedFormat(format!(
-                    "no transport registered for {:?}",
-                    transport_type
-                ))
-            })
+    /// Returns `None` if no transport is registered for the given protocol.
+    pub fn dispatch(&self, protocol: &ApiProtocol) -> Option<&dyn Transport> {
+        self.transports.get(protocol).map(|t| t.as_ref())
     }
 
-    /// Auto-detect the [`TransportType`] from a [`ProviderConfig`]'s `api_base` URL.
+    /// Convenience method that dispatches from a [`ResolvedModel`]'s `api_protocol`.
     ///
-    /// Detection rules (by host):
-    /// - `api.anthropic.com` → `TransportType::Anthropic`
-    /// - `generativelanguage.googleapis.com` → `TransportType::Gemini`
-    /// - `localhost:11434` → `TransportType::ChatCompletions` (Ollama)
-    /// - Everything else → `TransportType::ChatCompletions` (default)
-    pub fn auto_detect(&self, config: &ProviderConfig) -> TransportType {
-        let url = config.api_base.to_lowercase();
-
-        if url.contains("api.anthropic.com") {
-            TransportType::Anthropic
-        } else if url.contains("generativelanguage.googleapis.com") {
-            TransportType::Gemini
-        } else if url.contains("localhost:11434") {
-            TransportType::ChatCompletions
-        } else {
-            TransportType::ChatCompletions
-        }
-    }
-
-    /// Auto-detect the transport type from a [`ProviderConfig`] and dispatch.
-    ///
-    /// Convenience method combining [`auto_detect`](Self::auto_detect) and
-    /// [`dispatch`](Self::dispatch).
-    pub fn dispatch_for_config(
-        &self,
-        config: &ProviderConfig,
-    ) -> Result<&dyn Transport, TransportError> {
-        let transport_type = self.auto_detect(config);
-        self.dispatch(&transport_type)
+    /// This is the primary entry point for protocol-driven routing:
+    /// the catalog resolves a canonical model ID to a [`ResolvedModel`],
+    /// and the dispatcher routes to the correct transport based on the
+    /// resolved protocol.
+    pub fn dispatch_for_resolved(&self, resolved: &ResolvedModel) -> Option<&dyn Transport> {
+        self.dispatch(&resolved.api_protocol)
     }
 }
 
@@ -209,118 +175,102 @@ impl Default for TransportDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ApiProtocol, ResolvedModel};
-    use crate::types::ProviderConfig;
     use std::collections::HashMap;
-
-    fn make_config(api_base: &str, transport: TransportType) -> ProviderConfig {
-        ProviderConfig {
-            name: "test".to_string(),
-            api_base: api_base.to_string(),
-            api_key: None,
-            transport,
-            extra_headers: None,
-        }
-    }
 
     #[test]
     fn test_dispatch_chat_completions() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::ChatCompletions).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::OpenAiChat).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
     }
 
     #[test]
     fn test_dispatch_anthropic() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Anthropic).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
     }
 
     #[test]
     fn test_dispatch_gemini() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Gemini).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
         assert_eq!(transport.api_mode(), "gemini");
     }
 
     #[test]
-    fn test_dispatch_unregistered_returns_error() {
+    fn test_dispatch_unregistered_returns_none() {
         let dispatcher = TransportDispatcher::new();
-        let result = dispatcher.dispatch(&TransportType::Bedrock);
-        assert!(result.is_err());
+        let result = dispatcher.dispatch(&ApiProtocol::BedrockConverse);
+        assert!(result.is_none());
     }
 
     #[test]
-    fn test_auto_detect_anthropic_url() {
+    fn test_dispatch_for_resolved() {
         let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://api.anthropic.com/v1/messages",
-            TransportType::ChatCompletions, // intentionally wrong — auto_detect should override
-        );
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::Anthropic);
-    }
-
-    #[test]
-    fn test_auto_detect_gemini_url() {
-        let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://generativelanguage.googleapis.com/v1beta",
-            TransportType::ChatCompletions,
-        );
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::Gemini);
-    }
-
-    #[test]
-    fn test_auto_detect_ollama_url() {
-        let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "http://localhost:11434/v1",
-            TransportType::ChatCompletions,
-        );
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::ChatCompletions);
-    }
-
-    #[test]
-    fn test_auto_detect_default() {
-        let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://api.openai.com/v1",
-            TransportType::ChatCompletions,
-        );
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::ChatCompletions);
-    }
-
-    #[test]
-    fn test_auto_detect_case_insensitive() {
-        let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://API.ANTHROPIC.COM/v1",
-            TransportType::ChatCompletions,
-        );
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::Anthropic);
-    }
-
-    #[test]
-    fn test_dispatch_for_config() {
-        let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://api.anthropic.com/v1/messages",
-            TransportType::ChatCompletions,
-        );
-        let transport = dispatcher.dispatch_for_config(&config).unwrap();
+        let resolved = ResolvedModel {
+            canonical_id: "claude-3-opus".into(),
+            provider: "anthropic".into(),
+            api_key: None,
+            base_url: "https://api.anthropic.com".into(),
+            api_protocol: ApiProtocol::AnthropicMessages,
+            api_model_id: "claude-3-opus".into(),
+            context_length: 200000,
+            provider_specific: HashMap::new(),
+        };
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
     }
 
     #[test]
-    fn test_dispatch_for_config_default() {
+    fn test_dispatch_for_resolved_chat_completions() {
         let dispatcher = TransportDispatcher::new();
-        let config = make_config(
-            "https://api.unknown-provider.com/v1",
-            TransportType::ChatCompletions,
-        );
-        let transport = dispatcher.dispatch_for_config(&config).unwrap();
+        let resolved = ResolvedModel {
+            canonical_id: "gpt-4o".into(),
+            provider: "openai".into(),
+            api_key: None,
+            base_url: "https://api.openai.com/v1".into(),
+            api_protocol: ApiProtocol::OpenAiChat,
+            api_model_id: "gpt-4o".into(),
+            context_length: 128000,
+            provider_specific: HashMap::new(),
+        };
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
+    }
+
+    #[test]
+    fn test_dispatch_for_resolved_gemini() {
+        let dispatcher = TransportDispatcher::new();
+        let resolved = ResolvedModel {
+            canonical_id: "gemini-2.0-flash".into(),
+            provider: "google".into(),
+            api_key: None,
+            base_url: "https://generativelanguage.googleapis.com".into(),
+            api_protocol: ApiProtocol::GeminiGenerateContent,
+            api_model_id: "gemini-2.0-flash".into(),
+            context_length: 1048576,
+            provider_specific: HashMap::new(),
+        };
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
+        assert_eq!(transport.api_mode(), "gemini");
+    }
+
+    #[test]
+    fn test_dispatch_for_resolved_unregistered() {
+        let dispatcher = TransportDispatcher::new();
+        let resolved = ResolvedModel {
+            canonical_id: "unknown-model".into(),
+            provider: "test".into(),
+            api_key: None,
+            base_url: "https://api.example.com".into(),
+            api_protocol: ApiProtocol::Custom("unregistered".into()),
+            api_model_id: "unknown-model".into(),
+            context_length: 0,
+            provider_specific: HashMap::new(),
+        };
+        let result = dispatcher.dispatch_for_resolved(&resolved);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -328,11 +278,13 @@ mod tests {
         let mut dispatcher = TransportDispatcher::new();
 
         dispatcher.register(
-            TransportType::Bedrock,
-            Box::new(ChatCompletionsTransport::with_base_url("https://bedrock-runtime.us-east-1.amazonaws.com")),
+            ApiProtocol::BedrockConverse,
+            Box::new(ChatCompletionsTransport::with_base_url(
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+            )),
         );
 
-        let transport = dispatcher.dispatch(&TransportType::Bedrock).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::BedrockConverse).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
         assert_eq!(
             transport.base_url(),
@@ -345,18 +297,18 @@ mod tests {
         let mut dispatcher = TransportDispatcher::new();
 
         dispatcher.register(
-            TransportType::ChatCompletions,
+            ApiProtocol::OpenAiChat,
             Box::new(ChatCompletionsTransport::with_base_url("http://custom:9999/v1")),
         );
 
-        let transport = dispatcher.dispatch(&TransportType::ChatCompletions).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::OpenAiChat).unwrap();
         assert_eq!(transport.base_url(), "http://custom:9999/v1");
     }
 
     #[test]
     fn test_anthropic_normalize_request() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Anthropic).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
 
         let request = ChatRequest {
             messages: vec![
@@ -405,7 +357,7 @@ mod tests {
     #[test]
     fn test_anthropic_denormalize_response() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Anthropic).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
 
         let response = serde_json::json!({
             "content": [{"type": "text", "text": "Hi there!"}],
@@ -420,8 +372,8 @@ mod tests {
     #[test]
     fn test_default_impl() {
         let dispatcher = TransportDispatcher::default();
-        assert!(dispatcher.dispatch(&TransportType::ChatCompletions).is_ok());
-        assert!(dispatcher.dispatch(&TransportType::Anthropic).is_ok());
-        assert!(dispatcher.dispatch(&TransportType::Gemini).is_ok());
+        assert!(dispatcher.dispatch(&ApiProtocol::OpenAiChat).is_some());
+        assert!(dispatcher.dispatch(&ApiProtocol::AnthropicMessages).is_some());
+        assert!(dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).is_some());
     }
 }

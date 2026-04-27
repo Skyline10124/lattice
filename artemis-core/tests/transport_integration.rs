@@ -11,14 +11,14 @@ use artemis_core::provider::ChatRequest;
 use artemis_core::streaming::StreamEvent;
 use artemis_core::transport::anthropic::AnthropicTransport;
 use artemis_core::transport::chat_completions::{
-    ChatCompletionsTransport, Transport as ChatTransport, TransportError,
+    ChatCompletionsTransport, Transport as ChatTransport,
 };
 use artemis_core::transport::gemini::GeminiTransport;
 use artemis_core::transport::openai_compat::OpenAICompatTransport;
 use artemis_core::transport::dispatcher::TransportDispatcher;
 use artemis_core::transport::Transport as FormatTransport;
 use artemis_core::types::{
-    FunctionCall, Message, ProviderConfig, Role, ToolCall, ToolDefinition, TransportType,
+    FunctionCall, Message, Role, ToolCall, ToolDefinition,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -848,22 +848,6 @@ mod openai_compat {
     use super::*;
 
     #[test]
-    fn ollama_preset() {
-        let transport = OpenAICompatTransport::ollama();
-        assert_eq!(transport.base_url(), "http://localhost:11434/v1");
-        assert!(transport.extra_headers().is_empty());
-        assert_eq!(transport.api_mode(), "chat_completions");
-    }
-
-    #[test]
-    fn groq_preset() {
-        let transport = OpenAICompatTransport::groq();
-        assert_eq!(transport.base_url(), "https://api.groq.com/openai/v1");
-        assert!(transport.extra_headers().is_empty());
-        assert_eq!(transport.api_mode(), "chat_completions");
-    }
-
-    #[test]
     fn custom_base_url_configuration() {
         let custom_url = "https://my-llm.internal.corp/v1";
         let transport = OpenAICompatTransport::new(custom_url, HashMap::new());
@@ -882,7 +866,7 @@ mod openai_compat {
 
     #[test]
     fn delegates_normalize_to_chat_completions() {
-        let transport = OpenAICompatTransport::ollama();
+        let transport = OpenAICompatTransport::new("http://localhost:11434/v1", HashMap::new());
         let mut request = make_chat_request(sample_messages(), sample_tools());
         request.model = "llama3".to_string();
 
@@ -903,7 +887,8 @@ mod openai_compat {
 
     #[test]
     fn delegates_denormalize_to_chat_completions() {
-        let transport = OpenAICompatTransport::groq();
+        let transport =
+            OpenAICompatTransport::new("https://api.groq.com/openai/v1", HashMap::new());
 
         let response = json!({
             "id": "chatcmpl-compat",
@@ -934,20 +919,8 @@ mod openai_compat {
     }
 
     #[test]
-    fn openrouter_preset_with_headers() {
-        let transport = OpenAICompatTransport::openrouter();
-        assert_eq!(transport.base_url(), "https://openrouter.ai/api/v1");
-        let headers = transport.extra_headers();
-        assert_eq!(
-            headers.get("HTTP-Referer").unwrap(),
-            "https://github.com/astrin/artemis"
-        );
-        assert_eq!(headers.get("X-Title").unwrap(), "Artemis");
-    }
-
-    #[test]
     fn full_pipeline_compat_roundtrip() {
-        let transport = OpenAICompatTransport::deepseek();
+        let transport = OpenAICompatTransport::new("https://api.deepseek.com/v1", HashMap::new());
         let mut request = make_chat_request(sample_messages(), sample_tools());
         request.model = "deepseek-chat".to_string();
 
@@ -1154,120 +1127,64 @@ mod dispatcher {
     use super::*;
 
     #[test]
-    fn auto_detect_from_provider_config_urls() {
+    fn dispatch_protocol_returns_correct_transport() {
         let dispatcher = TransportDispatcher::new();
 
-        // Anthropic URL → Anthropic transport
-        let anthropic_config = ProviderConfig {
-            name: "anthropic".to_string(),
-            api_base: "https://api.anthropic.com/v1/messages".to_string(),
-            api_key: Some("sk-ant-test".to_string()),
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(
-            dispatcher.auto_detect(&anthropic_config),
-            TransportType::Anthropic
-        );
+        // ApiProtocol::OpenAiChat → chat_completions api_mode
+        let transport = dispatcher.dispatch(&ApiProtocol::OpenAiChat).unwrap();
+        assert_eq!(transport.api_mode(), "chat_completions");
 
-        // Gemini URL → Gemini transport
-        let gemini_config = ProviderConfig {
-            name: "gemini".to_string(),
-            api_base: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: Some("test-key".to_string()),
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(
-            dispatcher.auto_detect(&gemini_config),
-            TransportType::Gemini
-        );
+        // ApiProtocol::AnthropicMessages → anthropic api_mode
+        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        assert_eq!(transport.api_mode(), "anthropic");
 
-        // Ollama URL → ChatCompletions transport
-        let ollama_config = ProviderConfig {
-            name: "ollama".to_string(),
-            api_base: "http://localhost:11434/v1".to_string(),
-            api_key: None,
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(
-            dispatcher.auto_detect(&ollama_config),
-            TransportType::ChatCompletions
-        );
-
-        // Unknown URL → defaults to ChatCompletions
-        let unknown_config = ProviderConfig {
-            name: "custom".to_string(),
-            api_base: "https://my-llm.example.com/v1".to_string(),
-            api_key: None,
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(
-            dispatcher.auto_detect(&unknown_config),
-            TransportType::ChatCompletions
-        );
+        // ApiProtocol::GeminiGenerateContent → gemini api_mode
+        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
+        assert_eq!(transport.api_mode(), "gemini");
     }
 
     #[test]
-    fn dispatch_for_config_returns_correct_transport() {
+    fn dispatch_for_resolved_returns_correct_transport() {
         let dispatcher = TransportDispatcher::new();
 
-        // Anthropic config → anthropic api_mode
-        let anthropic_config = ProviderConfig {
-            name: "anthropic".to_string(),
-            api_base: "https://api.anthropic.com/v1/messages".to_string(),
-            api_key: None,
-            transport: TransportType::Anthropic,
-            extra_headers: None,
-        };
-        let transport = dispatcher.dispatch_for_config(&anthropic_config).unwrap();
+        let resolved = make_resolved(
+            "anthropic",
+            ApiProtocol::AnthropicMessages,
+            "https://api.anthropic.com",
+        );
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
 
-        // Gemini config → gemini api_mode
-        let gemini_config = ProviderConfig {
-            name: "gemini".to_string(),
-            api_base: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            api_key: None,
-            transport: TransportType::Gemini,
-            extra_headers: None,
-        };
-        let transport = dispatcher.dispatch_for_config(&gemini_config).unwrap();
+        let resolved = make_resolved(
+            "gemini",
+            ApiProtocol::GeminiGenerateContent,
+            "https://generativelanguage.googleapis.com",
+        );
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "gemini");
 
-        // OpenAI config → chat_completions api_mode
-        let openai_config = ProviderConfig {
-            name: "openai".to_string(),
-            api_base: "https://api.openai.com/v1".to_string(),
-            api_key: None,
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        let transport = dispatcher.dispatch_for_config(&openai_config).unwrap();
+        let resolved = make_resolved(
+            "openai",
+            ApiProtocol::OpenAiChat,
+            "https://api.openai.com/v1",
+        );
+        let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
     }
 
     #[test]
-    fn dispatch_unknown_transport_type_returns_error() {
+    fn dispatch_unregistered_protocol_returns_none() {
         let dispatcher = TransportDispatcher::new();
 
-        // Bedrock is not registered by default
-        let result = dispatcher.dispatch(&TransportType::Bedrock);
-        assert!(result.is_err());
-
-        match result {
-            Err(TransportError::UnexpectedFormat(msg)) => {
-                assert!(msg.contains("no transport registered"));
-            }
-            _ => panic!("expected UnexpectedFormat error"),
-        }
+        // BedrockConverse is not registered by default
+        let result = dispatcher.dispatch(&ApiProtocol::BedrockConverse);
+        assert!(result.is_none());
     }
 
     #[test]
     fn dispatcher_anthropic_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Anthropic).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
 
         let request = ChatRequest {
             messages: sample_messages(),
@@ -1316,7 +1233,7 @@ mod dispatcher {
     #[test]
     fn dispatcher_gemini_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&TransportType::Gemini).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
 
         let request = ChatRequest {
             messages: sample_messages(),
@@ -1369,7 +1286,7 @@ mod dispatcher {
     fn dispatcher_chat_completions_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
         let transport = dispatcher
-            .dispatch(&TransportType::ChatCompletions)
+            .dispatch(&ApiProtocol::OpenAiChat)
             .unwrap();
 
         let request = ChatRequest {
@@ -1411,40 +1328,17 @@ mod dispatcher {
 
         // Register a custom transport for Bedrock
         dispatcher.register(
-            TransportType::Bedrock,
+            ApiProtocol::BedrockConverse,
             Box::new(ChatCompletionsTransport::with_base_url(
                 "https://bedrock-runtime.us-east-1.amazonaws.com",
             )),
         );
 
-        let transport = dispatcher.dispatch(&TransportType::Bedrock).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::BedrockConverse).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
         assert_eq!(
             transport.base_url(),
             "https://bedrock-runtime.us-east-1.amazonaws.com"
         );
-    }
-
-    #[test]
-    fn auto_detect_case_insensitive() {
-        let dispatcher = TransportDispatcher::new();
-
-        let config = ProviderConfig {
-            name: "test".to_string(),
-            api_base: "HTTPS://API.ANTHROPIC.COM/v1".to_string(),
-            api_key: None,
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::Anthropic);
-
-        let config = ProviderConfig {
-            name: "test".to_string(),
-            api_base: "https://GENERATIVELANGUAGE.GOOGLEAPIS.COM/v1beta".to_string(),
-            api_key: None,
-            transport: TransportType::ChatCompletions,
-            extra_headers: None,
-        };
-        assert_eq!(dispatcher.auto_detect(&config), TransportType::Gemini);
     }
 }
