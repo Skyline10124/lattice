@@ -141,9 +141,20 @@ impl ArtemisEngine {
         Ok(())
     }
 
-    fn set_model(&self, _model: &str) -> PyResult<()> {
-        // TODO: implement model selection + re-resolution in T29 (agent loop)
+    fn set_model(&self, model_id: &str) -> PyResult<()> {
+        let mut state = self.state.lock().unwrap();
+        let s = state.get_or_insert_with(|| EngineState {
+            tools: Vec::new(),
+            last_response: None,
+            default_model: None,
+        });
+        s.default_model = Some(model_id.to_string());
         Ok(())
+    }
+
+    fn get_model(&self) -> PyResult<Option<String>> {
+        let state = self.state.lock().unwrap();
+        Ok(state.as_ref().and_then(|s| s.default_model.clone()))
     }
 
     fn run_once(
@@ -304,16 +315,18 @@ impl ArtemisEngine {
         Ok(events)
     }
 
-    fn list_providers(&self) -> Vec<String> {
-        self.list_models()
+    fn list_models(&self) -> PyResult<Vec<String>> {
+        let registry = self.registry.lock().unwrap();
+        Ok(registry.list_models())
+    }
+
+    fn list_authenticated_models(&self) -> PyResult<Vec<String>> {
+        let registry = self.registry.lock().unwrap();
+        Ok(registry.list_authenticated_models())
     }
 }
 
 impl ArtemisEngine {
-    fn list_models(&self) -> Vec<String> {
-        self.registry.lock().unwrap().list_models()
-    }
-
     fn block_on_model_chat(
         &self,
         _py: Python<'_>,

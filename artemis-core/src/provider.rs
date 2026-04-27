@@ -150,6 +150,11 @@ impl ModelRegistry {
         ids
     }
 
+    /// List models that have at least one provider with valid credentials.
+    pub fn list_authenticated_models(&self) -> Vec<String> {
+        self.router.list_authenticated_models()
+    }
+
     /// Resolve a model name to a [`ModelEntry`] + [`ResolvedModel`] using the router.
     ///
     /// Returns a reference to the registry entry and the resolved model details.
