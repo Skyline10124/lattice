@@ -1,10 +1,8 @@
-use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use crate::catalog::ApiProtocol;
 
 /// The role of a message participant in a conversation.
-#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Role {
     System,
@@ -13,91 +11,44 @@ pub enum Role {
     Tool,
 }
 
-#[pymethods]
-impl Role {
-    fn __repr__(&self) -> String {
-        match self {
-            Role::System => "Role.System",
-            Role::User => "Role.User",
-            Role::Assistant => "Role.Assistant",
-            Role::Tool => "Role.Tool",
-        }
-        .to_string()
-    }
-
-    fn __eq__(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
 /// Details of a function call invoked by the model.
-#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct FunctionCall {
-    #[pyo3(get, set)]
     pub name: String,
-    #[pyo3(get, set)]
     pub arguments: String,
 }
 
-#[pymethods]
 impl FunctionCall {
-    #[new]
-    fn new(name: String, arguments: String) -> Self {
+    pub fn new(name: String, arguments: String) -> Self {
         FunctionCall { name, arguments }
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "FunctionCall(name={}, arguments={})",
-            self.name, self.arguments
-        )
     }
 }
 
 /// A tool call made by the assistant, referencing a function to invoke.
-#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {
-    #[pyo3(get, set)]
     pub id: String,
-    #[pyo3(get, set)]
     pub function: FunctionCall,
 }
 
-#[pymethods]
 impl ToolCall {
-    #[new]
-    fn new(id: String, function: FunctionCall) -> Self {
+    pub fn new(id: String, function: FunctionCall) -> Self {
         ToolCall { id, function }
-    }
-
-    fn __repr__(&self) -> String {
-        format!("ToolCall(id={}, function={})", self.id, self.function.name)
     }
 }
 
 /// A message in a conversation between user and assistant.
-#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Message {
-    #[pyo3(get, set)]
     pub role: Role,
-    #[pyo3(get, set)]
     pub content: String,
-    #[pyo3(get, set)]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[pyo3(get, set)]
     pub tool_call_id: Option<String>,
-    #[pyo3(get, set)]
     pub name: Option<String>,
 }
 
-#[pymethods]
 impl Message {
-    #[new]
-    #[pyo3(signature = (role, content, tool_calls=None, tool_call_id=None, name=None))]
-    fn new(
+    pub fn new(
         role: Role,
         content: String,
         tool_calls: Option<Vec<ToolCall>>,
@@ -112,74 +63,25 @@ impl Message {
             name,
         }
     }
-
-    fn __repr__(&self) -> String {
-        let content_preview = if self.content.len() > 60 {
-            format!("{}...", &self.content[..60])
-        } else {
-            self.content.clone()
-        };
-        format!(
-            "Message(role={:?}, content={}, tool_calls={})",
-            self.role,
-            content_preview,
-            self.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0),
-        )
-    }
 }
 
 /// A tool definition providing a function specification to the model.
-#[pyclass(from_py_object)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ToolDefinition {
-    #[pyo3(get, set)]
     pub name: String,
-    #[pyo3(get, set)]
     pub description: String,
-    /// JSON schema for the tool parameters. Accessed from Python via get_parameters/set_parameters.
+    /// JSON schema for the tool parameters.
     pub parameters: serde_json::Value,
 }
 
-#[pymethods]
 impl ToolDefinition {
-    #[new]
-    #[pyo3(signature = (name, description, parameters = "{}"))]
-    fn new(name: String, description: String, parameters: &str) -> PyResult<Self> {
-        let params: serde_json::Value = serde_json::from_str(parameters).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON in parameters: {e}"))
-        })?;
-        if !params.is_object() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Tool parameters must be a JSON object".to_string(),
-            ));
-        }
-        Ok(ToolDefinition {
+    /// Create a new ToolDefinition with JSON parameter validation.
+    pub fn new(name: String, description: String, parameters: serde_json::Value) -> Self {
+        ToolDefinition {
             name,
             description,
-            parameters: params,
-        })
-    }
-
-    fn get_parameters(&self) -> String {
-        serde_json::to_string(&self.parameters).unwrap_or_default()
-    }
-
-    fn set_parameters(&mut self, params: String) {
-        if let Ok(val) = serde_json::from_str(&params) {
-            self.parameters = val;
+            parameters,
         }
-    }
-
-    fn __repr__(&self) -> String {
-        let desc_preview = if self.description.len() > 60 {
-            format!("{}...", &self.description[..60])
-        } else {
-            self.description.clone()
-        };
-        format!(
-            "ToolDefinition(name={}, description={})",
-            self.name, desc_preview
-        )
     }
 }
 

@@ -1,9 +1,9 @@
-//! Mock provider and tool for validating the Python↔Rust boundary.
+//! Mock provider and tool for testing.
 //!
-//! These types are **not** for production use — they exercise the full
-//! `ArtemisEngine → Provider → Event` pipeline with canned responses,
-//! proving the architecture works end-to-end before any real provider
-//! is implemented.
+//! These types are **not** for production use — they provide canned
+//! responses for unit tests within the crate.
+
+#![allow(dead_code)]
 
 use std::sync::Mutex;
 use std::time::Duration;
