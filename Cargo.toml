@@ -5,4 +5,5 @@ members = [
     "artemis-memory",
     "artemis-token-pool",
     "artemis-agent",
+    "artemis-python",
 ]
