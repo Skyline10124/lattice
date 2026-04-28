@@ -32,7 +32,10 @@ impl Transport for OpenAICompatTransport {
         "chat_completions"
     }
 
-    fn normalize_request(&self, request: &ChatRequest) -> Result<serde_json::Value, TransportError> {
+    fn normalize_request(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<serde_json::Value, TransportError> {
         self.inner.normalize_request(request)
     }
 
@@ -65,7 +68,10 @@ mod tests {
     #[test]
     fn test_custom_extra_headers() {
         let headers = HashMap::from([
-            ("HTTP-Referer".to_string(), "https://example.com".to_string()),
+            (
+                "HTTP-Referer".to_string(),
+                "https://example.com".to_string(),
+            ),
             ("X-Title".to_string(), "MyApp".to_string()),
         ]);
         let transport = OpenAICompatTransport::new("https://openrouter.ai/api/v1", headers.clone());

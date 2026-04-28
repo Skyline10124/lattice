@@ -319,8 +319,7 @@ mod tests {
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].function.name, "get_weather");
-        let args: serde_json::Value =
-            serde_json::from_str(&tcs[0].function.arguments).unwrap();
+        let args: serde_json::Value = serde_json::from_str(&tcs[0].function.arguments).unwrap();
         assert_eq!(args["city"], "Tokyo");
         assert_eq!(result.finish_reason, "tool_calls");
     }

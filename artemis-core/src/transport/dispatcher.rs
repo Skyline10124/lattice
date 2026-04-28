@@ -13,10 +13,10 @@ use std::collections::HashMap;
 
 use crate::catalog::{ApiProtocol, ResolvedModel};
 use crate::provider::{ChatRequest, ChatResponse};
-use crate::transport::Transport as FormatTransport;
 use crate::transport::anthropic::AnthropicTransport;
 use crate::transport::chat_completions::{ChatCompletionsTransport, Transport, TransportError};
 use crate::transport::gemini::GeminiTransport;
+use crate::transport::Transport as FormatTransport;
 
 // ---------------------------------------------------------------------------
 // Anthropic adapter — bridges AnthropicTransport to the Transport trait
@@ -57,7 +57,10 @@ impl Transport for AnthropicDispatchTransport {
         "anthropic"
     }
 
-    fn normalize_request(&self, request: &ChatRequest) -> Result<serde_json::Value, TransportError> {
+    fn normalize_request(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<serde_json::Value, TransportError> {
         let normalized = self.inner.normalize_messages(&request.messages);
         let mut body = serde_json::json!({
             "model": request.model,
@@ -76,8 +79,7 @@ impl Transport for AnthropicDispatchTransport {
 
         if let Some(temp) = request.temperature {
             body["temperature"] = serde_json::Value::Number(
-                serde_json::Number::from_f64(temp)
-                    .unwrap_or_else(|| serde_json::Number::from(0)),
+                serde_json::Number::from_f64(temp).unwrap_or_else(|| serde_json::Number::from(0)),
             );
         }
 
@@ -187,14 +189,18 @@ mod tests {
     #[test]
     fn test_dispatch_anthropic() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
     }
 
     #[test]
     fn test_dispatch_gemini() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::GeminiGenerateContent)
+            .unwrap();
         assert_eq!(transport.api_mode(), "gemini");
     }
 
@@ -298,7 +304,9 @@ mod tests {
 
         dispatcher.register(
             ApiProtocol::OpenAiChat,
-            Box::new(ChatCompletionsTransport::with_base_url("http://custom:9999/v1")),
+            Box::new(ChatCompletionsTransport::with_base_url(
+                "http://custom:9999/v1",
+            )),
         );
 
         let transport = dispatcher.dispatch(&ApiProtocol::OpenAiChat).unwrap();
@@ -308,7 +316,9 @@ mod tests {
     #[test]
     fn test_anthropic_normalize_request() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .unwrap();
 
         let request = ChatRequest {
             messages: vec![
@@ -357,7 +367,9 @@ mod tests {
     #[test]
     fn test_anthropic_denormalize_response() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .unwrap();
 
         let response = serde_json::json!({
             "content": [{"type": "text", "text": "Hi there!"}],
@@ -373,7 +385,11 @@ mod tests {
     fn test_default_impl() {
         let dispatcher = TransportDispatcher::default();
         assert!(dispatcher.dispatch(&ApiProtocol::OpenAiChat).is_some());
-        assert!(dispatcher.dispatch(&ApiProtocol::AnthropicMessages).is_some());
-        assert!(dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).is_some());
+        assert!(dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .is_some());
+        assert!(dispatcher
+            .dispatch(&ApiProtocol::GeminiGenerateContent)
+            .is_some());
     }
 }

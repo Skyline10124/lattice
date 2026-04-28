@@ -77,8 +77,15 @@ impl Transport for AnthropicTransport {
                     // Merge consecutive tool results into one user message
                     if let Some(last) = result.last_mut() {
                         if last["role"] == "user" {
-                            if let Some(content_arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
-                                if content_arr.first().and_then(|b| b.get("type")).and_then(|t| t.as_str()) == Some("tool_result") {
+                            if let Some(content_arr) =
+                                last.get_mut("content").and_then(|c| c.as_array_mut())
+                            {
+                                if content_arr
+                                    .first()
+                                    .and_then(|b| b.get("type"))
+                                    .and_then(|t| t.as_str())
+                                    == Some("tool_result")
+                                {
                                     content_arr.push(tool_result);
                                     continue;
                                 }
@@ -90,7 +97,10 @@ impl Transport for AnthropicTransport {
             }
         }
 
-        NormalizedMessages { system, messages: result }
+        NormalizedMessages {
+            system,
+            messages: result,
+        }
     }
 
     fn normalize_tools(&self, tools: &[ToolDefinition]) -> Vec<Value> {
@@ -126,8 +136,16 @@ impl Transport for AnthropicTransport {
                         }
                     }
                     "tool_use" => {
-                        let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let input = block.get("input").cloned().unwrap_or(json!({}));
                         let arguments = serde_json::to_string(&input).unwrap_or_default();
                         tool_calls.push(ToolCall {
@@ -166,11 +184,7 @@ impl Transport for AnthropicTransport {
         }
     }
 
-    fn denormalize_stream_chunk(
-        &self,
-        event_type: &str,
-        data: &Value,
-    ) -> Vec<StreamEvent> {
+    fn denormalize_stream_chunk(&self, event_type: &str, data: &Value) -> Vec<StreamEvent> {
         match event_type {
             "message_start" => vec![],
             "content_block_start" => {
@@ -192,7 +206,9 @@ impl Transport for AnthropicTransport {
                         if text.is_empty() {
                             vec![]
                         } else {
-                            vec![StreamEvent::Token { content: text.to_string() }]
+                            vec![StreamEvent::Token {
+                                content: text.to_string(),
+                            }]
                         }
                     }
                     Some("input_json_delta") => {
@@ -216,7 +232,9 @@ impl Transport for AnthropicTransport {
                         if thinking.is_empty() {
                             vec![]
                         } else {
-                            vec![StreamEvent::Token { content: thinking.to_string() }]
+                            vec![StreamEvent::Token {
+                                content: thinking.to_string(),
+                            }]
                         }
                     }
                     _ => vec![],
@@ -224,19 +242,22 @@ impl Transport for AnthropicTransport {
             }
             "content_block_stop" => {
                 let idx = data["index"].as_u64().unwrap_or(0) as u32;
-                vec![StreamEvent::ToolCallEnd { id: format!("idx_{}", idx) }]
+                vec![StreamEvent::ToolCallEnd {
+                    id: format!("idx_{}", idx),
+                }]
             }
             "message_delta" => {
-                let stop_reason = data["delta"]["stop_reason"]
-                    .as_str()
-                    .unwrap_or("end_turn");
+                let stop_reason = data["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
                 let finish_reason = map_stop_reason(stop_reason);
                 let usage = data.get("usage").map(|u| TokenUsage {
                     prompt_tokens: 0,
                     completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                     total_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
                 });
-                vec![StreamEvent::Done { finish_reason, usage }]
+                vec![StreamEvent::Done {
+                    finish_reason,
+                    usage,
+                }]
             }
             "message_stop" | "ping" => vec![],
             _ => vec![],
@@ -383,7 +404,10 @@ mod tests {
         });
         let result = transport.denormalize_response(&response);
         assert_eq!(result.content, Some("Let me check.".to_string()));
-        assert_eq!(result.reasoning, Some("I should look up the weather.".to_string()));
+        assert_eq!(
+            result.reasoning,
+            Some("I should look up the weather.".to_string())
+        );
         assert_eq!(result.finish_reason, "stop");
     }
 
@@ -399,7 +423,9 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
-            StreamEvent::Token { content: "Hello".to_string() }
+            StreamEvent::Token {
+                content: "Hello".to_string()
+            }
         );
     }
 
@@ -430,7 +456,9 @@ mod tests {
         let events = transport.denormalize_stream_chunk("content_block_delta", &delta_data);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::ToolCallDelta { arguments_delta, .. } => {
+            StreamEvent::ToolCallDelta {
+                arguments_delta, ..
+            } => {
                 assert_eq!(arguments_delta, r#"{"q":"ru"#);
             }
             other => panic!("expected ToolCallDelta, got {other:?}"),
@@ -449,7 +477,10 @@ mod tests {
         let events = transport.denormalize_stream_chunk("message_delta", &msg_delta_data);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::Done { finish_reason, usage } => {
+            StreamEvent::Done {
+                finish_reason,
+                usage,
+            } => {
                 assert_eq!(finish_reason, "tool_calls");
                 let usage = usage.as_ref().expect("expected usage");
                 assert_eq!(usage.completion_tokens, 50);

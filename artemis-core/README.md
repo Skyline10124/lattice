@@ -6,7 +6,7 @@ Model-centric LLM engine in Rust with Python bindings.
 
 Artemis Core lets you pick a model, not a provider. You call `set_model("sonnet")`
 and the engine resolves the alias, finds the best provider with valid credentials,
-and routes the request automatically. 98 models, 37 aliases, 8 MVP providers.
+and routes the request automatically. 98+ models, 37 aliases, 8 MVP providers.
 
 ## Quick Start
 
@@ -63,7 +63,7 @@ Requires Rust toolchain (1.75+) and Python 3.10+.
 
 ## Supported Models
 
-98 models across 8 MVP providers: OpenAI, Anthropic, Gemini, Ollama, Groq, xAI, DeepSeek, Mistral.
+98+ models across 8 MVP providers: OpenAI, Anthropic, Gemini, Ollama, Groq, xAI, DeepSeek, Mistral.
 
 Aliases let you type short names:
 

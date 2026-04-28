@@ -17,7 +17,10 @@ fn user_message(content: &str) -> Message {
 fn test_permissive_fallback_provider_model_format() {
     let router = ModelRouter::new();
     let result = router.resolve("anthropic/claude-opus-4", None);
-    assert!(result.is_ok(), "provider/model format should resolve via permissive fallback");
+    assert!(
+        result.is_ok(),
+        "provider/model format should resolve via permissive fallback"
+    );
 
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "anthropic");
@@ -29,7 +32,10 @@ fn test_permissive_fallback_provider_model_format() {
 fn test_permissive_fallback_openai_model() {
     let router = ModelRouter::new();
     let result = router.resolve("openai/gpt-4o-mini", None);
-    assert!(result.is_ok(), "openai/model format should resolve via permissive fallback");
+    assert!(
+        result.is_ok(),
+        "openai/model format should resolve via permissive fallback"
+    );
 
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "openai");
@@ -41,7 +47,10 @@ fn test_permissive_fallback_openai_model() {
 fn test_permissive_fallback_gemini_model() {
     let router = ModelRouter::new();
     let result = router.resolve("gemini/gemini-2.5-flash", None);
-    assert!(result.is_ok(), "gemini/model format should resolve via permissive fallback");
+    assert!(
+        result.is_ok(),
+        "gemini/model format should resolve via permissive fallback"
+    );
 
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "gemini");
@@ -52,7 +61,10 @@ fn test_permissive_fallback_gemini_model() {
 fn test_permissive_fallback_deepseek_model() {
     let router = ModelRouter::new();
     let result = router.resolve("deepseek/deepseek-chat", None);
-    assert!(result.is_ok(), "deepseek/model format should resolve via permissive fallback");
+    assert!(
+        result.is_ok(),
+        "deepseek/model format should resolve via permissive fallback"
+    );
 
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "deepseek");
@@ -63,7 +75,10 @@ fn test_permissive_fallback_deepseek_model() {
 fn test_unknown_model_no_provider_prefix_fails() {
     let router = ModelRouter::new();
     let result = router.resolve("totally-unknown-model", None);
-    assert!(result.is_err(), "unknown model without provider prefix should fail");
+    assert!(
+        result.is_err(),
+        "unknown model without provider prefix should fail"
+    );
 
     match result.err().unwrap() {
         ArtemisError::ModelNotFound { model } => {
@@ -103,11 +118,7 @@ fn test_permissive_resolved_model_usable_in_chat_request() {
     let router = ModelRouter::new();
     let resolved = router.resolve("openai/gpt-4o", None).unwrap();
 
-    let request = ChatRequest::new(
-        vec![user_message("Hello")],
-        vec![],
-        resolved.clone(),
-    );
+    let request = ChatRequest::new(vec![user_message("Hello")], vec![], resolved.clone());
 
     assert!(!request.model.is_empty(), "model field should be populated");
     assert_eq!(request.resolved.canonical_id, "gpt-4o");

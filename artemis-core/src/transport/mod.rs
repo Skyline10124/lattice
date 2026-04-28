@@ -68,11 +68,7 @@ pub trait Transport: Send + Sync {
     ///
     /// `event_type` is the SSE event field (e.g. `"content_block_delta"`).
     /// `data` is the raw data payload (after stripping `data: `).
-    fn denormalize_stream_chunk(
-        &self,
-        event_type: &str,
-        data: &Value,
-    ) -> Vec<StreamEvent>;
+    fn denormalize_stream_chunk(&self, event_type: &str, data: &Value) -> Vec<StreamEvent>;
 }
 
 pub use chat_completions::{ChatCompletionsTransport, Transport as ChatTransport, TransportError};

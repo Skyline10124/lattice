@@ -55,24 +55,14 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum StreamEvent {
     /// A chunk of generated text content.
-    Token {
-        content: String,
-    },
+    Token { content: String },
     /// A tool call has been requested — contains the tool id and name.
     /// Subsequent argument fragments arrive via [`ToolCallDelta`].
-    ToolCallStart {
-        id: String,
-        name: String,
-    },
+    ToolCallStart { id: String, name: String },
     /// A partial fragment of a tool call's JSON arguments.
-    ToolCallDelta {
-        id: String,
-        arguments_delta: String,
-    },
+    ToolCallDelta { id: String, arguments_delta: String },
     /// Signals that a tool call's argument stream is complete.
-    ToolCallEnd {
-        id: String,
-    },
+    ToolCallEnd { id: String },
     /// The stream is finished.
     Done {
         finish_reason: String,
@@ -80,9 +70,7 @@ pub enum StreamEvent {
     },
     /// A non-fatal error encountered during streaming
     /// (e.g. an API error chunk).
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// Parses a single SSE message (event type + data payload) into zero or more
@@ -315,9 +303,7 @@ impl SseParser for AnthropicSseParser {
                 }
             }
             "message_delta" => {
-                let stop_reason = root["delta"]["stop_reason"]
-                    .as_str()
-                    .unwrap_or("end_turn");
+                let stop_reason = root["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
                 let usage = root["usage"].as_object().map(|u| TokenUsage {
                     prompt_tokens: 0,
                     completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
@@ -486,8 +472,6 @@ impl Stream for EventStream {
         }
     }
 }
-
-
 
 /// A raw SSE event produced by [`parse_raw_sse`].
 #[derive(Debug, Clone, PartialEq)]
@@ -975,15 +959,18 @@ mod tests {
         let input = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[],\"model\":\"claude-3-5\",\"role\":\"assistant\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n";
         let mut parser = AnthropicSseParser::new();
         let events = parse_sse_text(input, &mut parser).unwrap();
-        assert_eq!(events.len(), 2, "message_start is ignored, text delta + Done");
+        assert_eq!(
+            events.len(),
+            2,
+            "message_start is ignored, text delta + Done"
+        );
         assert!(matches!(events[0], StreamEvent::Token { .. }));
         assert!(matches!(events[1], StreamEvent::Done { .. }));
     }
 
     #[test]
     #[ignore = "requires a running SSE HTTP server or mock EventSource"]
-    fn test_sse_stream_integration() {
-    }
+    fn test_sse_stream_integration() {}
 
     #[test]
     fn test_token_usage_roundtrip() {

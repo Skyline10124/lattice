@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::catalog::{Catalog, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
 use crate::errors::ArtemisError;
+use std::collections::HashMap;
 
 /// Multi-provider credential fallback map.
 /// Maps provider slugs to env var → field name mappings.
@@ -70,6 +70,12 @@ pub struct ModelRouter {
     custom_models: HashMap<String, ModelCatalogEntry>,
 }
 
+impl Default for ModelRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelRouter {
     pub fn new() -> Self {
         ModelRouter {
@@ -96,9 +102,9 @@ impl ModelRouter {
         let canonical_id = match self.resolve_alias(&normalized) {
             Some(id) => id,
             None => {
-                if self.catalog.get_model(&normalized).is_some() {
-                    normalized.clone()
-                } else if self.custom_models.contains_key(&normalized) {
+                if self.catalog.get_model(&normalized).is_some()
+                    || self.custom_models.contains_key(&normalized)
+                {
                     normalized.clone()
                 } else {
                     return self.resolve_permissive(model_name);
@@ -161,7 +167,7 @@ impl ModelRouter {
         }
 
         let best = &sorted_providers[0];
-        return Ok(ResolvedModel {
+        Ok(ResolvedModel {
             canonical_id: canonical_id.clone(),
             provider: best.provider_id.clone(),
             api_key: None,
@@ -170,13 +176,13 @@ impl ModelRouter {
             api_model_id: best.api_model_id.clone(),
             context_length: entry.context_length,
             provider_specific: best.provider_specific.clone(),
-        });
+        })
     }
 
     /// Check env vars for a provider entry's credential_keys.
     /// Returns the first env var value found, or None.
     fn resolve_credentials(&self, entry: &CatalogProviderEntry) -> Option<String> {
-        for (_field_name, env_var) in &entry.credential_keys {
+        for env_var in entry.credential_keys.values() {
             if let Ok(val) = std::env::var(env_var) {
                 let trimmed = val.trim().to_string();
                 if !trimmed.is_empty() {
@@ -237,10 +243,7 @@ impl ModelRouter {
     ///
     /// Tries "provider/model" split, looks up provider defaults,
     /// and constructs a ResolvedModel from the defaults.
-    pub fn resolve_permissive(
-        &self,
-        model_name: &str,
-    ) -> Result<ResolvedModel, ArtemisError> {
+    pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, ArtemisError> {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
             if let Some(defaults) = self.catalog.get_provider_defaults(provider_part) {
                 let api_key = self.resolve_credentials(&CatalogProviderEntry {
@@ -274,8 +277,7 @@ impl ModelRouter {
 
     /// Register a custom model at runtime (Python-facing API).
     pub fn register_model(&mut self, entry: ModelCatalogEntry) {
-        self.custom_models
-            .insert(entry.canonical_id.clone(), entry);
+        self.custom_models.insert(entry.canonical_id.clone(), entry);
     }
 
     /// List all canonical model IDs (catalog + custom).
@@ -370,10 +372,7 @@ mod tests {
             normalize_model_id("us.anthropic.claude-sonnet-4-6-v1:0"),
             "claude-sonnet-4-6"
         );
-        assert_eq!(
-            normalize_model_id("us.amazon.nova-pro-v1:0"),
-            "nova-pro"
-        );
+        assert_eq!(normalize_model_id("us.amazon.nova-pro-v1:0"), "nova-pro");
         assert_eq!(
             normalize_model_id("us.meta.llama4-maverick-17b-instruct-v1:0"),
             "llama4-maverick-17b-instruct"
@@ -398,18 +397,9 @@ mod tests {
 
     #[test]
     fn test_normalize_model_id_claude_dots_to_hyphens() {
-        assert_eq!(
-            normalize_model_id("claude-sonnet-4.6"),
-            "claude-sonnet-4-6"
-        );
-        assert_eq!(
-            normalize_model_id("claude-opus-4.7"),
-            "claude-opus-4-7"
-        );
-        assert_eq!(
-            normalize_model_id("claude-haiku-4.5"),
-            "claude-haiku-4-5"
-        );
+        assert_eq!(normalize_model_id("claude-sonnet-4.6"), "claude-sonnet-4-6");
+        assert_eq!(normalize_model_id("claude-opus-4.7"), "claude-opus-4-7");
+        assert_eq!(normalize_model_id("claude-haiku-4.5"), "claude-haiku-4-5");
     }
 
     #[test]
@@ -471,7 +461,10 @@ mod tests {
             .expect("should resolve sonnet alias");
         assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
         assert_eq!(resolved.provider, "anthropic");
-        assert!(resolved.api_key.is_some(), "should have api_key from env var");
+        assert!(
+            resolved.api_key.is_some(),
+            "should have api_key from env var"
+        );
         assert_eq!(resolved.api_key.unwrap(), "test-key-ant");
 
         restore_env("ANTHROPIC_API_KEY", prev);
@@ -600,7 +593,10 @@ mod tests {
         );
         let resolved = result.unwrap();
         assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
-        assert!(resolved.api_key.is_none(), "api_key should be None without credentials");
+        assert!(
+            resolved.api_key.is_none(),
+            "api_key should be None without credentials"
+        );
 
         for (k, v) in prev_keys {
             restore_env(&k, v);
@@ -635,7 +631,9 @@ mod tests {
         router.register_model(custom);
 
         assert!(
-            router.list_models().contains(&"my-custom-model".to_string()),
+            router
+                .list_models()
+                .contains(&"my-custom-model".to_string()),
             "list_models should include custom model"
         );
 

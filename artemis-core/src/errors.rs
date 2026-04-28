@@ -169,10 +169,7 @@ impl From<ArtemisError> for PyErr {
             })
             .expect("Python interpreter not initialized"),
 
-            ArtemisError::ProviderUnavailable {
-                provider,
-                reason,
-            } => Python::try_attach(|py| {
+            ArtemisError::ProviderUnavailable { provider, reason } => Python::try_attach(|py| {
                 let msg = format!("Provider '{provider}' unavailable: {reason}");
                 let py_err = PyErr::new::<py_exc::ProviderUnavailableError, _>((msg,));
                 let instance = py_err.value(py);
@@ -182,10 +179,7 @@ impl From<ArtemisError> for PyErr {
             })
             .expect("Python interpreter not initialized"),
 
-            ArtemisError::ContextWindowExceeded {
-                tokens,
-                limit,
-            } => Python::try_attach(|py| {
+            ArtemisError::ContextWindowExceeded { tokens, limit } => Python::try_attach(|py| {
                 let msg = format!("Context window exceeded: {tokens} tokens (limit {limit})");
                 let py_err = PyErr::new::<py_exc::ContextWindowExceededError, _>((msg,));
                 let instance = py_err.value(py);
@@ -269,8 +263,8 @@ impl ErrorClassifier {
 
             // 404: Model not found
             404 => {
-                let model = extract_model_from_body(response_body)
-                    .unwrap_or_else(|| "unknown".to_string());
+                let model =
+                    extract_model_from_body(response_body).unwrap_or_else(|| "unknown".to_string());
                 ArtemisError::ModelNotFound { model }
             }
 
@@ -778,9 +772,7 @@ mod tests {
                     "AuthenticationError",
                 ),
                 (
-                    ArtemisError::ModelNotFound {
-                        model: "x".into(),
-                    },
+                    ArtemisError::ModelNotFound { model: "x".into() },
                     "ModelNotFoundError",
                 ),
                 (
@@ -868,10 +860,7 @@ mod tests {
                 .unwrap()
                 .extract::<bool>()
                 .unwrap();
-            assert!(
-                is_sub,
-                "RateLimitError should be subclass of ArtemisError"
-            );
+            assert!(is_sub, "RateLimitError should be subclass of ArtemisError");
         });
     }
 

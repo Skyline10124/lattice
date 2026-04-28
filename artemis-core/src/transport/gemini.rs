@@ -33,16 +33,24 @@ use uuid::Uuid;
 /// A single piece of content extracted from a streaming chunk.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamChunk {
-    Token { content: String },
-    Thinking { content: String },
+    Token {
+        content: String,
+    },
+    Thinking {
+        content: String,
+    },
     ToolCallDelta {
         index: usize,
         id: String,
         name: String,
         arguments: String,
     },
-    Done { finish_reason: String },
-    Usage { usage: TokenUsage },
+    Done {
+        finish_reason: String,
+    },
+    Usage {
+        usage: TokenUsage,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +97,10 @@ impl GeminiTransport {
     }
 
     fn generate_call_id() -> String {
-        format!("call_{}", &Uuid::new_v4().to_string().replace("-", "")[..12])
+        format!(
+            "call_{}",
+            &Uuid::new_v4().to_string().replace("-", "")[..12]
+        )
     }
 
     /// Build the Gemini `contents` array and `systemInstruction` from internal messages.
@@ -122,7 +133,11 @@ impl GeminiTransport {
                         for tc in tool_calls {
                             let args: Value =
                                 serde_json::from_str(&tc.function.arguments).unwrap_or(json!({}));
-                            let args_obj = if args.is_object() { args } else { json!({"_value": args}) };
+                            let args_obj = if args.is_object() {
+                                args
+                            } else {
+                                json!({"_value": args})
+                            };
                             parts.push(json!({
                                 "functionCall": {
                                     "name": tc.function.name,
@@ -140,15 +155,19 @@ impl GeminiTransport {
                         .name
                         .as_deref()
                         .unwrap_or(msg.tool_call_id.as_deref().unwrap_or("tool"));
-                    let response: Value =
-                        if msg.content.trim().starts_with('{') || msg.content.trim().starts_with('[')
-                        {
-                            serde_json::from_str(&msg.content)
-                                .unwrap_or_else(|_| json!({"output": msg.content}))
-                        } else {
-                            json!({"output": msg.content})
-                        };
-                    let response_obj = if response.is_object() { response } else { json!({"output": response}) };
+                    let response: Value = if msg.content.trim().starts_with('{')
+                        || msg.content.trim().starts_with('[')
+                    {
+                        serde_json::from_str(&msg.content)
+                            .unwrap_or_else(|_| json!({"output": msg.content}))
+                    } else {
+                        json!({"output": msg.content})
+                    };
+                    let response_obj = if response.is_object() {
+                        response
+                    } else {
+                        json!({"output": response})
+                    };
                     contents.push(json!({
                         "role": "user",
                         "parts": [{"functionResponse": {"name": tool_name, "response": response_obj}}],
@@ -188,9 +207,7 @@ impl GeminiTransport {
 
     /// Parse a full Gemini response into a ChatResponse.
     fn parse_response(response: &Value) -> Result<ChatResponse, TransportError> {
-        let candidates = response
-            .get("candidates")
-            .and_then(|c| c.as_array());
+        let candidates = response.get("candidates").and_then(|c| c.as_array());
 
         let (content_parts, finish_reason_raw, model) = match candidates {
             Some(cands) if !cands.is_empty() => {
@@ -232,8 +249,7 @@ impl GeminiTransport {
             if let Some(fc) = part.get("functionCall") {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
-                let args_str = serde_json::to_string(&args)
-                    .unwrap_or_else(|_| "{}".to_string());
+                let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(crate::types::ToolCall {
                     id: Self::generate_call_id(),
                     function: crate::types::FunctionCall {
@@ -252,14 +268,31 @@ impl GeminiTransport {
         };
 
         let usage = response.get("usageMetadata").map(|u| TokenUsage {
-            prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            prompt_tokens: u
+                .get("promptTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            completion_tokens: u
+                .get("candidatesTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            total_tokens: u
+                .get("totalTokenCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
         });
 
         Ok(ChatResponse {
-            content: if text_pieces.is_empty() { None } else { Some(text_pieces.join("")) },
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            content: if text_pieces.is_empty() {
+                None
+            } else {
+                Some(text_pieces.join(""))
+            },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             usage,
             finish_reason,
             model,
@@ -295,13 +328,17 @@ impl GeminiTransport {
         for part in &content_parts {
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    results.push(StreamChunk::Thinking { content: text.to_string() });
+                    results.push(StreamChunk::Thinking {
+                        content: text.to_string(),
+                    });
                 }
                 continue;
             }
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
-                    results.push(StreamChunk::Token { content: text.to_string() });
+                    results.push(StreamChunk::Token {
+                        content: text.to_string(),
+                    });
                 }
             }
             if let Some(fc) = part.get("functionCall") {
@@ -326,9 +363,18 @@ impl GeminiTransport {
         if let Some(u) = chunk.get("usageMetadata") {
             results.push(StreamChunk::Usage {
                 usage: TokenUsage {
-                    prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    prompt_tokens: u
+                        .get("promptTokenCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    completion_tokens: u
+                        .get("candidatesTokenCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    total_tokens: u
+                        .get("totalTokenCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
                 },
             });
         }
@@ -378,7 +424,11 @@ impl Transport for GeminiTransport {
         if let Some(max_tokens) = request.max_tokens {
             generation_config["maxOutputTokens"] = json!(max_tokens);
         }
-        if generation_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+        if generation_config
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false)
+        {
             body["generationConfig"] = generation_config;
         }
 
@@ -444,7 +494,9 @@ mod tests {
         ];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -468,7 +520,9 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -496,7 +550,9 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -522,7 +578,9 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let contents = body["contents"].as_array().unwrap();
         assert_eq!(contents.len(), 1);
@@ -676,7 +734,9 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(vec![], tools)).unwrap();
+        let body = transport
+            .normalize_request(&make_request(vec![], tools))
+            .unwrap();
 
         let tools_arr = body["tools"].as_array().unwrap();
         assert_eq!(tools_arr.len(), 1);
@@ -690,7 +750,9 @@ mod tests {
     #[test]
     fn test_normalize_tools_empty() {
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(vec![], vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(vec![], vec![]))
+            .unwrap();
         assert!(body.get("tools").is_none());
     }
 
@@ -711,7 +773,12 @@ mod tests {
         let results = transport.denormalize_stream_chunk(&chunk);
 
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0], StreamChunk::Token { content: "Hello".to_string() });
+        assert_eq!(
+            results[0],
+            StreamChunk::Token {
+                content: "Hello".to_string()
+            }
+        );
     }
 
     #[test]
@@ -732,8 +799,18 @@ mod tests {
         let results = transport.denormalize_stream_chunk(&chunk);
 
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0], StreamChunk::Thinking { content: "Let me think...".to_string() });
-        assert_eq!(results[1], StreamChunk::Token { content: "The answer is 42".to_string() });
+        assert_eq!(
+            results[0],
+            StreamChunk::Thinking {
+                content: "Let me think...".to_string()
+            }
+        );
+        assert_eq!(
+            results[1],
+            StreamChunk::Token {
+                content: "The answer is 42".to_string()
+            }
+        );
     }
 
     #[test]
@@ -754,8 +831,12 @@ mod tests {
         let results = transport.denormalize_stream_chunk(&chunk);
 
         assert!(results.len() >= 2);
-        let has_done = results.iter().any(|r| matches!(r, StreamChunk::Done { .. }));
-        let has_usage = results.iter().any(|r| matches!(r, StreamChunk::Usage { .. }));
+        let has_done = results
+            .iter()
+            .any(|r| matches!(r, StreamChunk::Done { .. }));
+        let has_usage = results
+            .iter()
+            .any(|r| matches!(r, StreamChunk::Usage { .. }));
         assert!(has_done);
         assert!(has_usage);
     }
@@ -766,8 +847,14 @@ mod tests {
     fn test_finish_reason_mapping() {
         assert_eq!(GeminiTransport::map_finish_reason("STOP"), "stop");
         assert_eq!(GeminiTransport::map_finish_reason("MAX_TOKENS"), "length");
-        assert_eq!(GeminiTransport::map_finish_reason("SAFETY"), "content_filter");
-        assert_eq!(GeminiTransport::map_finish_reason("RECITATION"), "content_filter");
+        assert_eq!(
+            GeminiTransport::map_finish_reason("SAFETY"),
+            "content_filter"
+        );
+        assert_eq!(
+            GeminiTransport::map_finish_reason("RECITATION"),
+            "content_filter"
+        );
         assert_eq!(GeminiTransport::map_finish_reason("OTHER"), "stop");
         assert_eq!(GeminiTransport::map_finish_reason("UNKNOWN"), "stop");
         assert_eq!(GeminiTransport::map_finish_reason("stop"), "stop");
@@ -784,7 +871,10 @@ mod tests {
     #[test]
     fn test_default_base_url() {
         let transport = GeminiTransport::new();
-        assert_eq!(transport.base_url(), "https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(
+            transport.base_url(),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
     }
 
     #[test]
@@ -806,7 +896,9 @@ mod tests {
         }];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let fr = &body["contents"][0]["parts"][0]["functionResponse"];
         assert_eq!(fr["name"], "get_weather");
@@ -855,7 +947,9 @@ mod tests {
         ];
 
         let transport = GeminiTransport::new();
-        let body = transport.normalize_request(&make_request(messages, vec![])).unwrap();
+        let body = transport
+            .normalize_request(&make_request(messages, vec![]))
+            .unwrap();
 
         let sys_parts = body["systemInstruction"]["parts"].as_array().unwrap();
         assert_eq!(sys_parts.len(), 2);

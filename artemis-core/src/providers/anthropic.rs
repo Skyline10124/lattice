@@ -65,10 +65,7 @@ impl Provider for AnthropicProvider {
             );
         }
         if !tools.is_empty() {
-            body.insert(
-                "tools".to_string(),
-                serde_json::Value::Array(tools),
-            );
+            body.insert("tools".to_string(), serde_json::Value::Array(tools));
         }
         if let Some(max_tokens) = request.max_tokens {
             body.insert(
@@ -83,16 +80,11 @@ impl Provider for AnthropicProvider {
             );
         }
         if let Some(temperature) = request.temperature {
-            body.insert(
-                "temperature".to_string(),
-                serde_json::json!(temperature),
-            );
+            body.insert("temperature".to_string(), serde_json::json!(temperature));
         }
 
         let client = reqwest::Client::new();
-        let mut req = client
-            .post(&format!("{}/v1/messages", base_url))
-            .json(&body);
+        let mut req = client.post(format!("{}/v1/messages", base_url)).json(&body);
 
         // Anthropic uses x-api-key instead of Bearer.
         if let Some(ref api_key) = resolved.api_key {
@@ -156,7 +148,7 @@ impl Provider for AnthropicProvider {
 mod tests {
     use super::*;
     use crate::catalog::ApiProtocol;
-    use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
+    use crate::types::{Message, Role, ToolDefinition};
     use std::collections::HashMap;
 
     fn make_resolved(model_id: &str) -> crate::catalog::ResolvedModel {
@@ -298,10 +290,7 @@ mod tests {
         });
 
         let result = p.transport.denormalize_response(&response);
-        assert_eq!(
-            result.content.as_deref(),
-            Some("Let me check the weather.")
-        );
+        assert_eq!(result.content.as_deref(), Some("Let me check the weather."));
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].id, "toolu_abc");

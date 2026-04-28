@@ -13,13 +13,11 @@ use artemis_core::transport::anthropic::AnthropicTransport;
 use artemis_core::transport::chat_completions::{
     ChatCompletionsTransport, Transport as ChatTransport,
 };
+use artemis_core::transport::dispatcher::TransportDispatcher;
 use artemis_core::transport::gemini::GeminiTransport;
 use artemis_core::transport::openai_compat::OpenAICompatTransport;
-use artemis_core::transport::dispatcher::TransportDispatcher;
 use artemis_core::transport::Transport as FormatTransport;
-use artemis_core::types::{
-    FunctionCall, Message, Role, ToolCall, ToolDefinition,
-};
+use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -41,11 +39,11 @@ fn make_resolved(provider: &str, api_protocol: ApiProtocol, base_url: &str) -> R
 }
 
 fn make_chat_request(messages: Vec<Message>, tools: Vec<ToolDefinition>) -> ChatRequest {
-    ChatRequest::new(messages, tools, make_resolved(
-        "test",
-        ApiProtocol::OpenAiChat,
-        "https://api.test.com/v1",
-    ))
+    ChatRequest::new(
+        messages,
+        tools,
+        make_resolved("test", ApiProtocol::OpenAiChat, "https://api.test.com/v1"),
+    )
 }
 
 fn sample_messages() -> Vec<Message> {
@@ -154,7 +152,10 @@ mod openai_chat_completions {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "get_weather");
-        assert_eq!(tools[0]["function"]["description"], "Get the current weather for a city");
+        assert_eq!(
+            tools[0]["function"]["description"],
+            "Get the current weather for a city"
+        );
         assert!(tools[0]["function"]["parameters"].is_object());
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
     }
@@ -353,7 +354,10 @@ mod openai_chat_completions {
         });
 
         let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("The weather in Tokyo is sunny, 22°C."));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("The weather in Tokyo is sunny, 22°C.")
+        );
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs[0].function.name, "get_weather");
         assert_eq!(result.finish_reason, "tool_calls");
@@ -540,7 +544,9 @@ mod anthropic {
         let events = transport.denormalize_stream_chunk("content_block_delta", &delta_data);
         assert_eq!(events.len(), 1);
         match &events[0] {
-            StreamEvent::ToolCallDelta { arguments_delta, .. } => {
+            StreamEvent::ToolCallDelta {
+                arguments_delta, ..
+            } => {
                 assert_eq!(arguments_delta, r#"{"q":"ru"#);
             }
             other => panic!("expected ToolCallDelta, got {other:?}"),
@@ -599,7 +605,10 @@ mod anthropic {
 
         // Denormalize
         let result = transport.denormalize_response(&response);
-        assert_eq!(result.content, Some("The weather in Tokyo is sunny, 22°C.".to_string()));
+        assert_eq!(
+            result.content,
+            Some("The weather in Tokyo is sunny, 22°C.".to_string())
+        );
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs[0].id, "toolu_rt1");
         assert_eq!(tcs[0].function.name, "get_weather");
@@ -654,7 +663,10 @@ mod gemini {
         assert!(has_text, "model should have text part");
         assert!(has_fc, "model should have functionCall part");
 
-        let fc_part = parts.iter().find(|p| p.get("functionCall").is_some()).unwrap();
+        let fc_part = parts
+            .iter()
+            .find(|p| p.get("functionCall").is_some())
+            .unwrap();
         assert_eq!(fc_part["functionCall"]["name"], "get_weather");
         assert_eq!(fc_part["functionCall"]["args"]["city"], "Tokyo");
     }
@@ -704,7 +716,10 @@ mod gemini {
         });
 
         let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("The weather in Tokyo is sunny, 22°C."));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("The weather in Tokyo is sunny, 22°C.")
+        );
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
 
@@ -755,7 +770,10 @@ mod gemini {
         let decls = tools[0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0]["name"], "get_weather");
-        assert_eq!(decls[0]["description"], "Get the current weather for a city");
+        assert_eq!(
+            decls[0]["description"],
+            "Get the current weather for a city"
+        );
     }
 
     #[test]
@@ -796,8 +814,12 @@ mod gemini {
         });
 
         let results = transport.denormalize_stream_chunk(&chunk);
-        let has_done = results.iter().any(|r| matches!(r, StreamChunk::Done { .. }));
-        let has_usage = results.iter().any(|r| matches!(r, StreamChunk::Usage { .. }));
+        let has_done = results
+            .iter()
+            .any(|r| matches!(r, StreamChunk::Done { .. }));
+        let has_usage = results
+            .iter()
+            .any(|r| matches!(r, StreamChunk::Usage { .. }));
         assert!(has_done);
         assert!(has_usage);
     }
@@ -833,7 +855,10 @@ mod gemini {
         });
 
         let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("The weather in Tokyo is sunny, 22°C."));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("The weather in Tokyo is sunny, 22°C.")
+        );
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs[0].function.name, "get_weather");
         assert_eq!(result.finish_reason, "tool_calls");
@@ -857,9 +882,15 @@ mod openai_compat {
             "https://custom.api.com/v1",
             HashMap::from([("X-Custom".to_string(), "value".to_string())]),
         );
-        assert_eq!(transport_with_headers.base_url(), "https://custom.api.com/v1");
         assert_eq!(
-            transport_with_headers.extra_headers().get("X-Custom").unwrap(),
+            transport_with_headers.base_url(),
+            "https://custom.api.com/v1"
+        );
+        assert_eq!(
+            transport_with_headers
+                .extra_headers()
+                .get("X-Custom")
+                .unwrap(),
             "value"
         );
     }
@@ -962,8 +993,14 @@ mod cross_transport {
         // AnthropicTransport (FormatTransport)
         let anthropic = AnthropicTransport;
         let anth_result = anthropic.normalize_messages(&messages);
-        assert!(anth_result.system.is_some(), "Anthropic should extract system");
-        assert!(!anth_result.messages.is_empty(), "Anthropic should produce messages");
+        assert!(
+            anth_result.system.is_some(),
+            "Anthropic should extract system"
+        );
+        assert!(
+            !anth_result.messages.is_empty(),
+            "Anthropic should produce messages"
+        );
         let anth_tools = anthropic.normalize_tools(&tools);
         assert_eq!(anth_tools.len(), 1, "Anthropic should normalize tools");
 
@@ -1093,11 +1130,7 @@ mod cross_transport {
         // Anthropic
         let anthropic = AnthropicTransport;
         let anth = anthropic.normalize_messages(&[msg.clone()]);
-        let anth_user = anth
-            .messages
-            .iter()
-            .find(|m| m["role"] == "user")
-            .unwrap();
+        let anth_user = anth.messages.iter().find(|m| m["role"] == "user").unwrap();
         let anth_text = anth_user["content"][0]["text"].as_str().unwrap();
         assert_eq!(anth_text, "What is 2+2?");
 
@@ -1135,11 +1168,15 @@ mod dispatcher {
         assert_eq!(transport.api_mode(), "chat_completions");
 
         // ApiProtocol::AnthropicMessages → anthropic api_mode
-        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
 
         // ApiProtocol::GeminiGenerateContent → gemini api_mode
-        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::GeminiGenerateContent)
+            .unwrap();
         assert_eq!(transport.api_mode(), "gemini");
     }
 
@@ -1184,7 +1221,9 @@ mod dispatcher {
     #[test]
     fn dispatcher_anthropic_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::AnthropicMessages)
+            .unwrap();
 
         let request = ChatRequest {
             messages: sample_messages(),
@@ -1233,7 +1272,9 @@ mod dispatcher {
     #[test]
     fn dispatcher_gemini_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
+        let transport = dispatcher
+            .dispatch(&ApiProtocol::GeminiGenerateContent)
+            .unwrap();
 
         let request = ChatRequest {
             messages: sample_messages(),
@@ -1278,16 +1319,17 @@ mod dispatcher {
         });
 
         let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("The weather is sunny, 22°C."));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("The weather is sunny, 22°C.")
+        );
         assert_eq!(result.finish_reason, "stop");
     }
 
     #[test]
     fn dispatcher_chat_completions_normalize_denormalize() {
         let dispatcher = TransportDispatcher::new();
-        let transport = dispatcher
-            .dispatch(&ApiProtocol::OpenAiChat)
-            .unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::OpenAiChat).unwrap();
 
         let request = ChatRequest {
             messages: sample_messages(),

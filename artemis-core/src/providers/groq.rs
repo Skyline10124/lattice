@@ -56,7 +56,7 @@ impl Provider for GroqProvider {
 
         let client = reqwest::Client::new();
         let mut req = client
-            .post(&format!("{}/chat/completions", base_url))
+            .post(format!("{}/chat/completions", base_url))
             .json(&body);
 
         if let Some(ref api_key) = resolved.api_key {

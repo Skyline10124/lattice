@@ -50,7 +50,11 @@ pub struct ChatRequest {
 
 impl ChatRequest {
     /// Create a new ChatRequest with `model` derived from `resolved.api_model_id`.
-    pub fn new(messages: Vec<Message>, tools: Vec<ToolDefinition>, resolved: ResolvedModel) -> Self {
+    pub fn new(
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        resolved: ResolvedModel,
+    ) -> Self {
         let model = resolved.api_model_id.clone();
         ChatRequest {
             messages,
@@ -88,10 +92,7 @@ pub trait Provider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError>;
 
     /// Send a chat request and receive a streaming response as an [`EventStream`].
-    async fn chat_stream(
-        &self,
-        request: ChatRequest,
-    ) -> Result<EventStream, ProviderError>;
+    async fn chat_stream(&self, request: ChatRequest) -> Result<EventStream, ProviderError>;
 
     /// Human-readable provider name (e.g. `"openai"`, `"anthropic"`).
     fn name(&self) -> &str;
@@ -182,14 +183,12 @@ impl ModelRegistry {
         model_name: &str,
         provider_override: Option<&str>,
     ) -> Result<(&ModelEntry, ResolvedModel), ArtemisError> {
-        let resolved = self
-            .router
-            .resolve(model_name, provider_override)?;
-        let entry = self
-            .get(&resolved.canonical_id)
-            .ok_or_else(|| ArtemisError::ModelNotFound {
-                model: resolved.canonical_id.clone(),
-            })?;
+        let resolved = self.router.resolve(model_name, provider_override)?;
+        let entry =
+            self.get(&resolved.canonical_id)
+                .ok_or_else(|| ArtemisError::ModelNotFound {
+                    model: resolved.canonical_id.clone(),
+                })?;
         Ok((entry, resolved))
     }
 }
@@ -212,10 +211,7 @@ mod tests {
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn chat(
-            &self,
-            _request: ChatRequest,
-        ) -> Result<ChatResponse, ProviderError> {
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
             Ok(ChatResponse {
                 content: None,
                 tool_calls: None,
@@ -225,10 +221,7 @@ mod tests {
             })
         }
 
-        async fn chat_stream(
-            &self,
-            _request: ChatRequest,
-        ) -> Result<EventStream, ProviderError> {
+        async fn chat_stream(&self, _request: ChatRequest) -> Result<EventStream, ProviderError> {
             Err(ProviderError::Stream("not implemented in mock".to_string()))
         }
 
@@ -321,7 +314,10 @@ mod tests {
         registry.register("gamma", make_entry("gamma"));
 
         let ids = registry.list_models();
-        assert!(ids.len() >= 3, "Should have at least 3 models (catalog + registered)");
+        assert!(
+            ids.len() >= 3,
+            "Should have at least 3 models (catalog + registered)"
+        );
         assert!(ids.contains(&"alpha".to_string()));
         assert!(ids.contains(&"beta".to_string()));
         assert!(ids.contains(&"gamma".to_string()));

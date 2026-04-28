@@ -5,17 +5,13 @@
 //! 3. Concurrent requests — ModelRouter::resolve() under concurrency
 //! 4. Model resolution — single resolve() latency for various inputs
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::HashMap;
 
-use artemis_core::catalog::{
-    ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel,
-};
+use artemis_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
 use artemis_core::router::ModelRouter;
-use artemis_core::streaming::{AnthropicSseParser, OpenAiSseParser, SseParser, StreamEvent};
 use artemis_core::streaming::TokenUsage;
+use artemis_core::streaming::{AnthropicSseParser, OpenAiSseParser, SseParser, StreamEvent};
 use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -29,9 +25,10 @@ fn make_model_catalog_entry(id: &str, provider_count: usize) -> ModelCatalogEntr
             api_model_id: format!("{}-v{}", id, i),
             priority: i as u32 + 1,
             weight: 1,
-            credential_keys: HashMap::from([
-                ("api_key".to_string(), format!("PROVIDER_{}_API_KEY", i)),
-            ]),
+            credential_keys: HashMap::from([(
+                "api_key".to_string(),
+                format!("PROVIDER_{}_API_KEY", i),
+            )]),
             base_url: Some(format!("https://api.provider{}.example.com/v1", i)),
             api_protocol: if i % 2 == 0 {
                 ApiProtocol::OpenAiChat
@@ -47,7 +44,11 @@ fn make_model_catalog_entry(id: &str, provider_count: usize) -> ModelCatalogEntr
         display_name: format!("Model {}", id),
         description: format!("A benchmark test model with id={}", id),
         context_length: 128_000,
-        capabilities: vec!["chat".to_string(), "tool_call".to_string(), "streaming".to_string()],
+        capabilities: vec![
+            "chat".to_string(),
+            "tool_call".to_string(),
+            "streaming".to_string(),
+        ],
         providers,
         aliases: vec![id.split('-').next().unwrap_or("m").to_string()],
     }
@@ -282,7 +283,8 @@ fn bench_json_throughput(c: &mut Criterion) {
     // ── ToolDefinition ──
     let tool_def = ToolDefinition {
         name: "search_database".to_string(),
-        description: "Search the database for information with complex filtering options".to_string(),
+        description: "Search the database for information with complex filtering options"
+            .to_string(),
         parameters: serde_json::json!({
             "type": "object",
             "properties": {
@@ -314,7 +316,9 @@ fn bench_json_throughput(c: &mut Criterion) {
     });
 
     // ── StreamEvent variants ──
-    let token_event = StreamEvent::Token { content: "Hello world from benchmark".to_string() };
+    let token_event = StreamEvent::Token {
+        content: "Hello world from benchmark".to_string(),
+    };
     let done_event = StreamEvent::Done {
         finish_reason: "stop".to_string(),
         usage: Some(TokenUsage {
@@ -492,32 +496,33 @@ fn bench_concurrent_requests(c: &mut Criterion) {
     let router = ModelRouter::new();
 
     for concurrency in [1, 4, 16, 64].iter() {
-        group.bench_function(
-            BenchmarkId::new("resolve_concurrent", concurrency),
-            |b| {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                b.iter(|| {
-                    let n = *concurrency;
-                    rt.block_on(async {
-                        let mut handles = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            handles.push(tokio::spawn(async {}));
-                        }
-                        let mut results = Vec::with_capacity(n);
-                        for i in 0..n {
-                            let model = if i % 3 == 0 { "sonnet" }
-                                else if i % 3 == 1 { "gpt-4o" }
-                                else { "deepseek" };
-                            results.push(router.resolve(black_box(model), None));
-                        }
-                        for h in handles {
-                            h.await.unwrap();
-                        }
-                        results
-                    })
+        group.bench_function(BenchmarkId::new("resolve_concurrent", concurrency), |b| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            b.iter(|| {
+                let n = *concurrency;
+                rt.block_on(async {
+                    let mut handles = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        handles.push(tokio::spawn(async {}));
+                    }
+                    let mut results = Vec::with_capacity(n);
+                    for i in 0..n {
+                        let model = if i % 3 == 0 {
+                            "sonnet"
+                        } else if i % 3 == 1 {
+                            "gpt-4o"
+                        } else {
+                            "deepseek"
+                        };
+                        results.push(router.resolve(black_box(model), None));
+                    }
+                    for h in handles {
+                        h.await.unwrap();
+                    }
+                    results
                 })
-            },
-        );
+            })
+        });
     }
 
     // ── Batch resolve throughput ──
@@ -588,9 +593,9 @@ fn bench_model_resolution(c: &mut Criterion) {
 
     group.bench_function("normalize_model_id_complex", |b| {
         b.iter(|| {
-            artemis_core::router::normalize_model_id(
-                black_box("us.anthropic.claude-sonnet-4-6-v1:0"),
-            )
+            artemis_core::router::normalize_model_id(black_box(
+                "us.anthropic.claude-sonnet-4-6-v1:0",
+            ))
         })
     });
 
@@ -608,22 +613,10 @@ fn bench_model_resolution(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    json_throughput,
-    bench_json_throughput,
-);
-criterion_group!(
-    streaming_parse,
-    bench_streaming_parse,
-);
-criterion_group!(
-    concurrent_requests,
-    bench_concurrent_requests,
-);
-criterion_group!(
-    model_resolution,
-    bench_model_resolution,
-);
+criterion_group!(json_throughput, bench_json_throughput,);
+criterion_group!(streaming_parse, bench_streaming_parse,);
+criterion_group!(concurrent_requests, bench_concurrent_requests,);
+criterion_group!(model_resolution, bench_model_resolution,);
 
 criterion_main!(
     json_throughput,

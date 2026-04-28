@@ -1,4 +1,4 @@
-pub mod types;
 pub mod loader;
-pub use types::*;
+pub mod types;
 pub use loader::Catalog;
+pub use types::*;

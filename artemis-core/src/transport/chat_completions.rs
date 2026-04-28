@@ -56,7 +56,8 @@ pub trait Transport: Send + Sync {
     fn api_mode(&self) -> &str;
 
     /// Convert an internal [`ChatRequest`] into an API-specific JSON body.
-    fn normalize_request(&self, request: &ChatRequest) -> Result<serde_json::Value, TransportError>;
+    fn normalize_request(&self, request: &ChatRequest)
+        -> Result<serde_json::Value, TransportError>;
 
     /// Convert an API-specific JSON response into an internal [`ChatResponse`].
     fn denormalize_response(
@@ -120,7 +121,10 @@ impl Transport for ChatCompletionsTransport {
         "chat_completions"
     }
 
-    fn normalize_request(&self, request: &ChatRequest) -> Result<serde_json::Value, TransportError> {
+    fn normalize_request(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<serde_json::Value, TransportError> {
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": [],
@@ -129,7 +133,9 @@ impl Transport for ChatCompletionsTransport {
         let messages = body
             .get_mut("messages")
             .and_then(|m| m.as_array_mut())
-            .ok_or_else(|| TransportError::Serialization("failed to build messages array".into()))?;
+            .ok_or_else(|| {
+                TransportError::Serialization("failed to build messages array".into())
+            })?;
 
         for msg in &request.messages {
             let mut m = serde_json::json!({
@@ -190,8 +196,7 @@ impl Transport for ChatCompletionsTransport {
 
         if let Some(temp) = request.temperature {
             body["temperature"] = serde_json::Value::Number(
-                serde_json::Number::from_f64(temp)
-                    .unwrap_or_else(|| serde_json::Number::from(0)),
+                serde_json::Number::from_f64(temp).unwrap_or_else(|| serde_json::Number::from(0)),
             );
         }
 
@@ -231,10 +236,7 @@ impl Transport for ChatCompletionsTransport {
                             .to_string();
                         Some(crate::types::ToolCall {
                             id,
-                            function: crate::types::FunctionCall {
-                                name,
-                                arguments,
-                            },
+                            function: crate::types::FunctionCall { name, arguments },
                         })
                     })
                     .collect::<Vec<_>>()
@@ -248,18 +250,15 @@ impl Transport for ChatCompletionsTransport {
             .unwrap_or("stop")
             .to_string();
 
-        let model = response["model"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let model = response["model"].as_str().unwrap_or("unknown").to_string();
 
-        let usage = response["usage"].as_object().map(|u| {
-            crate::streaming::TokenUsage {
+        let usage = response["usage"]
+            .as_object()
+            .map(|u| crate::streaming::TokenUsage {
                 prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }
-        });
+            });
 
         Ok(ChatResponse {
             content,
@@ -451,7 +450,10 @@ mod tests {
         });
 
         let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("Hello! How can I help you?"));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("Hello! How can I help you?")
+        );
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
         assert_eq!(result.model, "gpt-4o");

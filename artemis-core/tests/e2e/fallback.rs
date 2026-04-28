@@ -64,7 +64,10 @@ impl Provider for FailingProvider {
         })
     }
 
-    async fn chat_stream(&self, _request: ChatRequest) -> Result<artemis_core::streaming::EventStream, ProviderError> {
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+    ) -> Result<artemis_core::streaming::EventStream, ProviderError> {
         Err(ProviderError::Stream("not supported".to_string()))
     }
 
@@ -143,7 +146,10 @@ fn test_fallback_all_providers_fail() {
     );
 
     let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
-    assert!(has_error, "all providers failing should produce Error event");
+    assert!(
+        has_error,
+        "all providers failing should produce Error event"
+    );
 }
 
 #[test]
@@ -156,14 +162,27 @@ fn test_router_priority_fallback_no_credentials() {
     let _lock = LOCK.lock().unwrap();
 
     let prev_keys: Vec<(String, Option<String>)> = [
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOUS_API_KEY",
-        "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY", "KILO_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
         "AI_GATEWAY_API_KEY",
-    ].iter().map(|k| (k.to_string(), env::var(k).ok())).collect();
+    ]
+    .iter()
+    .map(|k| (k.to_string(), env::var(k).ok()))
+    .collect();
 
-    for k in &["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NOUS_API_KEY",
-               "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY", "KILO_API_KEY",
-               "AI_GATEWAY_API_KEY"] {
+    for k in &[
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+    ] {
         env::remove_var(k);
     }
 
@@ -171,7 +190,10 @@ fn test_router_priority_fallback_no_credentials() {
     let result = router.resolve("claude-sonnet-4-6", None);
     assert!(result.is_ok(), "should resolve even without credentials");
     let resolved = result.unwrap();
-    assert!(resolved.api_key.is_none(), "api_key should be None without env credentials");
+    assert!(
+        resolved.api_key.is_none(),
+        "api_key should be None without env credentials"
+    );
 
     for (k, v) in prev_keys {
         match v {

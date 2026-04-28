@@ -7,7 +7,12 @@ use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition}
 use serde_json::json;
 use std::collections::HashMap;
 
-fn make_resolved(provider: &str, model: &str, protocol: ApiProtocol, base_url: &str) -> ResolvedModel {
+fn make_resolved(
+    provider: &str,
+    model: &str,
+    protocol: ApiProtocol,
+    base_url: &str,
+) -> ResolvedModel {
     ResolvedModel {
         canonical_id: model.to_string(),
         provider: provider.to_string(),
@@ -44,7 +49,12 @@ fn weather_tool() -> ToolDefinition {
 
 #[test]
 fn test_model_centric_resolve_stream_done() {
-    let resolved = make_resolved("mock", "test-model", ApiProtocol::OpenAiChat, "http://localhost/v1");
+    let resolved = make_resolved(
+        "mock",
+        "test-model",
+        ApiProtocol::OpenAiChat,
+        "http://localhost/v1",
+    );
 
     let mut provider = MockProvider::new("mock");
     provider.set_response("Hello from mock!");
@@ -61,7 +71,12 @@ fn test_model_centric_resolve_stream_done() {
 
 #[test]
 fn test_model_centric_resolve_tool_call_submit() {
-    let resolved = make_resolved("mock", "test-model", ApiProtocol::OpenAiChat, "http://localhost/v1");
+    let resolved = make_resolved(
+        "mock",
+        "test-model",
+        ApiProtocol::OpenAiChat,
+        "http://localhost/v1",
+    );
 
     let provider = MockProvider::new("mock")
         .with_first_content("Let me check the weather.")
@@ -80,7 +95,9 @@ fn test_model_centric_resolve_tool_call_submit() {
 
     let events = agent.run(&provider, resolved, messages, tools, LoopConfig::default());
 
-    let has_tool_call = events.iter().any(|e| matches!(e, LoopEvent::ToolCallRequired { .. }));
+    let has_tool_call = events
+        .iter()
+        .any(|e| matches!(e, LoopEvent::ToolCallRequired { .. }));
     assert!(has_tool_call, "first call should emit ToolCallRequired");
 
     let has_done = events.iter().any(|e| matches!(e, LoopEvent::Done { .. }));
@@ -91,19 +108,34 @@ fn test_model_centric_resolve_tool_call_submit() {
 fn test_router_resolve_provides_resolved_model() {
     let _lock = ENV_MUTEX.lock().unwrap();
     let saved_keys: Vec<(String, Option<String>)> = [
-        "ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY", "KILO_API_KEY", "AI_GATEWAY_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
         "OPENAI_API_KEY",
-    ].iter().map(|k| (k.to_string(), save_env(k))).collect();
+    ]
+    .iter()
+    .map(|k| (k.to_string(), save_env(k)))
+    .collect();
 
-    for k in &["NOUS_API_KEY", "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY",
-               "KILO_API_KEY", "AI_GATEWAY_API_KEY", "OPENAI_API_KEY"] {
+    for k in &[
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "OPENAI_API_KEY",
+    ] {
         env::remove_var(k);
     }
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve("sonnet", None).expect("sonnet should resolve");
+    let resolved = router
+        .resolve("sonnet", None)
+        .expect("sonnet should resolve");
 
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
     assert_eq!(resolved.provider, "anthropic");
@@ -118,7 +150,12 @@ fn test_router_resolve_provides_resolved_model() {
 
 #[test]
 fn test_resolve_to_chat_request_roundtrip() {
-    let resolved = make_resolved("openai", "gpt-4o", ApiProtocol::OpenAiChat, "https://api.openai.com/v1");
+    let resolved = make_resolved(
+        "openai",
+        "gpt-4o",
+        ApiProtocol::OpenAiChat,
+        "https://api.openai.com/v1",
+    );
 
     let request = ChatRequest::new(
         vec![user_message("What is 2+2?")],

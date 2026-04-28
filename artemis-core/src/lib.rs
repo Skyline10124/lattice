@@ -25,7 +25,10 @@ fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // ── Register Python exception hierarchy ──────────────────────────
     m.add("ArtemisError", m.py().get_type::<py_exc::ArtemisError>())?;
-    m.add("RateLimitError", m.py().get_type::<py_exc::RateLimitError>())?;
+    m.add(
+        "RateLimitError",
+        m.py().get_type::<py_exc::RateLimitError>(),
+    )?;
     m.add(
         "AuthenticationError",
         m.py().get_type::<py_exc::AuthenticationError>(),
@@ -46,7 +49,10 @@ fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ToolExecutionError",
         m.py().get_type::<py_exc::ToolExecutionError>(),
     )?;
-    m.add("StreamingError", m.py().get_type::<py_exc::StreamingError>())?;
+    m.add(
+        "StreamingError",
+        m.py().get_type::<py_exc::StreamingError>(),
+    )?;
     m.add("ConfigError", m.py().get_type::<py_exc::ConfigError>())?;
     m.add("NetworkError", m.py().get_type::<py_exc::NetworkError>())?;
 
@@ -63,6 +69,7 @@ fn artemis_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engine::Event>()?;
     m.add_class::<engine::ToolCallInfo>()?;
     m.add_class::<engine::PyResolvedModel>()?;
+    m.add_class::<streaming_bridge::StreamIterator>()?;
 
     Ok(())
 }

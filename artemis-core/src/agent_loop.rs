@@ -23,18 +23,30 @@ impl Default for LoopConfig {
 
 #[derive(Clone)]
 pub enum LoopEvent {
-    Token { content: String },
-    ToolCallRequired { tool_calls: Vec<ToolCall> },
+    Token {
+        content: String,
+    },
+    ToolCallRequired {
+        tool_calls: Vec<ToolCall>,
+    },
     Done {
         finish_reason: String,
         final_message: Message,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
     Interrupted,
 }
 
 pub struct AgentLoop {
     pub interrupted: Arc<AtomicBool>,
+}
+
+impl Default for AgentLoop {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentLoop {
@@ -79,8 +91,7 @@ impl AgentLoop {
                 break;
             }
 
-            let request =
-                ChatRequest::new(conversation.clone(), tools.clone(), resolved.clone());
+            let request = ChatRequest::new(conversation.clone(), tools.clone(), resolved.clone());
 
             let response = futures::executor::block_on(provider.chat(request));
 
@@ -153,6 +164,7 @@ impl AgentLoop {
     }
 
     /// Try providers in priority order, using fallback on failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_with_fallback(
         &self,
         providers: Vec<&dyn Provider>,
@@ -178,9 +190,7 @@ impl AgentLoop {
                 config.clone(),
             );
 
-            let has_error = events
-                .iter()
-                .any(|e| matches!(e, LoopEvent::Error { .. }));
+            let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
             if !has_error {
                 return events;
             }
@@ -239,9 +249,7 @@ mod tests {
             vec![],
             LoopConfig::default(),
         );
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, LoopEvent::Done { .. })));
+        assert!(events.iter().any(|e| matches!(e, LoopEvent::Done { .. })));
     }
 
     #[test]
@@ -257,8 +265,6 @@ mod tests {
             vec![],
             LoopConfig::default(),
         );
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, LoopEvent::Interrupted)));
+        assert!(events.iter().any(|e| matches!(e, LoopEvent::Interrupted)));
     }
 }

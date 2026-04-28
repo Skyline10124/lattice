@@ -51,7 +51,11 @@ fn test_concurrent_model_resolutions() {
         .map(|i| {
             let router = router.clone();
             thread::spawn(move || {
-                let model_name = if i % 2 == 0 { "gpt-4o" } else { "claude-sonnet-4-6" };
+                let model_name = if i % 2 == 0 {
+                    "gpt-4o"
+                } else {
+                    "claude-sonnet-4-6"
+                };
                 router.resolve(model_name, None)
             })
         })
@@ -170,9 +174,7 @@ fn test_concurrent_registry_lookups() {
 #[test]
 fn test_concurrent_resolved_model_construction() {
     let resolved_models: Vec<ResolvedModel> = (0..4)
-        .map(|i| {
-            make_resolved(&format!("model-{}", i), &format!("provider-{}", i))
-        })
+        .map(|i| make_resolved(&format!("model-{}", i), &format!("provider-{}", i)))
         .collect();
 
     for (i, resolved) in resolved_models.iter().enumerate() {

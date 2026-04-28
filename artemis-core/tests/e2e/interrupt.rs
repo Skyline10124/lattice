@@ -96,13 +96,22 @@ fn test_interrupt_with_fallback() {
             })
         }
 
-        async fn chat_stream(&self, _request: ChatRequest) -> Result<artemis_core::streaming::EventStream, ProviderError> {
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest,
+        ) -> Result<artemis_core::streaming::EventStream, ProviderError> {
             Err(ProviderError::Stream("not supported".to_string()))
         }
 
-        fn name(&self) -> &str { "slow" }
-        fn supports_streaming(&self) -> bool { false }
-        fn supports_tools(&self) -> bool { true }
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn supports_streaming(&self) -> bool {
+            false
+        }
+        fn supports_tools(&self) -> bool {
+            true
+        }
     }
 
     let agent = AgentLoop::new();

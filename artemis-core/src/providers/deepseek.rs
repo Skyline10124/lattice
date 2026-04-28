@@ -60,7 +60,7 @@ impl Provider for DeepSeekProvider {
 
         let client = reqwest::Client::new();
         let mut req = client
-            .post(&format!("{}/chat/completions", base_url))
+            .post(format!("{}/chat/completions", base_url))
             .json(&body);
 
         if let Some(ref api_key) = resolved.api_key {
@@ -230,7 +230,10 @@ mod tests {
         });
 
         let result = p.transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("Hello! How can I help you?"));
+        assert_eq!(
+            result.content.as_deref(),
+            Some("Hello! How can I help you?")
+        );
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
         assert_eq!(result.model, "deepseek-chat");

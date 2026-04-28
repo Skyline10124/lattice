@@ -71,11 +71,18 @@ pub struct ToolCallInfo {
 impl ToolCallInfo {
     #[new]
     fn new(id: String, name: String, arguments: String) -> Self {
-        ToolCallInfo { id, name, arguments }
+        ToolCallInfo {
+            id,
+            name,
+            arguments,
+        }
     }
 
     fn __repr__(&self) -> String {
-        format!("ToolCallInfo(id={}, name={}, arguments={})", self.id, self.name, self.arguments)
+        format!(
+            "ToolCallInfo(id={}, name={}, arguments={})",
+            self.id, self.name, self.arguments
+        )
     }
 }
 
@@ -112,13 +119,22 @@ impl Event {
         tool_calls: Option<Vec<ToolCallInfo>>,
         finish_reason: Option<String>,
     ) -> Self {
-        Event { kind, content, tool_calls, finish_reason }
+        Event {
+            kind,
+            content,
+            tool_calls,
+            finish_reason,
+        }
     }
 
     fn __repr__(&self) -> String {
         match &self.content {
             Some(c) => format!("Event(kind={}, content={})", self.kind, c),
-            None => format!("Event(kind={}, tool_calls={})", self.kind, self.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0)),
+            None => format!(
+                "Event(kind={}, tool_calls={})",
+                self.kind,
+                self.tool_calls.as_ref().map(|v| v.len()).unwrap_or(0)
+            ),
         }
     }
 }
@@ -144,7 +160,7 @@ impl ArtemisEngine {
         let router = ModelRouter::new();
         ArtemisEngine {
             runtime: Mutex::new(
-                tokio::runtime::Runtime::new().expect("Failed to create tokio runtime")
+                tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
             ),
             registry: Mutex::new(ModelRegistry::new(router)),
             state: Mutex::new(None),
@@ -324,22 +340,22 @@ impl ArtemisEngine {
                     s.tools.clone(),
                     match s.last_response.as_ref() {
                         Some(resp) => {
-                            let mut msgs = Vec::new();
-                            msgs.push(Message {
-                                role: Role::Assistant,
-                                content: resp.content.clone().unwrap_or_default(),
-                                tool_calls: resp.tool_calls.clone(),
-                                tool_call_id: None,
-                                name: None,
-                            });
-                            msgs.push(Message {
-                                role: Role::Tool,
-                                content: result,
-                                tool_calls: None,
-                                tool_call_id: Some(tool_call_id),
-                                name: None,
-                            });
-                            msgs
+                            vec![
+                                Message {
+                                    role: Role::Assistant,
+                                    content: resp.content.clone().unwrap_or_default(),
+                                    tool_calls: resp.tool_calls.clone(),
+                                    tool_call_id: None,
+                                    name: None,
+                                },
+                                Message {
+                                    role: Role::Tool,
+                                    content: result,
+                                    tool_calls: None,
+                                    tool_call_id: Some(tool_call_id),
+                                    name: None,
+                                },
+                            ]
                         }
                         None => vec![],
                     },
@@ -403,7 +419,7 @@ impl ArtemisEngine {
         base_url: String,
         api_protocol_str: String,
     ) -> PyResult<()> {
-        let api_protocol = ApiProtocol::from_str(&api_protocol_str);
+        let api_protocol: ApiProtocol = api_protocol_str.parse().unwrap();
         let provider_entry = CatalogProviderEntry {
             provider_id: provider_id.clone(),
             api_model_id: api_model_id.clone(),
@@ -469,10 +485,9 @@ impl ArtemisEngine {
     ) -> PyResult<ChatResponse> {
         let rt = self.runtime.lock().unwrap();
         let registry = self.registry.lock().unwrap();
-        let entry = registry.get(model_id)
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err(
-                format!("Model '{}' not found", model_id),
-            ))?;
+        let entry = registry.get(model_id).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", model_id))
+        })?;
         rt.block_on(entry.provider.chat(request))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }

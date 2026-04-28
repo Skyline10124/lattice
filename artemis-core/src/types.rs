@@ -147,8 +147,8 @@ impl ToolDefinition {
     #[new]
     #[pyo3(signature = (name, description, parameters = "{}"))]
     fn new(name: String, description: String, parameters: &str) -> Self {
-        let params: serde_json::Value =
-            serde_json::from_str(parameters).unwrap_or(serde_json::Value::Object(Default::default()));
+        let params: serde_json::Value = serde_json::from_str(parameters)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
         ToolDefinition {
             name,
             description,
@@ -181,7 +181,10 @@ impl ToolDefinition {
 
 /// The type of API transport to use for a provider.
 #[pyclass(from_py_object)]
-#[deprecated(since = "0.2.0", note = "Use ApiProtocol instead. TransportType is provider-centric and will be removed in T17.")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use ApiProtocol instead. TransportType is provider-centric and will be removed in T17."
+)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum TransportType {
     #[serde(rename = "chat_completions")]
@@ -230,12 +233,7 @@ mod tests {
 
     #[test]
     fn test_role_roundtrip() {
-        let cases = vec![
-            Role::System,
-            Role::User,
-            Role::Assistant,
-            Role::Tool,
-        ];
+        let cases = vec![Role::System, Role::User, Role::Assistant, Role::Tool];
         for role in cases {
             let json = serde_json::to_string(&role).unwrap();
             let deserialized: Role = serde_json::from_str(&json).unwrap();
@@ -366,21 +364,12 @@ mod tests {
 
     #[test]
     fn test_role_serialization_variants() {
-        assert_eq!(
-            serde_json::to_string(&Role::System).unwrap(),
-            "\"System\""
-        );
-        assert_eq!(
-            serde_json::to_string(&Role::User).unwrap(),
-            "\"User\""
-        );
+        assert_eq!(serde_json::to_string(&Role::System).unwrap(), "\"System\"");
+        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"User\"");
         assert_eq!(
             serde_json::to_string(&Role::Assistant).unwrap(),
             "\"Assistant\""
         );
-        assert_eq!(
-            serde_json::to_string(&Role::Tool).unwrap(),
-            "\"Tool\""
-        );
+        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"Tool\"");
     }
 }

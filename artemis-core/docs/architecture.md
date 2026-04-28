@@ -13,7 +13,7 @@ User Code (Python)
 ArtemisEngine (PyO3)
      │
      ▼
-ModelRouter ─────────── Catalog (98 models, 37 aliases)
+ModelRouter ─────────── Catalog (98+ models, 37 aliases)
      │                        │
      ▼                        ▼
 ResolvedModel              Provider Defaults

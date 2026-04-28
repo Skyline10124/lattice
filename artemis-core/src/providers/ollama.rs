@@ -61,7 +61,7 @@ impl Provider for OllamaProvider {
 
         let client = reqwest::Client::new();
         let req = client
-            .post(&format!("{}/chat/completions", base_url))
+            .post(format!("{}/chat/completions", base_url))
             .json(&body);
 
         // Ollama does not require authentication.

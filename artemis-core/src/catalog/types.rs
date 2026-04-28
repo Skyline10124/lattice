@@ -17,16 +17,18 @@ pub enum ApiProtocol {
     Custom(String),
 }
 
-impl ApiProtocol {
-    pub fn from_str(s: &str) -> Self {
-        match s {
+impl std::str::FromStr for ApiProtocol {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
             "chat_completions" => ApiProtocol::OpenAiChat,
             "anthropic_messages" | "anthropic" => ApiProtocol::AnthropicMessages,
             "gemini_generate_content" | "gemini" => ApiProtocol::GeminiGenerateContent,
             "bedrock_converse" | "bedrock" => ApiProtocol::BedrockConverse,
             "codex_responses" | "codex" => ApiProtocol::CodexResponses,
             other => ApiProtocol::Custom(other.to_string()),
-        }
+        })
     }
 }
 
@@ -48,9 +50,15 @@ pub struct CatalogProviderEntry {
     pub provider_specific: HashMap<String, String>,
 }
 
-fn default_priority() -> u32 { 1 }
-fn default_weight() -> u32 { 1 }
-fn default_api_protocol() -> ApiProtocol { ApiProtocol::OpenAiChat }
+fn default_priority() -> u32 {
+    1
+}
+fn default_weight() -> u32 {
+    1
+}
+fn default_api_protocol() -> ApiProtocol {
+    ApiProtocol::OpenAiChat
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {

@@ -383,32 +383,56 @@ fn test_chat_request_stores_resolved_config() {
 fn test_provider_error_general_display() {
     let err = ProviderError::General("something went wrong".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("Provider error"), "should contain 'Provider error': {msg}");
-    assert!(msg.contains("something went wrong"), "should contain the original message: {msg}");
+    assert!(
+        msg.contains("Provider error"),
+        "should contain 'Provider error': {msg}"
+    );
+    assert!(
+        msg.contains("something went wrong"),
+        "should contain the original message: {msg}"
+    );
 }
 
 #[test]
 fn test_provider_error_api_display() {
     let err = ProviderError::Api("rate limit exceeded".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("API error"), "should contain 'API error': {msg}");
-    assert!(msg.contains("rate limit exceeded"), "should contain the original message: {msg}");
+    assert!(
+        msg.contains("API error"),
+        "should contain 'API error': {msg}"
+    );
+    assert!(
+        msg.contains("rate limit exceeded"),
+        "should contain the original message: {msg}"
+    );
 }
 
 #[test]
 fn test_provider_error_stream_display() {
     let err = ProviderError::Stream("connection broken".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("Stream error"), "should contain 'Stream error': {msg}");
-    assert!(msg.contains("connection broken"), "should contain the original message: {msg}");
+    assert!(
+        msg.contains("Stream error"),
+        "should contain 'Stream error': {msg}"
+    );
+    assert!(
+        msg.contains("connection broken"),
+        "should contain the original message: {msg}"
+    );
 }
 
 #[test]
 fn test_provider_error_not_found_display() {
     let err = ProviderError::NotFound("unknown-provider".to_string());
     let msg = err.to_string();
-    assert!(msg.contains("Provider not found"), "should contain 'Provider not found': {msg}");
-    assert!(msg.contains("unknown-provider"), "should contain the provider name: {msg}");
+    assert!(
+        msg.contains("Provider not found"),
+        "should contain 'Provider not found': {msg}"
+    );
+    assert!(
+        msg.contains("unknown-provider"),
+        "should contain the provider name: {msg}"
+    );
 }
 
 #[test]

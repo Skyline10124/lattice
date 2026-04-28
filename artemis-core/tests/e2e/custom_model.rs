@@ -18,9 +18,7 @@ fn test_register_custom_model_resolve_and_call() {
             api_model_id: "my-llm".to_string(),
             priority: 1,
             weight: 1,
-            credential_keys: HashMap::from([
-                ("api_key".to_string(), "MY_LLM_API_KEY".to_string()),
-            ]),
+            credential_keys: HashMap::from([("api_key".to_string(), "MY_LLM_API_KEY".to_string())]),
             base_url: Some("http://my-llm.internal:8080/v1".to_string()),
             api_protocol: ApiProtocol::OpenAiChat,
             provider_specific: HashMap::new(),
@@ -30,9 +28,14 @@ fn test_register_custom_model_resolve_and_call() {
     router.register_model(custom_entry);
 
     let models = router.list_models();
-    assert!(models.contains(&"my-custom-llm".to_string()), "custom model should appear in list");
+    assert!(
+        models.contains(&"my-custom-llm".to_string()),
+        "custom model should appear in list"
+    );
 
-    let resolved = router.resolve("my-custom-llm", None).expect("should resolve custom model");
+    let resolved = router
+        .resolve("my-custom-llm", None)
+        .expect("should resolve custom model");
     assert_eq!(resolved.canonical_id, "my-custom-llm");
     assert_eq!(resolved.provider, "custom");
     assert_eq!(resolved.api_model_id, "my-llm");
@@ -63,10 +66,14 @@ fn test_register_custom_model_alias_resolution() {
     };
     router.register_model(custom_entry);
 
-    let resolved = router.resolve("myllm2", None).expect("alias should resolve");
+    let resolved = router
+        .resolve("myllm2", None)
+        .expect("alias should resolve");
     assert_eq!(resolved.canonical_id, "my-custom-llm-2");
 
-    let resolved2 = router.resolve("myllm2alt", None).expect("second alias should resolve");
+    let resolved2 = router
+        .resolve("myllm2alt", None)
+        .expect("second alias should resolve");
     assert_eq!(resolved2.canonical_id, "my-custom-llm-2");
 }
 
@@ -134,7 +141,9 @@ fn test_custom_model_anthropic_protocol() {
     };
     router.register_model(custom_entry);
 
-    let resolved = router.resolve("claude-internal", None).expect("should resolve");
+    let resolved = router
+        .resolve("claude-internal", None)
+        .expect("should resolve");
     assert_eq!(resolved.api_protocol, ApiProtocol::AnthropicMessages);
     assert_eq!(resolved.base_url, "https://internal-anthropic.corp");
 }
