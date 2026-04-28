@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
 use crate::streaming::EventStream;
-use crate::transport::chat_completions::{ChatCompletionsTransport, Transport};
+use crate::transport::chat_completions::ChatCompletionsTransport;
 
 /// Provider adapter for Ollama's OpenAI-compatible API.
 ///
@@ -42,53 +42,8 @@ impl Default for OllamaProvider {
 #[async_trait]
 impl Provider for OllamaProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-        let resolved = &request.resolved;
-
-        // Ollama relies on the catalog to supply the correct base URL.
-        // No fallback default — if the catalog entry is wrong, this will fail
-        // at the HTTP layer.
-        let base_url = resolved.base_url.clone();
-
-        // Build the request body using the transport's normalize_request.
-        let mut body = self
-            .transport
-            .normalize_request(&request)
-            .map_err(|e| ProviderError::General(e.to_string()))?;
-
-        // Ensure stream is explicitly false for non-streaming chat.
-        body["stream"] = serde_json::Value::Bool(false);
-
-        let client = crate::provider::shared_http_client();
-        let req = client
-            .post(format!("{}/chat/completions", base_url))
-            .json(&body);
-
-        // Ollama does not require authentication.
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ProviderError::General(format!("HTTP request failed: {}", e)))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.map_err(|e| {
-                ProviderError::General(format!("Failed to read response body: {}", e))
-            })?;
-            return Err(ProviderError::Api(text));
-        }
-
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::General(format!("Failed to parse response JSON: {}", e)))?;
-
-        let response = self
-            .transport
-            .denormalize_response(&json)
-            .map_err(|e| ProviderError::General(e.to_string()))?;
-
-        Ok(response)
+        let base_url = request.resolved.base_url.clone();
+        super::openai_compat_chat(&self.transport, &request, &base_url).await
     }
 
     async fn chat_stream(&self, _request: ChatRequest) -> Result<EventStream, ProviderError> {
@@ -118,6 +73,7 @@ impl Provider for OllamaProvider {
 mod tests {
     use super::*;
     use crate::catalog::ApiProtocol;
+    use crate::transport::Transport;
     use crate::types::{Message, Role};
     use std::collections::HashMap;
 

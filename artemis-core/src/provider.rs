@@ -214,42 +214,9 @@ impl ModelRegistry {
 mod tests {
     use super::*;
     use crate::catalog::{ApiProtocol, CatalogProviderEntry};
+    use crate::mock::MockProvider;
     use crate::types::{Message, Role};
     use std::collections::HashMap;
-
-    /// Minimal mock provider used for registry tests.
-    struct MockProvider {
-        name: String,
-    }
-
-    #[async_trait]
-    impl Provider for MockProvider {
-        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-            Ok(ChatResponse {
-                content: None,
-                tool_calls: None,
-                usage: None,
-                finish_reason: "stop".to_string(),
-                model: self.name.clone(),
-            })
-        }
-
-        async fn chat_stream(&self, _request: ChatRequest) -> Result<EventStream, ProviderError> {
-            Err(ProviderError::Stream("not implemented in mock".to_string()))
-        }
-
-        fn name(&self) -> &str {
-            &self.name
-        }
-
-        fn supports_streaming(&self) -> bool {
-            true
-        }
-
-        fn supports_tools(&self) -> bool {
-            true
-        }
-    }
 
     fn make_entry(model_id: &str) -> ModelEntry {
         ModelEntry {
@@ -271,9 +238,7 @@ mod tests {
                 }],
                 aliases: vec![],
             },
-            provider: Box::new(MockProvider {
-                name: model_id.to_string(),
-            }),
+            provider: Box::new(MockProvider::new(model_id)),
         }
     }
 

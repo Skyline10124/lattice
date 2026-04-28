@@ -1,5 +1,6 @@
 use crate::catalog::ResolvedModel;
 use crate::provider::{ChatRequest, Provider};
+use crate::tokens::TokenEstimator;
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,6 +17,48 @@ impl Default for LoopConfig {
             max_iterations: 10,
             budget_tokens: 100_000,
         }
+    }
+}
+
+fn trim_conversation(
+    messages: &[Message],
+    resolved: &ResolvedModel,
+    budget_tokens: u32,
+) -> Vec<Message> {
+    let token_count = TokenEstimator::estimate_messages_for_model(messages, &resolved.api_model_id);
+    if token_count <= budget_tokens {
+        return messages.to_vec();
+    }
+
+    let system_msgs: Vec<Message> = messages
+        .iter()
+        .filter(|m| matches!(m.role, Role::System))
+        .cloned()
+        .collect();
+
+    let mut non_system_msgs: Vec<Message> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .cloned()
+        .collect();
+
+    const MIN_KEEP: usize = 4;
+
+    if non_system_msgs.len() <= MIN_KEEP {
+        return messages.to_vec();
+    }
+
+    loop {
+        let mut current = system_msgs.clone();
+        current.extend(non_system_msgs.clone());
+        let current_tokens =
+            TokenEstimator::estimate_messages_for_model(&current, &resolved.api_model_id);
+
+        if current_tokens <= budget_tokens || non_system_msgs.len() <= MIN_KEEP {
+            return current;
+        }
+
+        non_system_msgs.remove(0);
     }
 }
 
@@ -90,6 +133,8 @@ impl AgentLoop {
                 });
                 break;
             }
+
+            conversation = trim_conversation(&conversation, &resolved, config.budget_tokens);
 
             let request = ChatRequest::new(conversation.clone(), tools.clone(), resolved.clone());
 
@@ -479,6 +524,184 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
             "run() still auto-completes tool calls with mock fallback"
+        );
+    }
+
+    #[test]
+    fn test_trim_conversation_preserves_system_and_recent() {
+        let resolved = make_resolved();
+        let long_text = "a".repeat(500);
+        let short1 = "recent one";
+        let short2 = "recent two";
+        let short3 = "recent three";
+        let short4 = "recent four";
+
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: "You are helpful.".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: long_text.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: long_text.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: long_text.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: long_text.clone(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: short1.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: short2.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: short3.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: short4.into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let trimmed = trim_conversation(&messages, &resolved, 30);
+
+        assert!(
+            matches!(trimmed[0].role, Role::System),
+            "system message should be preserved at front"
+        );
+        assert!(
+            trimmed.len() < messages.len(),
+            "some messages should be trimmed"
+        );
+
+        let contents: Vec<&str> = trimmed.iter().map(|m| m.content.as_str()).collect();
+
+        assert!(
+            contents.contains(&short1),
+            "recent messages should be preserved"
+        );
+        assert!(
+            contents.contains(&short4),
+            "most recent message should be preserved"
+        );
+
+        assert!(
+            !contents.contains(&long_text.as_str()),
+            "old long messages should be trimmed away"
+        );
+    }
+
+    #[test]
+    fn test_trim_conversation_under_budget_no_trim() {
+        let resolved = make_resolved();
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "hi".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: "hello".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let trimmed = trim_conversation(&messages, &resolved, 100_000);
+        assert_eq!(trimmed.len(), 2);
+        assert_eq!(trimmed[0].content, "hi");
+        assert_eq!(trimmed[1].content, "hello");
+    }
+
+    #[test]
+    fn test_run_with_tight_budget_completes() {
+        let mut provider = MockProvider::new("mock");
+        provider.set_response("Short reply.");
+
+        let agent = AgentLoop::new();
+        let long_msg = "x".repeat(500);
+
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: "You are helpful.".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: long_msg,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: "hi".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let config = LoopConfig {
+            max_iterations: 3,
+            budget_tokens: 20,
+        };
+
+        let events = agent.run(&provider, make_resolved(), messages, vec![], config);
+
+        assert!(
+            events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
+            "should emit Done even with tight budget"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, LoopEvent::Error { .. })),
+            "should not error due to budget trimming"
         );
     }
 }

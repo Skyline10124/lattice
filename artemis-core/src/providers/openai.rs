@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
 use crate::streaming::EventStream;
-use crate::transport::chat_completions::{ChatCompletionsTransport, Transport};
+use crate::transport::chat_completions::ChatCompletionsTransport;
 
 /// Provider adapter for the OpenAI Chat Completions API.
 ///
@@ -41,55 +41,12 @@ impl Default for OpenAIProvider {
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-        let resolved = &request.resolved;
-        let base_url = if resolved.base_url.is_empty() {
+        let base_url = if request.resolved.base_url.is_empty() {
             "https://api.openai.com/v1".to_string()
         } else {
-            resolved.base_url.clone()
+            request.resolved.base_url.clone()
         };
-
-        // Build the request body using the transport's normalize_request.
-        let mut body = self
-            .transport
-            .normalize_request(&request)
-            .map_err(|e| ProviderError::General(e.to_string()))?;
-
-        // Ensure stream is explicitly false for non-streaming chat.
-        body["stream"] = serde_json::Value::Bool(false);
-
-        let client = crate::provider::shared_http_client();
-        let mut req = client
-            .post(format!("{}/chat/completions", base_url))
-            .json(&body);
-
-        if let Some(ref api_key) = resolved.api_key {
-            req = req.header("Authorization", format!("Bearer {}", api_key));
-        }
-
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| ProviderError::General(format!("HTTP request failed: {}", e)))?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.map_err(|e| {
-                ProviderError::General(format!("Failed to read response body: {}", e))
-            })?;
-            return Err(ProviderError::Api(text));
-        }
-
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::General(format!("Failed to parse response JSON: {}", e)))?;
-
-        let response = self
-            .transport
-            .denormalize_response(&json)
-            .map_err(|e| ProviderError::General(e.to_string()))?;
-
-        Ok(response)
+        super::openai_compat_chat(&self.transport, &request, &base_url).await
     }
 
     async fn chat_stream(&self, _request: ChatRequest) -> Result<EventStream, ProviderError> {
@@ -119,6 +76,7 @@ impl Provider for OpenAIProvider {
 mod tests {
     use super::*;
     use crate::catalog::ApiProtocol;
+    use crate::transport::Transport;
     use crate::types::{Message, Role};
     use std::collections::HashMap;
 
