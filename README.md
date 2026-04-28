@@ -66,32 +66,25 @@ events = engine.run_conversation(
 ## Project structure
 
 ```
-artemis/
-  artemis-core/         # Rust crate (cdylib + rlib)
-    src/
-      catalog/          # 98+ models, 37 aliases, provider defaults
-      router/           # Model resolution, credential resolution
-      engine/           # Python-facing API (PyO3)
-      provider/         # Provider trait + shared HTTP client
-      providers/        # OpenAI, Anthropic, Gemini, DeepSeek, Groq, Mistral, Ollama, xAI
-      transport/        # Unified Transport trait, format conversion
-      streaming/        # SSE parsers (OpenAI, Anthropic)
-      streaming_bridge/  # PyO3 PyIterator
-      agent_loop/       # Multi-turn conversation with fallback
-      tool_boundary/    # Rust yields tool calls, Python executes
-      retry/            # Exponential backoff with jitter
-      tokens/           # tiktoken integration + estimation
-      errors/           # Rust enum → Python exception hierarchy
-      types/            # Role, Message, ToolDefinition, etc.
-      mock/             # MockProvider for tests
-    tests/
-      e2e/              # End-to-end + regression tests (714 tests)
-    docs/
-      architecture.md   # Architecture overview
-      ideas.md          # Design vision and future direction
-      code-review-report.md # Comprehensive code review
-    benches/            # Criterion benchmarks
-    examples/           # Usage examples
+artemis-core/           Rust crate (cdylib + rlib)
+├── src/
+│   ├── catalog/        Model catalog, aliases, provider defaults (98+ models)
+│   ├── router/         Model resolution, credential resolution
+│   ├── engine/         Python-facing API (PyO3)
+│   ├── provider/       Provider trait, shared HTTP client
+│   ├── providers/      OpenAI, Anthropic, Gemini, DeepSeek, Groq, Mistral, Ollama, xAI
+│   ├── transport/      Unified Transport trait, format conversion, dispatcher
+│   ├── streaming/      SSE parsers (OpenAI format, Anthropic format)
+│   ├── agent_loop/     Multi-turn conversation with fallback
+│   ├── tool_boundary/  Rust yields tool calls, Python executes them
+│   ├── retry/          Jittered exponential backoff
+│   ├── tokens/         tiktoken integration + token estimation
+│   ├── errors/         Rust enum → Python exception hierarchy (9 subclasses)
+│   └── types/          Role, Message, ToolDefinition, ToolCall, FunctionCall
+├── tests/e2e/          End-to-end + regression tests (714 tests)
+├── docs/               Architecture, ideas, code review
+├── benches/            Criterion benchmarks
+└── examples/           Usage examples
 ```
 
 ## Why not X?
