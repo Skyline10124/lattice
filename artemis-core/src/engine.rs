@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use pyo3::prelude::*;
 
 use crate::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
+use crate::errors::ArtemisError;
 use crate::mock::MockProvider;
 use crate::provider::{ChatRequest, ChatResponse, ModelEntry, ModelRegistry};
 use crate::router::ModelRouter;
@@ -143,6 +144,7 @@ struct EngineState {
     last_response: Option<ChatResponse>,
     default_model: Option<String>,
     resolved_model: Option<ResolvedModel>,
+    messages: Vec<Message>,
 }
 
 #[pyclass]
@@ -216,6 +218,7 @@ impl ArtemisEngine {
             last_response: None,
             default_model: None,
             resolved_model: None,
+            messages: Vec::new(),
         });
         s.default_model = Some(model_id.to_string());
         s.resolved_model = resolved;
@@ -246,12 +249,72 @@ impl ArtemisEngine {
         py: Python<'_>,
         results: Vec<(String, String)>,
     ) -> PyResult<Vec<Event>> {
-        let mut all_events = Vec::new();
-        for (tool_call_id, result) in results {
-            let events = self.submit_tool_result(py, tool_call_id, result)?;
-            all_events.extend(events);
+        let (resolved, tools, mut messages) = {
+            let state = self.state.lock().unwrap();
+            match state.as_ref() {
+                Some(s) => {
+                    let resolved = s
+                        .resolved_model
+                        .as_ref()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "No resolved model — call run_once() first",
+                            )
+                        })?
+                        .clone();
+                    let tools = s.tools.clone();
+                    let messages = s.messages.clone();
+                    (resolved, tools, messages)
+                }
+                None => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "No active conversation — call run_once() first",
+                    ));
+                }
+            }
+        };
+
+        if messages.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No prior conversation history — call run_conversation() first",
+            ));
         }
-        Ok(all_events)
+
+        let tool_result_messages: Vec<Message> = results
+            .iter()
+            .map(|(tool_call_id, result)| Message {
+                role: Role::Tool,
+                content: result.clone(),
+                tool_calls: None,
+                tool_call_id: Some(tool_call_id.clone()),
+                name: None,
+            })
+            .collect();
+
+        messages.extend(tool_result_messages.clone());
+
+        let request = ChatRequest::new(messages, tools, resolved.clone());
+
+        let response = self.block_on_model_chat(py, &resolved.canonical_id, request)?;
+
+        let events = response_to_events(&response);
+
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(s) = state.as_mut() {
+                s.messages.extend(tool_result_messages);
+                s.messages.push(Message {
+                    role: Role::Assistant,
+                    content: response.content.clone().unwrap_or_default(),
+                    tool_calls: response.tool_calls.clone(),
+                    tool_call_id: None,
+                    name: None,
+                });
+                s.last_response = Some(response);
+            }
+        }
+
+        Ok(events)
     }
 
     fn interrupt(&self) {
@@ -261,7 +324,7 @@ impl ArtemisEngine {
     fn run_once(
         &self,
         py: Python<'_>,
-        messages: Vec<Message>,
+        mut messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> PyResult<Vec<Event>> {
         let (model_id, resolved) = {
@@ -299,7 +362,7 @@ impl ArtemisEngine {
         };
 
         let resolved_for_state = resolved.clone();
-        let request = ChatRequest::new(messages, tools.clone(), resolved);
+        let request = ChatRequest::new(messages.clone(), tools.clone(), resolved);
 
         let response = self.block_on_model_chat(py, &model_id, request)?;
 
@@ -307,11 +370,19 @@ impl ArtemisEngine {
 
         {
             let mut state = self.state.lock().unwrap();
+            messages.push(Message {
+                role: Role::Assistant,
+                content: response.content.clone().unwrap_or_default(),
+                tool_calls: response.tool_calls.clone(),
+                tool_call_id: None,
+                name: None,
+            });
             *state = Some(EngineState {
                 tools,
                 last_response: Some(response),
                 default_model: Some(model_id),
                 resolved_model: Some(resolved_for_state),
+                messages,
             });
         }
 
@@ -324,7 +395,7 @@ impl ArtemisEngine {
         tool_call_id: String,
         result: String,
     ) -> PyResult<Vec<Event>> {
-        let (resolved, tools, prev_messages) = {
+        let (resolved, tools, mut messages) = {
             let state = self.state.lock().unwrap();
             match state.as_ref() {
                 Some(s) => {
@@ -338,28 +409,8 @@ impl ArtemisEngine {
                         })?
                         .clone();
                     let tools = s.tools.clone();
-                    let prev_messages = match s.last_response.as_ref() {
-                        Some(resp) => {
-                            vec![
-                                Message {
-                                    role: Role::Assistant,
-                                    content: resp.content.clone().unwrap_or_default(),
-                                    tool_calls: resp.tool_calls.clone(),
-                                    tool_call_id: None,
-                                    name: None,
-                                },
-                                Message {
-                                    role: Role::Tool,
-                                    content: result,
-                                    tool_calls: None,
-                                    tool_call_id: Some(tool_call_id),
-                                    name: None,
-                                },
-                            ]
-                        }
-                        None => vec![],
-                    };
-                    (resolved, tools, prev_messages)
+                    let messages = s.messages.clone();
+                    (resolved, tools, messages)
                 }
                 None => {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -369,7 +420,21 @@ impl ArtemisEngine {
             }
         };
 
-        let request = ChatRequest::new(prev_messages, tools, resolved.clone());
+        if messages.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "No prior conversation history — call run_conversation() first",
+            ));
+        }
+
+        messages.push(Message {
+            role: Role::Tool,
+            content: result.clone(),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.clone()),
+            name: None,
+        });
+
+        let request = ChatRequest::new(messages.clone(), tools, resolved.clone());
 
         let response = self.block_on_model_chat(py, &resolved.canonical_id, request)?;
 
@@ -378,6 +443,20 @@ impl ArtemisEngine {
         {
             let mut state = self.state.lock().unwrap();
             if let Some(s) = state.as_mut() {
+                s.messages.push(Message {
+                    role: Role::Tool,
+                    content: result,
+                    tool_calls: None,
+                    tool_call_id: Some(tool_call_id),
+                    name: None,
+                });
+                s.messages.push(Message {
+                    role: Role::Assistant,
+                    content: response.content.clone().unwrap_or_default(),
+                    tool_calls: response.tool_calls.clone(),
+                    tool_call_id: None,
+                    name: None,
+                });
                 s.last_response = Some(response);
             }
         }
@@ -394,6 +473,9 @@ impl ArtemisEngine {
         base_url: String,
         api_protocol_str: String,
     ) -> PyResult<()> {
+        if let Err(e) = validate_base_url(&base_url) {
+            return Err(pyo3::exceptions::PyValueError::new_err(e.to_string()));
+        }
         let api_protocol: ApiProtocol = api_protocol_str.parse().unwrap();
         let provider_entry = CatalogProviderEntry {
             provider_id: provider_id.clone(),
@@ -537,6 +619,24 @@ fn response_to_events(response: &ChatResponse) -> Vec<Event> {
     events
 }
 
+fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1") {
+        return Ok(());
+    }
+    if url.starts_with("http://") {
+        return Err(ArtemisError::Config {
+            message: format!(
+                "Insecure base_url '{}': use https:// or http://localhost for development",
+                url
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +737,33 @@ mod tests {
         let events = response_to_events(&response);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "done");
+    }
+
+    #[test]
+    fn test_validate_base_url_https() {
+        assert!(validate_base_url("https://api.openai.com").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_localhost() {
+        assert!(validate_base_url("http://localhost:8080").is_ok());
+        assert!(validate_base_url("http://localhost").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_127_0_0_1() {
+        assert!(validate_base_url("http://127.0.0.1:11434/v1").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_rejects_http() {
+        assert!(validate_base_url("http://api.example.com").is_err());
+        assert!(validate_base_url("http://evil.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_base_url_no_scheme_ok() {
+        assert!(validate_base_url("").is_ok());
+        assert!(validate_base_url("custom-scheme://something").is_ok());
     }
 }

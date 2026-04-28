@@ -106,7 +106,7 @@ fn test_model_centric_resolve_tool_call_submit() {
 
 #[test]
 fn test_router_resolve_provides_resolved_model() {
-    let _lock = ENV_MUTEX.lock().unwrap();
+    let _lock = crate::env_lock::lock();
     let saved_keys: Vec<(String, Option<String>)> = [
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
@@ -172,9 +172,6 @@ fn test_resolve_to_chat_request_roundtrip() {
 }
 
 use std::env;
-use std::sync::{LazyLock, Mutex};
-
-static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn save_env(key: &str) -> Option<String> {
     env::var(key).ok()

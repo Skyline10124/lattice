@@ -63,7 +63,7 @@ impl Provider for GeminiProvider {
         // Ensure stream is explicitly false for non-streaming chat.
         body["stream"] = serde_json::Value::Bool(false);
 
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let url = format!("{}/models/{}:generateContent", base_url, api_model_id);
         let mut req = client.post(&url).json(&body);
 

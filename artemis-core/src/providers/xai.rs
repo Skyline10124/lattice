@@ -53,7 +53,7 @@ impl Provider for XAIProvider {
 
         body["stream"] = serde_json::Value::Bool(false);
 
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let mut req = client
             .post(format!("{}/chat/completions", base_url))
             .json(&body);

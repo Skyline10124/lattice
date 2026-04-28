@@ -82,7 +82,7 @@ impl Provider for AnthropicProvider {
             body.insert("temperature".to_string(), serde_json::json!(temperature));
         }
 
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let mut req = client.post(format!("{}/v1/messages", base_url)).json(&body);
 
         // Anthropic uses x-api-key instead of Bearer.

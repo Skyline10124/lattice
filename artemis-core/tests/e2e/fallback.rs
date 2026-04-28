@@ -157,12 +157,10 @@ fn test_fallback_all_providers_fail() {
 fn test_router_priority_fallback_no_credentials() {
     use artemis_core::router::ModelRouter;
     use std::env;
-    use std::sync::{LazyLock, Mutex as StdMutex};
 
-    static LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
-    let _lock = LOCK.lock().unwrap();
+    let _lock = crate::env_lock::lock();
 
-    let prev_keys: Vec<(String, Option<String>)> = [
+    let all_keys: &[&str] = &[
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "NOUS_API_KEY",
@@ -170,20 +168,24 @@ fn test_router_priority_fallback_no_credentials() {
         "OPENCODE_ZEN_API_KEY",
         "KILO_API_KEY",
         "AI_GATEWAY_API_KEY",
-    ]
-    .iter()
-    .map(|k| (k.to_string(), env::var(k).ok()))
-    .collect();
+        "DEEPSEEK_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "XAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "MINIMAX_API_KEY",
+        "QWEN_API_KEY",
+        "ARK_API_KEY",
+        "INFINI_AI_API_KEY",
+        "OPENCODE_GO_API_KEY",
+    ];
 
-    for k in &[
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "NOUS_API_KEY",
-        "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY",
-        "KILO_API_KEY",
-        "AI_GATEWAY_API_KEY",
-    ] {
+    let prev_keys: Vec<(String, Option<String>)> = all_keys
+        .iter()
+        .map(|k| (k.to_string(), env::var(k).ok()))
+        .collect();
+
+    for k in all_keys {
         env::remove_var(k);
     }
 

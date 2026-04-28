@@ -227,12 +227,14 @@ impl SseParser for OpenAiSseParser {
 #[derive(Default)]
 pub struct AnthropicSseParser {
     tool_call_ids: HashMap<u32, String>,
+    input_tokens: u32,
 }
 
 impl AnthropicSseParser {
     pub fn new() -> Self {
         Self {
             tool_call_ids: HashMap::new(),
+            input_tokens: 0,
         }
     }
 }
@@ -250,7 +252,12 @@ impl SseParser for AnthropicSseParser {
         let root: Value = serde_json::from_str(data)?;
 
         match event_type {
-            "message_start" => Ok(vec![]),
+            "message_start" => {
+                if let Some(msg) = root.get("message") {
+                    self.input_tokens = msg["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+                }
+                Ok(vec![])
+            }
             "content_block_start" => {
                 let idx = root["index"].as_u64().unwrap_or(0) as u32;
                 let block = &root["content_block"];
@@ -304,10 +311,12 @@ impl SseParser for AnthropicSseParser {
             }
             "message_delta" => {
                 let stop_reason = root["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
-                let usage = root["usage"].as_object().map(|u| TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-                    total_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
+                let output_tokens = root["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                let total_tokens = self.input_tokens + output_tokens;
+                let usage = root["usage"].as_object().map(|_| TokenUsage {
+                    prompt_tokens: self.input_tokens,
+                    completion_tokens: output_tokens,
+                    total_tokens,
                 });
                 Ok(vec![StreamEvent::Done {
                     finish_reason: stop_reason.to_string(),
@@ -315,6 +324,14 @@ impl SseParser for AnthropicSseParser {
                 }])
             }
             "message_stop" | "ping" => Ok(vec![]),
+            "error" => {
+                let msg = root["error"]["message"]
+                    .as_str()
+                    .or_else(|| root["error"]["type"].as_str())
+                    .unwrap_or("Unknown Anthropic streaming error")
+                    .to_string();
+                Ok(vec![StreamEvent::Error { message: msg }])
+            }
             _ => Ok(vec![]),
         }
     }
@@ -807,7 +824,9 @@ mod tests {
             } => {
                 assert_eq!(finish_reason, "end_turn");
                 let usage = usage.as_ref().expect("expected usage");
+                assert_eq!(usage.prompt_tokens, 10, "input_tokens from message_start");
                 assert_eq!(usage.completion_tokens, 50);
+                assert_eq!(usage.total_tokens, 60, "total = input + output");
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -870,6 +889,56 @@ mod tests {
         let mut parser = AnthropicSseParser::new();
         let events = parser.parse_chunk("ping", "{}").unwrap();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_error_event() {
+        let mut parser = AnthropicSseParser::new();
+        let events = parser
+            .parse_chunk(
+                "error",
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::Error {
+                message: "Overloaded".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_anthropic_usage_tracks_input_tokens() {
+        let mut parser = AnthropicSseParser::new();
+
+        parser
+            .parse_chunk(
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1","content":[],"model":"claude-3-5-sonnet","role":"assistant","usage":{"input_tokens":42,"output_tokens":1}}}"#,
+            )
+            .unwrap();
+
+        let events = parser
+            .parse_chunk(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}"#,
+            )
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            StreamEvent::Done { usage, .. } => {
+                let u = usage.as_ref().expect("expected usage");
+                assert_eq!(
+                    u.prompt_tokens, 42,
+                    "input_tokens should come from message_start"
+                );
+                assert_eq!(u.completion_tokens, 50);
+                assert_eq!(u.total_tokens, 92, "total = input + output");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
 
     #[test]

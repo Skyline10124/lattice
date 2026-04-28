@@ -6,6 +6,19 @@
 //! All tests use pure Rust types — no Python runtime required.
 //! MockProvider is used for HTTP mocking (no real API keys or network calls).
 
+/// Global mutex for env var isolation across all e2e tests.
+/// Any test that sets/removes env vars MUST acquire this lock first
+/// to prevent race conditions with concurrent tests in the same binary.
+pub mod env_lock {
+    use std::sync::{LazyLock, Mutex};
+
+    static GLOBAL_ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[path = "e2e/model_flow.rs"]
 mod model_flow;
 

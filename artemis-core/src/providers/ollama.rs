@@ -58,7 +58,7 @@ impl Provider for OllamaProvider {
         // Ensure stream is explicitly false for non-streaming chat.
         body["stream"] = serde_json::Value::Bool(false);
 
-        let client = reqwest::Client::new();
+        let client = crate::provider::shared_http_client();
         let req = client
             .post(format!("{}/chat/completions", base_url))
             .json(&body);

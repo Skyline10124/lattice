@@ -1,11 +1,25 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::time::Duration;
 
 use crate::catalog::{ModelCatalogEntry, ResolvedModel};
 use crate::errors::ArtemisError;
 use crate::router::ModelRouter;
 use crate::streaming::{EventStream, TokenUsage};
 use crate::types::{Message, ToolCall, ToolDefinition};
+
+static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("Failed to build shared reqwest::Client")
+});
+
+pub fn shared_http_client() -> &'static reqwest::Client {
+    &SHARED_HTTP_CLIENT
+}
 
 // ---------------------------------------------------------------------------
 // Error type

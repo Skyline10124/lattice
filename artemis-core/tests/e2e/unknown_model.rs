@@ -31,7 +31,7 @@ fn test_permissive_fallback_provider_model_format() {
 #[test]
 fn test_permissive_fallback_openai_model() {
     let router = ModelRouter::new();
-    let result = router.resolve("openai/gpt-4o-mini", None);
+    let result = router.resolve_permissive("openai/gpt-4o-mini");
     assert!(
         result.is_ok(),
         "openai/model format should resolve via permissive fallback"
@@ -103,7 +103,7 @@ fn test_unknown_provider_prefix_fails() {
 #[test]
 fn test_permissive_resolved_model_fields() {
     let router = ModelRouter::new();
-    let resolved = router.resolve("openai/gpt-4o-mini", None).unwrap();
+    let resolved = router.resolve_permissive("openai/gpt-4o-mini").unwrap();
 
     assert_eq!(resolved.provider, "openai");
     assert_eq!(resolved.api_model_id, "gpt-4o-mini");

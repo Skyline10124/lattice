@@ -149,7 +149,33 @@ impl ModelRouter {
         let mut sorted_providers = entry.providers.clone();
         sorted_providers.sort_by_key(|p| p.priority);
 
+        let mut best_credentialless: Option<&CatalogProviderEntry> = None;
+        let mut current_priority = u32::MAX;
+
         for pe in &sorted_providers {
+            if pe.priority != current_priority {
+                if let Some(cpe) = best_credentialless.take() {
+                    return Ok(ResolvedModel {
+                        canonical_id: canonical_id.clone(),
+                        provider: cpe.provider_id.clone(),
+                        api_key: None,
+                        base_url: cpe.base_url.clone().unwrap_or_default(),
+                        api_protocol: cpe.api_protocol.clone(),
+                        api_model_id: cpe.api_model_id.clone(),
+                        context_length: entry.context_length,
+                        provider_specific: cpe.provider_specific.clone(),
+                    });
+                }
+                current_priority = pe.priority;
+            }
+
+            if Self::is_credentialless(pe) {
+                if best_credentialless.is_none() {
+                    best_credentialless = Some(pe);
+                }
+                continue;
+            }
+
             let api_key = self.resolve_credentials(pe);
             if api_key.is_some() {
                 return Ok(ResolvedModel {
@@ -165,6 +191,19 @@ impl ModelRouter {
             }
         }
 
+        if let Some(cpe) = best_credentialless.take() {
+            return Ok(ResolvedModel {
+                canonical_id: canonical_id.clone(),
+                provider: cpe.provider_id.clone(),
+                api_key: None,
+                base_url: cpe.base_url.clone().unwrap_or_default(),
+                api_protocol: cpe.api_protocol.clone(),
+                api_model_id: cpe.api_model_id.clone(),
+                context_length: entry.context_length,
+                provider_specific: cpe.provider_specific.clone(),
+            });
+        }
+
         let best = &sorted_providers[0];
         Ok(ResolvedModel {
             canonical_id: canonical_id.clone(),
@@ -176,6 +215,24 @@ impl ModelRouter {
             context_length: entry.context_length,
             provider_specific: best.provider_specific.clone(),
         })
+    }
+
+    /// Check whether a provider entry requires no credentials at all.
+    ///
+    /// A provider is credentialless when:
+    /// - Its `credential_keys` map is empty AND
+    /// - It has no credential entries in `_PROVIDER_CREDENTIALS` (or its entry is `&[]`)
+    fn is_credentialless(entry: &CatalogProviderEntry) -> bool {
+        if !entry.credential_keys.is_empty() {
+            return false;
+        }
+        for (slug, creds) in _PROVIDER_CREDENTIALS {
+            if *slug == entry.provider_id {
+                return creds.is_empty();
+            }
+        }
+        // Not in _PROVIDER_CREDENTIALS and no credential_keys — treat as credentialless
+        true
     }
 
     /// Check env vars for a provider entry's credential_keys.
@@ -301,7 +358,7 @@ impl ModelRouter {
         for model_id in self.catalog.list_models() {
             if let Some(entry) = self.catalog.get_model(model_id) {
                 for pe in &entry.providers {
-                    if self.resolve_credentials(pe).is_some() {
+                    if Self::is_credentialless(pe) || self.resolve_credentials(pe).is_some() {
                         authenticated.push(model_id.clone());
                         break;
                     }
@@ -311,7 +368,7 @@ impl ModelRouter {
 
         for (model_id, entry) in &self.custom_models {
             for pe in &entry.providers {
-                if self.resolve_credentials(pe).is_some() {
+                if Self::is_credentialless(pe) || self.resolve_credentials(pe).is_some() {
                     authenticated.push(model_id.clone());
                     break;
                 }
@@ -761,5 +818,113 @@ mod tests {
         // claude-sonnet-4-6 can be served by multiple providers with different api_model_ids
         let result = router.normalize_model_for_provider("claude-sonnet-4-6", "nous");
         assert_eq!(result, "anthropic/claude-sonnet-4.6"); // nous uses openrouter-style prefixes
+    }
+
+    #[test]
+    fn test_credentialless_provider_wins_over_lower_priority_credentialed() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let prev_ant = save_env("ANTHROPIC_API_KEY");
+        env::set_var("ANTHROPIC_API_KEY", "ant-key");
+
+        let mut router = ModelRouter::new();
+        let custom = ModelCatalogEntry {
+            canonical_id: "test-credless-priority".to_string(),
+            display_name: "Test".to_string(),
+            description: String::new(),
+            context_length: 8192,
+            capabilities: vec![],
+            providers: vec![
+                CatalogProviderEntry {
+                    provider_id: "ollama".to_string(),
+                    api_model_id: "test-model".to_string(),
+                    priority: 1,
+                    weight: 1,
+                    credential_keys: HashMap::new(),
+                    base_url: Some("http://localhost:11434/v1".to_string()),
+                    api_protocol: ApiProtocol::OpenAiChat,
+                    provider_specific: HashMap::new(),
+                },
+                CatalogProviderEntry {
+                    provider_id: "anthropic".to_string(),
+                    api_model_id: "test-model".to_string(),
+                    priority: 5,
+                    weight: 1,
+                    credential_keys: HashMap::from([(
+                        "api_key".to_string(),
+                        "ANTHROPIC_API_KEY".to_string(),
+                    )]),
+                    base_url: Some("https://api.anthropic.com".to_string()),
+                    api_protocol: ApiProtocol::AnthropicMessages,
+                    provider_specific: HashMap::new(),
+                },
+            ],
+            aliases: vec![],
+        };
+        router.register_model(custom);
+
+        let resolved = router
+            .resolve("test-credless-priority", None)
+            .expect("should resolve");
+        assert_eq!(
+            resolved.provider, "ollama",
+            "Ollama (priority 1, credentialless) should beat Anthropic (priority 5)"
+        );
+        assert!(resolved.api_key.is_none());
+
+        restore_env("ANTHROPIC_API_KEY", prev_ant);
+    }
+
+    #[test]
+    fn test_credentialed_provider_wins_over_credentialless_at_same_priority() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let prev_ant = save_env("ANTHROPIC_API_KEY");
+        env::set_var("ANTHROPIC_API_KEY", "ant-key");
+
+        let mut router = ModelRouter::new();
+        let custom = ModelCatalogEntry {
+            canonical_id: "test-cred-same-priority".to_string(),
+            display_name: "Test".to_string(),
+            description: String::new(),
+            context_length: 8192,
+            capabilities: vec![],
+            providers: vec![
+                CatalogProviderEntry {
+                    provider_id: "ollama".to_string(),
+                    api_model_id: "test-model".to_string(),
+                    priority: 1,
+                    weight: 1,
+                    credential_keys: HashMap::new(),
+                    base_url: Some("http://localhost:11434/v1".to_string()),
+                    api_protocol: ApiProtocol::OpenAiChat,
+                    provider_specific: HashMap::new(),
+                },
+                CatalogProviderEntry {
+                    provider_id: "anthropic".to_string(),
+                    api_model_id: "test-model".to_string(),
+                    priority: 1,
+                    weight: 1,
+                    credential_keys: HashMap::from([(
+                        "api_key".to_string(),
+                        "ANTHROPIC_API_KEY".to_string(),
+                    )]),
+                    base_url: Some("https://api.anthropic.com".to_string()),
+                    api_protocol: ApiProtocol::AnthropicMessages,
+                    provider_specific: HashMap::new(),
+                },
+            ],
+            aliases: vec![],
+        };
+        router.register_model(custom);
+
+        let resolved = router
+            .resolve("test-cred-same-priority", None)
+            .expect("should resolve");
+        assert_eq!(
+            resolved.provider, "anthropic",
+            "Credentialed provider at same priority should win over credentialless"
+        );
+        assert_eq!(resolved.api_key.as_deref(), Some("ant-key"));
+
+        restore_env("ANTHROPIC_API_KEY", prev_ant);
     }
 }
