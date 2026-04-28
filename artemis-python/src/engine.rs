@@ -1,6 +1,6 @@
-use pyo3::prelude::*;
 use artemis_core::catalog::ResolvedModel;
 use artemis_core::router::ModelRouter;
+use pyo3::prelude::*;
 use std::sync::Mutex;
 
 use crate::errors::convert_core_error;
@@ -22,7 +22,10 @@ impl ArtemisEngine {
 
     /// Resolve a model name to connection details.
     pub fn resolve_model(&self, model: &str) -> PyResult<PyResolvedModel> {
-        let resolved = self.router.lock().unwrap()
+        let resolved = self
+            .router
+            .lock()
+            .unwrap()
             .resolve(model, None)
             .map_err(convert_core_error)?;
         Ok(PyResolvedModel { inner: resolved })
@@ -49,16 +52,24 @@ pub struct PyResolvedModel {
 #[pymethods]
 impl PyResolvedModel {
     #[getter]
-    pub fn canonical_id(&self) -> &str { &self.inner.canonical_id }
+    pub fn canonical_id(&self) -> &str {
+        &self.inner.canonical_id
+    }
 
     #[getter]
-    pub fn provider(&self) -> &str { &self.inner.provider }
+    pub fn provider(&self) -> &str {
+        &self.inner.provider
+    }
 
     #[getter]
-    pub fn api_model_id(&self) -> &str { &self.inner.api_model_id }
+    pub fn api_model_id(&self) -> &str {
+        &self.inner.api_model_id
+    }
 
     #[getter]
-    pub fn context_length(&self) -> u32 { self.inner.context_length }
+    pub fn context_length(&self) -> u32 {
+        self.inner.context_length
+    }
 
     fn __repr__(&self) -> String {
         let key_masked = self.inner.api_key.as_ref().map(|_| "***");

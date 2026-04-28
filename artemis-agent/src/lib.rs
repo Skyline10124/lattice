@@ -70,7 +70,11 @@ impl Agent {
 
         let mut stream = match stream_result {
             Ok(s) => s,
-            Err(e) => return vec![LoopEvent::Error { message: e.to_string() }],
+            Err(e) => {
+                return vec![LoopEvent::Error {
+                    message: e.to_string(),
+                }]
+            }
         };
 
         let mut events = Vec::new();
@@ -153,7 +157,9 @@ impl Agent {
 
 #[derive(Debug, Clone)]
 pub enum LoopEvent {
-    Token { text: String },
+    Token {
+        text: String,
+    },
     ToolCallRequired {
         calls: Vec<artemis_core::types::ToolCall>,
     },

@@ -1,7 +1,7 @@
+use artemis_core::errors::ArtemisError as CoreError;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use artemis_core::errors::ArtemisError as CoreError;
 
 create_exception!(artemis_core, ArtemisError, PyException);
 create_exception!(artemis_core, RateLimitError, ArtemisError);
@@ -20,7 +20,10 @@ create_exception!(artemis_core, NetworkError, ArtemisError);
 /// Python extension module, so the GIL is held whenever this is called.
 pub fn convert_core_error(err: CoreError) -> PyErr {
     Python::try_attach(|py| match err {
-        CoreError::RateLimit { retry_after, provider } => {
+        CoreError::RateLimit {
+            retry_after,
+            provider,
+        } => {
             let msg = format!("Rate limit exceeded for provider '{}'", provider);
             let e = PyErr::new::<RateLimitError, _>(msg);
             let v = e.value(py);
@@ -49,7 +52,10 @@ pub fn convert_core_error(err: CoreError) -> PyErr {
             e
         }
         CoreError::ContextWindowExceeded { tokens, limit } => {
-            let msg = format!("Context window exceeded: {} tokens (limit {})", tokens, limit);
+            let msg = format!(
+                "Context window exceeded: {} tokens (limit {})",
+                tokens, limit
+            );
             let e = PyErr::new::<ContextWindowExceededError, _>(msg);
             let v = e.value(py);
             let _ = v.setattr("tokens", tokens);

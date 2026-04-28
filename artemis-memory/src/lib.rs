@@ -82,13 +82,16 @@ mod tests {
     fn test_multiple_messages_order() {
         let mut mem = InMemoryMemory::new();
         for i in 0..3 {
-            mem.save("s", &Message {
-                role: Role::User,
-                content: format!("msg{}", i),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+            mem.save(
+                "s",
+                &Message {
+                    role: Role::User,
+                    content: format!("msg{}", i),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+            );
         }
         let h = mem.history("s");
         assert_eq!(h.len(), 3);
