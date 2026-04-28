@@ -133,7 +133,7 @@ fn test_interrupt_with_fallback() {
         vec![user_message("Hello")],
         vec![],
         LoopConfig::default(),
-        &artemis_core::retry::ErrorClassifier,
+        &artemis_core::errors::ErrorClassifier,
         &policy,
     );
 

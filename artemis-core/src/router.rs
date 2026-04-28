@@ -30,6 +30,11 @@ pub const _PROVIDER_CREDENTIALS: &[(&str, &[(&str, &str)])] = &[
     ("opencode-go", &[("OPENCODE_GO_API_KEY", "api_key")]),
 ];
 
+static RE_SUFFIX: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"-v\d+(:\d+)?$").unwrap());
+static RE_DOTS: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"(\d+)\.(\d+)").unwrap());
+
 /// Normalize a model ID string:
 /// - Strip OpenRouter vendor prefixes (e.g. "anthropic/claude-sonnet-4.6" → "claude-sonnet-4.6")
 /// - Strip Bedrock inference profile prefixes (e.g. "us.anthropic.claude-sonnet-4-6-v1:0" → "claude-sonnet-4-6")
@@ -48,16 +53,10 @@ pub fn normalize_model_id(model_id: &str) -> String {
     let mid = mid.trim_start_matches("us.amazon.").to_string();
     let mid = mid.trim_start_matches("us.meta.").to_string();
 
-    let mid = regex::Regex::new(r"-v\d+(:\d+)?$")
-        .unwrap()
-        .replace(&mid, "")
-        .to_string();
+    let mid = RE_SUFFIX.replace(&mid, "").to_string();
 
     if mid.starts_with("claude-") {
-        return regex::Regex::new(r"(\d+)\.(\d+)")
-            .unwrap()
-            .replace_all(&mid, "$1-$2")
-            .to_string();
+        return RE_DOTS.replace_all(&mid, "$1-$2").to_string();
     }
 
     mid

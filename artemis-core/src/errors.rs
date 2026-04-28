@@ -238,6 +238,14 @@ impl From<ArtemisError> for PyErr {
 pub struct ErrorClassifier;
 
 impl ErrorClassifier {
+    /// Returns `true` if the error is retryable (rate limit or provider unavailable).
+    pub fn is_retryable(error: &ArtemisError) -> bool {
+        matches!(
+            error,
+            ArtemisError::RateLimit { .. } | ArtemisError::ProviderUnavailable { .. }
+        )
+    }
+
     /// Classify an API error response by HTTP status code and body text.
     ///
     /// * `status_code` — HTTP status (0 if no response was received).

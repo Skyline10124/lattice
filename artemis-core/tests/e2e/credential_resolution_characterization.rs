@@ -16,7 +16,7 @@
 //! - normalize_model_id() is the hot path that transforms user input before resolution
 
 use artemis_core::catalog::{ApiProtocol, CatalogProviderEntry};
-use artemis_core::router::{_PROVIDER_CREDENTIALS, ModelRouter, normalize_model_id};
+use artemis_core::router::{normalize_model_id, ModelRouter, _PROVIDER_CREDENTIALS};
 use std::collections::HashMap;
 use std::env;
 use std::sync::{LazyLock, Mutex};
@@ -42,8 +42,7 @@ fn restore_env(key: &str, prev: Option<String>) {
 
 /// Save and remove a set of env vars, returning previous values for restore.
 fn isolate_env<'a>(keys: &[&'a str]) -> Vec<(&'a str, Option<String>)> {
-    let saved: Vec<(&str, Option<String>)> =
-        keys.iter().map(|k| (*k, save_env(k))).collect();
+    let saved: Vec<(&str, Option<String>)> = keys.iter().map(|k| (*k, save_env(k))).collect();
     for k in keys {
         env::remove_var(k);
     }
@@ -95,7 +94,11 @@ fn provider_credentials_all_provider_slugs() {
         "infini-ai",
         "opencode-go",
     ];
-    assert_eq!(slugs.as_slice(), expected, "provider slugs must match expected order");
+    assert_eq!(
+        slugs.as_slice(),
+        expected,
+        "provider slugs must match expected order"
+    );
 }
 
 #[test]
@@ -219,13 +222,19 @@ fn resolve_credentials_returns_none_for_credentialless_provider() {
         .iter()
         .find(|(s, _)| *s == "ollama")
         .unwrap();
-    assert!(ollama_entry.1.is_empty(), "Ollama has no credential entries");
+    assert!(
+        ollama_entry.1.is_empty(),
+        "Ollama has no credential entries"
+    );
 
     let bedrock_entry = _PROVIDER_CREDENTIALS
         .iter()
         .find(|(s, _)| *s == "bedrock")
         .unwrap();
-    assert!(bedrock_entry.1.is_empty(), "Bedrock has no credential entries");
+    assert!(
+        bedrock_entry.1.is_empty(),
+        "Bedrock has no credential entries"
+    );
 }
 
 #[test]
@@ -254,7 +263,10 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
             api_model_id: "test-model".to_string(),
             priority: 1,
             weight: 1,
-            credential_keys: HashMap::from([("api_key".to_string(), "MY_CUSTOM_ANTHROPIC_KEY".to_string())]),
+            credential_keys: HashMap::from([(
+                "api_key".to_string(),
+                "MY_CUSTOM_ANTHROPIC_KEY".to_string(),
+            )]),
             base_url: Some("https://api.anthropic.com".to_string()),
             api_protocol: ApiProtocol::AnthropicMessages,
             provider_specific: HashMap::new(),
@@ -284,7 +296,10 @@ fn resolve_credentials_ignores_empty_env_var_values() {
 
     let router = ModelRouter::new();
     let result = router.resolve("claude-sonnet-4-6", Some("anthropic"));
-    assert!(result.is_ok(), "should resolve metadata even with empty key");
+    assert!(
+        result.is_ok(),
+        "should resolve metadata even with empty key"
+    );
     let resolved = result.unwrap();
     assert!(
         resolved.api_key.is_none(),
@@ -420,7 +435,10 @@ fn fallback_returns_first_sorted_provider_with_none_api_key() {
     let router = ModelRouter::new();
     let result = router.resolve("claude-sonnet-4-6", None);
 
-    assert!(result.is_ok(), "fallback should always return Ok with api_key: None");
+    assert!(
+        result.is_ok(),
+        "fallback should always return Ok with api_key: None"
+    );
     let resolved = result.unwrap();
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
     assert!(
@@ -493,7 +511,9 @@ fn permissive_resolves_credentials_from_defaults() {
     env::set_var("ANTHROPIC_API_KEY", "ant-permissive-key");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve_permissive("anthropic/my-custom-model").unwrap();
+    let resolved = router
+        .resolve_permissive("anthropic/my-custom-model")
+        .unwrap();
     assert_eq!(resolved.api_key.as_deref(), Some("ant-permissive-key"));
 
     restore_env("ANTHROPIC_API_KEY", prev);
@@ -506,7 +526,9 @@ fn permissive_returns_none_api_key_without_env_var() {
     env::remove_var("ANTHROPIC_API_KEY");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve_permissive("anthropic/my-custom-model").unwrap();
+    let resolved = router
+        .resolve_permissive("anthropic/my-custom-model")
+        .unwrap();
     assert!(resolved.api_key.is_none());
 
     restore_env("ANTHROPIC_API_KEY", prev);
@@ -516,7 +538,9 @@ fn permissive_returns_none_api_key_without_env_var() {
 fn permissive_uses_default_context_length() {
     // CHARACTERIZATION: resolve_permissive() always sets context_length to 131072.
     let router = ModelRouter::new();
-    let resolved = router.resolve_permissive("anthropic/my-custom-model").unwrap();
+    let resolved = router
+        .resolve_permissive("anthropic/my-custom-model")
+        .unwrap();
     assert_eq!(resolved.context_length, 131072);
 }
 
@@ -524,7 +548,10 @@ fn permissive_uses_default_context_length() {
 fn permissive_fails_for_unknown_provider() {
     let router = ModelRouter::new();
     let result = router.resolve_permissive("unknown-provider/model");
-    assert!(result.is_err(), "should fail for provider not in provider_defaults");
+    assert!(
+        result.is_err(),
+        "should fail for provider not in provider_defaults"
+    );
 }
 
 #[test]
@@ -544,7 +571,9 @@ fn permissive_provider_model_becomes_canonical_id() {
     env::remove_var("ANTHROPIC_API_KEY");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve_permissive("anthropic/claude-sonnet-4.6").unwrap();
+    let resolved = router
+        .resolve_permissive("anthropic/claude-sonnet-4.6")
+        .unwrap();
     assert_eq!(resolved.canonical_id, "anthropic/claude-sonnet-4.6");
 
     restore_env("ANTHROPIC_API_KEY", prev);
@@ -575,7 +604,10 @@ fn permissive_openrouter_not_in_defaults() {
     // so resolve_permissive() returns ModelNotFound for it.
     let router = ModelRouter::new();
     let result = router.resolve_permissive("openrouter/anthropic/claude-sonnet-4.6");
-    assert!(result.is_err(), "openrouter is not in provider_defaults, should fail");
+    assert!(
+        result.is_err(),
+        "openrouter is not in provider_defaults, should fail"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -606,8 +638,14 @@ fn normalize_strips_bedrock_prefix() {
 
 #[test]
 fn normalize_strips_bedrock_suffix() {
-    assert_eq!(normalize_model_id("claude-sonnet-4-6-v1:0"), "claude-sonnet-4-6");
-    assert_eq!(normalize_model_id("claude-sonnet-4-6-v1"), "claude-sonnet-4-6");
+    assert_eq!(
+        normalize_model_id("claude-sonnet-4-6-v1:0"),
+        "claude-sonnet-4-6"
+    );
+    assert_eq!(
+        normalize_model_id("claude-sonnet-4-6-v1"),
+        "claude-sonnet-4-6"
+    );
 }
 
 #[test]
@@ -620,7 +658,10 @@ fn normalize_claude_dots_to_hyphens() {
 #[test]
 fn normalize_lowercase() {
     assert_eq!(normalize_model_id("GPT-4O"), "gpt-4o");
-    assert_eq!(normalize_model_id("ANTHROPIC/CLAUDE-SONNET-4.6"), "claude-sonnet-4-6");
+    assert_eq!(
+        normalize_model_id("ANTHROPIC/CLAUDE-SONNET-4.6"),
+        "claude-sonnet-4-6"
+    );
 }
 
 #[test]
@@ -674,7 +715,10 @@ fn resolve_with_provider_override_skips_priority_loop() {
         .resolve("claude-sonnet-4-6", Some("anthropic"))
         .unwrap();
     assert_eq!(resolved.provider, "anthropic");
-    assert!(resolved.api_key.is_none(), "anthropic has no key set, override still works");
+    assert!(
+        resolved.api_key.is_none(),
+        "anthropic has no key set, override still works"
+    );
 
     restore_env("ANTHROPIC_API_KEY", prev_ant);
     restore_env("GITHUB_TOKEN", prev_gh);
@@ -684,7 +728,10 @@ fn resolve_with_provider_override_skips_priority_loop() {
 fn resolve_provider_override_nonexistent_returns_error() {
     let router = ModelRouter::new();
     let result = router.resolve("claude-sonnet-4-6", Some("nonexistent-provider"));
-    assert!(result.is_err(), "override to nonexistent provider should fail");
+    assert!(
+        result.is_err(),
+        "override to nonexistent provider should fail"
+    );
 }
 
 #[test]
@@ -808,8 +855,16 @@ fn all_19_credentialed_providers_have_env_var_mapping() {
         .map(|(slug, _)| slug)
         .collect();
 
-    assert_eq!(credentialed.len(), 19, "19 providers should have credential mappings");
-    assert_eq!(credentialless.len(), 2, "2 providers should be credentialless");
+    assert_eq!(
+        credentialed.len(),
+        19,
+        "19 providers should have credential mappings"
+    );
+    assert_eq!(
+        credentialless.len(),
+        2,
+        "2 providers should be credentialless"
+    );
     assert_eq!(*credentialless[0], "ollama");
     assert_eq!(*credentialless[1], "bedrock");
 }
@@ -841,7 +896,8 @@ fn each_env_var_maps_to_at_most_one_primary_provider() {
                 providers.len(),
                 1,
                 "env var '{}' should map to exactly one provider, got: {:?}",
-                env_var, providers
+                env_var,
+                providers
             );
         }
     }

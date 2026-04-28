@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Ollama provider adapter — implements the [`Provider`] trait for local
 //! Ollama instances exposing an OpenAI-compatible endpoint.
 //!

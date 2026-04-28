@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Mock provider and tool for validating the Python↔Rust boundary.
 //!
 //! These types are **not** for production use — they exercise the full

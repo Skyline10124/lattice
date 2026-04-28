@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Anthropic provider adapter — implements the [`Provider`] trait using the
 //! Anthropic Messages API.
 //!

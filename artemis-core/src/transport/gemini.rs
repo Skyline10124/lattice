@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Gemini transport — message normalizer for Google's `generateContent` API format.
 //!
 //! Converts between Artemis internal types ([`ChatRequest`], [`ChatResponse`])

@@ -175,7 +175,9 @@ fn char_agent_loop_tool_call_triggers_auto_continue() {
     );
 
     assert!(
-        events.iter().any(|e| matches!(e, LoopEvent::ToolCallRequired { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, LoopEvent::ToolCallRequired { .. })),
         "CHAR: AgentLoop emits ToolCallRequired when provider returns tool calls"
     );
     assert!(
@@ -327,7 +329,10 @@ fn char_agent_loop_hardcodes_mock_tool_result() {
         final_message,
     } = done_event
     {
-        assert_eq!(finish_reason, "stop", "CHAR: Done event has finish_reason='stop'");
+        assert_eq!(
+            finish_reason, "stop",
+            "CHAR: Done event has finish_reason='stop'"
+        );
         assert_eq!(
             final_message.content, "Based on search results: ...",
             "CHAR: final_message content is from MockProvider's final_content (not real tool output)"
@@ -370,7 +375,9 @@ fn char_agent_loop_multiple_tool_calls_all_get_mock_result() {
     );
 
     assert!(
-        events.iter().any(|e| matches!(e, LoopEvent::ToolCallRequired { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, LoopEvent::ToolCallRequired { .. })),
         "CHAR: ToolCallRequired emitted for multiple tool calls"
     );
     assert!(
@@ -411,7 +418,11 @@ fn char_agent_loop_conversation_grows_with_tool_calls() {
         LoopConfig::default(),
     );
 
-    assert_eq!(provider.call_count(), 2, "CHAR: MockProvider called twice (tool call + final)");
+    assert_eq!(
+        provider.call_count(),
+        2,
+        "CHAR: MockProvider called twice (tool call + final)"
+    );
     assert!(
         events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
         "CHAR: Loop completes after tool call + final response"
@@ -530,8 +541,14 @@ fn char_event_structure_done() {
 #[test]
 fn char_loop_config_defaults() {
     let config = LoopConfig::default();
-    assert_eq!(config.max_iterations, 10, "CHAR: LoopConfig defaults to max_iterations=10");
-    assert_eq!(config.budget_tokens, 100_000, "CHAR: LoopConfig defaults to budget_tokens=100_000");
+    assert_eq!(
+        config.max_iterations, 10,
+        "CHAR: LoopConfig defaults to max_iterations=10"
+    );
+    assert_eq!(
+        config.budget_tokens, 100_000,
+        "CHAR: LoopConfig defaults to budget_tokens=100_000"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -574,19 +591,30 @@ fn char_mock_provider_first_call_returns_first_content() {
     assert_eq!(provider.call_count(), 0, "CHAR: call_count starts at 0");
 
     let resolved = make_resolved();
-    let request = artemis_core::provider::ChatRequest::new(
-        vec![user_message("Hi")],
-        vec![],
-        resolved,
-    );
+    let request =
+        artemis_core::provider::ChatRequest::new(vec![user_message("Hi")], vec![], resolved);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let response = rt.block_on(provider.chat(request)).unwrap();
 
-    assert_eq!(response.content.unwrap(), "First!", "CHAR: first call returns first_content");
-    assert!(response.tool_calls.is_none(), "CHAR: first call has no tool_calls by default");
-    assert_eq!(response.finish_reason, "stop", "CHAR: first call finish_reason is 'stop'");
-    assert_eq!(provider.call_count(), 1, "CHAR: call_count incremented to 1");
+    assert_eq!(
+        response.content.unwrap(),
+        "First!",
+        "CHAR: first call returns first_content"
+    );
+    assert!(
+        response.tool_calls.is_none(),
+        "CHAR: first call has no tool_calls by default"
+    );
+    assert_eq!(
+        response.finish_reason, "stop",
+        "CHAR: first call finish_reason is 'stop'"
+    );
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "CHAR: call_count incremented to 1"
+    );
 }
 
 #[test]
@@ -605,16 +633,23 @@ fn char_mock_provider_subsequent_call_returns_final_content() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _first = rt.block_on(provider.chat(request)).unwrap();
 
-    let request2 = artemis_core::provider::ChatRequest::new(
-        vec![user_message("Hi")],
-        vec![],
-        resolved,
-    );
+    let request2 =
+        artemis_core::provider::ChatRequest::new(vec![user_message("Hi")], vec![], resolved);
     let second = rt.block_on(provider.chat(request2)).unwrap();
 
-    assert_eq!(second.content.unwrap(), "Final!", "CHAR: subsequent calls return final_content");
-    assert!(second.tool_calls.is_none(), "CHAR: subsequent calls have no tool_calls");
-    assert_eq!(second.finish_reason, "stop", "CHAR: subsequent calls finish_reason is 'stop'");
+    assert_eq!(
+        second.content.unwrap(),
+        "Final!",
+        "CHAR: subsequent calls return final_content"
+    );
+    assert!(
+        second.tool_calls.is_none(),
+        "CHAR: subsequent calls have no tool_calls"
+    );
+    assert_eq!(
+        second.finish_reason, "stop",
+        "CHAR: subsequent calls finish_reason is 'stop'"
+    );
     assert_eq!(provider.call_count(), 2, "CHAR: call_count is 2");
 }
 
@@ -631,17 +666,21 @@ fn char_mock_provider_first_call_with_tool_calls() {
         }]);
 
     let resolved = make_resolved();
-    let request = artemis_core::provider::ChatRequest::new(
-        vec![user_message("Hi")],
-        vec![],
-        resolved,
-    );
+    let request =
+        artemis_core::provider::ChatRequest::new(vec![user_message("Hi")], vec![], resolved);
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let response = rt.block_on(provider.chat(request)).unwrap();
 
-    assert_eq!(response.content.unwrap(), "Need to search.", "CHAR: first_content returned");
-    assert!(response.tool_calls.is_some(), "CHAR: tool_calls returned on first call");
+    assert_eq!(
+        response.content.unwrap(),
+        "Need to search.",
+        "CHAR: first_content returned"
+    );
+    assert!(
+        response.tool_calls.is_some(),
+        "CHAR: tool_calls returned on first call"
+    );
     assert_eq!(
         response.finish_reason, "tool_calls",
         "CHAR: finish_reason is 'tool_calls' when tool_calls present"
@@ -669,7 +708,10 @@ fn char_done_event_has_finish_reason() {
     let done = events.iter().find(|e| matches!(e, LoopEvent::Done { .. }));
     assert!(done.is_some(), "CHAR: Done event present");
     if let Some(LoopEvent::Done { finish_reason, .. }) = done {
-        assert_eq!(finish_reason, "stop", "CHAR: Done finish_reason is 'stop' for content responses");
+        assert_eq!(
+            finish_reason, "stop",
+            "CHAR: Done finish_reason is 'stop' for content responses"
+        );
     }
 }
 
@@ -695,10 +737,16 @@ fn char_tool_call_done_has_tool_calls_finish_reason() {
         LoopConfig::default(),
     );
 
-    let tool_call = events.iter().find(|e| matches!(e, LoopEvent::ToolCallRequired { .. }));
+    let tool_call = events
+        .iter()
+        .find(|e| matches!(e, LoopEvent::ToolCallRequired { .. }));
     assert!(tool_call.is_some(), "CHAR: ToolCallRequired present");
     if let Some(LoopEvent::ToolCallRequired { tool_calls }) = tool_call {
-        assert_eq!(tool_calls.len(), 1, "CHAR: One tool call in ToolCallRequired");
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "CHAR: One tool call in ToolCallRequired"
+        );
         assert_eq!(tool_calls[0].id, "call_1");
         assert_eq!(tool_calls[0].function.name, "search");
     }
@@ -710,8 +758,9 @@ fn char_tool_call_done_has_tool_calls_finish_reason() {
 
 #[test]
 fn char_agent_loop_fallback_tries_providers_in_order() {
+    use artemis_core::errors::ErrorClassifier;
     use artemis_core::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
-    use artemis_core::retry::{ErrorClassifier, RetryPolicy};
+    use artemis_core::retry::RetryPolicy;
     use async_trait::async_trait;
     use std::time::Duration;
 
@@ -768,8 +817,9 @@ fn char_agent_loop_fallback_tries_providers_in_order() {
 
 #[test]
 fn char_agent_loop_fallback_all_fail_returns_error() {
+    use artemis_core::errors::ErrorClassifier;
     use artemis_core::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
-    use artemis_core::retry::{ErrorClassifier, RetryPolicy};
+    use artemis_core::retry::RetryPolicy;
     use async_trait::async_trait;
     use std::time::Duration;
 

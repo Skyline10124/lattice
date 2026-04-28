@@ -1,7 +1,5 @@
-#![allow(deprecated)]
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub use crate::catalog::ApiProtocol;
 
@@ -179,54 +177,6 @@ impl ToolDefinition {
     }
 }
 
-/// The type of API transport to use for a provider.
-#[pyclass(from_py_object)]
-#[deprecated(
-    since = "0.2.0",
-    note = "Use ApiProtocol instead. TransportType is provider-centric and will be removed in T17."
-)]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum TransportType {
-    #[serde(rename = "chat_completions")]
-    ChatCompletions,
-    #[serde(rename = "anthropic")]
-    Anthropic,
-    #[serde(rename = "gemini")]
-    Gemini,
-    #[serde(rename = "bedrock")]
-    Bedrock,
-    #[serde(rename = "codex")]
-    Codex,
-}
-
-#[pymethods]
-impl TransportType {
-    fn __repr__(&self) -> String {
-        match self {
-            TransportType::ChatCompletions => "TransportType.ChatCompletions",
-            TransportType::Anthropic => "TransportType.Anthropic",
-            TransportType::Gemini => "TransportType.Gemini",
-            TransportType::Bedrock => "TransportType.Bedrock",
-            TransportType::Codex => "TransportType.Codex",
-        }
-        .to_string()
-    }
-
-    fn __eq__(&self, other: &Self) -> bool {
-        self == other
-    }
-}
-
-/// Internal only. Use `ResolvedModel` for model-centric routing.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ProviderConfig {
-    pub name: String,
-    pub api_base: String,
-    pub api_key: Option<String>,
-    pub transport: TransportType,
-    pub extra_headers: Option<HashMap<String, String>>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,36 +280,6 @@ mod tests {
         let json = serde_json::to_string(&td).unwrap();
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(td, deserialized);
-    }
-
-    #[test]
-    fn test_transport_type_roundtrip() {
-        let cases = vec![
-            TransportType::ChatCompletions,
-            TransportType::Anthropic,
-            TransportType::Gemini,
-            TransportType::Bedrock,
-            TransportType::Codex,
-        ];
-        for tt in cases {
-            let json = serde_json::to_string(&tt).unwrap();
-            let deserialized: TransportType = serde_json::from_str(&json).unwrap();
-            assert_eq!(tt, deserialized);
-        }
-    }
-
-    #[test]
-    fn test_provider_config_roundtrip() {
-        let config = ProviderConfig {
-            name: "openai".into(),
-            api_base: "https://api.openai.com/v1".into(),
-            api_key: Some("sk-...".into()),
-            transport: TransportType::ChatCompletions,
-            extra_headers: Some(HashMap::from([("X-Custom".into(), "value".into())])),
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: ProviderConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, deserialized);
     }
 
     #[test]

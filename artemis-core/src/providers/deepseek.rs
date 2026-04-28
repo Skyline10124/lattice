@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! DeepSeek provider adapter — implements the [`Provider`] trait using the
 //! DeepSeek Chat Completions API.
 //!

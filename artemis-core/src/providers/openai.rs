@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! OpenAI provider adapter — implements the [`Provider`] trait using the
 //! OpenAI Chat Completions API.
 //!

@@ -160,9 +160,7 @@ mod dispatcher_construction {
         assert!(from_new.dispatch(&ApiProtocol::OpenAiChat).is_some());
         assert!(from_default.dispatch(&ApiProtocol::OpenAiChat).is_some());
 
-        assert!(from_new
-            .dispatch(&ApiProtocol::AnthropicMessages)
-            .is_some());
+        assert!(from_new.dispatch(&ApiProtocol::AnthropicMessages).is_some());
         assert!(from_default
             .dispatch(&ApiProtocol::AnthropicMessages)
             .is_some());

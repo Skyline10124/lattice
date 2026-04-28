@@ -1,8 +1,9 @@
 use artemis_core::agent_loop::{AgentLoop, LoopConfig, LoopEvent};
 use artemis_core::catalog::{ApiProtocol, ResolvedModel};
+use artemis_core::errors::ErrorClassifier;
 use artemis_core::mock::MockProvider;
 use artemis_core::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
-use artemis_core::retry::{ErrorClassifier, RetryPolicy};
+use artemis_core::retry::RetryPolicy;
 use artemis_core::types::{Message, Role};
 use std::collections::HashMap;
 use std::sync::Mutex;

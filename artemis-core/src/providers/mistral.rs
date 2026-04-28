@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Mistral provider adapter — implements the [`Provider`] trait using the
 //! Mistral Chat Completions API.
 //!

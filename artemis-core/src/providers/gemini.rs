@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Gemini provider adapter — implements the [`Provider`] trait using the
 //! Google Gemini generateContent API.
 //!

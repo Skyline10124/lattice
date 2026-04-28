@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! xAI provider adapter — implements the [`Provider`] trait for xAI's
 //! OpenAI-compatible Chat Completions API (Grok).
 //!

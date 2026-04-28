@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! OpenAI Chat Completions transport — format conversion for the OpenAI API.
 //!
 //! This module defines the [`Transport`] trait and provides [`ChatCompletionsTransport`],

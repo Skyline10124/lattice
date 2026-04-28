@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Groq provider adapter — implements the [`Provider`] trait for Groq's
 //! OpenAI-compatible Chat Completions API.
 //!

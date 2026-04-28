@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use crate::catalog::ResolvedModel;
 use crate::provider::{ChatRequest, Provider};
 use crate::types::{Message, Role, ToolCall, ToolDefinition};
@@ -172,7 +170,7 @@ impl AgentLoop {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
         config: LoopConfig,
-        _classifier: &crate::retry::ErrorClassifier,
+        _classifier: &crate::errors::ErrorClassifier,
         policy: &crate::retry::RetryPolicy,
     ) -> Vec<LoopEvent> {
         let mut last_error: Option<String> = None;

@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -143,6 +142,7 @@ struct EngineState {
     tools: Vec<ToolDefinition>,
     last_response: Option<ChatResponse>,
     default_model: Option<String>,
+    resolved_model: Option<ResolvedModel>,
 }
 
 #[pyclass]
@@ -206,13 +206,19 @@ impl ArtemisEngine {
     }
 
     fn set_model(&self, model_id: &str) -> PyResult<()> {
+        let resolved = {
+            let registry = self.registry.lock().unwrap();
+            Self::resolve_from_registry(&registry, model_id).ok()
+        };
         let mut state = self.state.lock().unwrap();
         let s = state.get_or_insert_with(|| EngineState {
             tools: Vec::new(),
             last_response: None,
             default_model: None,
+            resolved_model: None,
         });
         s.default_model = Some(model_id.to_string());
+        s.resolved_model = resolved;
         Ok(())
     }
 
@@ -258,56 +264,41 @@ impl ArtemisEngine {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> PyResult<Vec<Event>> {
-        let model_id = {
+        let (model_id, resolved) = {
             let state = self.state.lock().unwrap();
             match state.as_ref() {
-                Some(s) => s.default_model.clone(),
-                None => None,
+                Some(s) => {
+                    let mid = s.default_model.clone();
+                    let res = s.resolved_model.clone();
+                    (mid, res)
+                }
+                None => (None, None),
             }
         };
 
         let (model_id, resolved) = {
             let registry = self.registry.lock().unwrap();
-            if let Some(ref mid) = model_id {
-                let entry = registry.get(mid).ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Model '{}' not registered",
-                        mid
-                    ))
-                })?;
-                let resolved = ResolvedModel {
-                    canonical_id: mid.clone(),
-                    provider: "mock".to_string(),
-                    api_key: None,
-                    base_url: "http://localhost".to_string(),
-                    api_protocol: ApiProtocol::OpenAiChat,
-                    api_model_id: mid.clone(),
-                    context_length: entry.config.context_length,
-                    provider_specific: HashMap::new(),
-                };
-                Ok::<_, PyErr>((mid.clone(), resolved))
-            } else {
-                let ids = registry.list_models();
-                if ids.is_empty() {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                        "No models registered",
-                    ));
+            match (model_id, resolved) {
+                (Some(ref mid), Some(res)) => (mid.clone(), res),
+                (Some(ref mid), None) => {
+                    let resolved = Self::resolve_from_registry(&registry, mid)?;
+                    (mid.clone(), resolved)
                 }
-                let mid = ids[0].clone();
-                let resolved = ResolvedModel {
-                    canonical_id: mid.clone(),
-                    provider: "mock".to_string(),
-                    api_key: None,
-                    base_url: "http://localhost".to_string(),
-                    api_protocol: ApiProtocol::OpenAiChat,
-                    api_model_id: mid.clone(),
-                    context_length: 131072,
-                    provider_specific: HashMap::new(),
-                };
-                Ok((mid, resolved))
-            }?
+                (None, _) => {
+                    let ids = registry.list_models();
+                    if ids.is_empty() {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "No models registered",
+                        ));
+                    }
+                    let mid = ids[0].clone();
+                    let resolved = Self::resolve_from_registry(&registry, &mid)?;
+                    (mid, resolved)
+                }
+            }
         };
 
+        let resolved_for_state = resolved.clone();
         let request = ChatRequest::new(messages, tools.clone(), resolved);
 
         let response = self.block_on_model_chat(py, &model_id, request)?;
@@ -320,6 +311,7 @@ impl ArtemisEngine {
                 tools,
                 last_response: Some(response),
                 default_model: Some(model_id),
+                resolved_model: Some(resolved_for_state),
             });
         }
 
@@ -332,13 +324,21 @@ impl ArtemisEngine {
         tool_call_id: String,
         result: String,
     ) -> PyResult<Vec<Event>> {
-        let (model_id, tools, prev_messages) = {
+        let (resolved, tools, prev_messages) = {
             let state = self.state.lock().unwrap();
             match state.as_ref() {
-                Some(s) => (
-                    s.default_model.clone(),
-                    s.tools.clone(),
-                    match s.last_response.as_ref() {
+                Some(s) => {
+                    let resolved = s
+                        .resolved_model
+                        .as_ref()
+                        .ok_or_else(|| {
+                            pyo3::exceptions::PyRuntimeError::new_err(
+                                "No resolved model — call run_once() first",
+                            )
+                        })?
+                        .clone();
+                    let tools = s.tools.clone();
+                    let prev_messages = match s.last_response.as_ref() {
                         Some(resp) => {
                             vec![
                                 Message {
@@ -358,8 +358,9 @@ impl ArtemisEngine {
                             ]
                         }
                         None => vec![],
-                    },
-                ),
+                    };
+                    (resolved, tools, prev_messages)
+                }
                 None => {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
                         "No active conversation — call run_once() first",
@@ -368,35 +369,9 @@ impl ArtemisEngine {
             }
         };
 
-        let model_id = model_id.ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(
-                "No default model set — call run_once() first",
-            )
-        })?;
+        let request = ChatRequest::new(prev_messages, tools, resolved.clone());
 
-        let resolved = {
-            let registry = self.registry.lock().unwrap();
-            let entry = registry.get(&model_id).ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "Model '{}' not registered",
-                    model_id
-                ))
-            })?;
-            ResolvedModel {
-                canonical_id: model_id.clone(),
-                provider: "mock".to_string(),
-                api_key: None,
-                base_url: "http://localhost".to_string(),
-                api_protocol: ApiProtocol::OpenAiChat,
-                api_model_id: model_id.clone(),
-                context_length: entry.config.context_length,
-                provider_specific: HashMap::new(),
-            }
-        };
-
-        let request = ChatRequest::new(prev_messages, tools, resolved);
-
-        let response = self.block_on_model_chat(py, &model_id, request)?;
+        let response = self.block_on_model_chat(py, &resolved.canonical_id, request)?;
 
         let events = response_to_events(&response);
 
@@ -477,6 +452,41 @@ impl ArtemisEngine {
 }
 
 impl ArtemisEngine {
+    fn resolve_from_registry(registry: &ModelRegistry, model_id: &str) -> PyResult<ResolvedModel> {
+        if let Ok(resolved) = registry.resolve(model_id, None) {
+            return Ok(resolved);
+        }
+        let entry = registry.get(model_id).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Model '{}' not registered",
+                model_id
+            ))
+        })?;
+        let pe = entry.config.providers.first();
+        Ok(match pe {
+            Some(pe) => ResolvedModel {
+                canonical_id: model_id.to_string(),
+                provider: pe.provider_id.clone(),
+                api_key: None,
+                base_url: pe.base_url.clone().unwrap_or_default(),
+                api_protocol: pe.api_protocol.clone(),
+                api_model_id: pe.api_model_id.clone(),
+                context_length: entry.config.context_length,
+                provider_specific: pe.provider_specific.clone(),
+            },
+            None => ResolvedModel {
+                canonical_id: model_id.to_string(),
+                provider: "unknown".to_string(),
+                api_key: None,
+                base_url: String::new(),
+                api_protocol: ApiProtocol::OpenAiChat,
+                api_model_id: model_id.to_string(),
+                context_length: entry.config.context_length,
+                provider_specific: HashMap::new(),
+            },
+        })
+    }
+
     fn block_on_model_chat(
         &self,
         _py: Python<'_>,
