@@ -1,187 +1,267 @@
-# artemis-core 设计构想与方向
+# artemis 设计构想与方向
 
-持续记录设计思路、架构构想和开发方向，指导后续开发。
+持续记录设计思路、架构构想和开发方向。
 
 **最后更新**: 2026-04-29
 
 ---
 
-## 一、定位：速度 + 最小化 + 插件 + 垂类
+## 一、定位
 
-不做一个全能型 agent 框架。聚焦窄而深的场景。
+> 一个快的、单二进制的 LLM 调用库，开发者引用进自己的项目，按需叠加 agent 插件。
 
-| 维度 | 目标 |
+**不是什么**：不做全能 agent 框架、不做可视化平台、不做工作流引擎。
+
+**四个维度**：
+
+| 维度 | 含义 |
 |------|------|
-| **速度** | Rust 核心，零开销抽象，不做重架构 |
-| **最小化部署** | 单二进制 + catalog.json，不绑 Python 运行时，不拖数据库 |
-| **插件自定义** | Overlay 模式注入 provider / tool / 路由规则 |
-| **垂类精通** | artemis-core 只做一件事：给定 model + messages → 高效返回 response |
+| **速度** | Rust 核心，零开销抽象 |
+| **最小化部署** | 单二进制 + catalog.json |
+| **插件自定义** | 类型化插件（Input → to_prompt → LLM → from_output → Output） |
+| **垂类精通** | artemis-core 只做模型路由 + 推理，不碰 agent logic |
+
+**与其他项目的区别**：
+
+| 项目 | 是什么 | 和 artemis 的关系 |
+|------|--------|------------------|
+| **OpenRouter** | 模型路由 SaaS | 竞品，但 artemis 是库不是 SaaS |
+| **LiteLLM** | 模型网关 | 竞品，但 artemis 是 Rust 不是 Python |
+| **LangGraph / CrewAI** | 多 agent 编排框架 | 不同层，重框架 vs 轻库 |
+| **n8n / Dify** | 可视化工作流 | 不同赛道，业务自动化 vs 开发者工具 |
+| **Google A2A** | Agent 间通信协议 | 参考，artemis 的 handoff 层可以参考 |
+| **Anthropic MCP** | 模型→工具协议 | 互补，插件内的工具用 MCP 连 |
+| **AgentUnion ACP** | Agent 通信协议（中国） | 参考 |
 
 ---
 
-## 二、微 Agent 架构
+## 二、核心理念：LLM 是函数，不是大脑
 
-### 2.1 分层
+### 2.1 控制反转
 
 ```
-┌──────────────────────────────────────────┐
-│          Agent 通信层（协议 + 路由）        │  ← 独立 crate
-├──────────────────────────────────────────┤
-│        插件组成层（overlay compose）        │  ← 独立 crate
-├──────────────────────────────────────────┤
-│     插件：code-review │ refactor │ test   │  ← 社区扩展
-├──────────────────────────────────────────┤
-│          artemis-core（最小内核）           │  ← 只做模型路由 + 推理
-└──────────────────────────────────────────┘
+传统 agent（LLM 是大脑）：
+  给 prompt + tools → LLM 决定一切 → 代码围观
+
+artemis（LLM 是工具）：
+  代码决定什么时候调 LLM → LLM 执行推理 → 代码验证结果 → 代码决定下一步
 ```
 
-### 2.2 插件 = 微型垂类 Agent
+LLM 不参与控制流。它是一个非确定性的 `fn(String) -> String`，被封装在类型安全的边界里。
+
+### 2.2 类型化的 LLM 调用 (Derivation)
 
 ```rust
-struct AgentPlugin {
-    name: String,
-    system_prompt: String,
-    tools: Vec<ToolDefinition>,
-    preferred_model: String,      // "sonnet" / "deepseek-v4-pro"
-    handoff_targets: Vec<String>, // 可以移交给哪些 agent
+// 每个插件定义一组输入/输出类型
+struct ReviewInput {
+    diff: String,
+    file_path: String,
+    context_rules: Vec<String>,
 }
 
-// 示例
-let code_review = AgentPlugin {
-    name: "code-review",
-    system_prompt: "你是资深代码审查工程师。审查代码正确性、安全和设计。",
-    tools: vec![read_file, run_test, list_directory],
-    preferred_model: "sonnet",
-    handoff_targets: vec!["refactor", "security-audit"],
-};
+struct ReviewOutput {
+    issues: Vec<Issue>,
+    suggested_handoff: Option<AgentId>,
+    confidence: f64,
+}
+
+// LLM 被包裹在类型边界里
+fn code_review(diff: &str) -> Result<ReviewOutput, ReviewError> {
+    let input = ReviewInput::new(diff);
+    let prompt = input.to_prompt()?;         // 代码控制输入格式
+    let raw = llm.invoke("sonnet", prompt)?;  // LLM 只做推理
+    let output = ReviewOutput::from_raw(raw)?; // 代码验证输出
+    output.validate()?;                       // 代码再验证
+    Ok(output)
+}
 ```
 
-### 2.3 组合 = 不同插件拼出不同垂类
+对比 Nix：LLM = builder，代码 = derivation graph。代码决定构建什么、怎么构建、输出怎么验证，builder 只是执行器。
 
+### 2.3 输入格式化的工程价值
+
+输出格式化简单（LLM 端已支持 `response_format: json_schema`）。输入格式化才是核心工程工作：
+
+- 这个任务该喂什么上下文？diff、文件、CLAUDE.md？
+- 怎么拼 prompt？顺序、粒度、示例、否定约束
+- token 预算怎么分？
+
+每个插件作者的主要工作量在 `to_prompt()`。很麻烦，但做好后有三大收益：
+
+**可测试**：
+```python
+def test_review_input():
+    prompt = CodeReview().to_prompt(ReviewInput(diff="...", file="auth.rs"))
+    assert "auth.rs" in prompt
+    assert len(tokens(prompt)) < 4000
+
+def test_review_output():
+    result = CodeReview().from_output(raw_json)
+    assert result.issues[0].file == "auth.rs"
+    assert result.confidence >= 0.8
 ```
-code-review + security-audit     → 安全审查 agent
-refactor + test-gen              → TDD agent
-code-review + refactor + test    → 全栈开发 agent
+
+**可组合**：
 ```
-
-每个组合就是一组 AgentPlugin 的 overlay merge，不改核心代码。
-
-### 2.4 通信层：Agent 间握手
-
+CodeReview 产出 ReviewOutput
+  → 直接传给 Refactor 的 RefactorInput
+    → 直接传给 TestGen 的 TestGenInput
 ```
-Agent A                     Agent B
-  │                            │
-  │  handoff {                 │
-  │    target: "security",     │
-  │    payload: { files: [...]},│
-  │    context_summary: "..."  │
-  │  }                         │
-  │ ──────────────────────────→│
-  │                            │ process...
-  │  result ←──────────────────│
-  │                            │
-```
+类型保证链路上每一段的输入合法，不需要祈祷下家能看懂。
 
-- 每个 agent 保持独立 context window，不共享上下文
-- 只通过结构化 handoff 传递结果
-- 类似 Anthropic tool use 协议，但 agent 级别
+**可迭代**：改 `to_prompt` 不影响 `from_output`，下游输入契约不变，A/B test prompt 变安全。
 
-### 2.5 artemis-core 的边界
+### 2.4 对比
 
-artemis-core 不碰：
-- Agent loop
-- 工具执行
-- Agent 间通信
-- 插件加载
-
-artemis-core 只做：
-- 模型名 → 解析 provider / 凭证 / 协议
-- 消息 → HTTP 请求 → 流式响应
-- 重试、错误分类
-- Token 估算
-
-Agent loop、插件系统、通信层都是上层独立 crate，通过 overlay 注入。
+| | Prompt 工程 | artemis 插件 | n8n / Dify |
+|------|-----------|-------------|-----------|
+| 控制权 | LLM | 代码 | 可视化拖拽 |
+| 可测试性 | 跑一遍看 | 输入/输出可单测 | 跑一遍看 |
+| 组合方式 | prompt 里写"请交给..." | 类型安全的函数组合 | 可视化连线 |
+| 失败处理 | prompt 说"再试一次" | 类型系统兜底 + retry | 手动配错误分支 |
+| 目标用户 | 所有人 | 开发者 | 非开发者 |
+| LLM 角色 | 大脑 | 函数内部实现 | 流程节点 |
 
 ---
 
-## 三、Nix 范式
+## 三、架构
 
-### 3.1 声明式配置 + lockfile
-
-```
-artemis.toml          # 声明需求：model = "sonnet", budget = "$50"
-artemis.lock          # 解析锁定：provider=anthropic, model=claude-sonnet-4-6-20250514
-```
-
-- 模型解析从"运行时动态选最优"变为"提前锁定，可审计，可复现"
-- 类似 `flake.nix` + `flake.lock`
-
-### 3.2 内容寻址缓存
+### 3.1 整体结构
 
 ```
-/content-cache/
-  sha256(prompt + model + params) → response
+┌───────────────────────────────────────────┐
+│    Python 胶水层：插件加载 + 组合 + handoff   │
+│    pip install artemis-code-review-plugin   │
+├───────────────────────────────────────────┤
+│    artemis-core（Rust，最小内核）            │
+│    模型路由 + HTTP 推理 + SSE + retry       │
+│    PyO3 暴露给 Python                       │
+└───────────────────────────────────────────┘
 ```
 
-- 同样 prompt + model + 参数 → 同样 hash → 直接返回缓存
-- Nix store 思路，但存的是 LLM 响应
+**为什么 Python 做胶水**：
+- AI 生态全在 Python，插件作者 python 比 rust 多 100 倍
+- `importlib` 动态加载，`pip` 分发 —— 这两件事 Rust 要花大力气
+- 胶水工作全在冷路径（加载、组装、路由），不在推理热路径
+- 推理延迟 99.9% 是网络 I/O + token 生成，Python 不影响
 
-### 3.3 派生式任务描述 (Derivation)
+**为什么 Rust 做核**：
+- 热路径：模型解析、HTTP、SSE 解析、retry
+- 信任边界：持有凭证，不可开放给插件
 
-```rust
-InferenceTask {
-    model: "sonnet",
-    messages: [...],
-    budget: 5000,  // tokens
+### 3.2 核心边界
+
+| 层 | 职责 | 信任 |
+|----|------|------|
+| **artemis-core** | 模型路由、HTTP、SSE、retry、token 估算 | 持凭证 |
+| **Python 胶水** | 加载插件、组合 agent、handoff 路由 | 不碰凭证 |
+| **插件** | 定义 Input/Output 类型、to_prompt、from_output、handoff 目标 | 不碰凭证、不碰 HTTP |
+
+插件不该做的事：注册 HTTP handler、拦截 retry、直接读 env var、创建 reqwest client。这些进核。
+
+### 3.3 插件结构
+
+```
+artemis-code-review/
+  setup.py
+  args.toml              # 声明式：Input 类型字段声明
+  prompts/
+    review.md            # 自然语言：agent 身份 + 推理策略
+  src/
+    input.py             # ReviewInput 定义 + to_prompt()
+    output.py            # ReviewOutput 定义 + from_output() + validate()
+    behavior.py          # 编程语言：handoff 路由、超时、重试
+```
+
+```python
+# behavior.py —— 代码控制，确定性的
+class CodeReviewBehavior:
+    def should_handoff(self, output: ReviewOutput) -> Optional[AgentId]:
+        if output.confidence < 0.7:
+            return None  # 不够自信，让人工介入
+        if any(i.severity == Severity.CRITICAL for i in output.issues):
+            return "refactor"  # 有严重问题，交给重构 agent
+        return None  # 无问题，结束
+
+    def on_parse_error(self, raw: str, retry_count: int) -> Action:
+        if retry_count < 3:
+            return Action.RETRY
+        return Action.FALLBACK_HUMAN
+```
+
+### 3.4 插件 vs MCP vs CLI
+
+```
+artemis 插件：agent 的完整定义（Input/Output + prompt + tools + handoff + behavior）
+MCP：        工具的协议（如何暴露、调用、返回），插件内部通过 MCP 引用工具
+CLI：        无 AI 的纯代码工具
+```
+
+三层各管各的：artemis 管 agent 组装和行为，MCP 管工具协议，CLI 不涉及 AI。
+
+---
+
+## 四、Nix 范式
+
+### 4.1 LLM 即 Builder
+
+```nix
+# Nix
+derivation {
+  name = "code-review";
+  builder = llm("sonnet");        # LLM = builder
+  args = [review_prompt, diff];   # 输入严格受控
+  output = [review_result.json];  # 输出可验证
 }
-// → 构建 → Response
-// 失败 → 查看构建日志
 ```
 
-### 3.4 Overlay 模式
+代码决定构建图，LLM 只执行推理。Nix 从来不问 builder 要不要 build。
+
+### 4.2 声明式配置 + lockfile
+
+```
+artemis.toml          # model = "sonnet", budget = "$50"
+artemis.lock          # provider=anthropic, model=claude-sonnet-4-6-20250514, 可审计可复现
+```
+
+### 4.3 内容寻址缓存
+
+```
+sha256(prompt + model + params) → response
+```
+
+### 4.4 Overlay 模式
 
 ```rust
-// 替代 register_model()，改为声明式叠加
 let overlay = CatalogOverlay::new()
     .add_model("my-fine-tune", ...)
     .patch_provider("anthropic", |p| p.timeout = 60);
-
 let catalog = Catalog::default().with_overlay(overlay);
 ```
 
 ---
 
-## 四、核心策略：Dogfooding
+## 五、Dogfooding
 
-用 artemis-core 开发 artemis-core 本身。
+用 artemis 开发 artemis 本身。
 
 - 写代码 → 自己跑推理 → 发现 bug → 修
 - 处理自己的 codebase 就是最真实 benchmark
-- catalog 98+ 模型、路由逻辑，每天在用就是在测
-
-**当前卡脖子的先修**：
-
-| 优先级 | 问题 | 描述 |
-|--------|------|------|
-| C2 | AgentLoop 无 tokio runtime | `futures::executor::block_on` 无法运行真实 provider |
-| H2 | 对话历史丢失 | `submit_tool_result` 丢弃完整历史，多轮对话断裂 |
-| H3 | Tool result 重入缺失 | 硬编码 "mock tool result" |
-| C1 | 双 Transport trait | 同名冲突，接口不一致 |
-| H4 | 双 ErrorClassifier | 两套实现分歧 |
+- 不做全能框架的定位 → 不需要"什么都行" → 只需要"开发自己够用"
 
 ---
 
-## 五、修复路线图
+## 六、路线图
 
-### 第一阶段：内核瘦身（砍掉不该在内核里的）
+### 第一阶段：内核瘦身
 
-- [ ] 从内核移除 agent_loop → 独立 crate
+- [ ] 从内核移除 agent_loop → 上层负责
 - [ ] 从内核移除 tool_boundary → 上层负责
-- [ ] 从内核移除 streaming_bridge（Python 相关）→ 独立 crate
+- [ ] 从内核移除 streaming_bridge → 独立 crate
 - [ ] 删除 `rig-core` 依赖（H11）
 - [ ] 删除 `ProviderConfig`、`TransportType` 死代码（M12, M13）
 
-### 第二阶段：内核收敛
+### 第二阶段：内核收敛 + 安全
 
 - [ ] C1: 合并双 Transport trait
 - [ ] H4: 统一 ErrorClassifier
@@ -191,24 +271,43 @@ let catalog = Catalog::default().with_overlay(overlay);
 - [ ] H13: HTTP 超时
 - [ ] H14: ResolvedModel Debug 脱敏
 
-### 第三阶段：上层 crate
+### 第三阶段：Dogfooding 就绪
 
-- [ ] `artemis-agent-compose` — 插件定义 + 组合 + overlay
-- [ ] `artemis-agent-protocol` — handoff 协议 + 通信路由
-- [ ] artemis-core dogfooding 就绪
-- [ ] 声明式配置 + lockfile 原型
+- [ ] C2: AgentLoop 集成 tokio runtime（或移至上层）
+- [ ] H2: 修复对话历史维护
+- [ ] H3: 添加 tool result 重入机制
 
-### 第四阶段：Nix 范式 + 安全
+### 第四阶段：类型化插件系统
 
+- [ ] 插件 Input/Output 类型接口定义
+- [ ] `to_prompt()` / `from_output()` trait
+- [ ] 输出解析 + 校验 + 重试框架
+- [ ] Python 胶水层：插件加载 + 组合
+- [ ] artemis-agent-protocol：handoff 路由
+
+### 第五阶段：Nix 范式落地
+
+- [ ] 声明式配置 + lockfile
 - [ ] 内容寻址缓存
 - [ ] Derivation 式任务模型
-- [ ] 沙箱工具执行
-- [ ] H12: base_url HTTPS 校验
-- [ ] M14-M16: 热路径优化
 
 ---
 
-## 六、相关文档
+## 七、竞品与参考
+
+| 项目 | 类型 | 参考价值 |
+|------|------|---------|
+| [Google A2A](https://github.com/google/A2A) | Agent 通信协议 | handoff 层设计参考 |
+| [Anthropic MCP](https://modelcontextprotocol.io) | 模型→工具协议 | 插件内工具引用 |
+| [AgentUnion ACP](https://acp.agentunion.cn) | Agent 通信协议（中国） | AID 身份体系参考 |
+| [OpenRouter](https://openrouter.ai) | 模型路由 SaaS | artemis-core 对标 |
+| [LiteLLM](https://github.com/BerriAI/litellm) | 模型网关 | 模型管理参考 |
+| [Lagant](https://github.com/InternLM/Lagent) | 轻量 Agent 框架 | 轻盈理念相似 |
+| ICML 2024 "Multiagent Debate" | 论文 | 多 agent 协作理论 |
+
+---
+
+## 八、相关文档
 
 - `code-review-report.md` — 完整审查报告，44 个发现问题
 - `architecture.md` — 当前架构文档
@@ -216,4 +315,4 @@ let catalog = Catalog::default().with_overlay(overlay);
 
 ---
 
-*此文档随开发推进持续更新。新想法、设计决策、方向变更均记录于此。*
+*此文档随开发推进持续更新。*

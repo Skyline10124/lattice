@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::env;
 
 use artemis_core::catalog::{ApiProtocol, ResolvedModel};
-use artemis_core::errors::ErrorClassifier;
 use artemis_core::errors::ArtemisError;
+use artemis_core::errors::ErrorClassifier;
 use artemis_core::provider::ChatRequest;
 use artemis_core::router::{self, ModelRouter};
 use artemis_core::streaming::{AnthropicSseParser, OpenAiSseParser, SseParser, StreamEvent};
@@ -78,8 +78,8 @@ fn user_message(content: &str) -> Message {
 fn catalog_loads_successfully_with_embedded_data() {
     // The catalog is embedded at compile time via include_str!("data.json").
     // A successful load proves the deserialization path works without panicking.
-    let catalog = artemis_core::catalog::Catalog::get()
-        .expect("catalog must load from embedded data.json");
+    let catalog =
+        artemis_core::catalog::Catalog::get().expect("catalog must load from embedded data.json");
     assert!(
         catalog.model_count() > 50,
         "expected >50 models, got {}",
@@ -89,8 +89,7 @@ fn catalog_loads_successfully_with_embedded_data() {
 
 #[test]
 fn catalog_claude_sonnet_entry_exists() {
-    let catalog = artemis_core::catalog::Catalog::get()
-        .expect("catalog must load");
+    let catalog = artemis_core::catalog::Catalog::get().expect("catalog must load");
     let model = catalog
         .get_model("claude-sonnet-4-6")
         .expect("claude-sonnet-4-6 should exist");
@@ -99,8 +98,7 @@ fn catalog_claude_sonnet_entry_exists() {
 
 #[test]
 fn catalog_resolve_alias_sonnet_works() {
-    let catalog = artemis_core::catalog::Catalog::get()
-        .expect("catalog must load");
+    let catalog = artemis_core::catalog::Catalog::get().expect("catalog must load");
     let resolved = catalog.resolve_alias("sonnet");
     assert!(
         resolved.is_some(),
@@ -315,9 +313,7 @@ fn anthropic_sse_error_event_no_type_or_message() {
 #[test]
 fn anthropic_sse_ping_event_ignored() {
     let mut parser = AnthropicSseParser::new();
-    let events = parser
-        .parse_chunk("ping", r#"{"type":"ping"}"#)
-        .unwrap();
+    let events = parser.parse_chunk("ping", r#"{"type":"ping"}"#).unwrap();
     assert!(events.is_empty(), "ping events should be ignored");
 }
 
@@ -389,11 +385,7 @@ fn error_classify_429_extracts_retry_after_numeric() {
 
 #[test]
 fn error_classify_429_extracts_retry_after_float() {
-    let err = ErrorClassifier::classify(
-        429,
-        r#"{"retry_after":3.5}"#,
-        "provider",
-    );
+    let err = ErrorClassifier::classify(429, r#"{"retry_after":3.5}"#, "provider");
     match err {
         ArtemisError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(3.5));
@@ -404,11 +396,7 @@ fn error_classify_429_extracts_retry_after_float() {
 
 #[test]
 fn error_classify_429_extracts_retry_after_hyphenated_key() {
-    let err = ErrorClassifier::classify(
-        429,
-        r#"{"retry-after":20}"#,
-        "provider",
-    );
+    let err = ErrorClassifier::classify(429, r#"{"retry-after":20}"#, "provider");
     match err {
         ArtemisError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(20.0));
@@ -431,11 +419,7 @@ fn error_classify_429_no_retry_after_returns_none() {
 #[test]
 fn error_classify_429_retry_after_from_non_json_body() {
     // Body is not JSON, but the extractor still scans for `retry_after:` pattern
-    let err = ErrorClassifier::classify(
-        429,
-        "retry_after: 25 seconds",
-        "provider",
-    );
+    let err = ErrorClassifier::classify(429, "retry_after: 25 seconds", "provider");
     match err {
         ArtemisError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(25.0));
@@ -507,7 +491,13 @@ fn error_classify_status_400_context_window_exceeded() {
 fn error_classify_status_400_without_context_overflow_is_network() {
     let err = ErrorClassifier::classify(400, "bad request", "provider");
     assert!(
-        matches!(err, ArtemisError::Network { status: Some(400), .. }),
+        matches!(
+            err,
+            ArtemisError::Network {
+                status: Some(400),
+                ..
+            }
+        ),
         "400 without context overflow should be Network"
     );
 }
@@ -531,7 +521,13 @@ fn error_classify_status_408_is_network() {
 fn error_classify_status_0_is_network() {
     let err = ErrorClassifier::classify(0, "connection refused", "provider");
     assert!(
-        matches!(err, ArtemisError::Network { status: Some(0), .. }),
+        matches!(
+            err,
+            ArtemisError::Network {
+                status: Some(0),
+                ..
+            }
+        ),
         "status 0 (no response) should be Network"
     );
 }
@@ -540,7 +536,13 @@ fn error_classify_status_0_is_network() {
 fn error_classify_unhandled_status_is_network() {
     let err = ErrorClassifier::classify(418, "I'm a teapot", "provider");
     assert!(
-        matches!(err, ArtemisError::Network { status: Some(418), .. }),
+        matches!(
+            err,
+            ArtemisError::Network {
+                status: Some(418),
+                ..
+            }
+        ),
         "unhandled status should be Network"
     );
 }
@@ -571,12 +573,16 @@ fn error_classify_is_retryable_provider_unavailable() {
 
 #[test]
 fn error_classify_is_not_retryable_for_other_errors() {
-    assert!(!ErrorClassifier::is_retryable(&ArtemisError::Authentication {
-        provider: "test".into()
-    }));
-    assert!(!ErrorClassifier::is_retryable(&ArtemisError::ModelNotFound {
-        model: "test".into()
-    }));
+    assert!(!ErrorClassifier::is_retryable(
+        &ArtemisError::Authentication {
+            provider: "test".into()
+        }
+    ));
+    assert!(!ErrorClassifier::is_retryable(
+        &ArtemisError::ModelNotFound {
+            model: "test".into()
+        }
+    ));
     assert!(!ErrorClassifier::is_retryable(
         &ArtemisError::ContextWindowExceeded {
             tokens: 1000,
@@ -638,10 +644,7 @@ fn resolve_permissive_works_with_mixed_case_provider() {
 fn resolve_permissive_rejects_unknown_provider() {
     let router = ModelRouter::new();
     let result = router.resolve_permissive("nonexistent42/model-name");
-    assert!(
-        result.is_err(),
-        "unknown provider should return error"
-    );
+    assert!(result.is_err(), "unknown provider should return error");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -657,11 +660,7 @@ fn chat_request_model_equals_resolved_api_model_id() {
         "https://api.openai.com/v1",
     );
 
-    let request = ChatRequest::new(
-        vec![user_message("Hello")],
-        vec![],
-        resolved.clone(),
-    );
+    let request = ChatRequest::new(vec![user_message("Hello")], vec![], resolved.clone());
 
     assert_eq!(
         request.model, request.resolved.api_model_id,
@@ -706,11 +705,7 @@ fn chat_request_model_is_distinct_from_canonical_id() {
         provider_specific: HashMap::new(),
     };
 
-    let request = ChatRequest::new(
-        vec![user_message("Hi")],
-        vec![],
-        resolved,
-    );
+    let request = ChatRequest::new(vec![user_message("Hi")], vec![], resolved);
 
     assert_eq!(request.model, "provider-specific-name");
     assert_eq!(request.resolved.canonical_id, "custom-model-v1");
@@ -757,7 +752,9 @@ fn openai_sse_tool_call_start_then_delta_works() {
         )
         .unwrap();
     assert!(
-        events.iter().any(|e| matches!(e, StreamEvent::ToolCallStart { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCallStart { .. })),
         "ToolCallStart should be produced"
     );
 
@@ -769,7 +766,9 @@ fn openai_sse_tool_call_start_then_delta_works() {
         )
         .unwrap();
     assert!(
-        events.iter().any(|e| matches!(e, StreamEvent::ToolCallDelta { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ToolCallDelta { .. })),
         "ToolCallDelta with matching start should be produced"
     );
 }
@@ -794,9 +793,9 @@ fn openai_sse_multiple_tool_calls_tracked_correctly() {
         )
         .unwrap();
     assert!(
-        events.iter().any(|e| {
-            matches!(e, StreamEvent::ToolCallStart { id, .. } if id == "call_b")
-        }),
+        events
+            .iter()
+            .any(|e| { matches!(e, StreamEvent::ToolCallStart { id, .. } if id == "call_b") }),
         "second ToolCallStart should have different id"
     );
 
@@ -808,9 +807,9 @@ fn openai_sse_multiple_tool_calls_tracked_correctly() {
         )
         .unwrap();
     assert!(
-        events.iter().any(|e| {
-            matches!(e, StreamEvent::ToolCallDelta { id, .. } if id == "call_a")
-        }),
+        events
+            .iter()
+            .any(|e| { matches!(e, StreamEvent::ToolCallDelta { id, .. } if id == "call_a") }),
         "delta for index 0 should reference call_a, not call_b"
     );
 
@@ -822,9 +821,9 @@ fn openai_sse_multiple_tool_calls_tracked_correctly() {
         )
         .unwrap();
     assert!(
-        events.iter().any(|e| {
-            matches!(e, StreamEvent::ToolCallDelta { id, .. } if id == "call_b")
-        }),
+        events
+            .iter()
+            .any(|e| { matches!(e, StreamEvent::ToolCallDelta { id, .. } if id == "call_b") }),
         "delta for index 1 should reference call_b"
     );
 }
@@ -836,7 +835,10 @@ fn openai_sse_multiple_tool_calls_tracked_correctly() {
 #[test]
 fn normalize_model_id_lowercases() {
     assert_eq!(router::normalize_model_id("GPT-4O"), "gpt-4o");
-    assert_eq!(router::normalize_model_id("CLAUDE-SONNET-4-6"), "claude-sonnet-4-6");
+    assert_eq!(
+        router::normalize_model_id("CLAUDE-SONNET-4-6"),
+        "claude-sonnet-4-6"
+    );
 }
 
 #[test]
@@ -850,15 +852,27 @@ fn normalize_model_id_strips_openrouter_prefix() {
 
 #[test]
 fn normalize_model_id_claude_dots_to_hyphens() {
-    assert_eq!(router::normalize_model_id("claude-sonnet-4.6"), "claude-sonnet-4-6");
-    assert_eq!(router::normalize_model_id("claude-opus-4.7"), "claude-opus-4-7");
-    assert_eq!(router::normalize_model_id("claude-haiku-4.5"), "claude-haiku-4-5");
+    assert_eq!(
+        router::normalize_model_id("claude-sonnet-4.6"),
+        "claude-sonnet-4-6"
+    );
+    assert_eq!(
+        router::normalize_model_id("claude-opus-4.7"),
+        "claude-opus-4-7"
+    );
+    assert_eq!(
+        router::normalize_model_id("claude-haiku-4.5"),
+        "claude-haiku-4-5"
+    );
 }
 
 #[test]
 fn normalize_model_id_noop_for_non_claude() {
     assert_eq!(router::normalize_model_id("gpt-4o"), "gpt-4o");
-    assert_eq!(router::normalize_model_id("deepseek-v4-pro"), "deepseek-v4-pro");
+    assert_eq!(
+        router::normalize_model_id("deepseek-v4-pro"),
+        "deepseek-v4-pro"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -895,7 +909,8 @@ fn router_resolve_uses_correct_provider_details() {
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-wave45");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve("sonnet", None)
+    let resolved = router
+        .resolve("sonnet", None)
         .expect("sonnet should resolve via Anthropic");
 
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");

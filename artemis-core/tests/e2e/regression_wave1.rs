@@ -37,9 +37,7 @@ fn restore_env(key: &str, prev: Option<String>) {
 
 /// Save and clear a batch of env vars, returning the saved state for restore.
 fn isolate_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
-    keys.iter()
-        .map(|k| (k.to_string(), save_env(k)))
-        .collect()
+    keys.iter().map(|k| (k.to_string(), save_env(k))).collect()
 }
 
 fn restore_env_batch(saved: &[(String, Option<String>)]) {
@@ -58,11 +56,18 @@ fn restore_env_batch(saved: &[(String, Option<String>)]) {
 #[test]
 fn regress_rig_core_model_resolution_works() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"]);
+    let saved = isolate_env(&[
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+    ]);
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-regress");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve("sonnet", None).expect("sonnet should resolve");
+    let resolved = router
+        .resolve("sonnet", None)
+        .expect("sonnet should resolve");
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
     assert_eq!(resolved.provider, "anthropic");
 
@@ -99,7 +104,10 @@ fn regress_error_classifier_unified_classify() {
         "openai",
     );
     match err {
-        ArtemisError::RateLimit { retry_after, provider } => {
+        ArtemisError::RateLimit {
+            retry_after,
+            provider,
+        } => {
             assert_eq!(retry_after, Some(15.0));
             assert_eq!(provider, "openai");
         }
@@ -199,7 +207,11 @@ fn regress_error_classifier_status_zero_network() {
     let err = ErrorClassifier::classify(0, "", "test");
     match err {
         ArtemisError::Network { status, .. } => {
-            assert_eq!(status, Some(0), "status=0 maps to Network with status=Some(0)");
+            assert_eq!(
+                status,
+                Some(0),
+                "status=0 maps to Network with status=Some(0)"
+            );
         }
         other => panic!("expected Network for status 0, got {:?}", other),
     }
@@ -343,7 +355,10 @@ fn regress_transport_type_all_variants_serialize() {
     let test_cases = [
         (ApiProtocol::OpenAiChat, "openai_chat"),
         (ApiProtocol::AnthropicMessages, "anthropic_messages"),
-        (ApiProtocol::GeminiGenerateContent, "gemini_generate_content"),
+        (
+            ApiProtocol::GeminiGenerateContent,
+            "gemini_generate_content",
+        ),
         (ApiProtocol::BedrockConverse, "bedrock_converse"),
         (ApiProtocol::CodexResponses, "codex_responses"),
     ];
@@ -370,8 +385,7 @@ fn regress_transport_type_all_variants_serialize() {
             provider_specific: HashMap::new(),
         };
         let json = serde_json::to_string(&model).expect("serialize model");
-        let deserialized: ResolvedModel =
-            serde_json::from_str(&json).expect("deserialize model");
+        let deserialized: ResolvedModel = serde_json::from_str(&json).expect("deserialize model");
         assert_eq!(
             format!("{:?}", deserialized.api_protocol),
             format!("{:?}", proto),
@@ -389,7 +403,10 @@ fn regress_transport_type_all_variants_serialize() {
 #[test]
 fn regress_lazylock_normalize_model_id_correctness() {
     let cases: Vec<(&str, &str)> = vec![
-        ("openrouter/anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"),
+        (
+            "openrouter/anthropic/claude-sonnet-4-6",
+            "anthropic/claude-sonnet-4-6",
+        ),
         ("anthropic/claude-opus-4-7", "claude-opus-4-7"),
         // Bedrock prefix stripping
         ("us.anthropic.claude-sonnet-4-6-v1:0", "claude-sonnet-4-6"),
@@ -427,10 +444,7 @@ fn regress_lazylock_normalize_model_id_case_insensitive() {
         router::normalize_model_id("CLAUDE-SONNET-4.6"),
         "claude-sonnet-4-6"
     );
-    assert_eq!(
-        router::normalize_model_id("GPT-4O"),
-        "gpt-4o"
-    );
+    assert_eq!(router::normalize_model_id("GPT-4O"), "gpt-4o");
     assert_eq!(
         router::normalize_model_id("AnThRoPiC/ClAuDe-OpUs-4.7"),
         "claude-opus-4-7"
@@ -551,18 +565,8 @@ fn regress_saturating_pow_normal_backoff_increases() {
     let d2 = policy.jittered_backoff(2);
     let d3 = policy.jittered_backoff(3);
 
-    assert!(
-        d3 > d2,
-        "backoff should increase: d2={:?}, d3={:?}",
-        d2,
-        d3
-    );
-    assert!(
-        d2 > d0,
-        "backoff should increase: d0={:?}, d2={:?}",
-        d0,
-        d2
-    );
+    assert!(d3 > d2, "backoff should increase: d2={:?}, d3={:?}", d2, d3);
+    assert!(d2 > d0, "backoff should increase: d0={:?}, d2={:?}", d0, d2);
 }
 
 /// Backoff is clamped to max_delay.
@@ -594,7 +598,10 @@ fn regress_saturating_pow_attempt_zero() {
     };
 
     let result = policy.jittered_backoff(0);
-    assert!(result >= Duration::from_secs(5), "attempt=0 should be >= base_delay");
+    assert!(
+        result >= Duration::from_secs(5),
+        "attempt=0 should be >= base_delay"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -616,13 +623,22 @@ fn regress_engine_mock_provider_resolves_correctly() {
     ]);
 
     // Only provide Anthropic credential
-    for key in &["NOUS_API_KEY", "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY", "KILO_API_KEY", "AI_GATEWAY_API_KEY", "OPENAI_API_KEY"] {
+    for key in &[
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "OPENAI_API_KEY",
+    ] {
         env::remove_var(key);
     }
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
 
     let router = ModelRouter::new();
-    let resolved = router.resolve("sonnet", None).expect("sonnet should resolve");
+    let resolved = router
+        .resolve("sonnet", None)
+        .expect("sonnet should resolve");
 
     // Provider must be "anthropic", not "mock"
     assert_eq!(
@@ -658,7 +674,12 @@ fn regress_engine_mock_provider_multi_provider() {
 #[test]
 fn regress_engine_mock_provider_metadata_correct() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"]);
+    let saved = isolate_env(&[
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+    ]);
 
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
     for key in &["NOUS_API_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"] {
@@ -686,7 +707,12 @@ fn regress_engine_mock_provider_metadata_correct() {
 #[test]
 fn regress_engine_mock_provider_auth_error_typed() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"]);
+    let saved = isolate_env(&[
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENAI_API_KEY",
+    ]);
 
     // Set an obviously invalid key so any real API call would get 401
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-bad");
@@ -696,13 +722,18 @@ fn regress_engine_mock_provider_auth_error_typed() {
 
     // The router should still resolve (key exists, even if invalid)
     let router = ModelRouter::new();
-    let resolved = router.resolve("sonnet", None).expect("sonnet should resolve");
+    let resolved = router
+        .resolve("sonnet", None)
+        .expect("sonnet should resolve");
     assert_eq!(resolved.provider, "anthropic");
 
     // Error classification should still work — classify an actual 401
     let err = ErrorClassifier::classify(401, r#"{"error": "invalid api key"}"#, &resolved.provider);
-    assert!(matches!(err, ArtemisError::Authentication { .. }),
-        "401 should classify as Authentication, got {:?}", err);
+    assert!(
+        matches!(err, ArtemisError::Authentication { .. }),
+        "401 should classify as Authentication, got {:?}",
+        err
+    );
 
     restore_env_batch(&saved);
 }
@@ -712,9 +743,24 @@ fn regress_engine_mock_provider_auth_error_typed() {
 #[test]
 fn regress_engine_mock_provider_missing_credential_errors() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY", "KILO_API_KEY", "AI_GATEWAY_API_KEY", "OPENAI_API_KEY"]);
+    let saved = isolate_env(&[
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "OPENAI_API_KEY",
+    ]);
 
-    for key in &["ANTHROPIC_API_KEY", "NOUS_API_KEY", "GITHUB_TOKEN", "OPENCODE_ZEN_API_KEY", "KILO_API_KEY", "AI_GATEWAY_API_KEY"] {
+    for key in &[
+        "ANTHROPIC_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+    ] {
         env::remove_var(key);
     }
     env::set_var("OPENAI_API_KEY", "sk-openai-test");
@@ -724,7 +770,10 @@ fn regress_engine_mock_provider_missing_credential_errors() {
 
     // With no Anthropic-compatible credentials, fallback returns api_key=None
     // but the provider must NOT be "mock" or some hardcoded value
-    assert!(result.is_ok(), "sonnet should resolve via fallback, not fail");
+    assert!(
+        result.is_ok(),
+        "sonnet should resolve via fallback, not fail"
+    );
     let resolved = result.unwrap();
     assert_ne!(
         resolved.provider, "mock",

@@ -144,11 +144,7 @@ fn regr_transport_normalize_request_openai_produces_model_field() {
         context_length: 128000,
         provider_specific: HashMap::new(),
     };
-    let request = ChatRequest::new(
-        vec![user_message("Hello!")],
-        vec![],
-        resolved,
-    );
+    let request = ChatRequest::new(vec![user_message("Hello!")], vec![], resolved);
 
     let body = transport.normalize_request(&request).unwrap();
     assert_eq!(body["model"], "gpt-4o");
@@ -175,11 +171,7 @@ fn regr_transport_normalize_request_openai_with_tools() {
         description: "Search the web".into(),
         parameters: serde_json::json!({"type": "object", "properties": {}}),
     }];
-    let request = ChatRequest::new(
-        vec![user_message("Search please")],
-        tools,
-        resolved,
-    );
+    let request = ChatRequest::new(vec![user_message("Search please")], tools, resolved);
 
     let body = transport.normalize_request(&request).unwrap();
     assert!(body["tools"].is_array());
@@ -228,11 +220,7 @@ fn regr_transport_normalize_request_openai_stream_flag() {
         context_length: 128000,
         provider_specific: HashMap::new(),
     };
-    let mut request = ChatRequest::new(
-        vec![user_message("Hi")],
-        vec![],
-        resolved,
-    );
+    let mut request = ChatRequest::new(vec![user_message("Hi")], vec![], resolved);
     request.stream = true;
 
     let body = transport.normalize_request(&request).unwrap();
@@ -293,11 +281,7 @@ fn regr_transport_normalize_request_anthropic_with_tools() {
         description: "Get weather".into(),
         parameters: serde_json::json!({"type": "object", "properties": {"city": {"type": "string"}}}),
     }];
-    let request = ChatRequest::new(
-        vec![user_message("Weather?")],
-        tools,
-        resolved,
-    );
+    let request = ChatRequest::new(vec![user_message("Weather?")], tools, resolved);
 
     let body = transport.normalize_request(&request).unwrap();
     assert!(body["tools"].is_array());
@@ -818,7 +802,10 @@ fn regr_budget_tokens_trim_conversation_with_tight_budget() {
 fn regr_budget_tokens_loop_config_defaults() {
     let config = LoopConfig::default();
     assert_eq!(config.max_iterations, 10, "default max_iterations is 10");
-    assert_eq!(config.budget_tokens, 100_000, "default budget_tokens is 100_000");
+    assert_eq!(
+        config.budget_tokens, 100_000,
+        "default budget_tokens is 100_000"
+    );
 }
 
 #[test]
@@ -883,28 +870,40 @@ fn regr_budget_tokens_keeps_system_message() {
 #[test]
 fn regr_dispatcher_create_transport_returns_openai() {
     let transport = create_transport(&ApiProtocol::OpenAiChat);
-    assert!(transport.is_some(), "create_transport returns Some for OpenAiChat");
+    assert!(
+        transport.is_some(),
+        "create_transport returns Some for OpenAiChat"
+    );
     assert_eq!(transport.unwrap().api_mode(), "chat_completions");
 }
 
 #[test]
 fn regr_dispatcher_create_transport_returns_anthropic() {
     let transport = create_transport(&ApiProtocol::AnthropicMessages);
-    assert!(transport.is_some(), "create_transport returns Some for AnthropicMessages");
+    assert!(
+        transport.is_some(),
+        "create_transport returns Some for AnthropicMessages"
+    );
     assert_eq!(transport.unwrap().api_mode(), "anthropic");
 }
 
 #[test]
 fn regr_dispatcher_create_transport_returns_gemini() {
     let transport = create_transport(&ApiProtocol::GeminiGenerateContent);
-    assert!(transport.is_some(), "create_transport returns Some for GeminiGenerateContent");
+    assert!(
+        transport.is_some(),
+        "create_transport returns Some for GeminiGenerateContent"
+    );
     assert_eq!(transport.unwrap().api_mode(), "gemini");
 }
 
 #[test]
 fn regr_dispatcher_create_transport_returns_none_for_unknown() {
     let transport = create_transport(&ApiProtocol::Custom("unknown-protocol".into()));
-    assert!(transport.is_none(), "create_transport returns None for unknown protocols");
+    assert!(
+        transport.is_none(),
+        "create_transport returns None for unknown protocols"
+    );
 }
 
 #[test]
@@ -917,14 +916,18 @@ fn regr_dispatcher_dispatch_openai() {
 #[test]
 fn regr_dispatcher_dispatch_anthropic() {
     let dispatcher = TransportDispatcher::new();
-    let transport = dispatcher.dispatch(&ApiProtocol::AnthropicMessages).unwrap();
+    let transport = dispatcher
+        .dispatch(&ApiProtocol::AnthropicMessages)
+        .unwrap();
     assert_eq!(transport.api_mode(), "anthropic");
 }
 
 #[test]
 fn regr_dispatcher_dispatch_gemini() {
     let dispatcher = TransportDispatcher::new();
-    let transport = dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).unwrap();
+    let transport = dispatcher
+        .dispatch(&ApiProtocol::GeminiGenerateContent)
+        .unwrap();
     assert_eq!(transport.api_mode(), "gemini");
 }
 
@@ -1026,8 +1029,12 @@ fn regr_dispatcher_register_replaces_existing() {
 fn regr_dispatcher_default_has_three_transports() {
     let dispatcher = TransportDispatcher::default();
     assert!(dispatcher.dispatch(&ApiProtocol::OpenAiChat).is_some());
-    assert!(dispatcher.dispatch(&ApiProtocol::AnthropicMessages).is_some());
-    assert!(dispatcher.dispatch(&ApiProtocol::GeminiGenerateContent).is_some());
+    assert!(dispatcher
+        .dispatch(&ApiProtocol::AnthropicMessages)
+        .is_some());
+    assert!(dispatcher
+        .dispatch(&ApiProtocol::GeminiGenerateContent)
+        .is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,7 +1055,9 @@ fn regr_credential_cache_caches_env_lookups() {
     // Now change the env var — cache should still return old value
     std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-different");
 
-    let resolved = router.resolve("claude-sonnet-4-6", Some("anthropic")).unwrap();
+    let resolved = router
+        .resolve("claude-sonnet-4-6", Some("anthropic"))
+        .unwrap();
     assert_eq!(
         resolved.api_key.as_deref(),
         Some("sk-ant-cached"),
@@ -1077,7 +1086,9 @@ fn regr_credential_cache_invalidate_clears_cache() {
     router.invalidate_credential_cache();
     std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-second");
 
-    let resolved = router.resolve("claude-sonnet-4-6", Some("anthropic")).unwrap();
+    let resolved = router
+        .resolve("claude-sonnet-4-6", Some("anthropic"))
+        .unwrap();
     assert_eq!(
         resolved.api_key.as_deref(),
         Some("sk-ant-second"),
@@ -1100,7 +1111,9 @@ fn regr_credential_cache_invalidate_then_repopulate() {
     let router = ModelRouter::new();
 
     // Populate cache
-    let resolved1 = router.resolve("claude-sonnet-4-6", Some("anthropic")).unwrap();
+    let resolved1 = router
+        .resolve("claude-sonnet-4-6", Some("anthropic"))
+        .unwrap();
     assert_eq!(resolved1.api_key.as_deref(), Some("sk-ant-third"));
 
     // Invalidate
@@ -1110,7 +1123,9 @@ fn regr_credential_cache_invalidate_then_repopulate() {
     std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-fourth");
 
     // repopulate from new env var
-    let resolved2 = router.resolve("claude-sonnet-4-6", Some("anthropic")).unwrap();
+    let resolved2 = router
+        .resolve("claude-sonnet-4-6", Some("anthropic"))
+        .unwrap();
     assert_eq!(resolved2.api_key.as_deref(), Some("sk-ant-fourth"));
 
     if let Some(v) = prev {
@@ -1136,10 +1151,27 @@ fn regr_provider_credentials_map_has_21_entries() {
 #[test]
 fn regr_provider_credentials_map_includes_all_providers() {
     let expected = [
-        "openrouter", "anthropic", "openai", "gemini", "deepseek",
-        "groq", "mistral", "xai", "ollama", "nous", "copilot",
-        "opencode-zen", "kilocode", "ai-gateway", "openai-codex",
-        "bedrock", "minimax", "qwen", "volces", "infini-ai", "opencode-go",
+        "openrouter",
+        "anthropic",
+        "openai",
+        "gemini",
+        "deepseek",
+        "groq",
+        "mistral",
+        "xai",
+        "ollama",
+        "nous",
+        "copilot",
+        "opencode-zen",
+        "kilocode",
+        "ai-gateway",
+        "openai-codex",
+        "bedrock",
+        "minimax",
+        "qwen",
+        "volces",
+        "infini-ai",
+        "opencode-go",
     ];
 
     let slugs: Vec<&str> = _PROVIDER_CREDENTIALS.iter().map(|(s, _)| *s).collect();
@@ -1212,16 +1244,32 @@ fn regr_response_json_chat_response_all_fields_populated() {
     let resp = rt.block_on(provider.chat(request)).unwrap();
 
     // content
-    assert_eq!(resp.content.as_deref(), Some("Hello"), "ChatResponse.content is populated");
+    assert_eq!(
+        resp.content.as_deref(),
+        Some("Hello"),
+        "ChatResponse.content is populated"
+    );
     // tool_calls
-    assert!(resp.tool_calls.is_none(), "ChatResponse.tool_calls is None for content-only response");
+    assert!(
+        resp.tool_calls.is_none(),
+        "ChatResponse.tool_calls is None for content-only response"
+    );
     // usage
     let usage = resp.usage.expect("ChatResponse.usage should be populated");
-    assert!(usage.total_tokens > 0, "ChatResponse.usage has token counts");
+    assert!(
+        usage.total_tokens > 0,
+        "ChatResponse.usage has token counts"
+    );
     // finish_reason
-    assert_eq!(resp.finish_reason, "stop", "ChatResponse.finish_reason is 'stop'");
+    assert_eq!(
+        resp.finish_reason, "stop",
+        "ChatResponse.finish_reason is 'stop'"
+    );
     // model
-    assert_eq!(resp.model, "test", "ChatResponse.model is populated from provider name");
+    assert_eq!(
+        resp.model, "test",
+        "ChatResponse.model is populated from provider name"
+    );
 }
 
 #[test]
@@ -1243,7 +1291,9 @@ fn regr_response_json_tool_call_response_fields() {
     let resp = rt.block_on(provider.chat(request)).unwrap();
 
     // tool_calls presence
-    let tool_calls = resp.tool_calls.expect("ChatResponse.tool_calls should be populated");
+    let tool_calls = resp
+        .tool_calls
+        .expect("ChatResponse.tool_calls should be populated");
     assert_eq!(tool_calls.len(), 1);
     assert_eq!(tool_calls[0].id, "call_1");
     assert_eq!(tool_calls[0].function.name, "get_weather");

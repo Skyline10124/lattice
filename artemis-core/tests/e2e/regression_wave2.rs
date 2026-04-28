@@ -31,7 +31,7 @@
 
 use artemis_core::catalog::{ApiProtocol, ResolvedModel};
 use artemis_core::mock::MockProvider;
-use artemis_core::provider::{ChatRequest, Provider, shared_http_client};
+use artemis_core::provider::{shared_http_client, ChatRequest, Provider};
 use artemis_core::router::ModelRouter;
 use artemis_core::streaming::{AnthropicSseParser, SseParser, StreamEvent, TokenUsage};
 use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
@@ -146,9 +146,7 @@ mod t10_submit_tool_result_history {
         );
 
         // Simulate a multi-turn tool conversation
-        let original_messages = vec![
-            user_message("What's the weather in Tokyo?"),
-        ];
+        let original_messages = vec![user_message("What's the weather in Tokyo?")];
 
         // First call: assistant responds with tool call
         let first_response = Message {
@@ -173,11 +171,8 @@ mod t10_submit_tool_result_history {
         full_history.push(tool_message("call_1", "Tokyo: Sunny, 22°C"));
 
         // Second call request should include ALL messages
-        let second_request = ChatRequest::new(
-            full_history.clone(),
-            vec![weather_tool()],
-            resolved.clone(),
-        );
+        let second_request =
+            ChatRequest::new(full_history.clone(), vec![weather_tool()], resolved.clone());
 
         // Verify the request contains the complete history
         assert_eq!(
@@ -281,7 +276,10 @@ mod t10_submit_tool_result_history {
         let first_response = rt.block_on(provider.chat(first_request)).unwrap();
         assert_eq!(first_response.finish_reason, "tool_calls");
         assert!(first_response.tool_calls.is_some());
-        assert_eq!(first_response.content, Some("Let me check the weather.".to_string()));
+        assert_eq!(
+            first_response.content,
+            Some("Let me check the weather.".to_string())
+        );
 
         // Second call: send full history + tool result (the FIX behavior)
         let full_history = vec![
@@ -296,11 +294,7 @@ mod t10_submit_tool_result_history {
             tool_message("call_wx_1", "Tokyo: Sunny, 22°C"),
         ];
 
-        let second_request = ChatRequest::new(
-            full_history,
-            vec![weather_tool()],
-            resolved.clone(),
-        );
+        let second_request = ChatRequest::new(full_history, vec![weather_tool()], resolved.clone());
         let second_response = rt.block_on(provider.chat(second_request)).unwrap();
 
         assert_eq!(second_response.finish_reason, "stop");
@@ -344,8 +338,7 @@ mod t11_credentialless_priority {
     }
 
     fn isolate_env<'a>(keys: &[&'a str]) -> Vec<(&'a str, Option<String>)> {
-        let saved: Vec<(&str, Option<String>)> =
-            keys.iter().map(|k| (*k, save_env(k))).collect();
+        let saved: Vec<(&str, Option<String>)> = keys.iter().map(|k| (*k, save_env(k))).collect();
         for k in keys {
             env::remove_var(k);
         }
@@ -821,7 +814,8 @@ mod t13_anthropic_usage_stats {
             "type": "message_delta",
             "delta": { "stop_reason": "end_turn" },
             "usage": { "output_tokens": 50 }
-        }).to_string();
+        })
+        .to_string();
 
         let done_events = parser
             .parse_chunk("message_delta", &message_delta)
@@ -962,7 +956,8 @@ mod t13_anthropic_usage_stats {
             "type": "message_delta",
             "delta": { "stop_reason": "end_turn" },
             "usage": { "output_tokens": 100 }
-        }).to_string();
+        })
+        .to_string();
 
         let events = parser
             .parse_chunk("message_delta", &message_delta)
@@ -1003,8 +998,8 @@ mod t13_anthropic_usage_stats {
 //   - Engine layer (`validate_base_url`): validates HTTPS/localhost for HTTP
 
 mod t14_https_validation {
-    use artemis_core::router::validate_base_url as router_validate_url;
     use artemis_core::errors::ArtemisError;
+    use artemis_core::router::validate_base_url as router_validate_url;
 
     // The router-layer validation (format only)
     fn engine_validate_base_url(url: &str) -> Result<(), ArtemisError> {
@@ -1126,11 +1121,16 @@ mod t14_https_validation {
 
     #[test]
     fn reg_engine_validate_rejects_http_non_localhost() {
-        for url in &["http://192.168.1.1", "http://api.openai.com", "http://0.0.0.0:8080"] {
+        for url in &[
+            "http://192.168.1.1",
+            "http://api.openai.com",
+            "http://0.0.0.0:8080",
+        ] {
             let result = engine_validate_base_url(url);
             assert!(
                 result.is_err(),
-                "REGRESSION: '{}' should be rejected (not localhost)", url
+                "REGRESSION: '{}' should be rejected (not localhost)",
+                url
             );
         }
     }

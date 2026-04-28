@@ -683,7 +683,10 @@ mod tests {
     fn test_permissive_fallback_uppercase_provider() {
         let router = ModelRouter::new();
         let resolved = router.resolve_permissive("ANTHROPIC/claude-sonnet-4.6");
-        assert!(resolved.is_ok(), "uppercase provider should normalize to lowercase");
+        assert!(
+            resolved.is_ok(),
+            "uppercase provider should normalize to lowercase"
+        );
         let r = resolved.unwrap();
         assert_eq!(r.provider, "anthropic");
         assert_eq!(r.api_model_id, "claude-sonnet-4.6");
@@ -694,7 +697,10 @@ mod tests {
     fn test_permissive_fallback_mixed_case_provider() {
         let router = ModelRouter::new();
         let resolved = router.resolve_permissive("OpenAI/gpt-4o");
-        assert!(resolved.is_ok(), "mixed-case provider should normalize to lowercase");
+        assert!(
+            resolved.is_ok(),
+            "mixed-case provider should normalize to lowercase"
+        );
         let r = resolved.unwrap();
         assert_eq!(r.provider, "openai");
         assert_eq!(r.api_protocol, ApiProtocol::OpenAiChat);

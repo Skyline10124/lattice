@@ -595,12 +595,10 @@ impl ArtemisEngine {
 
 fn provider_from_protocol(protocol: &ApiProtocol) -> PyResult<Box<dyn Provider>> {
     match protocol {
-        ApiProtocol::OpenAiChat => {
-            Ok(Box::new(crate::providers::openai::OpenAIProvider::new()))
-        }
-        ApiProtocol::AnthropicMessages => {
-            Ok(Box::new(crate::providers::anthropic::AnthropicProvider::new()))
-        }
+        ApiProtocol::OpenAiChat => Ok(Box::new(crate::providers::openai::OpenAIProvider::new())),
+        ApiProtocol::AnthropicMessages => Ok(Box::new(
+            crate::providers::anthropic::AnthropicProvider::new(),
+        )),
         ApiProtocol::GeminiGenerateContent => {
             Ok(Box::new(crate::providers::gemini::GeminiProvider::new()))
         }

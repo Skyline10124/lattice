@@ -147,10 +147,7 @@ impl std::fmt::Display for ArtemisError {
                 write!(f, "Model '{model}' not found")
             }
             ArtemisError::ProviderUnavailable { provider, reason } => {
-                write!(
-                    f,
-                    "Provider '{provider}' unavailable: {reason}"
-                )
+                write!(f, "Provider '{provider}' unavailable: {reason}")
             }
             ArtemisError::ContextWindowExceeded { tokens, limit } => {
                 write!(
