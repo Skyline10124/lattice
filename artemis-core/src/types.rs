@@ -144,14 +144,20 @@ pub struct ToolDefinition {
 impl ToolDefinition {
     #[new]
     #[pyo3(signature = (name, description, parameters = "{}"))]
-    fn new(name: String, description: String, parameters: &str) -> Self {
-        let params: serde_json::Value = serde_json::from_str(parameters)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        ToolDefinition {
+    fn new(name: String, description: String, parameters: &str) -> PyResult<Self> {
+        let params: serde_json::Value = serde_json::from_str(parameters).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON in parameters: {e}"))
+        })?;
+        if !params.is_object() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Tool parameters must be a JSON object".to_string(),
+            ));
+        }
+        Ok(ToolDefinition {
             name,
             description,
             parameters: params,
-        }
+        })
     }
 
     fn get_parameters(&self) -> String {

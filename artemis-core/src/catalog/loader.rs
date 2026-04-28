@@ -1,4 +1,5 @@
 use super::types::*;
+use crate::errors::ArtemisError;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -8,16 +9,26 @@ pub struct Catalog {
     provider_defaults: HashMap<String, ProviderDefaults>,
 }
 
-static CATALOG: OnceLock<Catalog> = OnceLock::new();
+static CATALOG: OnceLock<Result<Catalog, ArtemisError>> = OnceLock::new();
 
 impl Catalog {
-    pub fn get() -> &'static Catalog {
-        CATALOG.get_or_init(|| {
-            let data = include_str!("data.json");
-            let catalog_data: CatalogData =
-                serde_json::from_str(data).expect("Failed to deserialize catalog data.json");
-            Catalog::from_data(catalog_data)
-        })
+    /// Returns the global catalog, loading and deserializing on first access.
+    ///
+    /// The catalog is embedded at compile time via `include_str!("data.json")`.
+    /// A deserialization failure indicates a corrupt binary and returns a
+    /// `ConfigError` instead of panicking.
+    pub fn get() -> Result<&'static Catalog, ArtemisError> {
+        CATALOG
+            .get_or_init(|| {
+                let data = include_str!("data.json");
+                serde_json::from_str(data)
+                    .map(Catalog::from_data)
+                    .map_err(|e| ArtemisError::Config {
+                        message: format!("Failed to deserialize catalog data.json: {e}"),
+                    })
+            })
+            .as_ref()
+            .map_err(|e| e.clone())
     }
 
     fn from_data(data: CatalogData) -> Self {
@@ -66,7 +77,7 @@ mod tests {
 
     #[test]
     fn test_catalog_loads() {
-        let catalog = Catalog::get();
+        let catalog = Catalog::get().expect("catalog should load from embedded data.json");
         assert!(
             catalog.model_count() > 50,
             "Expected >50 models, got {}",
@@ -76,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_get_model_claude_sonnet() {
-        let catalog = Catalog::get();
+        let catalog = Catalog::get().expect("catalog should load from embedded data.json");
         let model = catalog
             .get_model("claude-sonnet-4-6")
             .expect("claude-sonnet-4-6 should exist in catalog");
@@ -92,14 +103,14 @@ mod tests {
 
     #[test]
     fn test_resolve_alias_sonnet() {
-        let catalog = Catalog::get();
+        let catalog = Catalog::get().expect("catalog should load from embedded data.json");
         let resolved = catalog.resolve_alias("sonnet");
         assert!(resolved.is_some(), "alias 'sonnet' should resolve");
     }
 
     #[test]
     fn test_provider_defaults_anthropic() {
-        let catalog = Catalog::get();
+        let catalog = Catalog::get().expect("catalog should load from embedded data.json");
         let defaults = catalog.get_provider_defaults("anthropic");
         assert!(
             defaults.is_some(),

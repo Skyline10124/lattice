@@ -27,7 +27,6 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use thiserror::Error;
 
 // ── PyO3 Python exception classes ──────────────────────────────────────
 //
@@ -59,10 +58,9 @@ pub mod py_exc {
 /// Each variant maps to a specific Python exception subclass via
 /// `From<ArtemisError> for PyErr`, carrying structured fields that
 /// become Python exception attributes.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum ArtemisError {
     /// Provider rate-limited the request.
-    #[error("Rate limit exceeded for provider '{provider}'")]
     RateLimit {
         /// Seconds after which a retry may succeed (if provided).
         retry_after: Option<f64>,
@@ -71,21 +69,18 @@ pub enum ArtemisError {
     },
 
     /// Authentication / authorization failure.
-    #[error("Authentication failed for provider '{provider}'")]
     Authentication {
         /// The provider that rejected the credentials.
         provider: String,
     },
 
     /// The requested model was not found or is unavailable.
-    #[error("Model '{model}' not found")]
     ModelNotFound {
         /// The model identifier that was not found.
         model: String,
     },
 
     /// The provider is temporarily unavailable.
-    #[error("Provider '{provider}' unavailable: {reason}")]
     ProviderUnavailable {
         /// The provider that is down.
         provider: String,
@@ -94,7 +89,6 @@ pub enum ArtemisError {
     },
 
     /// The context window was exceeded.
-    #[error("Context window exceeded: {tokens} tokens (limit {limit})")]
     ContextWindowExceeded {
         /// Number of tokens in the current context.
         tokens: u32,
@@ -103,7 +97,6 @@ pub enum ArtemisError {
     },
 
     /// A tool call failed during execution.
-    #[error("Tool '{tool}' execution failed: {message}")]
     ToolExecution {
         /// Name of the tool that failed.
         tool: String,
@@ -112,21 +105,18 @@ pub enum ArtemisError {
     },
 
     /// Streaming error during response generation.
-    #[error("Streaming error: {message}")]
     Streaming {
         /// Description of the streaming failure.
         message: String,
     },
 
     /// Configuration error.
-    #[error("Configuration error: {message}")]
     Config {
         /// Description of the configuration problem.
         message: String,
     },
 
     /// Generic network / transport error.
-    #[error("Network error: {message}")]
     Network {
         /// Description of the network failure.
         message: String,
@@ -134,6 +124,57 @@ pub enum ArtemisError {
         status: Option<u16>,
     },
 }
+
+// ── Non‑Python Display / Error impl (always available) ────────────────
+//
+// These implement the Rust standard error traits so that ArtemisError
+// can be returned as a plain Rust error type even when the Python
+// runtime is not available (e.g. `cargo test --no-default-features`).
+// The From<ArtemisError> for PyErr conversion below provides the
+// Python‑specific exception mapping when PyO3 is present.
+
+impl std::fmt::Display for ArtemisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArtemisError::RateLimit {
+                retry_after: _,
+                provider,
+            } => write!(f, "Rate limit exceeded for provider '{provider}'"),
+            ArtemisError::Authentication { provider } => {
+                write!(f, "Authentication failed for provider '{provider}'")
+            }
+            ArtemisError::ModelNotFound { model } => {
+                write!(f, "Model '{model}' not found")
+            }
+            ArtemisError::ProviderUnavailable { provider, reason } => {
+                write!(
+                    f,
+                    "Provider '{provider}' unavailable: {reason}"
+                )
+            }
+            ArtemisError::ContextWindowExceeded { tokens, limit } => {
+                write!(
+                    f,
+                    "Context window exceeded: {tokens} tokens (limit {limit})"
+                )
+            }
+            ArtemisError::ToolExecution { tool, message } => {
+                write!(f, "Tool '{tool}' execution failed: {message}")
+            }
+            ArtemisError::Streaming { message } => {
+                write!(f, "Streaming error: {message}")
+            }
+            ArtemisError::Config { message } => {
+                write!(f, "Configuration error: {message}")
+            }
+            ArtemisError::Network { message, status: _ } => {
+                write!(f, "Network error: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ArtemisError {}
 
 // ── Conversion: ArtemisError → PyErr ───────────────────────────────────
 
@@ -279,7 +320,7 @@ impl ErrorClassifier {
             // 500/502/503: Provider unavailable
             500 | 502 | 503 => ArtemisError::ProviderUnavailable {
                 provider: provider.to_string(),
-                reason: body_lower,
+                reason: truncate_body(&body_lower),
             },
 
             // Everything else: pattern-match body for special cases
@@ -291,13 +332,34 @@ impl ErrorClassifier {
                     }
                 } else {
                     ArtemisError::Network {
-                        message: response_body.to_string(),
+                        message: truncate_body(response_body),
                         status: Some(status_code),
                     }
                 }
             }
         }
     }
+}
+
+// ── Error body size limiting ────────────────────────────────────────────
+
+/// Maximum number of bytes to keep from an error response body.
+/// Bodies longer than this are truncated to prevent memory exhaustion.
+const MAX_ERROR_BODY_LENGTH: usize = 8192;
+
+/// Truncate a string to `MAX_ERROR_BODY_LENGTH` bytes, appending
+/// `... (truncated)` if it was cut short.
+///
+/// Classification (pattern matching) should be done on the full body
+/// *before* calling this — this is purely a storage/display limit.
+fn truncate_body(s: &str) -> String {
+    if s.len() <= MAX_ERROR_BODY_LENGTH {
+        return s.to_string();
+    }
+    let mut truncated = String::with_capacity(MAX_ERROR_BODY_LENGTH + 16);
+    truncated.push_str(&s[..MAX_ERROR_BODY_LENGTH]);
+    truncated.push_str("... (truncated)");
+    truncated
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────

@@ -91,7 +91,7 @@ impl Default for ModelRouter {
 impl ModelRouter {
     pub fn new() -> Self {
         ModelRouter {
-            catalog: Catalog::get(),
+            catalog: Catalog::get().expect("catalog data.json is embedded at compile time"),
             custom_models: HashMap::new(),
             credential_cache: Mutex::new(HashMap::new()),
         }
@@ -428,6 +428,35 @@ impl ModelRouter {
         }
         canonical_id.to_string()
     }
+}
+
+/// Validate that a base_url has proper URL format (parseable, has scheme, has host).
+///
+/// Rules:
+/// - Empty URLs are allowed (backward compatibility for providers without a base_url)
+/// - Non-empty URLs must contain `://` (scheme separator) with a non-empty host
+/// - Does NOT check for HTTPS (that validation lives in the engine layer)
+pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
+    if url.is_empty() {
+        return Ok(());
+    }
+
+    let proto_end = url.find("://").ok_or_else(|| ArtemisError::Config {
+        message: format!(
+            "Invalid base_url '{}': URL must contain a scheme separator (://)",
+            url
+        ),
+    })?;
+
+    let after_proto = &url[proto_end + 3..];
+    let host = after_proto.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        return Err(ArtemisError::Config {
+            message: format!("Invalid base_url '{}': URL has scheme but no host", url),
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -963,5 +992,31 @@ mod tests {
         assert_eq!(resolved.api_key.as_deref(), Some("ant-key"));
 
         restore_env("ANTHROPIC_API_KEY", prev_ant);
+    }
+
+    #[test]
+    fn test_validate_base_url_empty() {
+        assert!(validate_base_url("").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_valid() {
+        assert!(validate_base_url("https://api.openai.com/v1").is_ok());
+        assert!(validate_base_url("http://localhost:8080").is_ok());
+        assert!(validate_base_url("http://127.0.0.1:11434").is_ok());
+        assert!(validate_base_url("custom://host/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_no_host() {
+        assert!(validate_base_url("https:///path").is_err());
+        assert!(validate_base_url("http://").is_err());
+    }
+
+    #[test]
+    fn test_validate_base_url_no_scheme() {
+        assert!(validate_base_url("api.openai.com").is_err());
+        assert!(validate_base_url("localhost:8080").is_err());
+        assert!(validate_base_url("not-a-url").is_err());
     }
 }

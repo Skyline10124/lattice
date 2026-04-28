@@ -54,12 +54,16 @@ impl TokenEstimator {
     }
 
     pub fn fits_in_context(messages: &[Message], model_id: &str) -> bool {
-        let catalog = Catalog::get();
         let estimated = Self::estimate_messages_for_model(messages, model_id);
-        if let Some(entry) = catalog.get_model(model_id) {
-            entry.context_length == 0 || estimated < entry.context_length
-        } else {
-            estimated < 131072
+        match Catalog::get() {
+            Ok(catalog) => {
+                if let Some(entry) = catalog.get_model(model_id) {
+                    entry.context_length == 0 || estimated < entry.context_length
+                } else {
+                    estimated < 131072
+                }
+            }
+            Err(_) => estimated < 131072,
         }
     }
 }
