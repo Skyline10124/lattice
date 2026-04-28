@@ -45,3 +45,15 @@ mod error_classification_characterization;
 
 #[path = "e2e/state_machine_characterization.rs"]
 mod state_machine_characterization;
+
+#[path = "e2e/regression_wave4_5.rs"]
+mod regression_wave4_5;
+
+#[path = "e2e/regression_wave1.rs"]
+mod regression_wave1;
+
+#[path = "e2e/regression_wave3.rs"]
+mod regression_wave3;
+
+#[path = "e2e/regression_wave2.rs"]
+mod regression_wave2;
