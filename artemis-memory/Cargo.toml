@@ -1,0 +1,7 @@
+[package]
+name = "artemis-memory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+artemis-core = { path = "../artemis-core" }

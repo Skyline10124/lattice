@@ -2,4 +2,6 @@
 resolver = "2"
 members = [
     "artemis-core",
+    "artemis-memory",
+    "artemis-token-pool",
 ]
