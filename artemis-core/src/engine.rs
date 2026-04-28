@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use crate::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
 use crate::errors::ArtemisError;
 use crate::mock::MockProvider;
-use crate::provider::{ChatRequest, ChatResponse, ModelEntry, ModelRegistry};
+use crate::provider::{ChatRequest, ChatResponse, ModelEntry, ModelRegistry, Provider};
 use crate::router::ModelRouter;
 use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
@@ -577,11 +577,37 @@ impl ArtemisEngine {
     ) -> PyResult<ChatResponse> {
         let rt = self.runtime.lock().unwrap();
         let registry = self.registry.lock().unwrap();
-        let entry = registry.get(model_id).ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Model '{}' not found", model_id))
-        })?;
-        rt.block_on(entry.provider.chat(request))
+
+        // First try a registered provider (mocks, custom models)
+        if let Some(entry) = registry.get(model_id) {
+            return rt
+                .block_on(entry.provider.chat(request))
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()));
+        }
+        drop(registry);
+
+        // Fallback: create provider dynamically from the resolved model's api_protocol.
+        let provider = provider_from_protocol(&request.resolved.api_protocol)?;
+        rt.block_on(provider.chat(request))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+}
+
+fn provider_from_protocol(protocol: &ApiProtocol) -> PyResult<Box<dyn Provider>> {
+    match protocol {
+        ApiProtocol::OpenAiChat => {
+            Ok(Box::new(crate::providers::openai::OpenAIProvider::new()))
+        }
+        ApiProtocol::AnthropicMessages => {
+            Ok(Box::new(crate::providers::anthropic::AnthropicProvider::new()))
+        }
+        ApiProtocol::GeminiGenerateContent => {
+            Ok(Box::new(crate::providers::gemini::GeminiProvider::new()))
+        }
+        _ => Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "No provider available for protocol: {:?}",
+            protocol
+        ))),
     }
 }
 

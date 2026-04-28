@@ -338,9 +338,10 @@ impl ModelRouter {
     /// and constructs a ResolvedModel from the defaults.
     pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, ArtemisError> {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
-            if let Some(defaults) = self.catalog.get_provider_defaults(provider_part) {
+            let provider_lower = provider_part.to_lowercase();
+            if let Some(defaults) = self.catalog.get_provider_defaults(&provider_lower) {
                 let api_key = self.resolve_credentials(&CatalogProviderEntry {
-                    provider_id: provider_part.to_string(),
+                    provider_id: provider_lower.clone(),
                     api_model_id: model_part.to_string(),
                     priority: 1,
                     weight: 1,
@@ -352,7 +353,7 @@ impl ModelRouter {
 
                 return Ok(ResolvedModel {
                     canonical_id: model_name.to_string(),
-                    provider: provider_part.to_string(),
+                    provider: provider_lower,
                     api_key,
                     base_url: defaults.base_url.clone(),
                     api_protocol: defaults.api_protocol.clone(),
@@ -676,6 +677,27 @@ mod tests {
         let router = ModelRouter::new();
         let resolved = router.resolve_permissive("nonexistent/model");
         assert!(resolved.is_err());
+    }
+
+    #[test]
+    fn test_permissive_fallback_uppercase_provider() {
+        let router = ModelRouter::new();
+        let resolved = router.resolve_permissive("ANTHROPIC/claude-sonnet-4.6");
+        assert!(resolved.is_ok(), "uppercase provider should normalize to lowercase");
+        let r = resolved.unwrap();
+        assert_eq!(r.provider, "anthropic");
+        assert_eq!(r.api_model_id, "claude-sonnet-4.6");
+        assert_eq!(r.api_protocol, ApiProtocol::AnthropicMessages);
+    }
+
+    #[test]
+    fn test_permissive_fallback_mixed_case_provider() {
+        let router = ModelRouter::new();
+        let resolved = router.resolve_permissive("OpenAI/gpt-4o");
+        assert!(resolved.is_ok(), "mixed-case provider should normalize to lowercase");
+        let r = resolved.unwrap();
+        assert_eq!(r.provider, "openai");
+        assert_eq!(r.api_protocol, ApiProtocol::OpenAiChat);
     }
 
     #[test]
