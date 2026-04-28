@@ -23,3 +23,12 @@ mod interrupt;
 
 #[path = "e2e/concurrent.rs"]
 mod concurrent;
+
+#[path = "e2e/credential_resolution_characterization.rs"]
+mod credential_resolution_characterization;
+
+#[path = "e2e/error_classification_characterization.rs"]
+mod error_classification_characterization;
+
+#[path = "e2e/state_machine_characterization.rs"]
+mod state_machine_characterization;
