@@ -1,6 +1,7 @@
 use crate::catalog::{Catalog, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
 use crate::errors::ArtemisError;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Multi-provider credential fallback map.
 /// Maps provider slugs to env var → field name mappings.
@@ -29,6 +30,17 @@ pub const _PROVIDER_CREDENTIALS: &[(&str, &[(&str, &str)])] = &[
     ("infini-ai", &[("INFINI_AI_API_KEY", "api_key")]),
     ("opencode-go", &[("OPENCODE_GO_API_KEY", "api_key")]),
 ];
+
+/// HashMap-based O(1) lookup over _PROVIDER_CREDENTIALS, built once at first access.
+static PROVIDER_CREDENTIALS_MAP: std::sync::LazyLock<
+    HashMap<&'static str, &'static [(&'static str, &'static str)]>,
+> = std::sync::LazyLock::new(|| {
+    let mut map = HashMap::new();
+    for (slug, creds) in _PROVIDER_CREDENTIALS {
+        map.insert(*slug, *creds);
+    }
+    map
+});
 
 static RE_SUFFIX: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"-v\d+(:\d+)?$").unwrap());
@@ -67,6 +79,7 @@ pub fn normalize_model_id(model_id: &str) -> String {
 pub struct ModelRouter {
     catalog: &'static Catalog,
     custom_models: HashMap<String, ModelCatalogEntry>,
+    credential_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 impl Default for ModelRouter {
@@ -80,6 +93,7 @@ impl ModelRouter {
         ModelRouter {
             catalog: Catalog::get(),
             custom_models: HashMap::new(),
+            credential_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -226,43 +240,66 @@ impl ModelRouter {
         if !entry.credential_keys.is_empty() {
             return false;
         }
-        for (slug, creds) in _PROVIDER_CREDENTIALS {
-            if *slug == entry.provider_id {
-                return creds.is_empty();
-            }
+        match PROVIDER_CREDENTIALS_MAP.get(entry.provider_id.as_str()) {
+            Some(creds) => creds.is_empty(),
+            // Not in _PROVIDER_CREDENTIALS and no credential_keys — treat as credentialless
+            None => true,
         }
-        // Not in _PROVIDER_CREDENTIALS and no credential_keys — treat as credentialless
-        true
     }
 
     /// Check env vars for a provider entry's credential_keys.
     /// Returns the first env var value found, or None.
+    /// Results are cached per provider_id to avoid repeated env var lookups.
     fn resolve_credentials(&self, entry: &CatalogProviderEntry) -> Option<String> {
+        {
+            let cache = self.credential_cache.lock().unwrap();
+            if let Some(cached) = cache.get(&entry.provider_id) {
+                return cached.clone();
+            }
+        }
+
         for env_var in entry.credential_keys.values() {
             if let Ok(val) = std::env::var(env_var) {
                 let trimmed = val.trim().to_string();
                 if !trimmed.is_empty() {
-                    return Some(trimmed);
+                    let result = Some(trimmed);
+                    self.credential_cache
+                        .lock()
+                        .unwrap()
+                        .insert(entry.provider_id.clone(), result.clone());
+                    return result;
                 }
             }
         }
 
         let provider_id = &entry.provider_id;
-        for (slug, creds) in _PROVIDER_CREDENTIALS {
-            if *slug == *provider_id {
-                for (env_var, _field_name) in *creds {
-                    if let Ok(val) = std::env::var(env_var) {
-                        let trimmed = val.trim().to_string();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
+        if let Some(creds) = PROVIDER_CREDENTIALS_MAP.get(provider_id.as_str()) {
+            for (env_var, _field_name) in *creds {
+                if let Ok(val) = std::env::var(env_var) {
+                    let trimmed = val.trim().to_string();
+                    if !trimmed.is_empty() {
+                        let result = Some(trimmed);
+                        self.credential_cache
+                            .lock()
+                            .unwrap()
+                            .insert(entry.provider_id.clone(), result.clone());
+                        return result;
                     }
                 }
-                break;
             }
         }
 
+        self.credential_cache
+            .lock()
+            .unwrap()
+            .insert(entry.provider_id.clone(), None);
         None
+    }
+
+    /// Clear the credential cache, forcing re-checking of environment variables
+    /// on the next call to resolve_credentials.
+    pub fn invalidate_credential_cache(&self) {
+        self.credential_cache.lock().unwrap().clear();
     }
 
     /// Normalize a user-provided model string to a canonical ID.

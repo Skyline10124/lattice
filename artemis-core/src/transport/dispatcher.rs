@@ -1,107 +1,53 @@
 //! Transport dispatcher — maps [`ApiProtocol`] to concrete [`Transport`] implementations.
 //!
-//! The dispatcher provides protocol-driven routing: given a [`ResolvedModel`]
-//! (which carries an [`ApiProtocol`]), the dispatcher returns the appropriate
-//! transport for format normalization/denormalization.
+//! This module provides two ways to get a [`Transport`] for a given protocol:
 //!
-//! Default transports registered in [`TransportDispatcher::new()`]:
+//! 1. **[`create_transport`]** — a standalone factory function that returns a
+//!    `Box<dyn Transport>` for a given [`ApiProtocol`]. Prefer this for
+//!    one-shot transport construction (e.g. in providers that need a single
+//!    transport at startup).
+//!
+//! 2. **[`TransportDispatcher`]** — a HashMap-backed dispatcher that maps
+//!    protocols to transports and supports runtime registration of custom
+//!    transports. Useful in test infrastructure and any code that needs to
+//!    dispatch to multiple transports through a single registry.
+//!
+//! Default transports:
 //! - [`ChatCompletionsTransport`] for `ApiProtocol::OpenAiChat`
-//! - [`AnthropicDispatchTransport`] for `ApiProtocol::AnthropicMessages`
+//! - [`AnthropicTransport`] for `ApiProtocol::AnthropicMessages`
 //! - [`GeminiTransport`] for `ApiProtocol::GeminiGenerateContent`
 
 use std::collections::HashMap;
 
 use crate::catalog::{ApiProtocol, ResolvedModel};
-use crate::provider::{ChatRequest, ChatResponse};
 use crate::transport::anthropic::AnthropicTransport;
-use crate::transport::chat_completions::{ChatCompletionsTransport, Transport, TransportError};
+use crate::transport::chat_completions::{ChatCompletionsTransport, Transport};
 use crate::transport::gemini::GeminiTransport;
-use crate::transport::Transport as FormatTransport;
 
 // ---------------------------------------------------------------------------
-// Anthropic adapter — bridges AnthropicTransport to the Transport trait
+// Factory function
 // ---------------------------------------------------------------------------
 
-/// Adapter that wraps [`AnthropicTransport`] and implements the [`Transport`] trait.
+/// Create a `Box<dyn Transport>` for the given [`ApiProtocol`].
 ///
-/// `AnthropicTransport` natively implements a different interface
-/// (`normalize_messages` / `normalize_tools` / `denormalize_response` returning
-/// `NormalizedResponse`). This adapter bridges that gap so the dispatcher can
-/// treat all transports uniformly.
-struct AnthropicDispatchTransport {
-    base_url: String,
-    extra_headers: HashMap<String, String>,
-    inner: AnthropicTransport,
-}
-
-impl AnthropicDispatchTransport {
-    fn new() -> Self {
-        Self {
-            base_url: "https://api.anthropic.com".to_string(),
-            extra_headers: HashMap::new(),
-            inner: AnthropicTransport,
-        }
-    }
-}
-
-impl Transport for AnthropicDispatchTransport {
-    fn base_url(&self) -> &str {
-        &self.base_url
-    }
-
-    fn extra_headers(&self) -> &HashMap<String, String> {
-        &self.extra_headers
-    }
-
-    fn api_mode(&self) -> &str {
-        "anthropic"
-    }
-
-    fn normalize_request(
-        &self,
-        request: &ChatRequest,
-    ) -> Result<serde_json::Value, TransportError> {
-        let normalized = self.inner.normalize_messages(&request.messages);
-        let mut body = serde_json::json!({
-            "model": request.model,
-            "messages": normalized.messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-        });
-
-        if let Some(system) = normalized.system {
-            body["system"] = serde_json::Value::String(system);
-        }
-
-        if !request.tools.is_empty() {
-            let tools = self.inner.normalize_tools(&request.tools);
-            body["tools"] = serde_json::Value::Array(tools);
-        }
-
-        if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::Value::Number(
-                serde_json::Number::from_f64(temp).unwrap_or_else(|| serde_json::Number::from(0)),
-            );
-        }
-
-        if request.stream {
-            body["stream"] = serde_json::Value::Bool(true);
-        }
-
-        Ok(body)
-    }
-
-    fn denormalize_response(
-        &self,
-        response: &serde_json::Value,
-    ) -> Result<ChatResponse, TransportError> {
-        let normalized = self.inner.denormalize_response(response);
-        Ok(ChatResponse {
-            content: normalized.content,
-            tool_calls: normalized.tool_calls,
-            usage: None, // Anthropic usage extraction happens at the HTTP layer
-            finish_reason: normalized.finish_reason,
-            model: String::new(),
-        })
+/// Returns `None` for unsupported protocols beyond OpenAiChat,
+/// AnthropicMessages, and GeminiGenerateContent.
+///
+/// # Example
+///
+/// ```ignore
+/// use artemis_core::transport::dispatcher::create_transport;
+/// use artemis_core::catalog::ApiProtocol;
+///
+/// let transport = create_transport(&ApiProtocol::OpenAiChat).unwrap();
+/// assert_eq!(transport.api_mode(), "chat_completions");
+/// ```
+pub fn create_transport(protocol: &ApiProtocol) -> Option<Box<dyn Transport>> {
+    match protocol {
+        ApiProtocol::OpenAiChat => Some(Box::new(ChatCompletionsTransport::default())),
+        ApiProtocol::AnthropicMessages => Some(Box::new(AnthropicTransport::new())),
+        ApiProtocol::GeminiGenerateContent => Some(Box::new(GeminiTransport::new())),
+        _ => None,
     }
 }
 
@@ -113,6 +59,10 @@ impl Transport for AnthropicDispatchTransport {
 ///
 /// Uses the model catalog's [`ApiProtocol`] as the key, routing requests through
 /// the appropriate transport for format normalization/denormalization.
+///
+/// Internally delegates to [`create_transport`] for the default protocols.
+/// For one-shot transport construction without a HashMap registry, prefer
+/// [`create_transport`] directly.
 pub struct TransportDispatcher {
     transports: HashMap<ApiProtocol, Box<dyn Transport>>,
 }
@@ -126,15 +76,15 @@ impl TransportDispatcher {
         };
         dispatcher.register(
             ApiProtocol::OpenAiChat,
-            Box::new(ChatCompletionsTransport::default()),
+            create_transport(&ApiProtocol::OpenAiChat).unwrap(),
         );
         dispatcher.register(
             ApiProtocol::AnthropicMessages,
-            Box::new(AnthropicDispatchTransport::new()),
+            create_transport(&ApiProtocol::AnthropicMessages).unwrap(),
         );
         dispatcher.register(
             ApiProtocol::GeminiGenerateContent,
-            Box::new(GeminiTransport::new()),
+            create_transport(&ApiProtocol::GeminiGenerateContent).unwrap(),
         );
         dispatcher
     }
@@ -177,6 +127,7 @@ impl Default for TransportDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ChatRequest;
     use std::collections::HashMap;
 
     #[test]
@@ -360,7 +311,7 @@ mod tests {
         assert_eq!(body["max_tokens"], 200);
         assert_eq!(body["temperature"], 0.5);
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1); // system extracted separately
+        assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
     }
 
@@ -379,6 +330,8 @@ mod tests {
         let result = transport.denormalize_response(&response).unwrap();
         assert_eq!(result.content.as_deref(), Some("Hi there!"));
         assert_eq!(result.finish_reason, "stop");
+        assert!(result.usage.is_none());
+        assert_eq!(result.model, "");
     }
 
     #[test]

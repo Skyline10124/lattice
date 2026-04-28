@@ -10,13 +10,11 @@ use artemis_core::catalog::{ApiProtocol, ResolvedModel};
 use artemis_core::provider::ChatRequest;
 use artemis_core::streaming::StreamEvent;
 use artemis_core::transport::anthropic::AnthropicTransport;
-use artemis_core::transport::chat_completions::{
-    ChatCompletionsTransport, Transport as ChatTransport,
-};
+use artemis_core::transport::chat_completions::ChatCompletionsTransport;
 use artemis_core::transport::dispatcher::TransportDispatcher;
 use artemis_core::transport::gemini::GeminiTransport;
 use artemis_core::transport::openai_compat::OpenAICompatTransport;
-use artemis_core::transport::Transport as FormatTransport;
+use artemis_core::transport::Transport;
 use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -373,7 +371,7 @@ mod anthropic {
 
     #[test]
     fn normalize_messages_with_system_extraction() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let result = transport.normalize_messages(&sample_messages());
 
         // System prompt should be extracted separately
@@ -390,7 +388,7 @@ mod anthropic {
 
     #[test]
     fn normalize_messages_with_tool_use_content_blocks() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let result = transport.normalize_messages(&sample_messages());
 
         // Find the assistant message
@@ -418,7 +416,7 @@ mod anthropic {
 
     #[test]
     fn normalize_messages_with_tool_result() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let result = transport.normalize_messages(&sample_messages());
 
         // Tool results should be wrapped in a user message with tool_result content blocks
@@ -448,7 +446,7 @@ mod anthropic {
 
     #[test]
     fn denormalize_response_text_content() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [
                 {"type": "text", "text": "Hello! The weather is nice today."}
@@ -457,19 +455,18 @@ mod anthropic {
             "usage": {"input_tokens": 25, "output_tokens": 8}
         });
 
-        let result = transport.denormalize_response(&response);
+        let result = transport.denormalize_response(&response).unwrap();
         assert_eq!(
-            result.content,
-            Some("Hello! The weather is nice today.".to_string())
+            result.content.as_deref(),
+            Some("Hello! The weather is nice today.")
         );
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
-        assert!(result.reasoning.is_none());
     }
 
     #[test]
     fn denormalize_response_tool_use_content() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [
                 {"type": "text", "text": "Let me look that up."},
@@ -479,8 +476,8 @@ mod anthropic {
             "stop_reason": "tool_use"
         });
 
-        let result = transport.denormalize_response(&response);
-        assert_eq!(result.content, Some("Let me look that up.".to_string()));
+        let result = transport.denormalize_response(&response).unwrap();
+        assert_eq!(result.content.as_deref(), Some("Let me look that up."));
 
         let tcs = result.tool_calls.expect("should have tool_calls");
         assert_eq!(tcs.len(), 2);
@@ -498,7 +495,7 @@ mod anthropic {
 
     #[test]
     fn denormalize_stream_chunk_text_delta() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let data = json!({
             "type": "content_block_delta",
             "index": 0,
@@ -517,7 +514,7 @@ mod anthropic {
 
     #[test]
     fn denormalize_stream_chunk_tool_call_delta() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
 
         // content_block_start → ToolCallStart
         let start_data = json!({
@@ -561,7 +558,7 @@ mod anthropic {
 
     #[test]
     fn denormalize_stream_chunk_ignored_events() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         assert!(transport
             .denormalize_stream_chunk("message_start", &json!({}))
             .is_empty());
@@ -575,7 +572,7 @@ mod anthropic {
 
     #[test]
     fn normalize_tools_uses_input_schema() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let tools = sample_tools();
         let result = transport.normalize_tools(&tools);
 
@@ -588,7 +585,7 @@ mod anthropic {
 
     #[test]
     fn full_pipeline_anthropic_roundtrip() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
 
         // Normalize
         let normalized = transport.normalize_messages(&sample_messages());
@@ -604,10 +601,10 @@ mod anthropic {
         });
 
         // Denormalize
-        let result = transport.denormalize_response(&response);
+        let result = transport.denormalize_response(&response).unwrap();
         assert_eq!(
-            result.content,
-            Some("The weather in Tokyo is sunny, 22°C.".to_string())
+            result.content.as_deref(),
+            Some("The weather in Tokyo is sunny, 22°C.")
         );
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs[0].id, "toolu_rt1");
@@ -991,7 +988,7 @@ mod cross_transport {
         let tools = sample_tools();
 
         // AnthropicTransport (FormatTransport)
-        let anthropic = AnthropicTransport;
+        let anthropic = AnthropicTransport::new();
         let anth_result = anthropic.normalize_messages(&messages);
         assert!(
             anth_result.system.is_some(),
@@ -1038,13 +1035,13 @@ mod cross_transport {
         assert!(chat_result.tool_calls.is_none());
 
         // Anthropic format
-        let anthropic = AnthropicTransport;
+        let anthropic = AnthropicTransport::new();
         let anthropic_response = json!({
             "content": [{"type": "text", "text": "Hello!"}],
             "stop_reason": "end_turn"
         });
-        let anth_result = anthropic.denormalize_response(&anthropic_response);
-        assert_eq!(anth_result.content, Some("Hello!".to_string()));
+        let anth_result = anthropic.denormalize_response(&anthropic_response).unwrap();
+        assert_eq!(anth_result.content.as_deref(), Some("Hello!"));
         assert!(anth_result.tool_calls.is_none());
 
         // Gemini format
@@ -1087,14 +1084,14 @@ mod cross_transport {
         assert_eq!(chat_tcs[0].function.name, "search");
 
         // Anthropic format
-        let anthropic = AnthropicTransport;
+        let anthropic = AnthropicTransport::new();
         let anthropic_response = json!({
             "content": [
                 {"type": "tool_use", "id": "toolu_1", "name": "search", "input": {"q": "test"}}
             ],
             "stop_reason": "tool_use"
         });
-        let anth_result = anthropic.denormalize_response(&anthropic_response);
+        let anth_result = anthropic.denormalize_response(&anthropic_response).unwrap();
         let anth_tcs = anth_result.tool_calls.unwrap();
         assert_eq!(anth_tcs[0].function.name, "search");
 
@@ -1128,7 +1125,7 @@ mod cross_transport {
         };
 
         // Anthropic
-        let anthropic = AnthropicTransport;
+        let anthropic = AnthropicTransport::new();
         let anth = anthropic.normalize_messages(&[msg.clone()]);
         let anth_user = anth.messages.iter().find(|m| m["role"] == "user").unwrap();
         let anth_text = anth_user["content"][0]["text"].as_str().unwrap();

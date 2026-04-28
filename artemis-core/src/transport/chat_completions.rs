@@ -1,7 +1,8 @@
 //! OpenAI Chat Completions transport — format conversion for the OpenAI API.
 //!
-//! This module defines the [`Transport`] trait and provides [`ChatCompletionsTransport`],
-//! which handles normalization/denormalization for the OpenAI Chat Completions API format.
+//! This module provides [`ChatCompletionsTransport`], which handles
+//! normalization/denormalization for the OpenAI Chat Completions API format,
+//! and re-exports the unified [`Transport`] trait for backward compatibility.
 //!
 //! Other OpenAI-compatible providers (Ollama, Groq, xAI, DeepSeek, Mistral, OpenRouter)
 //! wrap this transport via [`crate::transport::openai_compat::OpenAICompatTransport`],
@@ -10,6 +11,16 @@
 use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
+
+// ---------------------------------------------------------------------------
+// Re-export the unified Transport trait
+// ---------------------------------------------------------------------------
+
+/// Re-export of the unified [`crate::transport::Transport`] trait.
+///
+/// This allows provider code and tests that still import from
+/// `chat_completions::Transport` to continue working.
+pub use crate::transport::Transport;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -29,40 +40,6 @@ pub enum TransportError {
     /// The API returned an unexpected format.
     #[error("Unexpected format: {0}")]
     UnexpectedFormat(String),
-}
-
-// ---------------------------------------------------------------------------
-// Transport trait
-// ---------------------------------------------------------------------------
-
-/// Trait for converting between internal types and a specific API format.
-///
-/// Each transport implementation handles one API format (e.g. OpenAI Chat Completions,
-/// Anthropic Messages). The transport is responsible for:
-///
-/// - Converting internal [`ChatRequest`]s into API-specific JSON bodies
-/// - Converting API-specific JSON responses into internal [`ChatResponse`]s
-/// - Providing the base URL and any extra headers needed for the HTTP client
-/// - Identifying the API mode (for logging / routing)
-pub trait Transport: Send + Sync {
-    /// The API base URL for constructing the HTTP client.
-    fn base_url(&self) -> &str;
-
-    /// Extra HTTP headers to include in requests (e.g. OpenRouter's `HTTP-Referer`).
-    fn extra_headers(&self) -> &HashMap<String, String>;
-
-    /// A string identifying the API mode (e.g. `"chat_completions"`, `"anthropic"`).
-    fn api_mode(&self) -> &str;
-
-    /// Convert an internal [`ChatRequest`] into an API-specific JSON body.
-    fn normalize_request(&self, request: &ChatRequest)
-        -> Result<serde_json::Value, TransportError>;
-
-    /// Convert an API-specific JSON response into an internal [`ChatResponse`].
-    fn denormalize_response(
-        &self,
-        response: &serde_json::Value,
-    ) -> Result<ChatResponse, TransportError>;
 }
 
 // ---------------------------------------------------------------------------

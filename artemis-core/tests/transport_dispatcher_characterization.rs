@@ -31,10 +31,9 @@
 
 use artemis_core::catalog::{ApiProtocol, ResolvedModel};
 use artemis_core::provider::ChatRequest;
-use artemis_core::transport::chat_completions::{
-    ChatCompletionsTransport, Transport as ChatTransport,
-};
+use artemis_core::transport::chat_completions::ChatCompletionsTransport;
 use artemis_core::transport::dispatcher::TransportDispatcher;
+use artemis_core::transport::Transport;
 use artemis_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -395,7 +394,7 @@ mod anthropic_dispatch_adapter {
     use super::*;
 
     /// Helper: get the Anthropic dispatch transport from the default dispatcher.
-    fn get_anthropic_transport() -> &'static dyn ChatTransport {
+    fn get_anthropic_transport() -> &'static dyn Transport {
         // We use a leaked Box to get a 'static reference for test ergonomics.
         // This is test-only code.
         let dispatcher = Box::leak(Box::new(TransportDispatcher::new()));

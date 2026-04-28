@@ -39,6 +39,7 @@ pub enum LoopEvent {
 
 pub struct AgentLoop {
     pub interrupted: Arc<AtomicBool>,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Default for AgentLoop {
@@ -51,6 +52,7 @@ impl AgentLoop {
     pub fn new() -> Self {
         AgentLoop {
             interrupted: Arc::new(AtomicBool::new(false)),
+            runtime: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
         }
     }
 
@@ -91,7 +93,7 @@ impl AgentLoop {
 
             let request = ChatRequest::new(conversation.clone(), tools.clone(), resolved.clone());
 
-            let response = futures::executor::block_on(provider.chat(request));
+            let response = self.runtime.block_on(provider.chat(request));
 
             match response {
                 Ok(resp) => {
@@ -161,6 +163,34 @@ impl AgentLoop {
         events
     }
 
+    /// Continue a conversation with real tool results instead of mock ones.
+    ///
+    /// Appends `Role::Tool` messages for each provided result, then
+    /// resumes the conversation loop. Any *further* tool calls the model
+    /// makes during the continuation will fall back to the hardcoded
+    /// `"mock tool result"` string.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_with_tool_results(
+        &self,
+        provider: &dyn Provider,
+        resolved: ResolvedModel,
+        mut messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+        config: LoopConfig,
+        results: Vec<(String, String)>,
+    ) -> Vec<LoopEvent> {
+        for (tool_call_id, result) in results {
+            messages.push(Message {
+                role: Role::Tool,
+                content: result,
+                tool_calls: None,
+                tool_call_id: Some(tool_call_id),
+                name: None,
+            });
+        }
+        self.run(provider, resolved, messages, tools, config)
+    }
+
     /// Try providers in priority order, using fallback on failure.
     #[allow(clippy::too_many_arguments)]
     pub fn run_with_fallback(
@@ -198,7 +228,10 @@ impl AgentLoop {
             }
 
             if i < providers.len() - 1 {
-                std::thread::sleep(policy.jittered_backoff(i as u32));
+                let duration = policy.jittered_backoff(i as u32);
+                self.runtime.block_on(async {
+                    tokio::time::sleep(duration).await;
+                });
             }
         }
 
@@ -213,6 +246,7 @@ mod tests {
     use super::*;
     use crate::catalog::ApiProtocol;
     use crate::mock::MockProvider;
+    use crate::types::FunctionCall;
     use std::collections::HashMap;
 
     fn make_resolved() -> ResolvedModel {
@@ -264,5 +298,187 @@ mod tests {
             LoopConfig::default(),
         );
         assert!(events.iter().any(|e| matches!(e, LoopEvent::Interrupted)));
+    }
+
+    #[test]
+    fn test_resume_with_tool_results_single() {
+        // First call returns tool calls, second call returns final answer.
+        let provider = MockProvider::new("mock")
+            .with_first_content("Let me check.")
+            .with_first_tool_calls(vec![ToolCall {
+                id: "call_1".to_string(),
+                function: FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Paris"}"#.to_string(),
+                },
+            }])
+            .with_final_content("Paris is sunny and 22°C.");
+        let agent = AgentLoop::new();
+
+        // Simulate: user sends message, assistant responds with tool call
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "What's the weather in Paris?".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    function: FunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: r#"{"city":"Paris"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let events = agent.resume_with_tool_results(
+            &provider,
+            make_resolved(),
+            messages,
+            vec![],
+            LoopConfig::default(),
+            vec![("call_1".to_string(), "Sunny, 22°C".to_string())],
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
+            "should emit Done after processing real tool result"
+        );
+
+        if let Some(LoopEvent::Done { final_message, .. }) =
+            events.iter().find(|e| matches!(e, LoopEvent::Done { .. }))
+        {
+            assert_eq!(
+                final_message.content, "Paris is sunny and 22°C.",
+                "final_message should contain the provider's response to real tool results"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resume_with_tool_results_multiple() {
+        let provider = MockProvider::new("mock")
+            .with_first_content("Checking multiple things.")
+            .with_first_tool_calls(vec![
+                ToolCall {
+                    id: "call_search".to_string(),
+                    function: FunctionCall {
+                        name: "search".to_string(),
+                        arguments: r#"{"query":"rust"}"#.to_string(),
+                    },
+                },
+                ToolCall {
+                    id: "call_calc".to_string(),
+                    function: FunctionCall {
+                        name: "calculate".to_string(),
+                        arguments: r#"{"expr":"2+2"}"#.to_string(),
+                    },
+                },
+            ])
+            .with_final_content("Combined results: 3 articles found, 2+2=4.");
+        let agent = AgentLoop::new();
+
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: "Search for rust and calculate 2+2".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: String::new(),
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_search".to_string(),
+                        function: FunctionCall {
+                            name: "search".to_string(),
+                            arguments: r#"{"query":"rust"}"#.to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: "call_calc".to_string(),
+                        function: FunctionCall {
+                            name: "calculate".to_string(),
+                            arguments: r#"{"expr":"2+2"}"#.to_string(),
+                        },
+                    },
+                ]),
+                tool_call_id: None,
+                name: None,
+            },
+        ];
+
+        let events = agent.resume_with_tool_results(
+            &provider,
+            make_resolved(),
+            messages,
+            vec![],
+            LoopConfig::default(),
+            vec![
+                (
+                    "call_search".to_string(),
+                    "Found 3 articles about Rust".to_string(),
+                ),
+                ("call_calc".to_string(), "4".to_string()),
+            ],
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
+            "should emit Done after processing multiple real tool results"
+        );
+
+        if let Some(LoopEvent::Done { final_message, .. }) =
+            events.iter().find(|e| matches!(e, LoopEvent::Done { .. }))
+        {
+            assert_eq!(
+                final_message.content, "Combined results: 3 articles found, 2+2=4.",
+                "final_message should contain final response based on real tool results"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_still_uses_mock_fallback() {
+        let provider = MockProvider::new("mock")
+            .with_first_content("Need to search.")
+            .with_first_tool_calls(vec![ToolCall {
+                id: "call_search".to_string(),
+                function: FunctionCall {
+                    name: "search".to_string(),
+                    arguments: r#"{"q":"rust"}"#.to_string(),
+                },
+            }])
+            .with_final_content("Search results: ...");
+        let agent = AgentLoop::new();
+
+        let events = agent.run(
+            &provider,
+            make_resolved(),
+            vec![Message {
+                role: Role::User,
+                content: "Search for rust".into(),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            vec![],
+            LoopConfig::default(),
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, LoopEvent::Done { .. })),
+            "run() still auto-completes tool calls with mock fallback"
+        );
     }
 }

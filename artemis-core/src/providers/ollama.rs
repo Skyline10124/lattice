@@ -71,16 +71,16 @@ impl Provider for OllamaProvider {
             .map_err(|e| ProviderError::General(format!("HTTP request failed: {}", e)))?;
 
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ProviderError::General(format!("Failed to read response body: {}", e)))?;
-
         if !status.is_success() {
+            let text = resp.text().await.map_err(|e| {
+                ProviderError::General(format!("Failed to read response body: {}", e))
+            })?;
             return Err(ProviderError::Api(text));
         }
 
-        let json: serde_json::Value = serde_json::from_str(&text)
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ProviderError::General(format!("Failed to parse response JSON: {}", e)))?;
 
         let response = self

@@ -1,10 +1,17 @@
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
+use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::{StreamEvent, TokenUsage};
-use crate::transport::{NormalizedMessages, NormalizedResponse, Transport};
+use crate::transport::chat_completions::TransportError;
+use crate::transport::{NormalizedMessages, Transport};
 use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
-pub struct AnthropicTransport;
+pub struct AnthropicTransport {
+    base_url: String,
+    extra_headers: HashMap<String, String>,
+}
 
 const STOP_REASON_MAP: &[(&str, &str)] = &[
     ("end_turn", "stop"),
@@ -21,7 +28,127 @@ fn map_stop_reason(reason: &str) -> String {
         .unwrap_or_else(|| "stop".to_string())
 }
 
+impl AnthropicTransport {
+    pub fn new() -> Self {
+        Self {
+            base_url: "https://api.anthropic.com".to_string(),
+            extra_headers: HashMap::new(),
+        }
+    }
+}
+
+impl Default for AnthropicTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transport for AnthropicTransport {
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn extra_headers(&self) -> &HashMap<String, String> {
+        &self.extra_headers
+    }
+
+    fn api_mode(&self) -> &str {
+        "anthropic"
+    }
+
+    fn normalize_request(&self, request: &ChatRequest) -> Result<Value, TransportError> {
+        let normalized = self.normalize_messages(&request.messages);
+        let mut body = serde_json::json!({
+            "model": request.model,
+            "messages": normalized.messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+        });
+
+        if let Some(system) = normalized.system {
+            body["system"] = serde_json::Value::String(system);
+        }
+
+        if !request.tools.is_empty() {
+            let tools = self.normalize_tools(&request.tools);
+            body["tools"] = serde_json::Value::Array(tools);
+        }
+
+        if let Some(temp) = request.temperature {
+            body["temperature"] = serde_json::Value::Number(
+                serde_json::Number::from_f64(temp).unwrap_or_else(|| serde_json::Number::from(0)),
+            );
+        }
+
+        if request.stream {
+            body["stream"] = serde_json::Value::Bool(true);
+        }
+
+        Ok(body)
+    }
+
+    fn denormalize_response(&self, response: &Value) -> Result<ChatResponse, TransportError> {
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+
+        if let Some(content) = response.get("content").and_then(|c| c.as_array()) {
+            for block in content {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match block_type {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            text_parts.push(text.to_string());
+                        }
+                    }
+                    "thinking" => {
+                        // Reasoning discarded in unified transport; extracted at
+                        // the provider layer if needed.
+                    }
+                    "tool_use" => {
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let input = block.get("input").cloned().unwrap_or(json!({}));
+                        let arguments = serde_json::to_string(&input).unwrap_or_default();
+                        tool_calls.push(ToolCall {
+                            id,
+                            function: FunctionCall { name, arguments },
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let stop_reason = response
+            .get("stop_reason")
+            .and_then(|r| r.as_str())
+            .unwrap_or("end_turn");
+        let finish_reason = map_stop_reason(stop_reason);
+
+        Ok(ChatResponse {
+            content: if text_parts.is_empty() {
+                None
+            } else {
+                Some(text_parts.join(""))
+            },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+            usage: None,
+            finish_reason,
+            model: String::new(),
+        })
+    }
+
     fn normalize_messages(&self, messages: &[Message]) -> NormalizedMessages {
         let mut system: Option<String> = None;
         let mut result: Vec<Value> = Vec::new();
@@ -115,74 +242,6 @@ impl Transport for AnthropicTransport {
             .collect()
     }
 
-    fn denormalize_response(&self, response: &Value) -> NormalizedResponse {
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut reasoning_parts: Vec<String> = Vec::new();
-        let mut tool_calls: Vec<ToolCall> = Vec::new();
-
-        if let Some(content) = response.get("content").and_then(|c| c.as_array()) {
-            for block in content {
-                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                match block_type {
-                    "text" => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            text_parts.push(text.to_string());
-                        }
-                    }
-                    "thinking" => {
-                        if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
-                            reasoning_parts.push(thinking.to_string());
-                        }
-                    }
-                    "tool_use" => {
-                        let id = block
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let input = block.get("input").cloned().unwrap_or(json!({}));
-                        let arguments = serde_json::to_string(&input).unwrap_or_default();
-                        tool_calls.push(ToolCall {
-                            id,
-                            function: FunctionCall { name, arguments },
-                        });
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let stop_reason = response
-            .get("stop_reason")
-            .and_then(|r| r.as_str())
-            .unwrap_or("end_turn");
-        let finish_reason = map_stop_reason(stop_reason);
-
-        NormalizedResponse {
-            content: if text_parts.is_empty() {
-                None
-            } else {
-                Some(text_parts.join(""))
-            },
-            tool_calls: if tool_calls.is_empty() {
-                None
-            } else {
-                Some(tool_calls)
-            },
-            finish_reason,
-            reasoning: if reasoning_parts.is_empty() {
-                None
-            } else {
-                Some(reasoning_parts.join("\n\n"))
-            },
-        }
-    }
-
     fn denormalize_stream_chunk(&self, event_type: &str, data: &Value) -> Vec<StreamEvent> {
         match event_type {
             "message_start" => vec![],
@@ -216,10 +275,6 @@ impl Transport for AnthropicTransport {
                         if partial.is_empty() {
                             vec![]
                         } else {
-                            // We need to track tool call IDs across chunks.
-                            // Since this is a stateless function, we return a delta
-                            // with an index-based placeholder. The AnthropicSseParser
-                            // (streaming.rs) handles full stateful parsing for live streams.
                             vec![StreamEvent::ToolCallDelta {
                                 id: format!("idx_{}", idx),
                                 arguments_delta: partial.to_string(),
@@ -281,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_system_extraction() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![
             make_message(Role::System, "You are helpful."),
             make_message(Role::User, "Hello"),
@@ -294,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_normalize_user_message() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![make_message(Role::User, "Hello, world!")];
         let result = transport.normalize_messages(&messages);
         assert!(result.system.is_none());
@@ -308,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_normalize_assistant_with_tool_use() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![Message {
             role: Role::Assistant,
             content: "Let me check.".to_string(),
@@ -337,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_normalize_tool_result() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![Message {
             role: Role::Tool,
             content: r##"{"temp": 22}"##.to_string(),
@@ -348,7 +403,6 @@ mod tests {
         let result = transport.normalize_messages(&messages);
         assert_eq!(result.messages.len(), 1);
         let msg = &result.messages[0];
-        // Anthropic wraps tool results in a user message
         assert_eq!(msg["role"], "user");
         let content = msg["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
@@ -358,22 +412,23 @@ mod tests {
 
     #[test]
     fn test_denormalize_text_response() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [{"type": "text", "text": "Hello there!"}],
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 10, "output_tokens": 5},
         });
-        let result = transport.denormalize_response(&response);
-        assert_eq!(result.content, Some("Hello there!".to_string()));
+        let result = transport.denormalize_response(&response).unwrap();
+        assert_eq!(result.content.as_deref(), Some("Hello there!"));
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
-        assert!(result.reasoning.is_none());
+        assert!(result.usage.is_none());
+        assert_eq!(result.model, "");
     }
 
     #[test]
     fn test_denormalize_tool_use_response() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [
                 {"type": "text", "text": "Checking weather..."},
@@ -381,8 +436,8 @@ mod tests {
             ],
             "stop_reason": "tool_use",
         });
-        let result = transport.denormalize_response(&response);
-        assert_eq!(result.content, Some("Checking weather...".to_string()));
+        let result = transport.denormalize_response(&response).unwrap();
+        assert_eq!(result.content.as_deref(), Some("Checking weather..."));
         let tcs = result.tool_calls.expect("expected tool calls");
         assert_eq!(tcs.len(), 1);
         assert_eq!(tcs[0].id, "toolu_abc");
@@ -393,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_denormalize_thinking_response() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [
                 {"type": "thinking", "thinking": "I should look up the weather."},
@@ -401,18 +456,15 @@ mod tests {
             ],
             "stop_reason": "end_turn",
         });
-        let result = transport.denormalize_response(&response);
-        assert_eq!(result.content, Some("Let me check.".to_string()));
-        assert_eq!(
-            result.reasoning,
-            Some("I should look up the weather.".to_string())
-        );
+        let result = transport.denormalize_response(&response).unwrap();
+        assert_eq!(result.content.as_deref(), Some("Let me check."));
+        // Reasoning is discarded in unified transport
         assert_eq!(result.finish_reason, "stop");
     }
 
     #[test]
     fn test_stream_text_delta() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let data = json!({
             "type": "content_block_delta",
             "index": 0,
@@ -430,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_stream_tool_use_delta() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
 
         let start_data = json!({
             "type": "content_block_start",
@@ -490,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_stream_ignored_events() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
 
         let events = transport.denormalize_stream_chunk(
             "message_start",
@@ -507,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_normalize_tools_uses_input_schema() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let tools = vec![ToolDefinition {
             name: "get_weather".to_string(),
             description: "Get weather".to_string(),
@@ -522,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_consecutive_tool_results_merged() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![
             Message {
                 role: Role::Tool,
@@ -549,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_empty_assistant_gets_placeholder() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let messages = vec![Message {
             role: Role::Assistant,
             content: String::new(),
@@ -564,12 +616,30 @@ mod tests {
 
     #[test]
     fn test_max_tokens_stop_reason() {
-        let transport = AnthropicTransport;
+        let transport = AnthropicTransport::new();
         let response = json!({
             "content": [{"type": "text", "text": "Truncated..."}],
             "stop_reason": "max_tokens",
         });
-        let result = transport.denormalize_response(&response);
+        let result = transport.denormalize_response(&response).unwrap();
         assert_eq!(result.finish_reason, "length");
+    }
+
+    #[test]
+    fn test_api_mode() {
+        let transport = AnthropicTransport::new();
+        assert_eq!(transport.api_mode(), "anthropic");
+    }
+
+    #[test]
+    fn test_default_base_url() {
+        let transport = AnthropicTransport::new();
+        assert_eq!(transport.base_url(), "https://api.anthropic.com");
+    }
+
+    #[test]
+    fn test_extra_headers_default_empty() {
+        let transport = AnthropicTransport::new();
+        assert!(transport.extra_headers().is_empty());
     }
 }

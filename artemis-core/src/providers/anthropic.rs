@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use crate::provider::{ChatRequest, ChatResponse, Provider, ProviderError};
 use crate::streaming::EventStream;
 use crate::transport::anthropic::AnthropicTransport;
-use crate::transport::Transport as FormatTransport;
+use crate::transport::Transport;
 
 /// Provider adapter for the Anthropic Messages API.
 ///
@@ -23,7 +23,7 @@ impl AnthropicProvider {
     /// Create a new AnthropicProvider with a default transport.
     pub fn new() -> Self {
         AnthropicProvider {
-            transport: AnthropicTransport,
+            transport: AnthropicTransport::new(),
         }
     }
 }
@@ -98,27 +98,24 @@ impl Provider for AnthropicProvider {
             .map_err(|e| ProviderError::General(format!("HTTP request failed: {}", e)))?;
 
         let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ProviderError::General(format!("Failed to read response body: {}", e)))?;
-
         if !status.is_success() {
+            let text = resp.text().await.map_err(|e| {
+                ProviderError::General(format!("Failed to read response body: {}", e))
+            })?;
             return Err(ProviderError::Api(text));
         }
 
-        let json: serde_json::Value = serde_json::from_str(&text)
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ProviderError::General(format!("Failed to parse response JSON: {}", e)))?;
 
-        let normalized_resp = self.transport.denormalize_response(&json);
+        let mut denormalized = self.transport.denormalize_response(&json).map_err(|e| {
+            ProviderError::General(format!("Response denormalization failed: {}", e))
+        })?;
 
-        Ok(ChatResponse {
-            content: normalized_resp.content,
-            tool_calls: normalized_resp.tool_calls,
-            usage: None, // usage extraction not yet implemented for Anthropic
-            finish_reason: normalized_resp.finish_reason,
-            model: resolved.api_model_id.clone(),
-        })
+        denormalized.model = resolved.api_model_id.clone();
+        Ok(denormalized)
     }
 
     async fn chat_stream(&self, _request: ChatRequest) -> Result<EventStream, ProviderError> {
@@ -258,14 +255,13 @@ mod tests {
             }
         });
 
-        let result = p.transport.denormalize_response(&response);
+        let result = p.transport.denormalize_response(&response).unwrap();
         assert_eq!(
             result.content.as_deref(),
             Some("Hello! How can I help you?")
         );
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
-        assert!(result.reasoning.is_none());
     }
 
     #[test]
@@ -288,7 +284,7 @@ mod tests {
             "stop_reason": "tool_use"
         });
 
-        let result = p.transport.denormalize_response(&response);
+        let result = p.transport.denormalize_response(&response).unwrap();
         assert_eq!(result.content.as_deref(), Some("Let me check the weather."));
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs.len(), 1);
@@ -313,12 +309,9 @@ mod tests {
             "stop_reason": "end_turn"
         });
 
-        let result = p.transport.denormalize_response(&response);
+        let result = p.transport.denormalize_response(&response).unwrap();
         assert_eq!(result.content.as_deref(), Some("Here is my answer."));
-        assert_eq!(
-            result.reasoning.as_deref(),
-            Some("I should consider the question carefully.")
-        );
+        // Reasoning is discarded by the unified transport trait
     }
 
     // ── Request building tests ────────────────────────────────────────
