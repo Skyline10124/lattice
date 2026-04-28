@@ -18,7 +18,7 @@ pub mod openai_compat;
 use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
-use crate::streaming::StreamEvent;
+use crate::streaming::{SseParser, StreamEvent};
 use crate::types::{Message, ToolCall, ToolDefinition};
 use serde_json::Value;
 
@@ -142,6 +142,39 @@ pub trait Transport: Send + Sync {
     /// Default: returns an empty vec (no streaming support).
     fn denormalize_stream_chunk(&self, _event_type: &str, _data: &Value) -> Vec<StreamEvent> {
         vec![]
+    }
+
+    // ── HTTP transport helpers for chat() ──────────────────────────────
+
+    /// The API path for streaming chat requests (e.g. `"/chat/completions"`).
+    ///
+    /// Default: `"/chat/completions"` (OpenAI-compatible).
+    fn chat_endpoint(&self) -> &str {
+        "/chat/completions"
+    }
+
+    /// The HTTP header name for API key authentication.
+    ///
+    /// Default: `"authorization"` (used with Bearer token).
+    fn auth_header_name(&self) -> &str {
+        "authorization"
+    }
+
+    /// Format the value of the auth header from the raw API key.
+    ///
+    /// Default: `"Bearer {api_key}"` (OpenAI-compatible).
+    fn auth_header_value(&self, api_key: &str) -> String {
+        format!("Bearer {}", api_key)
+    }
+
+    /// Create an SSE parser for this transport's streaming format.
+    ///
+    /// The returned parser is used to convert raw SSE chunks into
+    /// [`StreamEvent`]s during streaming.
+    ///
+    /// Default: [`crate::streaming::OpenAiSseParser`].
+    fn create_sse_parser(&self) -> Box<dyn SseParser> {
+        Box::new(crate::streaming::OpenAiSseParser::new())
     }
 }
 

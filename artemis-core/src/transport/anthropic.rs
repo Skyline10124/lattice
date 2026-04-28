@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::provider::{ChatRequest, ChatResponse};
-use crate::streaming::{StreamEvent, TokenUsage};
+use crate::streaming::{AnthropicSseParser, SseParser, StreamEvent, TokenUsage};
 use crate::transport::chat_completions::TransportError;
 use crate::transport::{NormalizedMessages, Transport};
 use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
@@ -240,6 +240,22 @@ impl Transport for AnthropicTransport {
                 })
             })
             .collect()
+    }
+
+    fn chat_endpoint(&self) -> &str {
+        "/v1/messages"
+    }
+
+    fn auth_header_name(&self) -> &str {
+        "x-api-key"
+    }
+
+    fn auth_header_value(&self, api_key: &str) -> String {
+        api_key.to_string()
+    }
+
+    fn create_sse_parser(&self) -> Box<dyn SseParser> {
+        Box::new(AnthropicSseParser::new())
     }
 
     fn denormalize_stream_chunk(&self, event_type: &str, data: &Value) -> Vec<StreamEvent> {
