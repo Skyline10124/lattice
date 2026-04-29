@@ -20,11 +20,11 @@ artemis/ (Cargo workspace)
 | | |
 |---|---|
 | **Fast** | Rust hot path, zero-cost abstractions |
-| **Minimal** | No DB, no external services. Just crates + catalog.json. |
+| **Minimal** | No DB, no external services. Just Rust library + catalog.json. |
 | **Pluggable** | Overlay pattern for providers, tools, routing rules |
 | **Focused** | One thing well: given model + messages -> return response |
 
-### Plugin model
+### Plugin model **(Design vision, not yet implemented)**
 
 Every plugin is a typed function: `Input -> to_prompt() -> LLM.invoke() -> from_output() -> Output`
 
@@ -89,7 +89,7 @@ Artemis is in **alpha / dogfooding** stage. What works:
 - **Tested providers**: deepseek, minimax (Anthropic protocol), opencode-go (14 models all pass)
 - **409+ tests pass, 0 fail**, clippy + fmt clean
 
-What's not yet done: full Python chat/streaming API, Gemini main path, error/retry贯通, production hardening. Not yet production ready.
+What's not yet done: Python binding is resolver-only (chat/streaming not yet exposed), Gemini main path, error/retry贯通, production hardening. Not yet production ready.
 
 ## Project structure
 
