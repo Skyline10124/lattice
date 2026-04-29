@@ -1,140 +1,174 @@
 use artemis_core::types::ToolDefinition;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{de::DeserializeOwned, Serialize};
+use thiserror::Error;
 
 // ---------------------------------------------------------------------------
-// Plugin trait
+// Plugin trait — LLM does inference, Behavior controls decisions
 // ---------------------------------------------------------------------------
 
-/// A plugin is a typed LLM function — Input → prompt → LLM → parse → Output.
+/// A typed LLM function. The Plugin defines *what* the LLM should do;
+/// the Behavior defines *how* to handle its output.
 ///
-/// Plugins are **composable**: the output of one plugin can become the input of
-/// the next, forming an agent pipeline controlled by code (not the LLM).
-///
-/// # Example
-///
-/// ```ignore
-/// let code_review = CodeReviewPlugin::new();
-/// let diff = fs::read_to_string("changes.diff")?;
-/// let input = serde_json::to_value(ReviewInput { diff })?;
-/// let output: ReviewOutput = code_review.run(&agent, &input)?;
-/// if code_review.should_handoff(&output) {
-///     let refactor = RefactorPlugin::new();
-///     refactor.run(&agent, &output.issues)?;
-/// }
-/// ```
+/// # Type parameters
+/// - `I`: Input type (e.g., a diff, a file list)
+/// - `O`: Output type (e.g., review issues, refactored code)
 pub trait Plugin: Send + Sync {
-    /// Human-readable name of this plugin.
+    type Input: Serialize + DeserializeOwned + Send;
+    type Output: Serialize + DeserializeOwned + Send;
+
+    /// Human-readable name.
     fn name(&self) -> &str;
 
     /// System prompt that defines the agent's identity and task.
     fn system_prompt(&self) -> &str;
 
-    /// Tools this plugin can use. Return `&[]` if no tools are needed.
-    fn tools(&self) -> &[ToolDefinition];
+    /// Format the typed input into a prompt string for the LLM.
+    fn to_prompt(&self, input: &Self::Input) -> String;
 
-    /// Preferred model for this plugin's task (e.g., `"deepseek-v4-pro"`).
-    /// Falls back to the Agent's model if empty.
+    /// Parse the LLM's raw text response into the typed output.
+    fn parse_output(&self, raw: &str) -> Result<Self::Output, PluginError>;
+
+    /// Tools this plugin may use.
+    fn tools(&self) -> &[ToolDefinition] {
+        &[]
+    }
+
+    /// Preferred model. Empty means "use the runner's default".
     fn preferred_model(&self) -> &str {
         ""
     }
+}
 
-    // ---- lifecycle hooks ----
+// ---------------------------------------------------------------------------
+// Behavior trait — how to handle output, errors, and handoffs
+// ---------------------------------------------------------------------------
 
-    /// Build the input value before sending to the LLM.
-    /// The returned JSON value is serialized as the user message content.
-    /// Default: passes through the raw input unchanged.
-    fn build_input(&self, raw_input: &Value) -> Result<Value, PluginError> {
-        Ok(raw_input.clone())
-    }
+/// Controls what happens after the LLM produces output.
+/// Separate from Plugin so the same plugin can run in different modes.
+pub trait Behavior: Send + Sync {
+    /// After receiving output, decide the next action.
+    fn decide(&self, confidence: f64) -> Action;
 
-    /// Parse and validate the LLM's response into structured output.
-    fn parse_output(&self, raw_response: &str) -> Result<Value, PluginError>;
+    /// Handle a parse or validation error.
+    fn on_error(&self, error: &PluginError, attempt: u32) -> ErrorAction;
+}
 
-    /// Validate the parsed output. Return `Ok(())` if the output is acceptable.
-    /// Return `Err` to trigger a retry or fallback.
-    fn validate_output(&self, _output: &Value) -> Result<(), PluginError> {
-        Ok(())
-    }
+/// What to do next.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Done — return the output.
+    Done,
+    /// Hand off to another plugin by name.
+    Handoff(String),
+    /// Retry the LLM call (with error feedback).
+    Retry,
+}
 
-    /// After receiving the model's response, decide what to do next.
-    /// - `None` → the plugin is done, return the output.
-    /// - `Some(name)` → hand off to the named plugin with this output as its input.
-    fn should_handoff(&self, _output: &Value) -> Option<String> {
-        None
-    }
+/// How to handle an error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrorAction {
+    /// Retry the LLM call.
+    Retry,
+    /// Stop and return the error.
+    Abort,
+    /// Hand off to a human for review.
+    Escalate,
+}
 
-    /// Called when parse_output fails. The plugin can decide to retry or abort.
-    /// Default: retry once, then give up.
-    fn on_parse_error(&self, error: &PluginError, _attempt: u32) -> PluginErrorAction {
-        if _attempt < 1 {
-            PluginErrorAction::Retry
-        } else {
-            PluginErrorAction::Abort
+// ---------------------------------------------------------------------------
+// Built-in behaviors
+// ---------------------------------------------------------------------------
+
+/// Strict: requires confidence >= threshold, escalates on persistent errors.
+pub struct StrictBehavior {
+    pub confidence_threshold: f64,
+    pub max_retries: u32,
+    pub escalate_to: Option<String>,
+}
+
+impl Default for StrictBehavior {
+    fn default() -> Self {
+        Self {
+            confidence_threshold: 0.7,
+            max_retries: 3,
+            escalate_to: None,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during plugin execution.
-#[derive(Debug, thiserror::Error)]
-pub enum PluginError {
-    /// The LLM's output could not be parsed into the expected format.
-    #[error("Parse error: {0}")]
-    Parse(String),
-
-    /// The parsed output failed validation.
-    #[error("Validation error: {0}")]
-    Validation(String),
-
-    /// A required tool was not available.
-    #[error("Missing tool: {0}")]
-    MissingTool(String),
-
-    /// An unexpected error occurred.
-    #[error("Plugin error: {0}")]
-    Other(String),
-}
-
-/// What to do when parse_output fails.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PluginErrorAction {
-    /// Retry the LLM call (the error message is fed back to the model).
-    Retry,
-    /// Stop the plugin and return the error.
-    Abort,
-}
-
-// ---------------------------------------------------------------------------
-// Plugin runner — ties a Plugin to an artemis Agent
-// ---------------------------------------------------------------------------
-
-/// Runs a Plugin by delegating to the artemis Agent for model calls.
-pub struct PluginRunner<'a, A> {
-    plugin: &'a dyn Plugin,
-    agent: &'a mut A,
-}
-
-impl<'a, A> PluginRunner<'a, A>
-where
-    A: PluginAgent,
-{
-    pub fn new(plugin: &'a dyn Plugin, agent: &'a mut A) -> Self {
-        Self { plugin, agent }
+impl Behavior for StrictBehavior {
+    fn decide(&self, confidence: f64) -> Action {
+        if confidence >= self.confidence_threshold {
+            Action::Done
+        } else {
+            Action::Retry
+        }
     }
 
-    /// Execute the plugin: send input → get response → parse → validate.
-    /// Retries on parse/validation errors according to the plugin's
-    /// `on_parse_error` policy.
-    pub fn run(&mut self, input: &Value) -> Result<Value, PluginError> {
-        let formatted = self.plugin.build_input(input)?;
-        let prompt = serde_json::to_string(&formatted)
-            .unwrap_or_else(|_| formatted.to_string());
+    fn on_error(&self, _error: &PluginError, attempt: u32) -> ErrorAction {
+        if attempt < self.max_retries {
+            ErrorAction::Retry
+        } else if self.escalate_to.is_some() {
+            ErrorAction::Escalate
+        } else {
+            ErrorAction::Abort
+        }
+    }
+}
 
+/// YOLO: trusts the LLM's output unconditionally. Never retries.
+pub struct YoloBehavior;
+
+impl Behavior for YoloBehavior {
+    fn decide(&self, _confidence: f64) -> Action {
+        Action::Done
+    }
+
+    fn on_error(&self, _error: &PluginError, _attempt: u32) -> ErrorAction {
+        ErrorAction::Abort
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PluginRunner — ties Plugin + Behavior + Agent together
+// ---------------------------------------------------------------------------
+
+use std::marker::PhantomData;
+
+/// Runs a Plugin with a given Behavior against an Agent.
+pub struct PluginRunner<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> {
+    plugin: &'a P,
+    behavior: &'a B,
+    agent: &'a mut A,
+    _phantom: PhantomData<(P::Input, P::Output)>,
+}
+
+/// Result of running a plugin.
+pub struct RunResult {
+    /// JSON-serialized output.
+    pub output: String,
+    /// Number of LLM calls made (including retries).
+    pub turns: u32,
+    /// The action taken on the final turn.
+    pub final_action: Action,
+}
+
+impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B, A> {
+    pub fn new(plugin: &'a P, behavior: &'a B, agent: &'a mut A) -> Self {
+        Self {
+            plugin,
+            behavior,
+            agent,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Run the plugin: to_prompt → LLM → parse → behavior.decide.
+    /// Retries and handoffs are handled by the Behavior.
+    pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
+        let prompt = self.plugin.to_prompt(input);
         let mut attempt = 0u32;
+
         loop {
             let raw = self
                 .agent
@@ -143,51 +177,110 @@ where
 
             match self.plugin.parse_output(&raw) {
                 Ok(output) => {
-                    self.plugin.validate_output(&output)?;
-                    return Ok(output);
+                    let confidence = extract_confidence(&raw);
+                    match self.behavior.decide(confidence) {
+                        Action::Done => {
+                            let json = serde_json::to_string(&output)
+                                .map_err(|e| PluginError::Other(e.to_string()))?;
+                            return Ok(RunResult {
+                                output: json,
+                                turns: attempt + 1,
+                                final_action: Action::Done,
+                            });
+                        }
+                        Action::Handoff(_target) => {
+                            let json = serde_json::to_string(&output)
+                                .map_err(|e| PluginError::Other(e.to_string()))?;
+                            return Ok(RunResult {
+                                output: json,
+                                turns: attempt + 1,
+                                final_action: Action::Handoff(_target),
+                            });
+                        }
+                        Action::Retry => {
+                            attempt += 1;
+                            continue;
+                        }
+                    }
                 }
-                Err(e) => match self.plugin.on_parse_error(&e, attempt) {
-                    PluginErrorAction::Retry => {
+                Err(e) => match self.behavior.on_error(&e, attempt) {
+                    ErrorAction::Retry => {
                         attempt += 1;
                         continue;
                     }
-                    PluginErrorAction::Abort => return Err(e),
+                    ErrorAction::Abort => return Err(e),
+                    ErrorAction::Escalate => {
+                        return Err(PluginError::Escalated {
+                            original: Box::new(e),
+                            after_attempts: attempt,
+                        });
+                    }
                 },
             }
         }
     }
-
-    /// Run the plugin and check for handoff.
-    pub fn run_with_handoff(&mut self, input: &Value) -> Result<RunResult, PluginError> {
-        let output = self.run(input)?;
-        let handoff = self.plugin.should_handoff(&output);
-        Ok(RunResult { output, handoff })
-    }
-}
-
-/// Result of a plugin run, including optional handoff target.
-#[derive(Debug, Clone)]
-pub struct RunResult {
-    pub output: Value,
-    pub handoff: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
-// Agent abstraction — any type that can call an LLM
+// Agent abstraction
 // ---------------------------------------------------------------------------
 
-/// Minimal interface that a PluginRunner needs from its underlying agent.
-/// artemis_agent::Agent implements this trait.
+/// Minimal interface for an LLM-calling agent.
 pub trait PluginAgent {
-    /// Send a message to the model and return the text response.
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+}
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum PluginError {
+    #[error("Parse error: {0}")]
+    Parse(String),
+
+    #[error("Validation error: {0}")]
+    Validation(String),
+
+    #[error("Missing tool: {0}")]
+    MissingTool(String),
+
+    #[error("Escalated after {after_attempts} attempts: {original}")]
+    Escalated {
+        original: Box<PluginError>,
+        after_attempts: u32,
+    },
+
+    #[error("{0}")]
+    Other(String),
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Try to extract a confidence score from the LLM's raw response.
+/// Falls back to 1.0 if not found (assumes single-pass outputs are confident).
+fn extract_confidence(raw: &str) -> f64 {
+    // Look for "confidence": 0.85 or similar JSON field
+    for line in raw.lines() {
+        if let Some(pos) = line.find("\"confidence\"") {
+            let after = &line[pos + 12..];
+            if let Some(colon) = after.find(':') {
+                let val = after[colon + 1..].trim().trim_end_matches(',');
+                if let Ok(f) = val.parse::<f64>() {
+                    return f.clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+    1.0 // default: trust the output
 }
 
 // ---------------------------------------------------------------------------
 // Built-in: CodeReview plugin
 // ---------------------------------------------------------------------------
 
-/// A simple code review plugin — reads a diff, finds issues.
 pub struct CodeReviewPlugin;
 
 impl CodeReviewPlugin {
@@ -197,23 +290,27 @@ impl CodeReviewPlugin {
 }
 
 impl Plugin for CodeReviewPlugin {
+    type Input = serde_json::Value;
+    type Output = serde_json::Value;
+
     fn name(&self) -> &str {
         "code-review"
     }
 
     fn system_prompt(&self) -> &str {
-        "You are a senior code reviewer. Review the diff for correctness, security, and design issues. \
-         Return a JSON object with an 'issues' array: each issue has 'severity' (critical/high/medium/low), \
-         'file', 'line', and 'description'. Return ONLY valid JSON, no other text."
+        "You are a senior code reviewer. Review the provided diff for correctness, \
+         security, and design issues. Return a JSON object with an 'issues' array. \
+         Each issue has: severity (critical/high/medium/low), file, line, description. \
+         Include a 'confidence' field (0.0-1.0) indicating how confident you are \
+         in this review. Return ONLY valid JSON."
     }
 
-    fn tools(&self) -> &[ToolDefinition] {
-        &[]
+    fn to_prompt(&self, input: &Self::Input) -> String {
+        serde_json::to_string(input).unwrap_or_default()
     }
 
-    fn parse_output(&self, raw: &str) -> Result<Value, PluginError> {
+    fn parse_output(&self, raw: &str) -> Result<serde_json::Value, PluginError> {
         let trimmed = raw.trim();
-        // Try to extract JSON from markdown code blocks or raw text
         let json_str = if let Some(start) = trimmed.find("```json") {
             let after = &trimmed[start + 7..];
             after.split("```").next().unwrap_or(trimmed)
@@ -222,23 +319,7 @@ impl Plugin for CodeReviewPlugin {
         } else {
             return Err(PluginError::Parse("Response does not contain JSON".into()));
         };
-
-        serde_json::from_str(json_str)
-            .map_err(|e| PluginError::Parse(format!("Invalid JSON: {}", e)))
-    }
-
-    fn validate_output(&self, output: &Value) -> Result<(), PluginError> {
-        let issues = output
-            .get("issues")
-            .and_then(|i| i.as_array())
-            .ok_or_else(|| PluginError::Validation("Missing 'issues' array".into()))?;
-
-        if issues.is_empty() {
-            return Err(PluginError::Validation(
-                "No issues found — response may be incomplete".into(),
-            ));
-        }
-        Ok(())
+        serde_json::from_str(json_str).map_err(|e| PluginError::Parse(e.to_string()))
     }
 }
 
@@ -251,31 +332,57 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_code_review_plugin_valid_json() {
-        let plugin = CodeReviewPlugin::new();
-        let raw = r#"{"issues":[{"severity":"high","file":"lib.rs","line":42,"description":"bug"}]}"#;
-        let result = plugin.parse_output(raw).unwrap();
-        assert_eq!(result["issues"].as_array().unwrap().len(), 1);
+    fn test_strict_behavior_retries_low_confidence() {
+        let b = StrictBehavior {
+            confidence_threshold: 0.8,
+            ..Default::default()
+        };
+        assert_eq!(b.decide(0.5), Action::Retry);
+        assert_eq!(b.decide(0.9), Action::Done);
     }
 
     #[test]
-    fn test_code_review_plugin_markdown_json() {
-        let plugin = CodeReviewPlugin::new();
-        let raw = "Here is the review:\n```json\n{\"issues\":[{\"severity\":\"low\",\"file\":\"a.rs\",\"line\":1,\"description\":\"nit\"}]}\n```";
-        let result = plugin.parse_output(raw).unwrap();
-        assert_eq!(result["issues"].as_array().unwrap().len(), 1);
+    fn test_yolo_always_done() {
+        let b = YoloBehavior;
+        assert_eq!(b.decide(0.1), Action::Done);
     }
 
     #[test]
-    fn test_code_review_plugin_invalid_json() {
-        let plugin = CodeReviewPlugin::new();
-        assert!(plugin.parse_output("not json at all").is_err());
+    fn test_strict_escalates_after_retries() {
+        let b = StrictBehavior {
+            max_retries: 2,
+            escalate_to: Some("human".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            b.on_error(&PluginError::Parse("x".into()), 0),
+            ErrorAction::Retry
+        );
+        assert_eq!(
+            b.on_error(&PluginError::Parse("x".into()), 2),
+            ErrorAction::Escalate
+        );
     }
 
     #[test]
-    fn test_code_review_plugin_empty_issues_fails_validation() {
-        let plugin = CodeReviewPlugin::new();
-        let output = serde_json::json!({"issues": []});
-        assert!(plugin.validate_output(&output).is_err());
+    fn test_code_review_parse_json() {
+        let p = CodeReviewPlugin::new();
+        let raw = r#"{"issues":[],"confidence":0.9}"#;
+        let out = p.parse_output(raw).unwrap();
+        assert_eq!(out["confidence"].as_f64().unwrap(), 0.9);
+    }
+
+    #[test]
+    fn test_code_review_parse_markdown() {
+        let p = CodeReviewPlugin::new();
+        let raw = "```json\n{\"issues\":[],\"confidence\":0.8}\n```";
+        let out = p.parse_output(raw).unwrap();
+        assert_eq!(out["confidence"].as_f64().unwrap(), 0.8);
+    }
+
+    #[test]
+    fn test_extract_confidence() {
+        assert!((extract_confidence("{\"confidence\":0.85}") - 0.85).abs() < 0.01);
+        assert!((extract_confidence("no confidence field") - 1.0).abs() < 0.01);
     }
 }
