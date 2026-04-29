@@ -41,12 +41,7 @@ pub fn run(
     Ok(())
 }
 
-fn display_events(
-    agent: &Agent,
-    events: Vec<LoopEvent>,
-    verbose: bool,
-    json: bool,
-) -> Result<()> {
+fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bool) -> Result<()> {
     let mut content_buf = String::new();
 
     for event in events {
@@ -65,11 +60,7 @@ fn display_events(
             }
             LoopEvent::ToolCallRequired { calls } => {
                 if verbose && !json {
-                    eprintln!(
-                        "\n{} {} tool call(s)...",
-                        "executing".dimmed(),
-                        calls.len()
-                    );
+                    eprintln!("\n{} {} tool call(s)...", "executing".dimmed(), calls.len());
                 }
             }
             LoopEvent::Done { usage } => {

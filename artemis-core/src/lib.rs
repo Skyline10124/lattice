@@ -359,7 +359,10 @@ mod resolve_tests {
         // Without ANTHROPIC_API_KEY, resolve should error with a Config message.
         let result = resolve("sonnet");
         match result {
-            Ok(r) => panic!("unexpected Ok: provider={}, api_key={:?}", r.provider, r.api_key),
+            Ok(r) => panic!(
+                "unexpected Ok: provider={}, api_key={:?}",
+                r.provider, r.api_key
+            ),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
@@ -390,7 +393,10 @@ mod resolve_tests {
     fn resolve_gpt4o_missing_credential_errors() {
         let result = resolve("gpt-4o");
         match result {
-            Ok(r) => panic!("unexpected Ok: provider={}, api_key={:?}", r.provider, r.api_key),
+            Ok(r) => panic!(
+                "unexpected Ok: provider={}, api_key={:?}",
+                r.provider, r.api_key
+            ),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(

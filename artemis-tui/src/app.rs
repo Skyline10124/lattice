@@ -1,5 +1,7 @@
 use anyhow::Result;
-use artemis_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent, ToolExecutor};
+use artemis_agent::{
+    default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent, ToolExecutor,
+};
 use artemis_core::types::{Role, ToolCall};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::UnboundedSender;
@@ -229,8 +231,7 @@ impl App {
                         LoopEvent::Done { usage } => {
                             if let Some(ref u) = usage {
                                 cumulative_tokens += u.total_tokens as u64;
-                                usage_text =
-                                    format!("\n\n[{} tok]", cumulative_tokens);
+                                usage_text = format!("\n\n[{} tok]", cumulative_tokens);
                             }
                         }
                         LoopEvent::Error { message } => {

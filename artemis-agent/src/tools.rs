@@ -111,7 +111,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         // --- New tools ---
         ToolDefinition::new(
             "patch".into(),
-            "Apply a find/replace edit to a file. Safer than write_file for targeted changes.".into(),
+            "Apply a find/replace edit to a file. Safer than write_file for targeted changes."
+                .into(),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -228,7 +229,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "execute_code".into(),
-            "Write code to a temp file and execute it. Allowed languages: py, js, rs, sh, ts.".into(),
+            "Write code to a temp file and execute it. Allowed languages: py, js, rs, sh, ts."
+                .into(),
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -268,39 +270,26 @@ impl DefaultToolExecutor {
 
 impl ToolExecutor for DefaultToolExecutor {
     fn execute(&self, call: &ToolCall) -> String {
-        let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
-            .unwrap_or(serde_json::Value::Null);
+        let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
 
         match call.function.name.as_str() {
             "read_file" => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                std::fs::read_to_string(path)
-                    .unwrap_or_else(|e| format!("Error: {}", e))
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                std::fs::read_to_string(path).unwrap_or_else(|e| format!("Error: {}", e))
             }
             "grep" => {
-                let pattern = args
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 let output = std::process::Command::new("grep")
                     .args(["-rn", "--include=*.rs", pattern, path])
                     .output();
                 match output {
                     Ok(o) => {
-                        let mut result =
-                            String::from_utf8_lossy(&o.stdout).to_string();
+                        let mut result = String::from_utf8_lossy(&o.stdout).to_string();
                         if !o.stderr.is_empty() {
-                            result.push_str(&format!(
-                                "\nERR:{}",
-                                String::from_utf8_lossy(&o.stderr)
-                            ));
+                            result
+                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
                         result
                     }
@@ -308,19 +297,9 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "write_file" => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let content = args
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let abs = format!(
-                    "{}/{}",
-                    self.project_root,
-                    path.trim_start_matches('/')
-                );
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
                 // Safety: only allow writing to project source dirs
                 let allowed = [
                     "artemis-core/",
@@ -351,32 +330,20 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "list_directory" => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 match std::fs::read_dir(path) {
                     Ok(entries) => {
-                        let mut files: Vec<_> =
-                            entries.filter_map(|e| e.ok()).collect();
+                        let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
                         files.sort_by_key(|e| e.file_name());
                         files
                             .iter()
                             .map(|e| {
-                                let ty = if e
-                                    .file_type()
-                                    .map(|t| t.is_dir())
-                                    .unwrap_or(false)
-                                {
+                                let ty = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                                     "DIR"
                                 } else {
                                     "FILE"
                                 };
-                                format!(
-                                    "{}  {}",
-                                    ty,
-                                    e.file_name().to_string_lossy()
-                                )
+                                format!("{}  {}", ty, e.file_name().to_string_lossy())
                             })
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -385,10 +352,7 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "run_test" => {
-                let test_name = args
-                    .get("test_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let test_name = args.get("test_name").and_then(|v| v.as_str()).unwrap_or("");
                 let mut cmd = std::process::Command::new("cargo");
                 cmd.arg("test").args(["--color", "never"]);
                 if !test_name.is_empty() {
@@ -419,22 +383,14 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "bash" => {
-                let cmd = args
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let output = std::process::Command::new("sh")
-                    .args(["-c", cmd])
-                    .output();
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let output = std::process::Command::new("sh").args(["-c", cmd]).output();
                 match output {
                     Ok(o) => {
-                        let mut result =
-                            String::from_utf8_lossy(&o.stdout).to_string();
+                        let mut result = String::from_utf8_lossy(&o.stdout).to_string();
                         if !o.stderr.is_empty() {
-                            result.push_str(&format!(
-                                "\nERR:{}",
-                                String::from_utf8_lossy(&o.stderr)
-                            ));
+                            result
+                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
                         result
                     }
@@ -459,7 +415,8 @@ impl ToolExecutor for DefaultToolExecutor {
                             match std::fs::write(&abs, &new_content) {
                                 Ok(_) => {
                                     // Show diff
-                                    let diff_lines: Vec<String> = new_content.lines()
+                                    let diff_lines: Vec<String> = new_content
+                                        .lines()
                                         .zip(content.lines())
                                         .enumerate()
                                         .filter(|(_, (a, b))| a != b)
@@ -480,7 +437,10 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "run_command" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+                let timeout_secs = args
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(30);
                 let output = std::process::Command::new("timeout")
                     .arg(timeout_secs.to_string())
                     .arg("sh")
@@ -542,7 +502,8 @@ impl ToolExecutor for DefaultToolExecutor {
                         let truncated: String = content.chars().take(5000).collect();
                         let mut result = truncated;
                         if !o.stderr.is_empty() {
-                            result.push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
+                            result
+                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
                         result
                     }
@@ -551,9 +512,7 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "browser_navigate" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let output = std::process::Command::new("xdg-open")
-                    .arg(url)
-                    .output();
+                let output = std::process::Command::new("xdg-open").arg(url).output();
                 match output {
                     Ok(o) => {
                         if o.status.success() {
@@ -563,11 +522,17 @@ impl ToolExecutor for DefaultToolExecutor {
                             format!("Failed to open {}: {}", url, stderr)
                         }
                     }
-                    Err(e) => format!("Error opening browser: {}. Try opening manually: {}", e, url),
+                    Err(e) => format!(
+                        "Error opening browser: {}. Try opening manually: {}",
+                        e, url
+                    ),
                 }
             }
             "browser_screenshot" => {
-                let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("screenshot.png");
+                let filename = args
+                    .get("filename")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("screenshot.png");
                 // Try import (ImageMagick) first
                 let result = std::process::Command::new("import")
                     .args(["-window", "root", filename])
@@ -578,23 +543,19 @@ impl ToolExecutor for DefaultToolExecutor {
                     }
                     _ => {
                         // Fall back to scrot
-                        let result2 = std::process::Command::new("scrot")
-                            .arg(filename)
-                            .output();
+                        let result2 = std::process::Command::new("scrot").arg(filename).output();
                         match result2 {
                             Ok(o2) if o2.status.success() => {
                                 format!("Screenshot saved to {}", filename)
                             }
                             _ => {
-                                format!("No screenshot tool available (tried import and scrot). Install ImageMagick or scrot.")
+                                "No screenshot tool available (tried import and scrot). Install ImageMagick or scrot.".to_string()
                             }
                         }
                     }
                 }
             }
-            "browser_console" => {
-                "not available in CLI mode".to_string()
-            }
+            "browser_console" => "not available in CLI mode".to_string(),
             "execute_code" => {
                 let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
                 let language = args.get("language").and_then(|v| v.as_str()).unwrap_or("");
@@ -605,10 +566,16 @@ impl ToolExecutor for DefaultToolExecutor {
                     "sh" => ("sh", "sh", &[]),
                     "ts" => ("ts", "npx", &["tsx"]),
                     "rs" => ("rs", "rustc", &[]),
-                    _ => return format!("Unsupported language: {}. Allowed: py, js, rs, sh, ts", language),
+                    _ => {
+                        return format!(
+                            "Unsupported language: {}. Allowed: py, js, rs, sh, ts",
+                            language
+                        )
+                    }
                 };
 
-                let tmp_dir = std::env::temp_dir().join(format!("artemis_code_{}", std::process::id()));
+                let tmp_dir =
+                    std::env::temp_dir().join(format!("artemis_code_{}", std::process::id()));
                 let _ = std::fs::create_dir_all(&tmp_dir);
 
                 // Rust: compile then run
@@ -625,7 +592,10 @@ impl ToolExecutor for DefaultToolExecutor {
                         .output();
                     match compile {
                         Ok(o) if !o.status.success() => {
-                            return format!("Compilation failed:\n{}", String::from_utf8_lossy(&o.stderr));
+                            return format!(
+                                "Compilation failed:\n{}",
+                                String::from_utf8_lossy(&o.stderr)
+                            );
                         }
                         Err(e) => return format!("Error running rustc: {}", e),
                         _ => {}

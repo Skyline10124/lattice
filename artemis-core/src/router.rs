@@ -245,7 +245,11 @@ impl ModelRouter {
             let hint = if keys.is_empty() {
                 format!("provider '{}' requires a credential", best.provider_id)
             } else {
-                format!("provider '{}' requires one of: {}", best.provider_id, keys.join(", "))
+                format!(
+                    "provider '{}' requires one of: {}",
+                    best.provider_id,
+                    keys.join(", ")
+                )
             };
             return Err(ArtemisError::Config { message: hint });
         }

@@ -131,6 +131,34 @@ impl Agent {
             }
         }
 
+        // --- Auto-save memory entry ---
+        if let Some(ref memory) = self.memory {
+            let prompt_summary = if content.len() > 200 {
+                format!("{}...", &content[..200])
+            } else {
+                content.to_string()
+            };
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let entry = artemis_memory::MemoryEntry {
+                id: format!("{}-{}", now_secs, self.state.token_usage),
+                kind: artemis_memory::EntryKind::SessionLog,
+                session_id: self.state.resolved.canonical_id.clone(),
+                summary: format!(
+                    "Model: {} | Provider: {} | Tokens: {}",
+                    self.state.resolved.api_model_id,
+                    self.state.resolved.provider,
+                    self.state.token_usage
+                ),
+                content: prompt_summary,
+                tags: vec![],
+                created_at: format!("{now_secs}"),
+            };
+            SHARED_RUNTIME.block_on(memory.save_entry(entry));
+        }
+
         all_events
     }
 

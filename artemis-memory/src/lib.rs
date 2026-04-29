@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use std::sync::LazyLock;
 
 // ---------------------------------------------------------------------------
@@ -46,15 +47,16 @@ impl MemoryEntry {
 // ---------------------------------------------------------------------------
 
 /// Cross-session persistent memory. Supports both full-text and semantic search.
+#[async_trait]
 pub trait Memory: Send + Sync {
     /// Store a memory entry.
-    fn save_entry(&self, entry: MemoryEntry);
+    async fn save_entry(&self, entry: MemoryEntry);
 
     /// Recall entries matching a natural-language query.
-    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
+    async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
 
     /// List all entries of a given kind.
-    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
+    async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
 
     /// Reflect on a conversation and extract memories.
     /// Returns summaries of what should be remembered.
@@ -85,15 +87,16 @@ impl Default for InMemoryMemory {
     }
 }
 
+#[async_trait]
 impl Memory for InMemoryMemory {
-    fn save_entry(&self, entry: MemoryEntry) {
+    async fn save_entry(&self, entry: MemoryEntry) {
         // InMemoryMemory is not Sync (it uses RefCell internally).
         // Using a static LazyLock<Mutex<…>> for cross-thread safety.
         // For now, just delegate to a global store.
         GLOBAL_STORE.lock().unwrap().entries.push(entry);
     }
 
-    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+    async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         let store = GLOBAL_STORE.lock().unwrap();
         store
             .entries
@@ -104,7 +107,7 @@ impl Memory for InMemoryMemory {
             .collect()
     }
 
-    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
+    async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
         let store = GLOBAL_STORE.lock().unwrap();
         store
             .entries
@@ -136,9 +139,8 @@ struct GlobalStore {
     entries: Vec<MemoryEntry>,
 }
 
-static GLOBAL_STORE: LazyLock<Mutex<GlobalStore>> = LazyLock::new(|| {
-    Mutex::new(GlobalStore { entries: vec![] })
-});
+static GLOBAL_STORE: LazyLock<Mutex<GlobalStore>> =
+    LazyLock::new(|| Mutex::new(GlobalStore { entries: vec![] }));
 
 pub mod reflect;
 pub mod sqlite;
@@ -154,7 +156,7 @@ mod tests {
     #[test]
     fn test_save_and_recall_inmemory() {
         let mem = InMemoryMemory::new();
-        mem.save_entry(MemoryEntry {
+        futures::executor::block_on(mem.save_entry(MemoryEntry {
             id: "1".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -162,8 +164,8 @@ mod tests {
             content: "artemis is written in Rust".into(),
             tags: vec!["project".into()],
             created_at: "2026-04-29".into(),
-        });
-        let results = mem.recall("Rust", 10);
+        }));
+        let results = futures::executor::block_on(mem.recall("Rust", 10));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].summary, "Project uses Rust");
     }
@@ -171,14 +173,14 @@ mod tests {
     #[test]
     fn test_recall_empty() {
         let mem = InMemoryMemory::new();
-        let results = mem.recall("nothing", 10);
+        let results = futures::executor::block_on(mem.recall("nothing", 10));
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_entries_by_kind_inmemory() {
         let mem = InMemoryMemory::new();
-        mem.save_entry(MemoryEntry {
+        futures::executor::block_on(mem.save_entry(MemoryEntry {
             id: "kind-fact".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -186,8 +188,8 @@ mod tests {
             content: "First fact content".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        });
-        mem.save_entry(MemoryEntry {
+        }));
+        futures::executor::block_on(mem.save_entry(MemoryEntry {
             id: "kind-decision".into(),
             kind: EntryKind::Decision,
             session_id: "s1".into(),
@@ -195,12 +197,12 @@ mod tests {
             content: "First decision content".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        });
-        let facts = mem.entries_by_kind(&EntryKind::Fact, 10);
+        }));
+        let facts = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Fact, 10));
         assert!(facts.iter().any(|e| e.id == "kind-fact"));
         assert!(!facts.iter().any(|e| e.id == "kind-decision"));
 
-        let decisions = mem.entries_by_kind(&EntryKind::Decision, 10);
+        let decisions = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Decision, 10));
         assert!(decisions.iter().any(|e| e.id == "kind-decision"));
         assert!(!decisions.iter().any(|e| e.id == "kind-fact"));
     }
