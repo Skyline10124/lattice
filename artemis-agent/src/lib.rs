@@ -250,6 +250,10 @@ struct ToolCallAccum {
 // ---------------------------------------------------------------------------
 
 impl artemis_plugin::PluginAgent for Agent {
+    fn set_system_prompt(&mut self, prompt: &str) {
+        self.state.push_system_message(prompt);
+    }
+
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
         let events = self.send(message);
         let mut content = String::new();

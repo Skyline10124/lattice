@@ -248,6 +248,9 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
     /// Output size is validated against config.max_output_bytes.
     /// If memory is set, the prompt and final output are saved.
     pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
+        // Set the plugin's system prompt before the first LLM call.
+        self.agent.set_system_prompt(self.plugin.system_prompt());
+
         let prompt = self.plugin.to_prompt(input);
         let mut attempt = 0u32;
 
@@ -393,7 +396,11 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
 
 /// Minimal interface for an LLM-calling agent.
 pub trait PluginAgent {
+    /// Send a user message and return the assistant's text response.
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Set the system prompt. Called once per plugin run before the first send().
+    fn set_system_prompt(&mut self, _prompt: &str) {}
 
     /// Returns the agent's cumulative token usage so far.
     /// Defaults to 0 for agents that do not track tokens.
@@ -488,7 +495,17 @@ impl Plugin for CodeReviewPlugin {
     }
 
     fn to_prompt(&self, input: &Self::Input) -> String {
-        serde_json::to_string(input).unwrap_or_default()
+        let diff = input
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        format!(
+            "Please review the following code for bugs, security issues, and design problems.\n\n\
+             Return a JSON object with an 'issues' array and a 'confidence' field (0.0-1.0).\n\
+             Each issue: severity (critical/high/medium/low), file, line, description.\n\n\
+             CODE TO REVIEW:\n{}",
+            diff
+        )
     }
 
     fn parse_output(&self, raw: &str) -> Result<serde_json::Value, PluginError> {

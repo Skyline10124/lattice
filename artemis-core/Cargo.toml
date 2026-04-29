@@ -21,6 +21,8 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+artemis-agent = { path = "../artemis-agent" }
+artemis-plugin = { path = "../artemis-plugin" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
@@ -45,3 +47,6 @@ name = "opencode_test"
 [[example]]
 name = "minimax_debug"
 
+
+[[example]]
+name = "dogfood"

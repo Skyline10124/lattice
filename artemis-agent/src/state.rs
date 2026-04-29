@@ -24,6 +24,17 @@ impl AgentState {
         }
     }
 
+    pub fn push_system_message(&mut self, content: &str) {
+        self.messages.push(Message {
+            role: Role::System,
+            content: content.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+    }
+
     pub fn push_user_message(&mut self, content: &str) {
         self.messages.push(Message {
             role: Role::User,
