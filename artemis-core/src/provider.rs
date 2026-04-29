@@ -1,9 +1,8 @@
-use async_trait::async_trait;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 use crate::catalog::ResolvedModel;
-use crate::streaming::{EventStream, TokenUsage};
+use crate::streaming::TokenUsage;
 use crate::types::{Message, ToolCall, ToolDefinition};
 
 static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -16,30 +15,6 @@ static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
 pub fn shared_http_client() -> &'static reqwest::Client {
     &SHARED_HTTP_CLIENT
-}
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// Errors that can occur during provider operations.
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    /// A general, non-specific provider error.
-    #[error("Provider error: {0}")]
-    General(String),
-
-    /// An error returned by the upstream API.
-    #[error("API error: {0}")]
-    Api(String),
-
-    /// An error during streaming.
-    #[error("Stream error: {0}")]
-    Stream(String),
-
-    /// The requested provider was not found in the registry.
-    #[error("Provider not found: {0}")]
-    NotFound(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -86,31 +61,6 @@ pub struct ChatResponse {
     pub usage: Option<TokenUsage>,
     pub finish_reason: String,
     pub model: String,
-}
-
-// ---------------------------------------------------------------------------
-// Provider trait
-// ---------------------------------------------------------------------------
-
-/// Interface that all LLM provider adapters must implement.
-///
-/// Each concrete provider (OpenAI, Anthropic, etc.) implements this trait.
-#[async_trait]
-pub trait Provider: Send + Sync {
-    /// Send a chat request and receive a complete (non-streaming) response.
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError>;
-
-    /// Send a chat request and receive a streaming response as an [`EventStream`].
-    async fn chat_stream(&self, request: ChatRequest) -> Result<EventStream, ProviderError>;
-
-    /// Human-readable provider name (e.g. `"openai"`, `"anthropic"`).
-    fn name(&self) -> &str;
-
-    /// Whether this provider supports streaming responses.
-    fn supports_streaming(&self) -> bool;
-
-    /// Whether this provider supports tool / function calling.
-    fn supports_tools(&self) -> bool;
 }
 
 // ---------------------------------------------------------------------------
