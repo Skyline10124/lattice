@@ -1,277 +1,195 @@
-# artemis-core 代码审查报告（第二轮）
+# artemis 代码审查报告（第三轮）
 
 **审查日期**: 2026-04-29
-**审查范围**: `artemis-core/` 全部源文件，含 opencode 修复后的代码
-**对比基准**: 第一轮审查（2026-04-28）发现的 44 个问题
+**审查范围**: 全部 5 个 crate（artemis-core, agent, memory, token-pool, python）
+**对比基准**: 第二轮审查（2026-04-29）发现的 27 个问题
 
 ---
 
-## 修复质量评估
+## 总体变化
 
-opencode 的 7 波修复（Wave 0 ~ Wave REG）系统地处理了第一轮审查中的大部分问题：
+| 指标 | 第二轮 | 第三轮 | 变化 |
+|------|--------|--------|------|
+| 高优问题 | 5 | 1 | -4 |
+| 中优问题 | 10 | 11 | +1 |
+| 低优问题 | 12 | 12 | 0 |
+| **总计** | **27** | **24** | **-3** |
 
-| 第一轮等级 | 数量 | 已修复 | 部分修复 | 仍然存在 | 新发现 |
-|-----------|------|--------|---------|---------|--------|
-| 致命 (Critical) | 2 | 2 (C1, C2) | 0 | 0 | 0 |
-| 高 (High) | 14 | 11 | 1 (H9) | 2 (H3, H8) | 1 |
-| 中 (Medium) | 16 | 12 | 1 (M14) | 3 | 7 |
-| 低 (Low) | 12 | 7 | 0 | 5 | 7 |
-
-**整体修复率**: 30/44（68%）已修复，5/44 部分修复或仍存，9/44 未修复（主要是低优项）
-
-### 关键修复确认
-
-| 原问题 | 状态 |
-|--------|------|
-| C1 双 Transport trait | 已合并为单一 trait，`chat_completions.rs` 为 re-export |
-| C2 AgentLoop 无 tokio runtime | AgentLoop 已创建 tokio runtime（但引入新问题，见下文） |
-| H1 credentialless 优先级 | 正确处理三向优先级权衡 |
-| H2 对话历史丢失 | 完整历史保留，state 正确更新 |
-| H4 双 ErrorClassifier | `retry.rs` 中的重复已删除 |
-| H5 Anthropic SSE error 吞噬 | 显式 `"error"` 匹配分支 |
-| H6 Regex 编译开销 | `LazyLock<Regex>` 静态变量 |
-| H7 reqwest Client 每次创建 | `LazyLock<reqwest::Client>` 共享，10s connect / 30s 总超时 |
-| H11 rig-core | 已从 Cargo.toml 删除 |
-| H12 API key 明文 HTTP | `engine.rs` 中非 localhost HTTP 被拒绝 |
-| H13 HTTP 超时 | 已配置 10s connect + 30s total |
-| H14 ResolvedModel Debug 脱敏 | 自定义 `Debug` impl，`api_key` 显示 `"***"` |
-| M1 Anthropic usage 统计 | input_tokens 从 message_start 正确捕获，total 正确计算 |
-| M2 jittered_backoff overflow | `saturating_pow` |
-| M3 fits_in_context panic | Catalog::get() 使用 OnceLock + 返回 Config 错误 |
-| M12 ProviderConfig 死代码 | 已删除 |
-| M13 TransportType 注册 | 已删除 |
-| M15 线性扫描 | HashMap |
-| M16 双重分配 | `resp.json()` 替代 `text()` + `from_str` |
+第二轮 5 个高优中已修复 4 个（主要是 agent_loop 的 O(n²)、conversation clone 等随内核拆分自然消除）。
 
 ---
 
-## 一、高优先级问题 (High)
+## 一、高优问题 (High)
 
-### H-N1. `run_with_fallback` 无视错误分类，对所有错误执行 fallback
+### H1. HTTPS 校验缺失，API key 可能明文传输
 
-**文件**: `src/agent_loop.rs:266-269`
+**文件**: `artemis-core/src/router.rs:430-457`, `artemis-python/src/engine.rs:14-43`
 
-```rust
-let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
-if !has_error {
-    return events;
-}
-// 不管是什么错误，都进行 fallback——包括 401/403（不可能在下一个 provider 成功）
-```
+`validate_base_url` 函数存在但**从未在生产代码中被调用**。文档注释说 "HTTPS validation lives in the engine layer"，但 engine 层没有做任何 HTTPS 校验。用户可以注册 `http://` 的 base URL，API key 明文传输。
 
-`_classifier` 参数以下划线前缀命名（有意未使用）。`is_retryable()` 从未被调用。`AuthenticationError`（401/403）也会触发 fallback，浪费 backoff 延迟 + 在所有 provider 上都失败。
-
-**修复**: 调用 `_classifier.is_retryable()` 并在 fallback 前检查错误类型。让 `LoopEvent::Error` 携带结构化错误类型，而非裸字符串。
-
-### H-N2. `trim_conversation` O(n²) + 可能破坏 tool call 配对
-
-**文件**: `src/agent_loop.rs:23-63`
-
-三个独立问题：
-1. **`Vec::remove(0)` 在循环中**（第 61 行）— O(n) 移位，使裁剪变成 O(n²)
-2. **`system_msgs.clone()` 和 `non_system_msgs.clone()` 每轮迭代都 clone**（第 52-53 行）— 不必要的分配
-3. **可能分割 tool-call 配对** — 从前面移除消息时，`Assistant` + `tool_calls` 消息可能与其后续的 `Tool` 结果消息分离，产生畸形对话
-
-**修复**: 使用 `VecDeque` 实现 O(1) pop_front。在裁剪前检查 tool-call 配对边界。跟踪累积 token 计数，减去已移除消息的 token，而非每次从头重新计算。
-
-### H-N3. `conversation.clone()` 每轮循环仍会 clone
-
-**文件**: `src/agent_loop.rs:139`
-
-```rust
-let request = ChatRequest::new(conversation.clone(), tools.clone(), resolved.clone());
-```
-
-整个 `Vec<Message>` 在每轮循环都被 clone，此外还有 `trim_conversation` 的额外 clone（见 H-N2）。对于 50+ 条消息的对话，每轮都是一次 O(n) 的深拷贝。
-
-### 原问题仍存
-
-### H-N4. AgentLoop 注入硬编码 "mock tool result"（原 H3）
-
-**文件**: `src/agent_loop.rs:147-152`
-
-```rust
-conversation.push(Message {
-    content: "mock tool result".to_string(),
-```
-
-未改变。`resume_with_tool_results()` 方法已添加（第 218-237 行），提供了正确路径，但默认循环仍使用 mock 结果。
-
-### H-N5. `budget_tokens` 使用 `conversation.clone()` 无界增长（原 H8）
-
-**文件**: `src/agent_loop.rs:137`
-
-trimming 逻辑已添加（解决了一半问题——现在有了预算执行），但每次 clone 整个对话的开销未解决。
+**修复**: 在路由层或 engine 层添加 HTTPS 强制校验，仅允许 localhost/127.0.0.1 的 HTTP。
 
 ---
 
-## 二、中优先级问题 (Medium)
+## 二、中优问题 (Medium)
 
-### M-N1. `ToolDefinition::set_parameters` 静默吞噬无效 JSON
+### M1. `chat()` 硬编码 `tools: vec![]`，工具调用完全不可用
 
-**文件**: `src/types.rs:167-171`
+**文件**: `artemis-core/src/lib.rs:63`
 
 ```rust
-fn set_parameters(&mut self, params: String) {
-    if let Ok(val) = serde_json::from_str(&params) {
-        self.parameters = val;
-    }
-    // 静默忽略无效 JSON —— 无错误返回，无警告
+let request = ChatRequest {
+    messages: messages.to_vec(),
+    tools: vec![],  // 硬编码为空
+    ...
+};
+```
+
+`chat()` 无条件发送空工具列表。Agent 没有注册工具的机制，即使注册了也无法传递。模型永远收不到 tool definitions。
+
+**修复**: `chat()` 需要 `tools` 参数。
+
+### M2. `resolve()` 每次创建新 ModelRouter，丢失自定义模型注册
+
+**文件**: `artemis-core/src/lib.rs:24-26`
+
+```rust
+pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError> {
+    ModelRouter::new().resolve(model, None)  // 每次新建，无状态
 }
 ```
 
-`ToolDefinition::new()` 正确返回了 `PyResult`，但 `set_parameters` 仍然静默吞噬错误。调用 `td.set_parameters("{bad json}")` 无任何反馈。
+Python 侧的 `ArtemisEngine` 维护了带 `Mutex` 的 `ModelRouter`，允许 `register_model()`。但独立调用 `resolve()` 会忽略所有自定义注册。两条解析路径产生不同结果。
 
-### M-N2. `extract_retry_after` 对字符串编码数值失败
+### M3. Agent `retry` 字段是死代码
 
-**文件**: `src/errors.rs:375-383`
+**文件**: `artemis-agent/src/lib.rs:24, 66-78`
 
-```rust
-let after_colon = after_key[colon_pos + 1..].trim();
-// "retry_after": "30" → after_colon 以 '"' 开头
-// take_while 不匹配 '"' → 产生空字符串 → 解析失败
-```
+`retry: RetryPolicy` 字段和 `with_retry()` builder 方法存在但从未被使用。`run_chat()` 在 `chat()` 报错时立即返回 `Error`，不做任何重试。
 
-大多数 provider 返回数值，但 LiteLLM/OpenRouter 等网关可能返回字符串。函数应在提取前去除前导 `"`。
+### M4. HTTP 408/504 未被分类为重试
 
-### M-N3. HTTP 408 未被分类为可重试
+**文件**: `artemis-core/src/errors.rs:158`
 
-**文件**: `src/errors.rs:295-337`
+408（Request Timeout）和 504（Gateway Timeout）穿透到通用分支，变成 `Network` 错误，不可重试。应加入 500/502/503 的重试分支。
 
-408（Request Timeout）穿透到 `_ =>` 通用分支，变成 `Network` 错误 → `is_retryable` 返回 false。408 在语义上接近 503/429（瞬时错误），应为可重试。
+### M5. `extract_retry_after` 对字符串编码数值失败
 
-### M-N4. `ContextWindowExceeded` 总是报告 0 token
-
-**文件**: `src/errors.rs:327-328`
+**文件**: `artemis-core/src/errors.rs:220`
 
 ```rust
-ArtemisError::ContextWindowExceeded {
-    tokens: 0,
-    limit: 0,    // 无诊断信息
-}
+// "retry_after": "30"（JSON 字符串，非数值）
+// after_colon.trim() 结果是 '"30"'，开头是引号
+// take_while 不匹配引号 → num_str 为空 → 解析失败
 ```
 
-Python 调用者收到 `ContextWindowExceededError`，其中 `tokens=0`，`limit=0`。
+LiteLLM、OpenRouter 等网关可能返回字符串编码的 retry_after。
 
-### M-N5. Tool call result 无大小限制
+**修复**: `after_colon.trim().trim_matches('"')` 去除引号。
 
-**文件**: `src/engine.rs:247-318, 392-465`, `src/agent_loop.rs:218-237`
+### M6. `ContextWindowExceeded` 总是报告 0 token
 
-Python 工具返回 MB/GB 级数据时，将原样存入对话历史并序列化到 API 请求体。应设置可配置的大小上限（如每结果 1MB）并做截断。
+**文件**: `artemis-core/src/errors.rs:165-169`
 
-### M-N6. `normalize_model_id` 分配最多 7 个中间 String
+```rust
+ArtemisError::ContextWindowExceeded { tokens: 0, limit: 0 }
+```
 
-**文件**: `src/router.rs:55-75`
+Provider 返回的 token 实际数值未提取。Python 调用者收到 `tokens=0, limit=0`，无诊断信息。
 
-`.to_lowercase()`、`.split_once()`、三次 `.trim_start_matches().to_string()`、`RE_SUFFIX.replace()`、`RE_DOTS.replace_all()` — 全部独立分配。常见情况（如 `"gpt-4o"` 无 Bedrock 前缀）即使字符串未改变仍会分配 5-6 次。考虑使用 `Cow<str>` 或链式操作。
+### M7. `truncate_body` 在多字节 UTF-8 边界处 panic（新发现）
 
-### M-N7. `resolve_permissive` 硬编码 `context_length: 131072`
+**文件**: `artemis-core/src/errors.rs:197`
 
-**文件**: `src/router.rs:361`
+```rust
+truncated.push_str(&s[..MAX_ERROR_BODY_LENGTH]);  // 8192 字节
+```
 
-不适用于小窗口模型或 Gemini 1M+ token 窗口。
+若 8192 字节边界落在多字节 UTF-8 字符中间，`&s[..8192]` 会 panic。
 
-### M-N8. AgentLoop 创建自己的 tokio runtime（嵌套 `block_on` 风险）
+**修复**: 使用 `s.char_indices()` 找到安全边界再切片。
 
-**文件**: `src/agent_loop.rs:98`, `src/engine.rs:164-165`
+### M8. Tool call 结果无大小限制（DoS 向量）
 
-`AgentLoop` 和 `ArtemisEngine` 各自创建独立的 tokio runtime。如果在 engine 的 `block_on` 上下文内调用 AgentLoop，tokio 将 panic（"Cannot block the current thread from within a runtime"）。
+**文件**: `artemis-agent/src/lib.rs:54-58`, `artemis-agent/src/state.rs:42-50`
+
+工具返回大体积数据（多 GB 数据库查询、递归目录列表）时，无限制地存入对话历史，每次 `send()` 都会重复 clone。
+
+### M9. `normalize_model_id` 过度分配
+
+**文件**: `artemis-core/src/router.rs:63-71`
+
+三次 `trim_start_matches("...").to_string()` 即使无匹配也分配新 String。`regex` replace 的 `Cow<str>` 被 `.to_string()` 强制分配。
+
+**修复**: 链式 `trim_start_matches` 在 `&str` 引用上操作，`Cow::into_owned()` 仅在匹配时分配。
+
+### M10. `chat()` 每次创建新的 `TransportDispatcher`
+
+**文件**: `artemis-core/src/lib.rs:74, 111`
+
+无状态 dispatcher 应使用 `LazyLock<TransportDispatcher>` 静态变量，避免每次调用重新创建。
+
+### M11. `Agent` 每次创建新的 tokio runtime
+
+**文件**: `artemis-agent/src/lib.rs:27`
+
+多个 Agent 实例 = 多个独立 runtime，造成 `N * cores` 线程竞争。应使用共享 `LazyLock<Runtime>` 或 `Handle::current()`。
 
 ---
 
-## 三、低优先级问题 (Low)
+## 三、低优问题 (Low)
 
 | # | 文件:行 | 问题 |
 |---|---------|------|
-| L-N1 | `errors.rs:357` | `truncate_body` 字节索引在多字节 UTF-8 字符处会 panic（实际中较低，因错误体为 ASCII） |
-| L-N2 | `streaming.rs:134` | OpenAI 解析器对空 keep-alive chunk 无防护，会产生不必要的 `SseError::Parse` |
-| L-N3 | `engine.rs:261,271,407,416` | 错误消息引用私有 `run_once()` 而非公开的 `run_conversation()` |
-| L-N4 | `tokens.rs:49-54` | Token 估算忽略 tool call JSON、tool_call_id、role framing token |
-| L-N5 | `transport/anthropic.rs:148` | `denormalize_response` 始终设置 `model: String::new()` — 与其他 provider 不一致 |
-| L-N6 | `engine.rs:646-662` | `validate_base_url` 接受非 HTTP scheme（虽 reqwest 会拒绝，但 validator 不应声称它们合法） |
-| L-N7 | `router.rs:309-310` | `resolve_alias` 中重复的 `normalize_model_id` 调用 |
-| L-N8 | `transport/anthropic.rs:274,299` | `denormalize_stream_chunk` 对 delta/stop 事件使用合成 ID（`idx_0`），与 content_block_start 中的真实 ID 不匹配 |
-| L-N9 | `chat_completions.rs:63-79` | `extra_headers` 字段无 setter |
-| L-N10 | `streaming_bridge.rs:83` | Rust `Iterator::next` clone 完整 `LoopEvent`，即使通常只消耗一次 |
-| L-N11 | `lib.rs:1` | `#![allow(deprecated)]` 在无废弃项残留后仍存在 |
-| L-N12 | `Cargo.toml:21-23` | 未使用依赖：`uuid`、`chrono`、`pyo3-async-runtimes` |
+| L1 | `streaming.rs:322` | Anthropic SSE 解析器不改写 finish reason（transport 层改写但 SSE 路径不走） |
+| L2 | `router.rs:306` | `resolve_alias` 中重复调用 `normalize_model_id` |
+| L3 | `router.rs:356` | `resolve_permissive` 的 model_part 未小写归一化 |
+| L4 | `router.rs:221` | 空 provider 列表时 `[0]` 会 panic |
+| L5 | `streaming.rs:312-324` | Anthropic `message_delta` 不处理 `stop_reason: "error"` |
+| L6 | `tokens.rs:8,18` | `model_id.to_lowercase()` 被调用两次 |
+| L7 | `provider.rs:12` | 30s HTTP 超时会杀死长流式响应 |
+| L8 | `providers/mod.rs:52-56` | 错误响应体无大小限制读取 |
+| L9 | `Cargo.toml` ×2 | tokio `"full"` feature 包含未使用的子系统 |
+| L10 | `streaming.rs:256-258` | Anthropic 缓存 token 统计未捕获 |
+| L11 | `router.rs:299-301` | `resolve_alias` 文档注释拼接了不存在函数的残留行 |
+| L12 | `docs/architecture.md` | 引用了已删除的模块和 `TransportType` |
 
 ---
 
-## 四、代码结构
-
-### 改进确认
-
-- **Transport trait 已统一**: 单一 trait 定义于 `transport/mod.rs:72-146`，`chat_completions.rs:23` 为 re-export
-- **ErrorClassifier 已统一**: `retry.rs` 中重复已删除，仅 `errors.rs` 留存
-- **死代码已清理**: `ProviderConfig`、`TransportType` 已移除
-- **Provier 共享逻辑已提取**: `openai_compat_chat()` 处理所有 OpenAI 兼容 provider 的公共 HTTP 逻辑
-
-### 剩余担忧
-
-- **5 个 provider 文件仍高度重复**（H9 部分修复）: deepseek.rs、mistral.rs、groq.rs、xai.rs、ollama.rs 共享通过 `openai_compat_chat()` 的公共逻辑，但 ~1300 行样板 struct/trait impl 和测试仍然重复。一个 `macro_rules! openai_compat_provider` 可将每个 provider 减少到 ~15 行
-- **agent_loop 仍在核心中**: 708 行 agent_loop.rs 仍在主 crate 中
-- **未使用依赖**: `uuid`、`chrono`、`pyo3-async-runtimes` 仍存在于 Cargo.toml
-- **架构文档略有不同步**: `docs/architecture.md:76` 引用了已移除的 `TransportType`
-
----
-
-## 五、安全
-
-### 确认修复
-
-| 原问题 | 状态 |
-|--------|------|
-| H12 API key 明文 HTTP | `engine.rs:646-662` 拒绝非 localhost HTTP |
-| H13 HTTP 超时 | 共享 Client 配置 10s connect + 30s total |
-| H14 Debug 脱敏 | 自定义 `Debug` impl，`api_key` → `"***"` |
-
-### 新发现
+## 四、架构问题
 
 | # | 等级 | 问题 |
 |---|------|------|
-| S1 | M | Tool call 结果无大小限制（DoS 向量）— `engine.rs:247`, `agent_loop.rs:218` |
-| S2 | L | `#![allow(deprecated)]` 可移除 — `lib.rs:1` |
-| S3 | L | 未使用依赖：`uuid`、`chrono`、`pyo3-async-runtimes` — `Cargo.toml:21-23` |
+| A1 | P0 | `providers/` 模块全部 8 个 provider 都是死代码——`chat()` 用 `TransportDispatcher` 不走它们 |
+| A2 | P0 | `artemis-python` 的 Cargo.toml 依赖了 `artemis-agent` 但从未 import |
+| A3 | P1 | Python 绑定未注册 `Message`、`Role`、`ToolDefinition` 等核心类型 |
+| A4 | P1 | 全部 6 个 Python 示例文件引用了不存在的 API（`set_model`、`run_conversation` 等） |
+| A5 | P2 | `#[allow(dead_code)]` 在 `Agent` 和 `LoopEvent` 上——真要保留还是删 |
 
 ---
 
-## 六、对比汇总
+## 五、优先修复清单
 
-| 指标 | 第一轮 | 第二轮 | 变化 |
-|------|--------|--------|------|
-| 致命问题 | 2 | 0 | -2 |
-| 高优问题 | 14 | 5 | -9 |
-| 中优问题 | 16 | 10 | -6 |
-| 低优问题 | 12 | 12 | 0 |
-| **总计** | **44** | **27** | **-17 (-39%)** |
-| 回归测试 | 无 | **714 个** | +714 |
+**第一阶段**（立即可修）：
+1. 给 `chat()` 加 `tools` 参数（M1）
+2. 共享 `ModelRouter` 实例或给 `resolve()` 加 router 参数（M2）
+3. 删除或激活死代码 `providers/`（A1）
+4. 移除 `artemis-python` 中未使用的 `artemis-agent` 依赖（A2）
+5. 用 `LazyLock` 替换 `TransportDispatcher::new()`（M10）
 
----
+**第二阶段**（基础设施）：
+6. 在 engine 或 router 层强制 HTTPS 校验（H1）
+7. 让 `retry` 字段在 `run_chat` 中生效（M3）
+8. 添加 tool call 结果大小限制（M8）
+9. 修复 HTTP 408/504 重试分类（M4）
 
-## 七、优先修复清单
-
-### 立即修复（低成本）
-
-1. 删除未使用依赖（`uuid`、`chrono`、`pyo3-async-runtimes`）
-2. 移除 `lib.rs` 中的 `#![allow(deprecated)]`
-3. 修复 `ToolDefinition::set_parameters` 使其返回错误
-4. 将 HTTP 408 添加到可重试分类
-5. 修复 `extract_retry_after` 使其支持字符串编码值
-6. 从 `ContextWindowExceeded` 中提取实际 token 计数
-
-### 第二轮（中等成本）
-
-7. 修复 `run_with_fallback` 使其检查 `is_retryable()`（H-N1）
-8. 修复 `trim_conversation` O(n²) + tool-call 配对（H-N2）
-9. 添加 tool call 结果大小限制（S1）
-10. 在 `normalize_model_id` 中使用 `Cow<str>` 减少分配（M-N6）
-
-### 第三轮（架构）
-
-11. 使用 macro 减少 5 个 provider 文件的样板代码（H9 收尾）
-12. 将 agent_loop 分离到独立 crate
-13. 修复 `denormalize_stream_chunk` 合成 ID（L-N8）
+**第三阶段**（打磨）：
+10. 修复 `extract_retry_after` 字符串编码（M5）
+11. 从错误体中提取实际 token 数值（M6）
+12. 修复 `truncate_body` UTF-8 panic（M7）
+13. 共享 tokio runtime（M11）
+14. 修复 `normalize_model_id` 分配（M9）
+15. 低优项 L1-L12
 
 ---
 
