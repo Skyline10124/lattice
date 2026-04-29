@@ -9,8 +9,6 @@ pub enum ApiProtocol {
     AnthropicMessages,
     #[serde(rename = "gemini_generate_content")]
     GeminiGenerateContent,
-    #[serde(rename = "bedrock_converse")]
-    BedrockConverse,
     #[serde(rename = "codex_responses")]
     CodexResponses,
     #[serde(untagged)]
@@ -25,7 +23,6 @@ impl std::str::FromStr for ApiProtocol {
             "chat_completions" => ApiProtocol::OpenAiChat,
             "anthropic_messages" | "anthropic" => ApiProtocol::AnthropicMessages,
             "gemini_generate_content" | "gemini" => ApiProtocol::GeminiGenerateContent,
-            "bedrock_converse" | "bedrock" => ApiProtocol::BedrockConverse,
             "codex_responses" | "codex" => ApiProtocol::CodexResponses,
             other => ApiProtocol::Custom(other.to_string()),
         })

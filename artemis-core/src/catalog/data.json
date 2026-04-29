@@ -3739,11 +3739,6 @@
       },
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     },
-    "bedrock": {
-      "api_protocol": "bedrock_converse",
-      "credential_keys": {},
-      "base_url": ""
-    },
     "azure-foundry": {
       "api_protocol": "chat_completions",
       "credential_keys": {

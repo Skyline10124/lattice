@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn test_dispatch_unregistered_returns_none() {
         let dispatcher = TransportDispatcher::new();
-        let result = dispatcher.dispatch(&ApiProtocol::BedrockConverse);
+        let result = dispatcher.dispatch(&ApiProtocol::CodexResponses);
         assert!(result.is_none());
     }
 
@@ -235,17 +235,17 @@ mod tests {
         let mut dispatcher = TransportDispatcher::new();
 
         dispatcher.register(
-            ApiProtocol::BedrockConverse,
+            ApiProtocol::CodexResponses,
             Box::new(ChatCompletionsTransport::with_base_url(
-                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "https://api.openai.com/v1",
             )),
         );
 
-        let transport = dispatcher.dispatch(&ApiProtocol::BedrockConverse).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::CodexResponses).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
         assert_eq!(
             transport.base_url(),
-            "https://bedrock-runtime.us-east-1.amazonaws.com"
+            "https://api.openai.com/v1"
         );
     }
 
