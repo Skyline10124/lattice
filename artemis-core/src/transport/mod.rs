@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::{SseParser, StreamEvent};
-use crate::types::{Message, ToolCall, ToolDefinition};
+use crate::types::{Message, ToolDefinition};
 use serde_json::Value;
 
 /// Result of normalizing internal messages to a provider-specific format.
@@ -31,22 +31,6 @@ pub struct NormalizedMessages {
     pub system: Option<String>,
     /// Non-system messages converted to provider-native JSON.
     pub messages: Vec<Value>,
-}
-
-/// Internal representation of a normalized provider response.
-///
-/// Used for characterisation/testing of format-level transports that need
-/// access to reasoning/thinking content before it gets discarded by the
-/// unified `denormalize_response`.
-pub struct NormalizedResponse {
-    /// Text content from the response.
-    pub content: Option<String>,
-    /// Tool calls requested by the model.
-    pub tool_calls: Option<Vec<ToolCall>>,
-    /// Finish reason (e.g. "stop", "tool_calls", "length").
-    pub finish_reason: String,
-    /// Reasoning/thinking content (extended thinking models).
-    pub reasoning: Option<String>,
 }
 
 /// Error type for transport-level operations.
