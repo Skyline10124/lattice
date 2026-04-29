@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Provider adapter integration tests.
 //!
 //! Verifies the structural properties of all 8 provider adapters:

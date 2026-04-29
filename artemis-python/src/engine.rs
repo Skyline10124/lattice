@@ -43,7 +43,7 @@ impl ArtemisEngine {
 }
 
 /// Python-facing resolved model (read-only).
-#[pyclass]
+#[pyclass(skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyResolvedModel {
     inner: ResolvedModel,

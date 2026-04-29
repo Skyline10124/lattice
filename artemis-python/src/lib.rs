@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 mod engine;
 mod errors;
 

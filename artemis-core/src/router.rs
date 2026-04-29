@@ -298,15 +298,11 @@ impl ModelRouter {
 
     /// Clear the credential cache, forcing re-checking of environment variables
     /// on the next call to resolve_credentials.
-    pub fn invalidate_credential_cache(&self) {
-        self.credential_cache.lock().unwrap().clear();
-    }
-
     /// Normalize a user-provided model string to a canonical ID.
     ///
     /// Checks catalog aliases, catalog model keys, custom models, and applies
     /// normalize_model_id() before checking.
-    pub fn resolve_alias(&self, name: &str) -> Option<String> {
+    fn resolve_alias(&self, name: &str) -> Option<String> {
         let normalized = normalize_model_id(name);
 
         if let Some(canonical) = self.catalog.resolve_alias(&normalized) {

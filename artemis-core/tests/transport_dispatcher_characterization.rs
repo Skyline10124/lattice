@@ -1,4 +1,3 @@
-#![allow(deprecated)]
 //! Characterization tests for TransportDispatcher.
 //!
 //! These tests capture the CURRENT behavior of the dispatcher and its registered
