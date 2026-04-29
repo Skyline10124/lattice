@@ -103,7 +103,11 @@ pub async fn chat(
             body["stream"] = serde_json::Value::Bool(true);
 
             let base_url = resolved.base_url.trim_end_matches('/');
-            let endpoint = transport.chat_endpoint();
+            let endpoint = resolved
+                .provider_specific
+                .get("chat_endpoint")
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| transport.chat_endpoint());
             let url = format!("{}{}", base_url, endpoint);
 
             let mut req = client.post(&url).json(&body);
@@ -138,7 +142,11 @@ pub async fn chat(
                     })?;
 
             let base_url = resolved.base_url.trim_end_matches('/');
-            let endpoint = transport.chat_endpoint();
+            let endpoint = resolved
+                .provider_specific
+                .get("chat_endpoint")
+                .map(|s| s.as_str())
+                .unwrap_or_else(|| transport.chat_endpoint());
             let url = format!("{}{}", base_url, endpoint);
 
             let mut req = client

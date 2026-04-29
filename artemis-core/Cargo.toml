@@ -41,3 +41,9 @@ name = "minimax_test"
 
 [[example]]
 name = "minimax_think"
+
+[[example]]
+name = "opencode_test"
+
+[[example]]
+name = "minimax_debug"
