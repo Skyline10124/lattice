@@ -35,3 +35,9 @@ name = "tool_test"
 
 [[example]]
 name = "think_test"
+
+[[example]]
+name = "minimax_test"
+
+[[example]]
+name = "minimax_think"

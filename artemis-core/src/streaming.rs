@@ -297,6 +297,16 @@ impl SseParser for AnthropicSseParser {
                             }])
                         }
                     }
+                    Some("thinking_delta") => {
+                        let thinking = delta["thinking"].as_str().unwrap_or("");
+                        if thinking.is_empty() {
+                            Ok(vec![])
+                        } else {
+                            Ok(vec![StreamEvent::Reasoning {
+                                content: thinking.to_string(),
+                            }])
+                        }
+                    }
                     Some("input_json_delta") => {
                         let partial = delta["partial_json"].as_str().unwrap_or("");
                         if partial.is_empty() {

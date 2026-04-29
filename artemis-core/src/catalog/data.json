@@ -1085,8 +1085,8 @@
           "credential_keys": {
             "api_key": "MINIMAX_API_KEY"
           },
-          "base_url": null,
-          "api_protocol": "chat_completions",
+          "base_url": "https://api.minimaxi.com/anthropic",
+          "api_protocol": "anthropic_messages",
           "provider_specific": {}
         },
         {
@@ -3635,11 +3635,11 @@
       "base_url": ""
     },
     "minimax": {
-      "api_protocol": "chat_completions",
+      "api_protocol": "anthropic_messages",
       "credential_keys": {
         "api_key": "MINIMAX_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.minimaxi.com/anthropic"
     },
     "minimax-cn": {
       "api_protocol": "chat_completions",
