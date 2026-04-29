@@ -363,11 +363,26 @@ mod resolve_tests {
     }
 
     #[test]
-    fn test_resolve_gpt4o() {
+    fn test_resolve_gpt4o_missing_credential_now_errors() {
+        // Without OPENAI_API_KEY set, resolve should now error with a Config message.
+        let result = resolve("gpt-4o");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn test_resolve_gpt4o_with_key_ok() {
+        let prev = std::env::var("OPENAI_API_KEY").ok();
+        std::env::set_var("OPENAI_API_KEY", "sk-test");
         let result = resolve("gpt-4o");
         assert!(result.is_ok());
-        let r = result.unwrap();
-        assert_eq!(r.api_protocol, catalog::ApiProtocol::OpenAiChat);
+        if let Ok(r) = result {
+            assert_eq!(r.api_protocol, catalog::ApiProtocol::OpenAiChat);
+        }
+        match prev {
+            Some(k) => std::env::set_var("OPENAI_API_KEY", k),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
     }
 
     #[test]

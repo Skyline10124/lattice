@@ -64,7 +64,7 @@ pub fn normalize_model_id(model_id: &str) -> String {
     let mid = mid.trim_start_matches("us.amazon.");
     let mid = mid.trim_start_matches("us.meta.");
 
-    let mid = RE_SUFFIX.replace(&mid, "").into_owned();
+    let mid = RE_SUFFIX.replace(mid, "").into_owned();
 
     if mid.starts_with("claude-") {
         let replaced = RE_DOTS.replace_all(&mid, "$1-$2");
@@ -236,6 +236,19 @@ impl ModelRouter {
         }
 
         let best = &sorted_providers[0];
+        if !Self::is_credentialless(best) {
+            let keys: Vec<&str> = PROVIDER_CREDENTIALS_RAW
+                .iter()
+                .filter(|(s, _)| *s == best.provider_id)
+                .flat_map(|(_, creds)| creds.iter().map(|(ev, _)| *ev))
+                .collect();
+            let hint = if keys.is_empty() {
+                format!("provider '{}' requires a credential", best.provider_id)
+            } else {
+                format!("provider '{}' requires one of: {}", best.provider_id, keys.join(", "))
+            };
+            return Err(ArtemisError::Config { message: hint });
+        }
         Ok(ResolvedModel {
             canonical_id: canonical_id.clone(),
             provider: best.provider_id.clone(),

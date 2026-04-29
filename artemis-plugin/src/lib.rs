@@ -216,6 +216,7 @@ pub struct RunResult {
 }
 
 impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B, A> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         plugin: &'a P,
         behavior: &'a B,
@@ -475,6 +476,12 @@ pub struct CodeReviewPlugin;
 impl CodeReviewPlugin {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for CodeReviewPlugin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
