@@ -1,7 +1,8 @@
 use artemis_core::retry::RetryPolicy;
 use artemis_core::streaming::TokenUsage;
 use artemis_core::types::{Message, Role, ToolDefinition};
-use artemis_memory::Memory;
+use std::time::SystemTime;
+use artemis_memory::{EntryKind, Memory, MemoryEntry};
 use artemis_token_pool::TokenPool;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -312,28 +313,24 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                                 hooks.on_complete(&result);
                             }
                             if let Some(ref mut memory) = self.memory {
-                                memory.save(
-                                    self.plugin.name(),
-                                    &Message {
-                                        role: Role::User,
-                                        content: prompt.clone(),
-                                        reasoning_content: None,
-                                        tool_calls: None,
-                                        tool_call_id: None,
-                                        name: None,
-                                    },
-                                );
-                                memory.save(
-                                    self.plugin.name(),
-                                    &Message {
-                                        role: Role::Assistant,
-                                        content: json,
-                                        reasoning_content: None,
-                                        tool_calls: None,
-                                        tool_call_id: None,
-                                        name: None,
-                                    },
-                                );
+                                memory.save_entry(MemoryEntry {
+                                    id: format!("{}-user-{}", self.plugin.name(), attempt),
+                                    kind: EntryKind::SessionLog,
+                                    session_id: self.plugin.name().to_string(),
+                                    summary: format!("User message (attempt {})", attempt),
+                                    content: prompt.clone(),
+                                    tags: vec![],
+                                    created_at: timestamp(),
+                                });
+                                memory.save_entry(MemoryEntry {
+                                    id: format!("{}-assistant-{}", self.plugin.name(), attempt),
+                                    kind: EntryKind::SessionLog,
+                                    session_id: self.plugin.name().to_string(),
+                                    summary: format!("Assistant response (attempt {})", attempt),
+                                    content: json,
+                                    tags: vec![],
+                                    created_at: timestamp(),
+                                });
                             }
                             return Ok(result);
                         }
@@ -524,6 +521,18 @@ impl Plugin for CodeReviewPlugin {
         };
         serde_json::from_str(json_str).map_err(|e| PluginError::Parse(e.to_string()))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Generate a timestamp string (Unix epoch microseconds) from the system clock.
+fn timestamp() -> String {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_micros().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 // ---------------------------------------------------------------------------

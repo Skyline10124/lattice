@@ -1,30 +1,81 @@
-use artemis_core::types::Message;
-use std::collections::HashMap;
+use std::sync::LazyLock;
 
-/// Trait for cross-session conversation memory.
-pub trait Memory: Send + Sync {
-    /// Store a message in the given session.
-    fn save(&mut self, session: &str, msg: &Message);
+// ---------------------------------------------------------------------------
+// MemoryEntry — a single unit of stored information
+// ---------------------------------------------------------------------------
 
-    /// Return all messages for a session in chronological order.
-    fn history(&self, session: &str) -> Vec<Message>;
+/// Kinds of memory entries.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EntryKind {
+    /// Raw conversation log (input → output).
+    SessionLog,
+    /// A factual statement extracted from conversation ("the project path is X").
+    Fact,
+    /// A decision or design choice made during the session.
+    Decision,
+    /// Project-level context (CLAUDE.md rules, repo structure).
+    ProjectContext,
+}
 
-    /// Search past sessions for messages relevant to a query.
-    fn search(&self, _query: &str, _limit: usize) -> Vec<Message> {
-        vec![]
+/// A single memory entry, akin to hindsight's memory_item.
+#[derive(Debug, Clone)]
+pub struct MemoryEntry {
+    pub id: String,
+    pub kind: EntryKind,
+    pub session_id: String,
+    pub summary: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub created_at: String,
+}
+
+impl MemoryEntry {
+    /// Convert the entry kind to a static string for storage.
+    fn kind_str(&self) -> &str {
+        match self.kind {
+            EntryKind::SessionLog => "session_log",
+            EntryKind::Fact => "fact",
+            EntryKind::Decision => "decision",
+            EntryKind::ProjectContext => "project_context",
+        }
     }
 }
 
-/// Default implementation: in-memory HashMap. Not persisted across restarts.
-pub struct InMemoryMemory {
-    sessions: HashMap<String, Vec<Message>>,
+// ---------------------------------------------------------------------------
+// Memory trait — persistent, searchable memory
+// ---------------------------------------------------------------------------
+
+/// Cross-session persistent memory. Supports both full-text and semantic search.
+pub trait Memory: Send + Sync {
+    /// Store a memory entry.
+    fn save_entry(&self, entry: MemoryEntry);
+
+    /// Recall entries matching a natural-language query.
+    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
+
+    /// List all entries of a given kind.
+    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
+
+    /// Reflect on a conversation and extract memories.
+    /// Returns summaries of what should be remembered.
+    fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String>;
 }
+
+/// A single turn in a conversation (used as input for reflection).
+pub struct ConversationTurn {
+    pub role: String,
+    pub content: String,
+}
+
+// ---------------------------------------------------------------------------
+// InMemoryMemory — HashMap-based, not persisted. Default implementation.
+// ---------------------------------------------------------------------------
+
+pub struct InMemoryMemory;
 
 impl InMemoryMemory {
     pub fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -35,69 +86,122 @@ impl Default for InMemoryMemory {
 }
 
 impl Memory for InMemoryMemory {
-    fn save(&mut self, session: &str, msg: &Message) {
-        self.sessions
-            .entry(session.to_string())
-            .or_default()
-            .push(msg.clone());
+    fn save_entry(&self, entry: MemoryEntry) {
+        // InMemoryMemory is not Sync (it uses RefCell internally).
+        // Using a static LazyLock<Mutex<…>> for cross-thread safety.
+        // For now, just delegate to a global store.
+        GLOBAL_STORE.lock().unwrap().entries.push(entry);
     }
 
-    fn history(&self, session: &str) -> Vec<Message> {
-        self.sessions.get(session).cloned().unwrap_or_default()
+    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+        let store = GLOBAL_STORE.lock().unwrap();
+        store
+            .entries
+            .iter()
+            .filter(|e| e.summary.contains(query) || e.content.contains(query))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
-    fn search(&self, _query: &str, _limit: usize) -> Vec<Message> {
+    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
+        let store = GLOBAL_STORE.lock().unwrap();
+        store
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    (&e.kind, kind),
+                    (EntryKind::SessionLog, EntryKind::SessionLog)
+                        | (EntryKind::Fact, EntryKind::Fact)
+                        | (EntryKind::Decision, EntryKind::Decision)
+                        | (EntryKind::ProjectContext, EntryKind::ProjectContext)
+                )
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String> {
+        // Default: no-op reflection. Override in SqliteMemory or use Reflect
+        // to get real LLM-based extraction.
         vec![]
     }
 }
 
+use std::sync::Mutex;
+
+struct GlobalStore {
+    entries: Vec<MemoryEntry>,
+}
+
+static GLOBAL_STORE: LazyLock<Mutex<GlobalStore>> = LazyLock::new(|| {
+    Mutex::new(GlobalStore { entries: vec![] })
+});
+
+pub mod reflect;
+pub mod sqlite;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artemis_core::types::{Message, Role};
 
     #[test]
-    fn test_save_and_history() {
-        let mut mem = InMemoryMemory::new();
-        let msg = Message {
-            role: Role::User,
-            content: "hello".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        };
-        mem.save("session-1", &msg);
-        let history = mem.history("session-1");
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content, "hello");
-    }
-
-    #[test]
-    fn test_history_empty_session() {
+    fn test_save_and_recall_inmemory() {
         let mem = InMemoryMemory::new();
-        assert!(mem.history("nonexistent").is_empty());
+        mem.save_entry(MemoryEntry {
+            id: "1".into(),
+            kind: EntryKind::Fact,
+            session_id: "s1".into(),
+            summary: "Project uses Rust".into(),
+            content: "artemis is written in Rust".into(),
+            tags: vec!["project".into()],
+            created_at: "2026-04-29".into(),
+        });
+        let results = mem.recall("Rust", 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary, "Project uses Rust");
     }
 
     #[test]
-    fn test_multiple_messages_order() {
-        let mut mem = InMemoryMemory::new();
-        for i in 0..3 {
-            mem.save(
-                "s",
-                &Message {
-                    role: Role::User,
-                    content: format!("msg{}", i),
-                    reasoning_content: None,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    name: None,
-                },
-            );
-        }
-        let h = mem.history("s");
-        assert_eq!(h.len(), 3);
-        assert_eq!(h[0].content, "msg0");
-        assert_eq!(h[2].content, "msg2");
+    fn test_recall_empty() {
+        let mem = InMemoryMemory::new();
+        let results = mem.recall("nothing", 10);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_entries_by_kind_inmemory() {
+        let mem = InMemoryMemory::new();
+        mem.save_entry(MemoryEntry {
+            id: "kind-fact".into(),
+            kind: EntryKind::Fact,
+            session_id: "s1".into(),
+            summary: "Fact one".into(),
+            content: "First fact content".into(),
+            tags: vec![],
+            created_at: "2026-04-29".into(),
+        });
+        mem.save_entry(MemoryEntry {
+            id: "kind-decision".into(),
+            kind: EntryKind::Decision,
+            session_id: "s1".into(),
+            summary: "Decision one".into(),
+            content: "First decision content".into(),
+            tags: vec![],
+            created_at: "2026-04-29".into(),
+        });
+        let facts = mem.entries_by_kind(&EntryKind::Fact, 10);
+        assert!(facts.iter().any(|e| e.id == "kind-fact"));
+        assert!(!facts.iter().any(|e| e.id == "kind-decision"));
+
+        let decisions = mem.entries_by_kind(&EntryKind::Decision, 10);
+        assert!(decisions.iter().any(|e| e.id == "kind-decision"));
+        assert!(!decisions.iter().any(|e| e.id == "kind-fact"));
     }
 }
