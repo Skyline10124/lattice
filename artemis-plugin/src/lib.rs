@@ -267,7 +267,9 @@ fn extract_confidence(raw: &str) -> f64 {
         if let Some(pos) = line.find("\"confidence\"") {
             let after = &line[pos + 12..];
             if let Some(colon) = after.find(':') {
-                let val = after[colon + 1..].trim().trim_end_matches(',');
+                let val = after[colon + 1..]
+                    .trim()
+                    .trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
                 if let Ok(f) = val.parse::<f64>() {
                     return f.clamp(0.0, 1.0);
                 }
