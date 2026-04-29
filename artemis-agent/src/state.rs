@@ -61,7 +61,13 @@ impl AgentState {
     pub fn push_tool_result(&mut self, call_id: &str, result: &str, max_size: Option<usize>) {
         let max = max_size.unwrap_or(1_048_576); // default 1MB
         let content = if result.len() > max {
-            format!("{}... (truncated to {} bytes)", &result[..max], max)
+            // Find safe UTF-8 boundary to avoid panicking in the middle of a
+            // multi-byte character.
+            let mut end = max;
+            while end > 0 && !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}... (truncated to {} bytes)", &result[..end], max)
         } else {
             result.to_string()
         };
