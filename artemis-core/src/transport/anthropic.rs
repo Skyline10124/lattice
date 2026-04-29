@@ -74,9 +74,17 @@ impl Transport for AnthropicTransport {
         }
 
         if let Some(temp) = request.temperature {
-            body["temperature"] = serde_json::Value::Number(
-                serde_json::Number::from_f64(temp).unwrap_or_else(|| serde_json::Number::from(0)),
-            );
+            if temp.is_nan() || temp.is_infinite() {
+                eprintln!(
+                    "WARNING: temperature value {} is NaN or infinite, omitting temperature field",
+                    temp
+                );
+            } else {
+                body["temperature"] = serde_json::Value::Number(
+                    serde_json::Number::from_f64(temp)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                );
+            }
         }
 
         if request.stream {
