@@ -72,8 +72,8 @@ artemis-python      # PyO3 bindings (resolver only, for now)
 The project is in **alpha / dogfooding** stage. Phase 1 and 2 are complete. Current priorities:
 
 1. **Python API expansion**: expose `Message`, `Role`, `chat_complete()` in `artemis-python`
-2. **Runtime correctness**: finish reason mapping, error classification贯通, streaming timeout fix
-3. **Agent productionization**: memory/token_pool integration, tool name mapping, UTF-8 safe truncation
+2. **Runtime correctness**: finish reason mapping, streaming timeout fix
+3. **Agent productionization**: memory/token_pool integration
 
 After Python API parity and runtime hardening, move to Phase 3 (typed plugin system).
 
