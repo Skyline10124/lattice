@@ -3639,14 +3639,14 @@
       "credential_keys": {
         "api_key": "ZAI_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.z.ai/api/paas/v4"
     },
     "nous": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "NOUS_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://inference-api.nousresearch.com/v1"
     },
     "copilot": {
       "api_protocol": "chat_completions",
@@ -3681,21 +3681,21 @@
       "credential_keys": {
         "api_key": "XIAOMI_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.xiaomimimo.com/v1"
     },
     "stepfun": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "STEPFUN_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.stepfun.ai/v1"
     },
     "kimi-coding": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "KIMI_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.kimi.com/coding/v1"
     },
     "kimi-coding-cn": {
       "api_protocol": "chat_completions",
@@ -3709,35 +3709,35 @@
       "credential_keys": {
         "api_key": "MOONSHOT_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.moonshot.ai/v1"
     },
     "arcee": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "ARCEE_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.arcee.ai/api/v1"
     },
     "nvidia": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "NVIDIA_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://integrate.api.nvidia.com/v1"
     },
     "huggingface": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "HF_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://router.huggingface.co/v1"
     },
     "alibaba": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "DASHSCOPE_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     },
     "bedrock": {
       "api_protocol": "bedrock_converse",
@@ -3749,14 +3749,14 @@
       "credential_keys": {
         "api_key": "AZURE_FOUNDRY_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://{resource}.openai.azure.com/openai/v1/"
     },
     "kilocode": {
       "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "KILO_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.kilo.ai/api/gateway"
     },
     "opencode-zen": {
       "api_protocol": "chat_completions",
