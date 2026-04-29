@@ -2,8 +2,10 @@
 resolver = "2"
 members = [
     "artemis-core",
-            "artemis-memory",
+    "artemis-memory",
     "artemis-token-pool",
     "artemis-agent",
     "artemis-python",
-    ]
+    "artemis-cli",
+    "artemis-tui",
+]

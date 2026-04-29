@@ -19,7 +19,7 @@ pub fn run(action: SessionAction) -> Result<()> {
             println!("Session: {}", id.bold());
         }
         SessionAction::Rm { id } => {
-            println!("{} Removed session {}", "\u2713".green(), id);
+            println!("{} Removed session {}", "\u{2713}".green(), id);
         }
     }
     Ok(())

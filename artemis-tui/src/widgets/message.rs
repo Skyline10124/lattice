@@ -19,10 +19,10 @@ impl<'a> MessageWidget<'a> {
 
     pub fn render(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
         let prefix = match self.msg.role {
-            artemis_core::types::Role::User => "\uf2bd ",
-            artemis_core::types::Role::Assistant => "\uf120 ",
-            artemis_core::types::Role::System => "\uf013 ",
-            artemis_core::types::Role::Tool => "\uf0ad ",
+            artemis_core::types::Role::User => "\u{F2BD} ",
+            artemis_core::types::Role::Assistant => "\u{F120} ",
+            artemis_core::types::Role::System => "\u{F013} ",
+            artemis_core::types::Role::Tool => "\u{F0AD} ",
         };
 
         let style = match self.msg.role {
@@ -42,7 +42,7 @@ impl<'a> MessageWidget<'a> {
         // Thinking block (collapsible, shown inline for MVP)
         if let Some(ref reasoning) = self.msg.reasoning {
             lines.push(Line::from(vec![
-                Span::styled("\uf0eb ".to_string(), self.theme.thinking_style()),
+                Span::styled("\u{F0EB} ".to_string(), self.theme.thinking_style()),
                 Span::styled(reasoning.clone(), self.theme.thinking_style()),
             ]));
         }

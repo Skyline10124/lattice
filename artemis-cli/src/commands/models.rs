@@ -13,7 +13,7 @@ pub fn run(auth_only: bool) -> Result<()> {
     let authed = router.list_authenticated_models();
 
     for m in models {
-        let icon = if authed.contains(&m) { "\u2713" } else { "\u2717" };
+        let icon = if authed.contains(&m) { "\u{2713}" } else { "\u{2717}" };
         let color = if authed.contains(&m) { m.green() } else { m.red() };
         println!("{} {}", icon, color);
     }

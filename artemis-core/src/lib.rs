@@ -262,13 +262,44 @@ pub async fn chat_complete(
                 usage = u;
             }
             StreamEvent::Error { message: m } => {
-                // "Stream ended" is a normal SSE connection close after all events
-                // have been delivered. If we received content or tool calls, treat
-                // it as a successful stream end. finish_reason was already set by
-                // any prior Done event, or remains "unknown" if no Done was received.
-                if m.contains("Stream ended") && (!content.is_empty() || !tool_calls_map.is_empty()) {
+                // If we already received content or tool calls, a stream error
+                // is non-fatal — return the partial response. The caller can
+                // decide whether to retry based on what was received.
+                let has_content = !content.is_empty() || !tool_calls_map.is_empty();
+
+                // "Stream ended" is a normal SSE close — always non-fatal.
+                if m.contains("Stream ended") {
+                    if has_content {
+                        break;
+                    }
+                    // Empty stream ended: the provider accepted the request but
+                    // sent nothing useful. Classify as transient.
+                    return Err(ArtemisError::ProviderUnavailable {
+                        provider: resolved.provider.clone(),
+                        reason: m,
+                    });
+                }
+
+                if has_content {
+                    if finish_reason == "unknown" {
+                        finish_reason = String::from("stream_lost");
+                    }
                     break;
                 }
+
+                // No content and not a normal stream close — propagate as typed error.
+                // Classify common transport errors so the Agent can retry appropriately.
+                if m.contains("error sending request")
+                    || m.contains("connection")
+                    || m.contains("timeout")
+                    || m.contains("reset")
+                {
+                    return Err(ArtemisError::ProviderUnavailable {
+                        provider: resolved.provider.clone(),
+                        reason: m,
+                    });
+                }
+
                 return Err(ArtemisError::Streaming { message: m });
             }
         }

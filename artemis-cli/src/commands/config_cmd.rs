@@ -29,13 +29,13 @@ theme = "dark"
 show_reasoning = true
 "#;
             std::fs::write(&config_path, default)?;
-            println!("{} config initialized at {}", "\u2713".green(), config_path.display());
+            println!("{} config initialized at {}", "\u{2713}".green(), config_path.display());
         }
         ConfigAction::Get { key } => {
             println!("{} = (not implemented for key: {})", key.bold(), key);
         }
         ConfigAction::Set { key, value } => {
-            println!("{} {} = {}", "\u2713".green(), key.bold(), value);
+            println!("{} {} = {}", "\u{2713}".green(), key.bold(), value);
         }
     }
 

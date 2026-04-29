@@ -40,7 +40,7 @@ struct Cli {
     #[arg(short, long, help = "JSON output")]
     json: bool,
 
-    #[arg(short, long, help = "Configuration file path")]
+    #[arg(long, help = "Configuration file path")]
     config: Option<String>,
 }
 
@@ -66,27 +66,13 @@ enum Commands {
     #[command(about = "Manage configuration")]
     Config {
         #[command(subcommand)]
-        action: ConfigAction,
+        action: commands::config_cmd::ConfigAction,
     },
     #[command(about = "Manage sessions")]
     Sessions {
         #[command(subcommand)]
-        action: SessionAction,
+        action: commands::sessions::SessionAction,
     },
-}
-
-#[derive(Subcommand)]
-enum ConfigAction {
-    Init,
-    Get { key: String },
-    Set { key: String, value: String },
-}
-
-#[derive(Subcommand)]
-enum SessionAction {
-    List,
-    Show { id: String },
-    Rm { id: String },
 }
 
 #[tokio::main]
