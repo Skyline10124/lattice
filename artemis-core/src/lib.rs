@@ -202,7 +202,10 @@ pub async fn chat_complete(
     let mut reasoning_content = String::new();
     let mut tool_calls_map: std::collections::HashMap<String, ToolCallBuilder> =
         std::collections::HashMap::new();
-    let mut finish_reason = String::from("stop");
+    // Default finish_reason when no Done event is received before stream ends.
+    // If a Done event arrives (see below), finish_reason is overwritten with the
+    // provider-reported value.
+    let mut finish_reason = String::from("unknown");
     let mut usage = None;
 
     while let Some(event) = stream.next().await {
@@ -241,8 +244,10 @@ pub async fn chat_complete(
                 usage = u;
             }
             StreamEvent::Error { message: m } => {
-                // "Stream ended" is normal SSE connection close.
-                // Treat as Done if we received content or tool calls.
+                // "Stream ended" is a normal SSE connection close after all events
+                // have been delivered. If we received content or tool calls, treat
+                // it as a successful stream end. finish_reason was already set by
+                // any prior Done event, or remains "unknown" if no Done was received.
                 if m.contains("Stream ended") && (!content.is_empty() || !tool_calls_map.is_empty()) {
                     break;
                 }
