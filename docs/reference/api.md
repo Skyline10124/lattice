@@ -44,6 +44,8 @@ pub enum StreamEvent {
 
 ## artemis-agent
 
+> **Known issue**: `Agent.send_message()` currently hangs in synchronous contexts (`fn main` without `#[tokio::main]`). Being tracked.
+
 ```rust
 pub struct Agent;
 

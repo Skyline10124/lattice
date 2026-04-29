@@ -71,6 +71,8 @@ artemis-python      # PyO3 bindings (resolver only, for now)
 
 **Target**: compose vertical agents from plugins + route between them.
 
+> **Known limitation**: `Agent.send_message()` currently requires `#[tokio::main]` context. Sync usage hangs. See issue in `artemis-agent` `run_chat()`.
+
 ## Phase 5: Nix paradigm
 
 - [ ] `artemis.toml` + `artemis.lock` -- declarative config, reproducible builds

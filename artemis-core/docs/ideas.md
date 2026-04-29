@@ -2,7 +2,7 @@
 
 持续记录设计思路、架构构想和开发方向。
 
-**最后更新**: 2026-04-29
+**最后更新**: 2026-04-30
 
 ---
 
@@ -289,3 +289,9 @@ CLI：        无 AI 的纯代码工具
 ---
 
 *此文档随开发推进持续更新。*
+
+---
+
+## 九、Known Issues
+
+- `Agent.send_message()` hangs when called from sync code (`fn main` without `#[tokio::main]`). Workaround: use `#[tokio::main]` + `chat_complete()` directly. Fix in progress.

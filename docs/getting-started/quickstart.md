@@ -36,6 +36,8 @@ resolved = engine.resolve_model("sonnet")
 # Python 目前只支持 resolve，chat 走 Rust
 ```
 
+> **注意**: `Agent.send_message()` 目前需要 `#[tokio::main]`。同步代码请使用 `artemis_core::chat_complete()` 配合 `futures::executor::block_on()` 和 tokio runtime。
+
 ## 下一步
 
 - [第一个调用](first-call.md)
