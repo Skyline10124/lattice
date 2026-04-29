@@ -427,12 +427,12 @@ impl ModelRouter {
     }
 }
 
-/// Validate that a base_url has proper URL format (parseable, has scheme, has host).
+/// Validate that a base_url has proper URL format and uses HTTPS.
 ///
 /// Rules:
-/// - Empty URLs are allowed (backward compatibility for providers without a base_url)
-/// - Non-empty URLs must contain `://` (scheme separator) with a non-empty host
-/// - Does NOT check for HTTPS (that validation lives in the engine layer)
+/// - Empty URLs are allowed (backward compatibility)
+/// - Non-empty URLs must contain `://` with a non-empty host
+/// - HTTP is only allowed for localhost/127.0.0.1/::1
 pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
     if url.is_empty() {
         return Ok(());
@@ -445,11 +445,22 @@ pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
         ),
     })?;
 
+    let scheme = &url[..proto_end];
     let after_proto = &url[proto_end + 3..];
-    let host = after_proto.split('/').next().unwrap_or("");
+    let host_port = after_proto.split('/').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
     if host.is_empty() {
         return Err(ArtemisError::Config {
             message: format!("Invalid base_url '{}': URL has scheme but no host", url),
+        });
+    }
+
+    if scheme == "http" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+        return Err(ArtemisError::Config {
+            message: format!(
+                "Insecure base_url '{}': HTTP is only allowed for localhost. Use HTTPS.",
+                url
+            ),
         });
     }
 

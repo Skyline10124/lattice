@@ -21,6 +21,7 @@ impl ArtemisEngine {
     }
 
     /// Resolve a model name to connection details.
+    /// Rejects non-localhost HTTP base URLs for security.
     pub fn resolve_model(&self, model: &str) -> PyResult<PyResolvedModel> {
         let resolved = self
             .router
@@ -28,6 +29,11 @@ impl ArtemisEngine {
             .unwrap()
             .resolve(model, None)
             .map_err(convert_core_error)?;
+
+        // Security: reject non-localhost HTTP
+        artemis_core::router::validate_base_url(&resolved.base_url)
+            .map_err(convert_core_error)?;
+
         Ok(PyResolvedModel { inner: resolved })
     }
 
