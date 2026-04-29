@@ -7,6 +7,8 @@ use artemis_core::ResolvedModel;
 pub struct AgentState {
     pub messages: Vec<Message>,
     pub resolved: ResolvedModel,
+    /// Cumulative total tokens used across all turns.
+    pub token_usage: u64,
     /// Maps tool_call_id to function_name so push_tool_result can set the
     /// correct `name` field (required by Gemini for functionResponse.name).
     tool_names: HashMap<String, String>,
@@ -17,6 +19,7 @@ impl AgentState {
         Self {
             messages: vec![],
             resolved,
+            token_usage: 0,
             tool_names: HashMap::new(),
         }
     }
@@ -79,5 +82,10 @@ impl AgentState {
             tool_call_id: Some(call_id.to_string()),
             name: self.tool_names.get(call_id).cloned(),
         });
+    }
+
+    /// Add tokens to the cumulative usage counter.
+    pub fn add_token_usage(&mut self, tokens: u64) {
+        self.token_usage += tokens;
     }
 }

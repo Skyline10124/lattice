@@ -57,6 +57,11 @@ impl Agent {
         self
     }
 
+    /// Return the cumulative token usage across all turns so far.
+    pub fn token_usage(&self) -> u64 {
+        self.state.token_usage
+    }
+
     /// Send a user message, returning streaming events.
     /// Each event is either a Token, ToolCallRequired, Done, or Error.
     pub fn send(&mut self, content: &str) -> Vec<LoopEvent> {
@@ -131,6 +136,10 @@ impl Agent {
                         // Tool-call argument stream ends; already accumulated.
                     }
                     StreamEvent::Done { usage, .. } => {
+                        if let Some(ref u) = usage {
+                            self.state
+                                .add_token_usage(u.total_tokens as u64);
+                        }
                         if !tool_builders.is_empty() {
                             let calls: Vec<artemis_core::types::ToolCall> = tool_builders
                                 .iter()
