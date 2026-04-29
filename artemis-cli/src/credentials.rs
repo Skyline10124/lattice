@@ -33,7 +33,7 @@ impl CredentialStore {
         // Load from config's providers section.
         // api_key = "$ANTHROPIC_API_KEY"  -> read env var
         // api_key = "sk-abc123"           -> use literal value
-        for (_provider_id, cfg) in &config.providers {
+        for cfg in config.providers.values() {
             if let Some(ref key_spec) = cfg.api_key {
                 if key_spec.starts_with('$') {
                     // Env var reference: $ANTHROPIC_API_KEY
@@ -69,11 +69,6 @@ impl CredentialStore {
     /// Return credentials as a HashMap for ModelRouter::with_credentials().
     pub fn to_hashmap(&self) -> HashMap<String, String> {
         self.values.clone()
-    }
-
-    /// Look up a single credential by env var name.
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.values.get(key)
     }
 
     /// Diagnostic: which env vars are present?

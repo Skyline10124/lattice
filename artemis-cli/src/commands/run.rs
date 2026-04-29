@@ -5,24 +5,21 @@ use artemis_core::types::ToolDefinition;
 use colored::Colorize;
 use serde::Deserialize;
 use std::io::Write;
-use std::time::Instant;
 
 pub fn run(
-    model: &str,
-    prompt: &str,
+    prompt: String,
+    model: String,
     provider_override: Option<&str>,
     verbose: bool,
     json: bool,
     creds: &crate::credentials::CredentialStore,
 ) -> Result<()> {
-    let start = Instant::now();
-
     if verbose {
         eprintln!("{}", format!("resolve: {} ...", model).dimmed());
     }
 
     let router = ModelRouter::with_credentials(creds.to_hashmap());
-    let resolved = router.resolve(model, provider_override)?;
+    let resolved = router.resolve(&model, provider_override)?;
 
     if verbose {
         eprintln!(
@@ -32,19 +29,14 @@ pub fn run(
     }
 
     let tools = tool_definitions();
-    let mut agent = Agent::new(resolved.clone()).with_tools(tools);
+    let mut agent = Agent::new(resolved).with_tools(tools);
 
     if verbose {
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.send_message(prompt);
+    let events = agent.send_message(&prompt);
     run_conversation(&mut agent, events, verbose, json)?;
-
-    let elapsed = start.elapsed().as_millis();
-    if verbose && !json {
-        eprintln!("{}: {} ms", "elapsed".dimmed(), elapsed);
-    }
 
     Ok(())
 }
@@ -98,6 +90,14 @@ fn run_conversation(
 
         if tool_calls.is_empty() {
             break;
+        }
+
+        if verbose && !json {
+            eprintln!(
+                "\n{} {} tool call(s)...",
+                "executing".dimmed(),
+                tool_calls.len()
+            );
         }
 
         let results: Vec<(String, String)> = tool_calls

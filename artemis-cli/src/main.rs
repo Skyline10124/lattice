@@ -7,7 +7,7 @@ mod config;
 mod credentials;
 mod session;
 
-use commands::{config_cmd, doctor, models, print, resolve, sessions, stats};
+use commands::{config_cmd, doctor, models, print, resolve, run, sessions, stats};
 use config::Config;
 use credentials::CredentialStore;
 
@@ -73,6 +73,12 @@ enum Commands {
         #[command(subcommand)]
         action: commands::sessions::SessionAction,
     },
+    #[command(about = "Run a prompt through the model")]
+    Run {
+        prompt: String,
+        #[arg(short, long, help = "Model alias or canonical ID")]
+        model: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -92,8 +98,7 @@ async fn main() -> Result<()> {
             cli.verbose,
             cli.json,
             &creds,
-        )
-        .await;
+        );
     }
 
     // Default: enter TUI (if no subcommand)
@@ -119,6 +124,19 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sessions { action }) => {
             sessions::run(action)?;
+        }
+        Some(Commands::Run { prompt, model }) => {
+            let model = model
+                .or_else(|| cli.model.clone())
+                .unwrap_or_else(|| config.default_model());
+            run::run(
+                prompt,
+                model,
+                cli.provider.as_deref(),
+                cli.verbose,
+                cli.json,
+                &creds,
+            )?;
         }
         None => {
             // No command and no -p: launch TUI
