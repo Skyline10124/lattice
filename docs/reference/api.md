@@ -51,8 +51,8 @@ impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self;
     pub fn with_tools(self, tools: Vec<ToolDefinition>) -> Self;
     pub fn with_retry(self, policy: RetryPolicy) -> Self;
-    pub fn with_memory(self, memory: Box<dyn Memory>) -> Self;
-    pub fn with_token_pool(self, pool: Box<dyn TokenPool>) -> Self;
+    pub fn with_memory(self, memory: Box<dyn Memory>) -> Self;  //（setter available, behavior not yet wired — stores reference for future use）
+    pub fn with_token_pool(self, pool: Box<dyn TokenPool>) -> Self;  //（setter available, behavior not yet wired — stores reference for future use）
 
     pub fn send(&mut self, content: &str) -> Vec<LoopEvent>;
     pub fn submit_tools(&mut self, results: Vec<(String, String)>, max_size: Option<usize>) -> Vec<LoopEvent>;
