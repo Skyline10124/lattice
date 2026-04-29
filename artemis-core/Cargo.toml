@@ -47,3 +47,7 @@ name = "opencode_test"
 
 [[example]]
 name = "minimax_debug"
+
+[[example]]
+name = "dogfood"
+
