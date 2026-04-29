@@ -252,7 +252,7 @@ fn regress_deprecated_consolidation_types_compile() {
 /// Exercise provider module — was in the deprecated consolidation list.
 #[test]
 fn regress_deprecated_consolidation_provider_compile() {
-    use artemis_core::provider::{ChatRequest, ChatResponse, ModelRegistry};
+    use artemis_core::provider::{ChatRequest, ChatResponse};
     let resolved = ResolvedModel {
         canonical_id: "test".into(),
         provider: "test".into(),
@@ -272,7 +272,6 @@ fn regress_deprecated_consolidation_provider_compile() {
         finish_reason: "stop".into(),
         model: "test".into(),
     };
-    let _registry = ModelRegistry::new(ModelRouter::new());
 }
 
 // ════════════════════════════════════════════════════════════════════════════

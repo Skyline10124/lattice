@@ -1,11 +1,8 @@
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use crate::catalog::{ModelCatalogEntry, ResolvedModel};
-use crate::errors::ArtemisError;
-use crate::router::ModelRouter;
+use crate::catalog::ResolvedModel;
 use crate::streaming::{EventStream, TokenUsage};
 use crate::types::{Message, ToolCall, ToolDefinition};
 
@@ -97,8 +94,7 @@ pub struct ChatResponse {
 
 /// Interface that all LLM provider adapters must implement.
 ///
-/// Each concrete provider (OpenAI, Anthropic, etc.) implements this trait
-/// and is registered in a [`ModelRegistry`].
+/// Each concrete provider (OpenAI, Anthropic, etc.) implements this trait.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Send a chat request and receive a complete (non-streaming) response.
@@ -118,129 +114,15 @@ pub trait Provider: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Registry
-// ---------------------------------------------------------------------------
-
-/// A single entry in the model registry: catalog entry + provider implementation.
-pub struct ModelEntry {
-    pub config: ModelCatalogEntry,
-    pub provider: Box<dyn Provider>,
-}
-
-/// Model-centric registry replacing the old provider-centric `ProviderRegistry`.
-///
-/// Models are registered by canonical ID. Use [`resolve_and_get`] to resolve
-/// a user-facing model name via the router and retrieve the corresponding entry.
-///
-/// [`resolve_and_get`]: ModelRegistry::resolve_and_get
-pub struct ModelRegistry {
-    models: HashMap<String, ModelEntry>,
-    router: ModelRouter,
-}
-
-impl ModelRegistry {
-    /// Create a new registry with an empty model map and a fresh [`ModelRouter`].
-    pub fn new(router: ModelRouter) -> Self {
-        Self {
-            models: HashMap::new(),
-            router,
-        }
-    }
-
-    /// Register a model under its canonical ID.
-    pub fn register(&mut self, model_id: &str, entry: ModelEntry) {
-        self.models.insert(model_id.to_string(), entry);
-    }
-
-    /// Look up a registered model by its canonical ID.
-    pub fn get(&self, model_id: &str) -> Option<&ModelEntry> {
-        self.models.get(model_id)
-    }
-
-    /// List all model IDs: catalog models from the router plus locally registered entries.
-    pub fn list_models(&self) -> Vec<String> {
-        let mut ids = self.router.list_models();
-        for id in self.models.keys() {
-            if !ids.contains(id) {
-                ids.push(id.clone());
-            }
-        }
-        ids.sort();
-        ids
-    }
-
-    /// List models that have at least one provider with valid credentials.
-    pub fn list_authenticated_models(&self) -> Vec<String> {
-        self.router.list_authenticated_models()
-    }
-
-    /// Register a [`ModelCatalogEntry`] with the router (for name resolution).
-    pub fn register_catalog_entry(&mut self, entry: ModelCatalogEntry) {
-        self.router.register_model(entry);
-    }
-
-    /// Resolve a model name to a [`ResolvedModel`] using the router.
-    pub fn resolve(
-        &self,
-        model_name: &str,
-        provider_override: Option<&str>,
-    ) -> Result<ResolvedModel, ArtemisError> {
-        self.router.resolve(model_name, provider_override)
-    }
-
-    /// Resolve a model name to a [`ModelEntry`] + [`ResolvedModel`] using the router.
-    ///
-    /// Returns a reference to the registry entry and the resolved model details.
-    pub fn resolve_and_get(
-        &self,
-        model_name: &str,
-        provider_override: Option<&str>,
-    ) -> Result<(&ModelEntry, ResolvedModel), ArtemisError> {
-        let resolved = self.router.resolve(model_name, provider_override)?;
-        let entry =
-            self.get(&resolved.canonical_id)
-                .ok_or_else(|| ArtemisError::ModelNotFound {
-                    model: resolved.canonical_id.clone(),
-                })?;
-        Ok((entry, resolved))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ApiProtocol, CatalogProviderEntry};
-    use crate::mock::MockProvider;
+    use crate::catalog::ApiProtocol;
     use crate::types::{Message, Role};
     use std::collections::HashMap;
-
-    fn make_entry(model_id: &str) -> ModelEntry {
-        ModelEntry {
-            config: ModelCatalogEntry {
-                canonical_id: model_id.to_string(),
-                display_name: model_id.to_string(),
-                description: String::new(),
-                context_length: 8192,
-                capabilities: vec![],
-                providers: vec![CatalogProviderEntry {
-                    provider_id: "mock".to_string(),
-                    api_model_id: model_id.to_string(),
-                    priority: 1,
-                    weight: 1,
-                    credential_keys: HashMap::new(),
-                    base_url: Some("http://localhost".to_string()),
-                    api_protocol: ApiProtocol::OpenAiChat,
-                    provider_specific: HashMap::new(),
-                }],
-                aliases: vec![],
-            },
-            provider: Box::new(MockProvider::new(model_id)),
-        }
-    }
 
     fn make_resolved(model_id: &str) -> ResolvedModel {
         ResolvedModel {
@@ -270,49 +152,5 @@ mod tests {
         assert_eq!(req.model, "test-model");
         assert_eq!(req.messages, messages);
         assert_eq!(req.resolved.canonical_id, "test-model");
-    }
-
-    #[test]
-    fn test_register_and_get() {
-        let router = ModelRouter::new();
-        let mut registry = ModelRegistry::new(router);
-        registry.register("model-1", make_entry("model-1"));
-
-        let retrieved = registry.get("model-1");
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().provider.name(), "model-1");
-    }
-
-    #[test]
-    fn test_register_multiple_and_list() {
-        let router = ModelRouter::new();
-        let mut registry = ModelRegistry::new(router);
-        registry.register("alpha", make_entry("alpha"));
-        registry.register("beta", make_entry("beta"));
-        registry.register("gamma", make_entry("gamma"));
-
-        let ids = registry.list_models();
-        assert!(
-            ids.len() >= 3,
-            "Should have at least 3 models (catalog + registered)"
-        );
-        assert!(ids.contains(&"alpha".to_string()));
-        assert!(ids.contains(&"beta".to_string()));
-        assert!(ids.contains(&"gamma".to_string()));
-    }
-
-    #[test]
-    fn test_get_nonexistent_returns_none() {
-        let router = ModelRouter::new();
-        let registry = ModelRegistry::new(router);
-        assert!(registry.get("nonexistent").is_none());
-    }
-
-    #[test]
-    fn test_resolve_and_get_not_registered() {
-        let router = ModelRouter::new();
-        let registry = ModelRegistry::new(router);
-        let result = registry.resolve_and_get("nonexistent-model-xyz", None);
-        assert!(result.is_err());
     }
 }
