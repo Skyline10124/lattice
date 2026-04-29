@@ -19,6 +19,7 @@ impl AgentState {
         self.messages.push(Message {
             role: Role::User,
             content: content.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -28,11 +29,17 @@ impl AgentState {
     pub fn push_assistant_message(
         &mut self,
         content: &str,
+        reasoning: &str,
         tool_calls: Option<Vec<artemis_core::types::ToolCall>>,
     ) {
         self.messages.push(Message {
             role: Role::Assistant,
             content: content.to_string(),
+            reasoning_content: if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning.to_string())
+            },
             tool_calls,
             tool_call_id: None,
             name: None,
@@ -49,6 +56,7 @@ impl AgentState {
         self.messages.push(Message {
             role: Role::Tool,
             content,
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
             name: None,

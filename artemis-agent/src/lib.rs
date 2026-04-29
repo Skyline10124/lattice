@@ -90,6 +90,7 @@ impl Agent {
 
         let mut events = Vec::new();
         let mut content_buf = String::new();
+        let mut reasoning_buf = String::new();
         let mut tool_builders: HashMap<String, ToolCallAccum> = HashMap::new();
 
         self.runtime.block_on(async {
@@ -98,6 +99,10 @@ impl Agent {
                     StreamEvent::Token { content: c } => {
                         content_buf.push_str(&c);
                         events.push(LoopEvent::Token { text: c });
+                    }
+                    StreamEvent::Reasoning { content: r } => {
+                        reasoning_buf.push_str(&r);
+                        events.push(LoopEvent::Reasoning { text: r });
                     }
                     StreamEvent::ToolCallStart { id, name } => {
                         tool_builders.insert(
@@ -160,7 +165,8 @@ impl Agent {
             )
         };
 
-        self.state.push_assistant_message(&content_buf, tool_calls);
+        self.state
+            .push_assistant_message(&content_buf, &reasoning_buf, tool_calls);
 
         events
     }
@@ -202,6 +208,10 @@ impl Agent {
 #[derive(Debug, Clone)]
 pub enum LoopEvent {
     Token {
+        text: String,
+    },
+    /// A chunk of reasoning/thinking content (e.g., DeepSeek thinking chain).
+    Reasoning {
         text: String,
     },
     ToolCallRequired {
