@@ -61,6 +61,12 @@ pub trait Memory: Send + Sync {
     /// Reflect on a conversation and extract memories.
     /// Returns summaries of what should be remembered.
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String>;
+
+    /// Clone this memory as a trait object.
+    /// Default implementation creates a fresh InMemoryMemory.
+    fn clone_box(&self) -> Box<dyn Memory> {
+        Box::new(InMemoryMemory::new())
+    }
 }
 
 /// A single turn in a conversation (used as input for reflection).
