@@ -154,8 +154,8 @@ impl ErrorClassifier {
                 ArtemisError::ModelNotFound { model }
             }
 
-            // 500/502/503: Provider unavailable
-            500 | 502 | 503 => ArtemisError::ProviderUnavailable {
+            // 408/500/502/503/504: Provider unavailable
+            408 | 500 | 502 | 503 | 504 => ArtemisError::ProviderUnavailable {
                 provider: provider.to_string(),
                 reason: truncate_body(&body_lower),
             },

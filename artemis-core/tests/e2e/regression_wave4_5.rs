@@ -503,17 +503,14 @@ fn error_classify_status_400_without_context_overflow_is_network() {
 }
 
 #[test]
-fn error_classify_status_408_is_network() {
-    // BUG (L4): Currently 408 is classified as Network (not retryable).
-    // This test captures the current behavior. The fix should reclassify
-    // 408 as ProviderUnavailable (retryable).
+fn error_classify_status_408_is_retryable() {
+    // FIXED (M4): 408 is now classified as ProviderUnavailable (retryable).
     let err = ErrorClassifier::classify(408, "Request Timeout", "provider");
     match err {
-        ArtemisError::Network { status, .. } => {
-            assert_eq!(status, Some(408));
-            // Current behavior: Network is NOT retryable
+        ArtemisError::ProviderUnavailable { provider, .. } => {
+            assert_eq!(provider, "provider");
         }
-        _ => panic!("expected Network for 408 (current behavior), got {err:?}"),
+        _ => panic!("expected ProviderUnavailable for 408, got {err:?}"),
     }
 }
 
