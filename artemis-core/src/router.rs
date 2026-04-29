@@ -23,7 +23,6 @@ pub const _PROVIDER_CREDENTIALS: &[(&str, &[(&str, &str)])] = &[
     ("kilocode", &[("KILO_API_KEY", "api_key")]),
     ("ai-gateway", &[("AI_GATEWAY_API_KEY", "api_key")]),
     ("openai-codex", &[("OPENAI_API_KEY", "api_key")]),
-
     ("minimax", &[("MINIMAX_API_KEY", "api_key")]),
     ("qwen", &[("QWEN_API_KEY", "api_key")]),
     ("volces", &[("ARK_API_KEY", "api_key")]),
@@ -247,8 +246,8 @@ impl ModelRouter {
         }
         match PROVIDER_CREDENTIALS_MAP.get(entry.provider_id.as_str()) {
             Some(creds) => creds.is_empty(),
-            // Not in _PROVIDER_CREDENTIALS and no credential_keys — treat as credentialless
-            None => true,
+            // Unknown provider: require authentication, don't assume credentialless
+            None => false,
         }
     }
 
@@ -536,7 +535,6 @@ mod tests {
         );
         assert_eq!(normalize_model_id("openai/gpt-4o"), "gpt-4o");
     }
-
 
     #[test]
     fn test_custom_registration() {
@@ -831,5 +829,24 @@ mod tests {
         assert!(validate_base_url("api.openai.com").is_err());
         assert!(validate_base_url("localhost:8080").is_err());
         assert!(validate_base_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn test_unknown_provider_is_not_credentialless() {
+        let entry = CatalogProviderEntry {
+            provider_id: "antrhopic".to_string(),
+            api_model_id: "some-model".to_string(),
+            priority: 1,
+            weight: 1,
+            credential_keys: HashMap::new(),
+            base_url: None,
+            api_protocol: ApiProtocol::AnthropicMessages,
+            provider_specific: HashMap::new(),
+        };
+        // Unknown provider not in _PROVIDER_CREDENTIALS should NOT be treated as credentialless
+        assert!(
+            !ModelRouter::is_credentialless(&entry),
+            "Unknown provider should not be treated as credentialless"
+        );
     }
 }
