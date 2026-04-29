@@ -4,12 +4,14 @@ use std::collections::HashMap;
 
 use artemis_core::retry::RetryPolicy;
 use artemis_core::streaming::StreamEvent;
+use artemis_core::types::ToolDefinition;
 use artemis_core::ResolvedModel;
 
 #[allow(dead_code)]
 pub struct Agent {
     resolved: ResolvedModel,
     state: state::AgentState,
+    tools: Vec<ToolDefinition>,
     retry: RetryPolicy,
     memory: Option<Box<dyn artemis_memory::Memory>>,
     token_pool: Option<Box<dyn artemis_token_pool::TokenPool>>,
@@ -21,11 +23,17 @@ impl Agent {
         Self {
             resolved: resolved.clone(),
             state: state::AgentState::new(resolved),
+            tools: vec![],
             retry: RetryPolicy::default(),
             memory: None,
             token_pool: None,
             runtime: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
         }
+    }
+
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
+        self
     }
 
     pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
@@ -63,10 +71,7 @@ impl Agent {
     fn run_chat(&mut self) -> Vec<LoopEvent> {
         use futures::StreamExt;
 
-        let stream_result = self.runtime.block_on(artemis_core::chat(
-            &self.state.resolved,
-            &self.state.messages,
-        ));
+        let stream_result = self.chat_with_retry();
 
         let mut stream = match stream_result {
             Ok(s) => s,
@@ -152,6 +157,39 @@ impl Agent {
         self.state.push_assistant_message(&content_buf, tool_calls);
 
         events
+    }
+
+    /// Call chat() with retry logic. Retries only on retryable errors.
+    fn chat_with_retry(
+        &self,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
+        artemis_core::ArtemisError,
+    > {
+        use artemis_core::errors::ErrorClassifier;
+        let mut attempt = 0u32;
+
+        loop {
+            let result = self.runtime.block_on(artemis_core::chat(
+                &self.state.resolved,
+                &self.state.messages,
+                &self.tools,
+            ));
+
+            match result {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(&e) {
+                        return Err(e);
+                    }
+                    let delay = self.retry.jittered_backoff(attempt);
+                    self.runtime.block_on(async {
+                        tokio::time::sleep(delay).await;
+                    });
+                    attempt += 1;
+                }
+            }
+        }
     }
 }
 

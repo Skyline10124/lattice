@@ -53,10 +53,11 @@ use crate::transport::TransportDispatcher;
 pub async fn chat(
     resolved: &ResolvedModel,
     messages: &[Message],
+    tools: &[ToolDefinition],
 ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, ArtemisError> {
     let request = ChatRequest {
         messages: messages.to_vec(),
-        tools: vec![],
+        tools: tools.to_vec(),
         model: resolved.api_model_id.clone(),
         temperature: None,
         max_tokens: None,
@@ -168,8 +169,9 @@ pub async fn chat(
 pub async fn chat_complete(
     resolved: &ResolvedModel,
     messages: &[Message],
+    tools: &[ToolDefinition],
 ) -> Result<ChatResponse, ArtemisError> {
-    let mut stream = chat(resolved, messages).await?;
+    let mut stream = chat(resolved, messages, tools).await?;
 
     let mut content = String::new();
     let mut tool_calls_map: std::collections::HashMap<String, ToolCallBuilder> =
