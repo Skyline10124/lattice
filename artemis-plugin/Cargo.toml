@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 artemis-core = { path = "../artemis-core" }
+artemis-memory = { path = "../artemis-memory" }
+artemis-token-pool = { path = "../artemis-token-pool" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

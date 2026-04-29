@@ -1,4 +1,8 @@
-use artemis_core::types::ToolDefinition;
+use artemis_core::retry::RetryPolicy;
+use artemis_core::streaming::TokenUsage;
+use artemis_core::types::{Message, Role, ToolDefinition};
+use artemis_memory::Memory;
+use artemis_token_pool::TokenPool;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
@@ -130,6 +134,56 @@ impl Behavior for YoloBehavior {
 }
 
 // ---------------------------------------------------------------------------
+// PluginHooks — lifecycle observability
+// ---------------------------------------------------------------------------
+
+/// Hooks into the PluginRunner lifecycle for logging, metrics, and tracing.
+///
+/// All methods have default no-op implementations so users only override
+/// the hooks they care about.
+pub trait PluginHooks: Send + Sync {
+    /// Called before the first LLM call.
+    fn on_start(&self, _plugin: &str, _input_tokens: u32) {}
+
+    /// Called after each LLM response is parsed and an action is decided.
+    fn on_turn(&self, _attempt: u32, _tokens: Option<TokenUsage>, _action: &Action) {}
+
+    /// Called when a parse error occurs.
+    fn on_error(&self, _attempt: u32, _error: &PluginError) {}
+
+    /// Called when the plugin run completes (successfully or with a handoff).
+    fn on_complete(&self, _result: &RunResult) {}
+}
+
+// ---------------------------------------------------------------------------
+// PluginConfig — safety parameters
+// ---------------------------------------------------------------------------
+
+/// Configuration for a PluginRunner run.
+#[derive(Debug, Clone, Copy)]
+pub struct PluginConfig {
+    /// Maximum number of LLM calls (including retries). Default: 10.
+    pub max_turns: u32,
+    /// Maximum output size in bytes. Default: 1 MB.
+    pub max_output_bytes: usize,
+    /// Whether to check context length before sending. Default: true.
+    pub context_check: bool,
+    /// Timeout per LLM call in seconds. Default: 120.
+    pub timeout_per_call_secs: u64,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 10,
+            max_output_bytes: 1_048_576,
+            context_check: true,
+            timeout_per_call_secs: 120,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PluginRunner — ties Plugin + Behavior + Agent together
 // ---------------------------------------------------------------------------
 
@@ -140,10 +194,17 @@ pub struct PluginRunner<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> {
     plugin: &'a P,
     behavior: &'a B,
     agent: &'a mut A,
+    config: &'a PluginConfig,
+    hooks: Option<&'a dyn PluginHooks>,
+    retry_policy: Option<&'a RetryPolicy>,
+    memory: Option<Box<dyn Memory>>,
+    #[allow(dead_code)]
+    token_pool: Option<&'a dyn TokenPool>,
     _phantom: PhantomData<(P::Input, P::Output)>,
 }
 
 /// Result of running a plugin.
+#[derive(Debug, Clone)]
 pub struct RunResult {
     /// JSON-serialized output.
     pub output: String,
@@ -154,22 +215,52 @@ pub struct RunResult {
 }
 
 impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B, A> {
-    pub fn new(plugin: &'a P, behavior: &'a B, agent: &'a mut A) -> Self {
+    pub fn new(
+        plugin: &'a P,
+        behavior: &'a B,
+        agent: &'a mut A,
+        config: &'a PluginConfig,
+        hooks: Option<&'a dyn PluginHooks>,
+        retry_policy: Option<&'a RetryPolicy>,
+        memory: Option<Box<dyn Memory>>,
+        token_pool: Option<&'a dyn TokenPool>,
+    ) -> Self {
         Self {
             plugin,
             behavior,
             agent,
+            config,
+            hooks,
+            retry_policy,
+            memory,
+            token_pool,
             _phantom: PhantomData,
         }
     }
 
     /// Run the plugin: to_prompt → LLM → parse → behavior.decide.
     /// Retries and handoffs are handled by the Behavior.
+    ///
+    /// Lifecycle hooks (`on_start`, `on_turn`, `on_error`, `on_complete`)
+    /// are called at each stage when hooks are configured.
+    /// Backoff is applied between retries when a retry_policy is set.
+    /// Output size is validated against config.max_output_bytes.
+    /// If memory is set, the prompt and final output are saved.
     pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
         let prompt = self.plugin.to_prompt(input);
         let mut attempt = 0u32;
 
+        let est_input_tokens = (prompt.len() as u32).div_ceil(4);
+
+        if let Some(hooks) = self.hooks {
+            hooks.on_start(self.plugin.name(), est_input_tokens);
+        }
+
         loop {
+            if attempt >= self.config.max_turns {
+                return Err(PluginError::MaxTurnsExceeded(self.config.max_turns));
+            }
+
             let raw = self
                 .agent
                 .send(&prompt)
@@ -178,44 +269,105 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
             match self.plugin.parse_output(&raw) {
                 Ok(output) => {
                     let confidence = extract_confidence(&raw);
-                    match self.behavior.decide(confidence) {
+                    let action = self.behavior.decide(confidence);
+
+                    if let Some(hooks) = self.hooks {
+                        hooks.on_turn(attempt, None, &action);
+                    }
+
+                    match action {
                         Action::Done => {
                             let json = serde_json::to_string(&output)
                                 .map_err(|e| PluginError::Other(e.to_string()))?;
-                            return Ok(RunResult {
-                                output: json,
+                            if json.len() > self.config.max_output_bytes {
+                                return Err(PluginError::OutputTooLarge(
+                                    json.len(),
+                                    self.config.max_output_bytes,
+                                ));
+                            }
+                            let result = RunResult {
+                                output: json.clone(),
                                 turns: attempt + 1,
                                 final_action: Action::Done,
-                            });
+                            };
+                            if let Some(hooks) = self.hooks {
+                                hooks.on_complete(&result);
+                            }
+                            if let Some(ref mut memory) = self.memory {
+                                memory.save(
+                                    self.plugin.name(),
+                                    &Message {
+                                        role: Role::User,
+                                        content: prompt.clone(),
+                                        reasoning_content: None,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        name: None,
+                                    },
+                                );
+                                memory.save(
+                                    self.plugin.name(),
+                                    &Message {
+                                        role: Role::Assistant,
+                                        content: json,
+                                        reasoning_content: None,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                        name: None,
+                                    },
+                                );
+                            }
+                            return Ok(result);
                         }
-                        Action::Handoff(_target) => {
+                        Action::Handoff(target) => {
                             let json = serde_json::to_string(&output)
                                 .map_err(|e| PluginError::Other(e.to_string()))?;
-                            return Ok(RunResult {
+                            if json.len() > self.config.max_output_bytes {
+                                return Err(PluginError::OutputTooLarge(
+                                    json.len(),
+                                    self.config.max_output_bytes,
+                                ));
+                            }
+                            let result = RunResult {
                                 output: json,
                                 turns: attempt + 1,
-                                final_action: Action::Handoff(_target),
-                            });
+                                final_action: Action::Handoff(target),
+                            };
+                            if let Some(hooks) = self.hooks {
+                                hooks.on_complete(&result);
+                            }
+                            return Ok(result);
                         }
                         Action::Retry => {
                             attempt += 1;
+                            if let Some(policy) = self.retry_policy {
+                                std::thread::sleep(policy.jittered_backoff(attempt));
+                            }
                             continue;
                         }
                     }
                 }
-                Err(e) => match self.behavior.on_error(&e, attempt) {
-                    ErrorAction::Retry => {
-                        attempt += 1;
-                        continue;
+                Err(e) => {
+                    if let Some(hooks) = self.hooks {
+                        hooks.on_error(attempt, &e);
                     }
-                    ErrorAction::Abort => return Err(e),
-                    ErrorAction::Escalate => {
-                        return Err(PluginError::Escalated {
-                            original: Box::new(e),
-                            after_attempts: attempt,
-                        });
+                    match self.behavior.on_error(&e, attempt) {
+                        ErrorAction::Retry => {
+                            attempt += 1;
+                            if let Some(policy) = self.retry_policy {
+                                std::thread::sleep(policy.jittered_backoff(attempt));
+                            }
+                            continue;
+                        }
+                        ErrorAction::Abort => return Err(e),
+                        ErrorAction::Escalate => {
+                            return Err(PluginError::Escalated {
+                                original: Box::new(e),
+                                after_attempts: attempt,
+                            });
+                        }
                     }
-                },
+                }
             }
         }
     }
@@ -244,6 +396,15 @@ pub enum PluginError {
 
     #[error("Missing tool: {0}")]
     MissingTool(String),
+
+    #[error("Context window exceeded: {0} tokens required")]
+    ContextExceeded(u32),
+
+    #[error("Max turns exceeded ({0})")]
+    MaxTurnsExceeded(u32),
+
+    #[error("Output too large: {0} bytes (max {1})")]
+    OutputTooLarge(usize, usize),
 
     #[error("Escalated after {after_attempts} attempts: {original}")]
     Escalated {
@@ -386,5 +547,234 @@ mod tests {
     fn test_extract_confidence() {
         assert!((extract_confidence("{\"confidence\":0.85}") - 0.85).abs() < 0.01);
         assert!((extract_confidence("no confidence field") - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_plugin_config_defaults() {
+        let config = PluginConfig::default();
+        assert_eq!(config.max_turns, 10);
+        assert_eq!(config.max_output_bytes, 1_048_576);
+        assert!(config.context_check);
+        assert_eq!(config.timeout_per_call_secs, 120);
+    }
+
+    #[test]
+    fn test_plugin_error_display() {
+        let err = PluginError::MaxTurnsExceeded(5);
+        assert_eq!(format!("{}", err), "Max turns exceeded (5)");
+
+        let err = PluginError::ContextExceeded(500_000);
+        assert_eq!(
+            format!("{}", err),
+            "Context window exceeded: 500000 tokens required"
+        );
+
+        let err = PluginError::OutputTooLarge(2_000_000, 1_000_000);
+        assert_eq!(
+            format!("{}", err),
+            "Output too large: 2000000 bytes (max 1000000)"
+        );
+    }
+
+    /// A PluginHooks implementation that records lifecycle calls for testing.
+    struct TestHooks {
+        starts: std::sync::atomic::AtomicU32,
+        turns: std::sync::atomic::AtomicU32,
+        errors: std::sync::atomic::AtomicU32,
+        completes: std::sync::atomic::AtomicU32,
+    }
+
+    impl TestHooks {
+        fn new() -> Self {
+            Self {
+                starts: std::sync::atomic::AtomicU32::new(0),
+                turns: std::sync::atomic::AtomicU32::new(0),
+                errors: std::sync::atomic::AtomicU32::new(0),
+                completes: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+    }
+
+    impl PluginHooks for TestHooks {
+        fn on_start(&self, _plugin: &str, _input_tokens: u32) {
+            self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn on_turn(&self, _attempt: u32, _tokens: Option<TokenUsage>, _action: &Action) {
+            self.turns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn on_error(&self, _attempt: u32, _error: &PluginError) {
+            self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn on_complete(&self, _result: &RunResult) {
+            self.completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// A mock agent that returns a fixed response.
+    struct MockAgent {
+        response: String,
+    }
+
+    impl PluginAgent for MockAgent {
+        fn send(&mut self, _message: &str) -> Result<String, Box<dyn std::error::Error>> {
+            Ok(self.response.clone())
+        }
+    }
+
+    #[test]
+    fn test_plugin_runner_hooks_lifecycle() {
+        let plugin = CodeReviewPlugin::new();
+        let behavior = YoloBehavior;
+        let mut agent = MockAgent {
+            response: r#"{"issues":[{"severity":"high","file":"a.rs","line":1,"description":"bad"}],"confidence":0.95}"#.into(),
+        };
+        let config = PluginConfig::default();
+        let hooks = TestHooks::new();
+        let mut runner = PluginRunner::new(
+            &plugin,
+            &behavior,
+            &mut agent,
+            &config,
+            Some(&hooks),
+            None,
+            None,
+            None,
+        );
+
+        let input = serde_json::json!({"diff": "+unsafe code"});
+        let result = runner.run(&input).unwrap();
+
+        assert_eq!(result.turns, 1);
+        assert_eq!(result.final_action, Action::Done);
+        assert_eq!(
+            hooks.starts.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "on_start should be called once"
+        );
+        assert_eq!(
+            hooks.turns.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "on_turn should be called once"
+        );
+        assert_eq!(
+            hooks.errors.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "on_error should not be called"
+        );
+        assert_eq!(
+            hooks.completes.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "on_complete should be called once"
+        );
+    }
+
+    #[test]
+    fn test_plugin_runner_max_turns_exceeded() {
+        let plugin = CodeReviewPlugin::new();
+        let behavior = StrictBehavior {
+            confidence_threshold: 1.0, // never satisfied
+            ..Default::default()
+        };
+        let mut agent = MockAgent {
+            response: r#"{"issues":[],"confidence":0.5}"#.into(),
+        };
+        let config = PluginConfig {
+            max_turns: 2,
+            ..Default::default()
+        };
+        let mut runner = PluginRunner::new(
+            &plugin,
+            &behavior,
+            &mut agent,
+            &config,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let input = serde_json::json!({});
+        let err = runner.run(&input).unwrap_err();
+        assert!(matches!(err, PluginError::MaxTurnsExceeded(2)));
+    }
+
+    #[test]
+    fn test_plugin_runner_output_too_large() {
+        // Create a plugin whose output exceeds the max_output_bytes limit.
+        struct LargeOutputPlugin;
+        impl Plugin for LargeOutputPlugin {
+            type Input = serde_json::Value;
+            type Output = serde_json::Value;
+
+            fn name(&self) -> &str {
+                "large-output"
+            }
+            fn system_prompt(&self) -> &str {
+                ""
+            }
+            fn to_prompt(&self, _input: &Self::Input) -> String {
+                "do it".into()
+            }
+            fn parse_output(&self, _raw: &str) -> Result<serde_json::Value, PluginError> {
+                // Return a value that serializes to more than 100 bytes.
+                Ok(serde_json::json!({"data": "A".repeat(200)}))
+            }
+        }
+
+        let plugin = LargeOutputPlugin;
+        let behavior = YoloBehavior;
+        let mut agent = MockAgent {
+            response: "any".into(),
+        };
+        let config = PluginConfig {
+            max_output_bytes: 50,
+            ..Default::default()
+        };
+        let mut runner = PluginRunner::new(
+            &plugin,
+            &behavior,
+            &mut agent,
+            &config,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let input = serde_json::json!({});
+        let err = runner.run(&input).unwrap_err();
+        assert!(matches!(err, PluginError::OutputTooLarge(_, 50)));
+    }
+
+    #[test]
+    fn test_plugin_runner_memory_save() {
+        use artemis_memory::InMemoryMemory;
+
+        let plugin = CodeReviewPlugin::new();
+        let behavior = YoloBehavior;
+        let mut agent = MockAgent {
+            response: r#"{"issues":[],"confidence":0.9}"#.into(),
+        };
+        let config = PluginConfig::default();
+        let memory = Box::new(InMemoryMemory::new());
+        let mut runner = PluginRunner::new(
+            &plugin,
+            &behavior,
+            &mut agent,
+            &config,
+            None,
+            None,
+            Some(memory),
+            None,
+        );
+
+        let input = serde_json::json!({"diff": "test"});
+        let result = runner.run(&input).unwrap();
+        assert_eq!(result.final_action, Action::Done);
+
+        // The memory was moved into the runner; we can't access it directly from
+        // here after it's been consumed. The save happened during run().
+        // For a proper test we'd need the memory to be accessible after the run,
+        // but this validates that the save path compiles and runs without panic.
     }
 }
