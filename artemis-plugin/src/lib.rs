@@ -495,10 +495,7 @@ impl Plugin for CodeReviewPlugin {
     }
 
     fn to_prompt(&self, input: &Self::Input) -> String {
-        let diff = input
-            .get("diff")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let diff = input.get("diff").and_then(|v| v.as_str()).unwrap_or("");
         format!(
             "Please review the following code for bugs, security issues, and design problems.\n\n\
              Return a JSON object with an 'issues' array and a 'confidence' field (0.0-1.0).\n\

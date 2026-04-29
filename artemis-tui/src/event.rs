@@ -14,6 +14,11 @@ pub enum Event {
         done: bool,
         error: Option<String>,
     },
+    /// Resolved model + provider info from the background task.
+    ModelInfo {
+        model: String,
+        provider: String,
+    },
 }
 
 pub struct EventHandler {

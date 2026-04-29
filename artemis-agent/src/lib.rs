@@ -13,6 +13,12 @@ static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Runtime::new().expect("Failed to create shared tokio runtime")
 });
 
+/// Executes a tool call and returns the result string.
+/// The Agent calls this when the model requests a tool execution.
+pub trait ToolExecutor: Send + Sync {
+    fn execute(&self, call: &artemis_core::types::ToolCall) -> String;
+}
+
 #[allow(dead_code)]
 pub struct Agent {
     resolved: ResolvedModel,
@@ -21,6 +27,7 @@ pub struct Agent {
     retry: RetryPolicy,
     memory: Option<Box<dyn artemis_memory::Memory>>,
     token_pool: Option<Box<dyn artemis_token_pool::TokenPool>>,
+    tool_executor: Option<Box<dyn ToolExecutor>>,
 }
 
 impl Agent {
@@ -34,6 +41,7 @@ impl Agent {
             retry: RetryPolicy::default(),
             memory: None,
             token_pool: None,
+            tool_executor: None,
         }
     }
 
@@ -204,9 +212,7 @@ impl Agent {
             ));
 
             match result {
-                Ok(stream) => {
-                    return Ok(stream)
-                }
+                Ok(stream) => return Ok(stream),
                 Err(ref e) => {
                     if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(e) {
                         return Err(e.clone());

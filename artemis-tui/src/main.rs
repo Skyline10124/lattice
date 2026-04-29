@@ -70,6 +70,10 @@ async fn run_app<B: ratatui::backend::Backend>(
                 } => {
                     app.apply_stream_token(content, reasoning, done, error);
                 }
+                event::Event::ModelInfo { model, provider } => {
+                    app.current_model = model;
+                    app.current_provider = provider;
+                }
             }
         }
     }

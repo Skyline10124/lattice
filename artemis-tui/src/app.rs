@@ -1,7 +1,8 @@
-use anyhow::Result;
-use artemis_core::types::{Message as CoreMessage, Role};
+use anyhow::{anyhow, Result};
+use artemis_agent::{Agent, LoopEvent};
+use artemis_core::types::{Role, ToolCall, ToolDefinition};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use futures::StreamExt;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::Event;
@@ -45,8 +46,8 @@ impl App {
             input: String::new(),
             input_cursor: 0,
             status: AppStatus::Ready,
-            current_model: "sonnet".into(),
-            current_provider: "nous".into(),
+            current_model: "deepseek-v4-flash".into(),
+            current_provider: "".into(),
             token_count: 0,
             show_reasoning: true,
             scroll_offset: 0,
@@ -174,6 +175,7 @@ impl App {
         let model = self.current_model.clone();
 
         tokio::spawn(async move {
+            // --- Resolve model ---
             let resolved = match artemis_core::resolve(&model) {
                 Ok(r) => r,
                 Err(e) => {
@@ -187,68 +189,93 @@ impl App {
                 }
             };
 
-            let messages = vec![CoreMessage::new(Role::User, text.into(), None, None, None)];
+            // Report resolved model info to the statusline
+            let _ = tx.send(Event::ModelInfo {
+                model: resolved.canonical_id.clone(),
+                provider: resolved.provider.clone(),
+            });
 
-            let mut stream = match artemis_core::chat(&resolved, &messages, &[]).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = tx.send(Event::StreamToken {
-                        content: String::new(),
-                        reasoning: None,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
-                    return;
-                }
-            };
+            // --- Create Agent with tools ---
+            let mut agent = Agent::new(resolved).with_tools(tool_definitions());
+            let mut events = agent.send_message(&text);
+            let mut cumulative_tokens = 0u64;
 
-            while let Some(event) = stream.next().await {
-                match event {
-                    artemis_core::StreamEvent::Token { content } => {
-                        let _ = tx.send(Event::StreamToken {
-                            content,
-                            reasoning: None,
-                            done: false,
-                            error: None,
-                        });
-                    }
-                    artemis_core::StreamEvent::Reasoning { content } => {
-                        let _ = tx.send(Event::StreamToken {
-                            content: String::new(),
-                            reasoning: Some(content),
-                            done: false,
-                            error: None,
-                        });
-                    }
-                    artemis_core::StreamEvent::Done { usage, .. } => {
-                        if let Some(u) = usage {
+            // --- Conversation loop (handles tool call rounds) ---
+            loop {
+                let mut tool_calls: Vec<ToolCall> = Vec::new();
+                let mut usage_text = String::new();
+
+                for event in events {
+                    match event {
+                        LoopEvent::Token { text } => {
                             let _ = tx.send(Event::StreamToken {
-                                content: format!("\n\n[{} tok]", u.total_tokens),
+                                content: text,
                                 reasoning: None,
-                                done: true,
+                                done: false,
                                 error: None,
                             });
-                        } else {
+                        }
+                        LoopEvent::Reasoning { text } => {
+                            let _ = tx.send(Event::StreamToken {
+                                content: String::new(),
+                                reasoning: Some(text),
+                                done: false,
+                                error: None,
+                            });
+                        }
+                        LoopEvent::ToolCallRequired { calls } => {
+                            tool_calls = calls;
+                        }
+                        LoopEvent::Done { usage } => {
+                            if let Some(ref u) = usage {
+                                cumulative_tokens += u.total_tokens as u64;
+                                usage_text =
+                                    format!("\n\n[{} tok]", cumulative_tokens);
+                            }
+                        }
+                        LoopEvent::Error { message } => {
                             let _ = tx.send(Event::StreamToken {
                                 content: String::new(),
                                 reasoning: None,
                                 done: true,
-                                error: None,
+                                error: Some(message),
                             });
+                            return;
                         }
-                        break;
                     }
-                    artemis_core::StreamEvent::Error { message } => {
-                        let _ = tx.send(Event::StreamToken {
-                            content: String::new(),
-                            reasoning: None,
-                            done: true,
-                            error: Some(message),
-                        });
-                        break;
-                    }
-                    _ => {}
                 }
+
+                // No tool calls — conversation round is complete
+                if tool_calls.is_empty() {
+                    let _ = tx.send(Event::StreamToken {
+                        content: usage_text,
+                        reasoning: None,
+                        done: true,
+                        error: None,
+                    });
+                    break;
+                }
+
+                // Notify UI that tools are being executed
+                let _ = tx.send(Event::StreamToken {
+                    content: format!("\n[{} tool call(s)]", tool_calls.len()),
+                    reasoning: None,
+                    done: false,
+                    error: None,
+                });
+
+                // Execute tools and collect results
+                let results: Vec<(String, String)> = tool_calls
+                    .iter()
+                    .map(|call| {
+                        let result = execute_tool(&call.function.name, &call.function.arguments)
+                            .unwrap_or_else(|e| format!("Error: {}", e));
+                        (call.id.clone(), result)
+                    })
+                    .collect();
+
+                // Submit results back to the agent and get next round of events
+                events = agent.submit_tools(results, None);
             }
         });
 
@@ -290,5 +317,84 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tool definitions and execution (mirrors artemis-cli/src/commands/run.rs)
+// ---------------------------------------------------------------------------
+
+fn tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::new(
+            "read_file".into(),
+            "Read the contents of a file at the given path".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path to the file to read"
+                    }
+                },
+                "required": ["path"]
+            }),
+        ),
+        ToolDefinition::new(
+            "grep".into(),
+            "Search for a pattern in files within a directory".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (regex)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path to search in (default: current directory)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        ),
+    ]
+}
+
+fn execute_tool(name: &str, args_json: &str) -> Result<String> {
+    match name {
+        "read_file" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: String,
+            }
+            let args: Args =
+                serde_json::from_str(args_json).map_err(|e| anyhow!("Invalid args: {}", e))?;
+            std::fs::read_to_string(&args.path)
+                .map_err(|e| anyhow!("Failed to read {}: {}", args.path, e))
+        }
+        "grep" => {
+            #[derive(Deserialize)]
+            struct Args {
+                pattern: String,
+                path: Option<String>,
+            }
+            let args: Args =
+                serde_json::from_str(args_json).map_err(|e| anyhow!("Invalid args: {}", e))?;
+            let dir = args.path.unwrap_or_else(|| ".".to_string());
+            let output = std::process::Command::new("grep")
+                .args(["-rn", "--color=never", &args.pattern, &dir])
+                .output()
+                .map_err(|e| anyhow!("Failed to run grep: {}", e))?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else if output.status.code() == Some(1) {
+                Ok(String::new())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(anyhow!("grep failed: {}", stderr))
+            }
+        }
+        _ => Err(anyhow!("Unknown tool: {}", name)),
     }
 }
