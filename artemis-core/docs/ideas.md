@@ -253,7 +253,7 @@ let catalog = Catalog::default().with_overlay(overlay);
 
 ## 六、路线图
 
-### 第一阶段：内核瘦身
+### 第一阶段：内核瘦身 ✅
 
 - [x] 从内核移除 agent_loop → 上层负责
 - [x] 从内核移除 tool_boundary → 上层负责
@@ -261,7 +261,7 @@ let catalog = Catalog::default().with_overlay(overlay);
 - [x] 删除 `rig-core` 依赖（H11）
 - [x] 删除 `ProviderConfig`、`TransportType` 死代码（M12, M13）
 
-### 第二阶段：内核收敛 + 安全
+### 第二阶段：内核收敛 + 安全 ✅
 
 - [x] C1: 合并双 Transport trait
 - [x] H4: 统一 ErrorClassifier
@@ -271,13 +271,13 @@ let catalog = Catalog::default().with_overlay(overlay);
 - [x] H13: HTTP 超时
 - [x] H14: ResolvedModel Debug 脱敏
 
-### 第三阶段：Dogfooding 就绪
+### 第三阶段：Dogfooding 就绪 ✅
 
-- [ ] C2: AgentLoop 集成 tokio runtime（或移至上层）
-- [ ] H2: 修复对话历史维护
-- [ ] H3: 添加 tool result 重入机制
+- [x] C2: Agent 独立 crate（artemis-agent）
+- [x] H2: 对话历史维护（Agent state）
+- [x] H3: tool result 重入机制（submit_tools）
 
-### 第四阶段：类型化插件系统
+### 第四阶段：类型化插件系统（下一阶段）
 
 - [ ] 插件 Input/Output 类型接口定义
 - [ ] `to_prompt()` / `from_output()` trait
