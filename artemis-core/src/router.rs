@@ -7,7 +7,7 @@ use std::sync::Mutex;
 /// Maps provider slugs to env var → field name mappings.
 /// Used when a provider entry's credential_keys is empty or needs
 /// supplementary env var lookups (e.g. openrouter which isn't in provider_defaults).
-pub const _PROVIDER_CREDENTIALS: &[(&str, &[(&str, &str)])] = &[
+pub const PROVIDER_CREDENTIALS_RAW: &[(&str, &[(&str, &str)])] = &[
     ("openrouter", &[("OPENROUTER_API_KEY", "api_key")]),
     ("anthropic", &[("ANTHROPIC_API_KEY", "api_key")]),
     ("openai", &[("OPENAI_API_KEY", "api_key")]),
@@ -30,12 +30,12 @@ pub const _PROVIDER_CREDENTIALS: &[(&str, &[(&str, &str)])] = &[
     ("opencode-go", &[("OPENCODE_GO_API_KEY", "api_key")]),
 ];
 
-/// HashMap-based O(1) lookup over _PROVIDER_CREDENTIALS, built once at first access.
+/// HashMap-based O(1) lookup over PROVIDER_CREDENTIALS_RAW, built once at first access.
 static PROVIDER_CREDENTIALS_MAP: std::sync::LazyLock<
     HashMap<&'static str, &'static [(&'static str, &'static str)]>,
 > = std::sync::LazyLock::new(|| {
     let mut map = HashMap::new();
-    for (slug, creds) in _PROVIDER_CREDENTIALS {
+    for (slug, creds) in PROVIDER_CREDENTIALS_RAW {
         map.insert(*slug, *creds);
     }
     map
@@ -239,7 +239,7 @@ impl ModelRouter {
     ///
     /// A provider is credentialless when:
     /// - Its `credential_keys` map is empty AND
-    /// - It has no credential entries in `_PROVIDER_CREDENTIALS` (or its entry is `&[]`)
+    /// - It has no credential entries in `PROVIDER_CREDENTIALS_RAW` (or its entry is `&[]`)
     fn is_credentialless(entry: &CatalogProviderEntry) -> bool {
         if !entry.credential_keys.is_empty() {
             return false;
@@ -843,7 +843,7 @@ mod tests {
             api_protocol: ApiProtocol::AnthropicMessages,
             provider_specific: HashMap::new(),
         };
-        // Unknown provider not in _PROVIDER_CREDENTIALS should NOT be treated as credentialless
+        // Unknown provider not in PROVIDER_CREDENTIALS_RAW should NOT be treated as credentialless
         assert!(
             !ModelRouter::is_credentialless(&entry),
             "Unknown provider should not be treated as credentialless"

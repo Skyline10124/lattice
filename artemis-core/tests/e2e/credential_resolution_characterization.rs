@@ -5,7 +5,7 @@
 //! and adding credential caching (T22).
 //!
 //! KEY BEHAVIORS DOCUMENTED:
-//! - _PROVIDER_CREDENTIALS maps 20 providers to env var names
+//! - PROVIDER_CREDENTIALS_RAW maps 20 providers to env var names
 //! - Ollama has empty credential_keys (credentialless)
 //! - Priority loop (resolve() lines 150-167) skips providers where api_key is None
 //! - Fallback path (lines 169-179) returns first sorted provider with api_key: None
@@ -16,7 +16,7 @@
 //! - normalize_model_id() is the hot path that transforms user input before resolution
 
 use artemis_core::catalog::{ApiProtocol, CatalogProviderEntry};
-use artemis_core::router::{normalize_model_id, ModelRouter, _PROVIDER_CREDENTIALS};
+use artemis_core::router::{normalize_model_id, ModelRouter, PROVIDER_CREDENTIALS_RAW};
 use std::collections::HashMap;
 use std::env;
 
@@ -47,21 +47,21 @@ fn restore_env_batch(saved: Vec<(&str, Option<String>)>) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 1: _PROVIDER_CREDENTIALS table characterization
+// SECTION 1: PROVIDER_CREDENTIALS_RAW table characterization
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn provider_credentials_has_20_entries() {
     assert_eq!(
-        _PROVIDER_CREDENTIALS.len(),
+        PROVIDER_CREDENTIALS_RAW.len(),
         20,
-        "_PROVIDER_CREDENTIALS should have exactly 20 provider entries"
+        "PROVIDER_CREDENTIALS_RAW should have exactly 20 provider entries"
     );
 }
 
 #[test]
 fn provider_credentials_all_provider_slugs() {
-    let slugs: Vec<&str> = _PROVIDER_CREDENTIALS.iter().map(|(s, _)| *s).collect();
+    let slugs: Vec<&str> = PROVIDER_CREDENTIALS_RAW.iter().map(|(s, _)| *s).collect();
     let expected = [
         "openrouter",
         "anthropic",
@@ -117,10 +117,10 @@ fn provider_credentials_env_var_mapping() {
     ];
 
     for (slug, env_var, field_name) in &expected {
-        let entry = _PROVIDER_CREDENTIALS
+        let entry = PROVIDER_CREDENTIALS_RAW
             .iter()
             .find(|(s, _)| *s == *slug)
-            .unwrap_or_else(|| panic!("provider '{}' not found in _PROVIDER_CREDENTIALS", slug));
+            .unwrap_or_else(|| panic!("provider '{}' not found in PROVIDER_CREDENTIALS_RAW", slug));
         assert_eq!(
             entry.1.len(),
             1,
@@ -145,7 +145,7 @@ fn ollama_is_credentialless() {
     // CHARACTERIZATION: Ollama has an empty credential list.
     // This means resolve_credentials() returns None for it, and the
     // priority loop in resolve() skips it (because api_key.is_some() is false).
-    for (slug, creds) in _PROVIDER_CREDENTIALS {
+    for (slug, creds) in PROVIDER_CREDENTIALS_RAW {
         if *slug == "ollama" {
             assert!(
                 creds.is_empty(),
@@ -166,7 +166,7 @@ fn ollama_is_credentialless() {
 fn openai_codex_shares_openai_key() {
     // CHARACTERIZATION: openai-codex shares OPENAI_API_KEY with openai.
     // This means setting OPENAI_API_KEY will authenticate both openai and openai-codex providers.
-    let codex_entry = _PROVIDER_CREDENTIALS
+    let codex_entry = PROVIDER_CREDENTIALS_RAW
         .iter()
         .find(|(s, _)| *s == "openai-codex")
         .unwrap();
@@ -177,7 +177,7 @@ fn openai_codex_shares_openai_key() {
 fn copilot_uses_github_token_not_api_key() {
     // CHARACTERIZATION: copilot uses GITHUB_TOKEN with field name "token"
     // (not "api_key" like most other providers).
-    let copilot_entry = _PROVIDER_CREDENTIALS
+    let copilot_entry = PROVIDER_CREDENTIALS_RAW
         .iter()
         .find(|(s, _)| *s == "copilot")
         .unwrap();
@@ -206,9 +206,9 @@ fn resolve_credentials_finds_env_var_for_provider() {
 
 #[test]
 fn resolve_credentials_returns_none_for_credentialless_provider() {
-    // Ollama has empty credential entries in _PROVIDER_CREDENTIALS,
+    // Ollama has empty credential entries in PROVIDER_CREDENTIALS_RAW,
     // so resolve_credentials() returns None for it regardless of env vars.
-    let ollama_entry = _PROVIDER_CREDENTIALS
+    let ollama_entry = PROVIDER_CREDENTIALS_RAW
         .iter()
         .find(|(s, _)| *s == "ollama")
         .unwrap();
@@ -221,7 +221,7 @@ fn resolve_credentials_returns_none_for_credentialless_provider() {
 #[test]
 fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
     // CHARACTERIZATION: resolve_credentials() first checks entry.credential_keys,
-    // then falls back to _PROVIDER_CREDENTIALS. If entry.credential_keys has
+    // then falls back to PROVIDER_CREDENTIALS_RAW. If entry.credential_keys has
     // the right mapping, it wins.
     let _lock = crate::env_lock::lock();
     let prev_custom = save_env("MY_CUSTOM_ANTHROPIC_KEY");
@@ -260,7 +260,7 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
     assert_eq!(
         resolved.api_key.as_deref(),
         Some("custom-key-value"),
-        "should use entry.credential_keys first, not _PROVIDER_CREDENTIALS fallback"
+        "should use entry.credential_keys first, not PROVIDER_CREDENTIALS_RAW fallback"
     );
 
     restore_env("MY_CUSTOM_ANTHROPIC_KEY", prev_custom);
@@ -823,14 +823,14 @@ fn bug_ollama_not_selected_when_anthropic_has_creds() {
 
 #[test]
 fn all_19_credentialed_providers_have_env_var_mapping() {
-    // CHARACTERIZATION: Of the 20 entries in _PROVIDER_CREDENTIALS,
+    // CHARACTERIZATION: Of the 20 entries in PROVIDER_CREDENTIALS_RAW,
     // 19 have at least one env var mapping, and 1 (ollama) has none.
-    let credentialed: Vec<&&str> = _PROVIDER_CREDENTIALS
+    let credentialed: Vec<&&str> = PROVIDER_CREDENTIALS_RAW
         .iter()
         .filter(|(_, creds)| !creds.is_empty())
         .map(|(slug, _)| slug)
         .collect();
-    let credentialless: Vec<&&str> = _PROVIDER_CREDENTIALS
+    let credentialless: Vec<&&str> = PROVIDER_CREDENTIALS_RAW
         .iter()
         .filter(|(_, creds)| creds.is_empty())
         .map(|(slug, _)| slug)
@@ -854,7 +854,7 @@ fn each_env_var_maps_to_at_most_one_primary_provider() {
     // CHARACTERIZATION: Most env vars are unique to a single provider.
     // Exception: OPENAI_API_KEY is shared by "openai" and "openai-codex".
     let mut env_var_to_providers: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (slug, creds) in _PROVIDER_CREDENTIALS {
+    for (slug, creds) in PROVIDER_CREDENTIALS_RAW {
         for (env_var, _field) in *creds {
             env_var_to_providers
                 .entry(*env_var)
