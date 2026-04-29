@@ -1,3 +1,4 @@
+pub mod sandbox;
 pub mod state;
 pub mod tools;
 
@@ -29,7 +30,8 @@ pub trait AgentDispatcher: Send + Sync {
     fn dispatch(&self, agent_name: &str, input: &str) -> String;
 }
 
-// Re-export shared default tools for convenience.
+// Re-export shared default tools and sandbox for convenience.
+pub use sandbox::SandboxConfig;
 pub use tools::{default_tool_definitions, DefaultToolExecutor};
 
 #[allow(dead_code)]

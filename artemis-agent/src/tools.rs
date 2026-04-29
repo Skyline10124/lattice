@@ -1,6 +1,7 @@
 use artemis_core::types::ToolCall;
 use artemis_core::types::ToolDefinition;
 
+use crate::sandbox::SandboxConfig;
 use crate::{AgentDispatcher, ToolExecutor};
 
 /// Returns the default set of tool definitions: read_file, grep, write_file,
@@ -278,9 +279,14 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
 /// `agent_call` requires an `AgentDispatcher` to be configured via
 /// `with_agent_dispatcher()`. Without one, `agent_call` returns an
 /// error message.
+///
+/// All tool operations are gated by the `sandbox` configuration
+/// (path validation, sensitive-file blocking, command allowlisting,
+/// URL scheme restrictions, and size/timeout limits).
 pub struct DefaultToolExecutor {
     pub project_root: String,
     pub agent_dispatcher: Option<Box<dyn AgentDispatcher>>,
+    pub sandbox: SandboxConfig,
 }
 
 impl DefaultToolExecutor {
@@ -288,6 +294,7 @@ impl DefaultToolExecutor {
         Self {
             project_root: project_root.to_string(),
             agent_dispatcher: None,
+            sandbox: SandboxConfig::default(),
         }
     }
 
@@ -295,6 +302,12 @@ impl DefaultToolExecutor {
     /// can launch sub-agents and return their output.
     pub fn with_agent_dispatcher(mut self, d: Box<dyn AgentDispatcher>) -> Self {
         self.agent_dispatcher = Some(d);
+        self
+    }
+
+    /// Override the sandbox config (replaces the default).
+    pub fn with_sandbox(mut self, config: SandboxConfig) -> Self {
+        self.sandbox = config;
         self
     }
 }
@@ -340,11 +353,28 @@ impl ToolExecutor for DefaultToolExecutor {
         match call.function.name.as_str() {
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_read(path) {
+                    return e;
+                }
+                match std::fs::metadata(path) {
+                    Ok(meta) if meta.len() > self.sandbox.max_read_size as u64 => {
+                        return format!(
+                            "Sandbox: file size {} exceeds max_read_size {}",
+                            meta.len(),
+                            self.sandbox.max_read_size
+                        );
+                    }
+                    Err(e) => return format!("Error accessing {}: {}", path, e),
+                    _ => {}
+                }
                 std::fs::read_to_string(path).unwrap_or_else(|e| format!("Error: {}", e))
             }
             "grep" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                if let Err(e) = self.sandbox.check_read(path) {
+                    return e;
+                }
                 let output = std::process::Command::new("grep")
                     .args(["-rn", "--include=*.rs", pattern, path])
                     .output();
@@ -364,27 +394,16 @@ impl ToolExecutor for DefaultToolExecutor {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
-                // Safety: only allow writing to project source dirs
-                let allowed = [
-                    "artemis-core/",
-                    "artemis-agent/",
-                    "artemis-memory/",
-                    "artemis-token-pool/",
-                    "artemis-python/",
-                    "artemis-plugin/",
-                    "artemis-cli/",
-                    "artemis-tui/",
-                ];
-                let safe = allowed.iter().any(|p| abs.contains(p));
-                if !safe {
-                    return format!(
-                        "Write denied: path '{}' must be under {}",
-                        path,
-                        allowed.join(", ")
-                    );
+                // Sandbox: validate path + size
+                if let Err(e) = self.sandbox.check_write(path) {
+                    return e;
                 }
-                if abs.contains("..") {
-                    return "Write denied: path contains '..'".into();
+                if content.len() > self.sandbox.max_write_size {
+                    return format!(
+                        "Sandbox: content size {} exceeds max_write_size {}",
+                        content.len(),
+                        self.sandbox.max_write_size
+                    );
                 }
                 match std::fs::write(&abs, content) {
                     Ok(_) => {
@@ -395,6 +414,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "list_directory" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                if let Err(e) = self.sandbox.check_read(path) {
+                    return e;
+                }
                 match std::fs::read_dir(path) {
                     Ok(entries) => {
                         let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
@@ -417,6 +439,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "run_test" => {
                 let test_name = args.get("test_name").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_command("cargo test") {
+                    return e;
+                }
                 let mut cmd = std::process::Command::new("cargo");
                 cmd.arg("test").args(["--color", "never"]);
                 if !test_name.is_empty() {
@@ -433,6 +458,9 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "run_clippy" => {
+                if let Err(e) = self.sandbox.check_command("cargo clippy") {
+                    return e;
+                }
                 let output = std::process::Command::new("cargo")
                     .args(["clippy", "--color", "never"])
                     .output();
@@ -448,6 +476,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_command(cmd) {
+                    return e;
+                }
                 let output = std::process::Command::new("sh").args(["-c", cmd]).output();
                 match output {
                     Ok(o) => {
@@ -466,6 +497,9 @@ impl ToolExecutor for DefaultToolExecutor {
                 let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
                 let search = args.get("search").and_then(|v| v.as_str()).unwrap_or("");
                 let insert = args.get("insert").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_write(path) {
+                    return e;
+                }
                 let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
                 match std::fs::read_to_string(&abs) {
                     Ok(content) => {
@@ -501,6 +535,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "run_command" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_command(cmd) {
+                    return e;
+                }
                 let timeout_secs = args
                     .get("timeout_secs")
                     .and_then(|v| v.as_u64())
@@ -528,6 +565,9 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             "list_processes" => {
+                if let Err(e) = self.sandbox.check_command("ps aux") {
+                    return e;
+                }
                 let output = std::process::Command::new("sh")
                     .args(["-c", "ps aux | head -30"])
                     .output();
@@ -538,6 +578,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "web_search" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_url(url) {
+                    return e;
+                }
                 let output = std::process::Command::new("curl")
                     .args(["-sL", url])
                     .output();
@@ -557,6 +600,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "web_fetch" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_url(url) {
+                    return e;
+                }
                 let output = std::process::Command::new("curl")
                     .args(["-sL", url])
                     .output();
@@ -576,6 +622,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "browser_navigate" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = self.sandbox.check_url(url) {
+                    return e;
+                }
                 let output = std::process::Command::new("xdg-open").arg(url).output();
                 match output {
                     Ok(o) => {
@@ -597,6 +646,9 @@ impl ToolExecutor for DefaultToolExecutor {
                     .get("filename")
                     .and_then(|v| v.as_str())
                     .unwrap_or("screenshot.png");
+                if let Err(e) = self.sandbox.check_write(filename) {
+                    return e;
+                }
                 // Try import (ImageMagick) first
                 let result = std::process::Command::new("import")
                     .args(["-window", "root", filename])
