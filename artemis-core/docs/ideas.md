@@ -255,21 +255,21 @@ let catalog = Catalog::default().with_overlay(overlay);
 
 ### 第一阶段：内核瘦身
 
-- [ ] 从内核移除 agent_loop → 上层负责
-- [ ] 从内核移除 tool_boundary → 上层负责
-- [ ] 从内核移除 streaming_bridge → 独立 crate
-- [ ] 删除 `rig-core` 依赖（H11）
-- [ ] 删除 `ProviderConfig`、`TransportType` 死代码（M12, M13）
+- [x] 从内核移除 agent_loop → 上层负责
+- [x] 从内核移除 tool_boundary → 上层负责
+- [x] 从内核移除 streaming_bridge → 独立 crate
+- [x] 删除 `rig-core` 依赖（H11）
+- [x] 删除 `ProviderConfig`、`TransportType` 死代码（M12, M13）
 
 ### 第二阶段：内核收敛 + 安全
 
-- [ ] C1: 合并双 Transport trait
-- [ ] H4: 统一 ErrorClassifier
-- [ ] H9: 提取公共 provider 逻辑
-- [ ] H6: Regex `LazyLock`
-- [ ] H7: 共享 `reqwest::Client`
-- [ ] H13: HTTP 超时
-- [ ] H14: ResolvedModel Debug 脱敏
+- [x] C1: 合并双 Transport trait
+- [x] H4: 统一 ErrorClassifier
+- [x] H9: 提取公共 provider 逻辑（移除 providers/ 目录，核心逻辑收敛至 transport/）
+- [x] H6: Regex `LazyLock`
+- [x] H7: 共享 `reqwest::Client`
+- [x] H13: HTTP 超时
+- [x] H14: ResolvedModel Debug 脱敏
 
 ### 第三阶段：Dogfooding 就绪
 
