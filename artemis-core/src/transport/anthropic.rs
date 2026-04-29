@@ -169,9 +169,13 @@ impl Transport for AnthropicTransport {
 
         for m in messages {
             match m.role {
-                Role::System => {
-                    system = Some(m.content.clone());
-                }
+                Role::System => match system {
+                    Some(ref mut existing) => {
+                        existing.push_str("\n\n");
+                        existing.push_str(&m.content);
+                    }
+                    None => system = Some(m.content.clone()),
+                },
                 Role::User => {
                     let content = if m.content.is_empty() {
                         json!([{"type": "text", "text": "(empty message)"}])
@@ -374,6 +378,23 @@ mod tests {
         ];
         let result = transport.normalize_messages(&messages);
         assert_eq!(result.system, Some("You are helpful.".to_string()));
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn test_multiple_system_messages_merged() {
+        let transport = AnthropicTransport::new();
+        let messages = vec![
+            make_message(Role::System, "First system prompt."),
+            make_message(Role::System, "Second system prompt."),
+            make_message(Role::User, "Hello"),
+        ];
+        let result = transport.normalize_messages(&messages);
+        assert_eq!(
+            result.system,
+            Some("First system prompt.\n\nSecond system prompt.".to_string())
+        );
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0]["role"], "user");
     }
