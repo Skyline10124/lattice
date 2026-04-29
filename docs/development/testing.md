@@ -12,8 +12,8 @@ cargo test -p artemis-core <name>    # 单测试
 
 | Crate | 测试数 |
 |-------|--------|
-| artemis-core | 380 |
-| artemis-agent | 170 |
+| artemis-core | 411（lib: 170 + e2e: 170 + transport_char: 29 + transport_integration: 42） |
+| artemis-agent | 0 |
 | artemis-memory | 3 |
 | artemis-token-pool | 3 |
 | artemis-python | 0（Python binding 无 Rust 测试） |
