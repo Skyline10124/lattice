@@ -214,7 +214,7 @@ fn extract_retry_after(body: &str) -> Option<f64> {
         if let Some(pos) = body_lower.find(key) {
             let after_key = &body_lower[pos + key.len()..];
             if let Some(colon_pos) = after_key.find(':') {
-                let after_colon = after_key[colon_pos + 1..].trim();
+                let after_colon = after_key[colon_pos + 1..].trim().trim_matches('"');
                 let num_str: String = after_colon
                     .chars()
                     .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')

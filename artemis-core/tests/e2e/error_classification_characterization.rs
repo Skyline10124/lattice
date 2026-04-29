@@ -413,15 +413,14 @@ fn retry_after_not_present() {
 
 #[test]
 fn retry_after_string_encoded_number_bug() {
-    // BUG (L3): extract_retry_after does NOT parse string-encoded numbers.
-    // When retry_after is "30" (string), the parser finds the key but
-    // the take_while skips the quote character, so it can't parse the value.
+    // FIXED (M5): extract_retry_after now handles string-encoded numbers
+    // by stripping quotes before digit extraction.
     let err = ErrorsClassifier::classify(429, r#"{"retry_after": "30"}"#, "openai");
     match err {
         ArtemisError::RateLimit { retry_after, .. } => {
             assert_eq!(
-                retry_after, None,
-                "BUG L3: string-encoded '30' is NOT parsed"
+                retry_after, Some(30.0),
+                "M5 FIXED: string-encoded '30' should now be parsed"
             );
         }
         _ => panic!("Expected RateLimit"),
