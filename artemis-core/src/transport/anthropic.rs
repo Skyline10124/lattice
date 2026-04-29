@@ -132,6 +132,19 @@ impl Transport for AnthropicTransport {
             .unwrap_or("end_turn");
         let finish_reason = map_stop_reason(stop_reason);
 
+        let model = response
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let usage = response.get("usage").map(|u| TokenUsage {
+            prompt_tokens: u["input_tokens"].as_u64().unwrap_or(0) as u32,
+            completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
+            total_tokens: (u["input_tokens"].as_u64().unwrap_or(0)
+                + u["output_tokens"].as_u64().unwrap_or(0)) as u32,
+        });
+
         Ok(ChatResponse {
             content: if text_parts.is_empty() {
                 None
@@ -144,9 +157,9 @@ impl Transport for AnthropicTransport {
             } else {
                 Some(tool_calls)
             },
-            usage: None,
+            usage,
             finish_reason,
-            model: String::new(),
+            model,
         })
     }
 
@@ -442,7 +455,10 @@ mod tests {
         assert_eq!(result.content.as_deref(), Some("Hello there!"));
         assert!(result.tool_calls.is_none());
         assert_eq!(result.finish_reason, "stop");
-        assert!(result.usage.is_none());
+        let usage = result.usage.expect("expected usage from response");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
         assert_eq!(result.model, "");
     }
 

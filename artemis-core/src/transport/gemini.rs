@@ -208,7 +208,7 @@ impl GeminiTransport {
     fn parse_response(response: &Value) -> Result<ChatResponse, TransportError> {
         let candidates = response.get("candidates").and_then(|c| c.as_array());
 
-        let (content_parts, finish_reason_raw, model) = match candidates {
+        let (content_parts, finish_reason_raw) = match candidates {
             Some(cands) if !cands.is_empty() => {
                 let cand = &cands[0];
                 let parts = cand
@@ -222,7 +222,7 @@ impl GeminiTransport {
                     .and_then(|r| r.as_str())
                     .unwrap_or("STOP")
                     .to_string();
-                (parts, reason, String::new())
+                (parts, reason)
             }
             _ => {
                 return Ok(ChatResponse {
@@ -266,6 +266,12 @@ impl GeminiTransport {
         } else {
             Self::map_finish_reason(&finish_reason_raw)
         };
+
+        let model = response
+            .get("modelVersion")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
 
         let usage = response.get("usageMetadata").map(|u| TokenUsage {
             prompt_tokens: u
