@@ -17,6 +17,10 @@ pub use types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 use router::ModelRouter;
 
 /// Resolve a model name (or alias, e.g. "sonnet") to provider connection details.
+///
+/// This is a stateless convenience — each call creates a fresh router.
+/// For custom model registrations, use [`ModelRouter`] directly.
+///
 /// Credentials are resolved from environment variables.
 pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError> {
     ModelRouter::new().resolve(model, None)
@@ -27,6 +31,7 @@ pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError> {
 // ---------------------------------------------------------------------------
 
 use std::pin::Pin;
+use std::sync::LazyLock;
 
 use futures::{Stream, StreamExt};
 use reqwest_eventsource::RequestBuilderExt;
@@ -35,6 +40,8 @@ use crate::catalog::ApiProtocol;
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::EventStream;
 use crate::transport::TransportDispatcher;
+
+static DISPATCHER: LazyLock<TransportDispatcher> = LazyLock::new(TransportDispatcher::new);
 
 /// Send messages to a resolved model and return a stream of [`StreamEvent`]s.
 ///
@@ -69,8 +76,7 @@ pub async fn chat(
 
     match &resolved.api_protocol {
         ApiProtocol::OpenAiChat => {
-            let dispatcher = TransportDispatcher::new();
-            let transport = dispatcher
+            let transport = &DISPATCHER
                 .dispatch(&ApiProtocol::OpenAiChat)
                 .ok_or_else(|| ArtemisError::Config {
                     message: "OpenAiChat transport not registered".into(),
@@ -106,8 +112,7 @@ pub async fn chat(
         }
 
         ApiProtocol::AnthropicMessages => {
-            let dispatcher = TransportDispatcher::new();
-            let transport = dispatcher
+            let transport = &DISPATCHER
                 .dispatch(&ApiProtocol::AnthropicMessages)
                 .ok_or_else(|| ArtemisError::Config {
                     message: "AnthropicMessages transport not registered".into(),
