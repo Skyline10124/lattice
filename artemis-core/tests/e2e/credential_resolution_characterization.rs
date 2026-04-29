@@ -398,7 +398,7 @@ fn priority_loop_bug_ollama_skipped_despite_highest_priority() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn fallback_returns_first_sorted_provider_with_none_api_key() {
+fn fallback_returns_config_error_when_no_credentials() {
     // CHARACTERIZATION: When no provider has credentials, the fallback
     // path returns sorted_providers[0] with api_key: None.
     // sorted_providers is sorted by priority (ascending), so the
@@ -417,21 +417,22 @@ fn fallback_returns_first_sorted_provider_with_none_api_key() {
     let result = router.resolve("claude-sonnet-4-6", None);
 
     assert!(
-        result.is_ok(),
-        "fallback should always return Ok with api_key: None"
+        result.is_err(),
+        "fallback should error with Config when credentials are missing"
     );
-    let resolved = result.unwrap();
-    assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
-    assert!(
-        resolved.api_key.is_none(),
-        "fallback path should produce api_key: None when no credentials are set"
-    );
+    if let Err(ref e) = result {
+        assert!(
+            e.to_string().contains("API_KEY") || e.to_string().contains("requires"),
+            "error should mention required credential, got: {}",
+            e
+        );
+    }
 
     restore_env_batch(prev_keys);
 }
 
 #[test]
-fn fallback_preserves_provider_metadata() {
+fn fallback_errors_on_missing_provider_metadata() {
     // CHARACTERIZATION: The fallback path preserves api_protocol,
     // api_model_id from the first sorted provider, even though api_key is None.
     let _lock = crate::env_lock::lock();

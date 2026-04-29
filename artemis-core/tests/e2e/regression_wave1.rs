@@ -740,7 +740,7 @@ fn regress_engine_mock_provider_auth_error_typed() {
 /// When credential is missing, the router falls back to the first provider
 /// with api_key=None — but crucially, the provider name is real (not "mock").
 #[test]
-fn regress_engine_mock_provider_missing_credential_errors() {
+fn regress_missing_credential_errors() {
     let _lock = crate::env_lock::lock();
     let saved = isolate_env(&[
         "ANTHROPIC_API_KEY",

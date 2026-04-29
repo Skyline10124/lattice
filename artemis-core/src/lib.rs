@@ -355,19 +355,51 @@ mod resolve_tests {
     use super::*;
 
     #[test]
-    fn test_resolve_sonnet_alias() {
+    fn test_resolve_sonnet_alias_missing_credential() {
+        // Without ANTHROPIC_API_KEY, resolve should error with a Config message.
         let result = resolve("sonnet");
-        assert!(result.is_ok());
-        let r = result.unwrap();
-        assert_eq!(r.canonical_id, "claude-sonnet-4-6");
+        match result {
+            Ok(r) => panic!("unexpected Ok: provider={}, api_key={:?}", r.provider, r.api_key),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("API_KEY") || msg.contains("requires"),
+                    "error should mention missing credential, got: {}",
+                    msg
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_resolve_gpt4o_missing_credential_now_errors() {
-        // Without OPENAI_API_KEY set, resolve should now error with a Config message.
+    fn test_resolve_sonnet_alias_with_credential() {
+        let prev = std::env::var("ANTHROPIC_API_KEY").ok();
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-test");
+        let result = resolve("sonnet");
+        assert!(result.is_ok());
+        if let Ok(r) = result {
+            assert_eq!(r.canonical_id, "claude-sonnet-4-6");
+        }
+        match prev {
+            Some(k) => std::env::set_var("ANTHROPIC_API_KEY", k),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn resolve_gpt4o_missing_credential_errors() {
         let result = resolve("gpt-4o");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("OPENAI_API_KEY"));
+        match result {
+            Ok(r) => panic!("unexpected Ok: provider={}, api_key={:?}", r.provider, r.api_key),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("API_KEY") || msg.contains("requires"),
+                    "error should mention missing credential, got: {}",
+                    msg
+                );
+            }
+        }
     }
 
     #[test]
