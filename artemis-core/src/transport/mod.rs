@@ -124,6 +124,7 @@ pub trait Transport: Send + Sync {
     /// `data` is the raw data payload (after stripping `data: `).
     ///
     /// Default: returns an empty vec (no streaming support).
+    #[deprecated(note = "Use SseParser via chat() instead. This method produces divergent output.")]
     fn denormalize_stream_chunk(&self, _event_type: &str, _data: &Value) -> Vec<StreamEvent> {
         vec![]
     }
