@@ -32,3 +32,6 @@ name = "chat_test"
 
 [[example]]
 name = "tool_test"
+
+[[example]]
+name = "think_test"
