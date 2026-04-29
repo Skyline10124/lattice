@@ -3,7 +3,13 @@
 **日期**：2026-04-29  
 **范围**：当前 `artemis` Rust workspace 静态扫描  
 **文档性质**：当前实现快照 / 代码审查 addendum  
-**重要说明**：本文件记录当前代码状态。`docs/code-review-report.md` 可视为历史审查记录；其中“生产就绪”等结论与本次扫描结果不完全一致，应以后续实际修复与验证为准。
+**重要说明**：本文件记录当前代码状态。`docs/code-review-report.md` 可视为历史审查记录；其中”生产就绪”等结论与本次扫描结果不完全一致，应以后续实际修复与验证为准。
+
+**Updates since original scan**:
+- P2-2 (credential cache key): fixed -- cache key now includes credential_keys fingerprint (a56b612)
+- P2-5 (tool name mapping): fixed -- AgentState now maintains tool_call_id → function_name map (fb35061)
+- P2-6 (UTF-8 truncation): fixed -- tool result truncation uses char-boundary-safe slicing (9d92282)
+- P2-7 (CI workflow location): fixed -- workflow moved to workspace root `.github/workflows/` (58b9610)
 
 ---
 
@@ -161,7 +167,7 @@ README 示例中出现：
 
 建议：
 
-1. 短期：修 README，明确 Python 目前只支持 resolver。
+1. 短期：update README to clarify Python is resolver-only (chat/streaming not yet exposed).
 2. 中期：在 `artemis-python` 暴露 `Message`、`Role`、`ToolDefinition`、`chat_complete`。
 3. 长期：暴露 streaming iterator 和 agent API。
 
