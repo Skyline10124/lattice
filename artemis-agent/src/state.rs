@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use artemis_core::types::Message;
 use artemis_core::types::Role;
 use artemis_core::ResolvedModel;
@@ -5,6 +7,9 @@ use artemis_core::ResolvedModel;
 pub struct AgentState {
     pub messages: Vec<Message>,
     pub resolved: ResolvedModel,
+    /// Maps tool_call_id to function_name so push_tool_result can set the
+    /// correct `name` field (required by Gemini for functionResponse.name).
+    tool_names: HashMap<String, String>,
 }
 
 impl AgentState {
@@ -12,6 +17,7 @@ impl AgentState {
         Self {
             messages: vec![],
             resolved,
+            tool_names: HashMap::new(),
         }
     }
 
@@ -32,6 +38,12 @@ impl AgentState {
         reasoning: &str,
         tool_calls: Option<Vec<artemis_core::types::ToolCall>>,
     ) {
+        if let Some(ref calls) = tool_calls {
+            for call in calls {
+                self.tool_names
+                    .insert(call.id.clone(), call.function.name.clone());
+            }
+        }
         self.messages.push(Message {
             role: Role::Assistant,
             content: content.to_string(),
@@ -59,7 +71,7 @@ impl AgentState {
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
-            name: None,
+            name: self.tool_names.get(call_id).cloned(),
         });
     }
 }
