@@ -26,6 +26,10 @@ event: message_delta
 - `thinking_delta` → `StreamEvent::Reasoning`
 - stop_reason 映射：`end_turn` → `stop`, `tool_use` → `tool_calls`, `max_tokens` → `length`
 
+## denormalize_stream_chunk（Transport trait）
+
+`denormalize_stream_chunk` 是 `Transport` trait 上的一个方法，用于将 provider 的 SSE 事件转换为内部 `StreamEvent`。**主 `chat()` 路径不使用此方法**——它通过 `create_sse_parser()` 返回的 `SseParser` 直接解析 SSE 流。`denormalize_stream_chunk` 保留用于测试和独立的 chunk 级验证。两者可能产生不同的输出，实际推理请以 `SseParser` 路径为准。
+
 ## StreamEvent
 
 ```rust
