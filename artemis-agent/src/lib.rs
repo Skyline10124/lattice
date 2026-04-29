@@ -1,4 +1,5 @@
 pub mod state;
+pub mod tools;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -18,6 +19,9 @@ static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &artemis_core::types::ToolCall) -> String;
 }
+
+// Re-export shared default tools for convenience.
+pub use tools::{default_tool_definitions, DefaultToolExecutor};
 
 #[allow(dead_code)]
 pub struct Agent {
@@ -65,6 +69,11 @@ impl Agent {
         self
     }
 
+    pub fn with_tool_executor(mut self, executor: Box<dyn ToolExecutor>) -> Self {
+        self.tool_executor = Some(executor);
+        self
+    }
+
     /// Return the cumulative token usage across all turns so far.
     pub fn token_usage(&self) -> u64 {
         self.state.token_usage
@@ -74,8 +83,7 @@ impl Agent {
     /// Each event is either a Token, ToolCallRequired, Done, or Error.
     pub fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
-        let events = self.run_chat();
-        events
+        self.run_chat()
     }
 
     /// Submit tool call results, continue the conversation.
@@ -90,6 +98,40 @@ impl Agent {
             self.state.push_tool_result(call_id, result, max_size);
         }
         self.run_chat()
+    }
+
+    /// Run a message through the Agent, handling tool calls automatically.
+    /// If a ToolExecutor is registered, tools are executed and results submitted
+    /// in a loop until the model produces a final answer or `max_turns` is reached.
+    pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
+        self.state.push_user_message(content);
+        let mut all_events = Vec::new();
+
+        for _ in 0..max_turns {
+            let events = self.run_chat();
+            let mut tool_calls = Vec::new();
+
+            for event in &events {
+                if let LoopEvent::ToolCallRequired { calls } = event {
+                    tool_calls.extend(calls.clone());
+                }
+            }
+
+            all_events.extend(events);
+
+            if tool_calls.is_empty() {
+                break;
+            }
+
+            if let Some(ref executor) = self.tool_executor {
+                for call in &tool_calls {
+                    let result = executor.execute(call);
+                    self.state.push_tool_result(&call.id, &result, None);
+                }
+            }
+        }
+
+        all_events
     }
 
     /// Internal: call artemis_core::chat() with the current conversation state,
