@@ -1,7 +1,6 @@
 pub mod catalog;
 pub mod errors;
 pub mod provider;
-pub mod providers;
 pub mod retry;
 pub mod router;
 pub mod streaming;
