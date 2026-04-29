@@ -117,6 +117,12 @@ pub async fn chat(
                     transport.auth_header_value(api_key),
                 );
             }
+            // Inject extra headers from provider_specific (e.g. OpenRouter HTTP-Referer)
+            for (key, value) in &resolved.provider_specific {
+                if let Some(header_name) = key.strip_prefix("header:") {
+                    req = req.header(header_name, value);
+                }
+            }
 
             let event_source = req.eventsource().map_err(|e| ArtemisError::Network {
                 message: format!("Failed to create event source: {}", e),
@@ -158,6 +164,12 @@ pub async fn chat(
                     transport.auth_header_name(),
                     transport.auth_header_value(api_key),
                 );
+            }
+            // Inject extra headers from provider_specific
+            for (key, value) in &resolved.provider_specific {
+                if let Some(header_name) = key.strip_prefix("header:") {
+                    req = req.header(header_name, value);
+                }
             }
 
             let event_source = req.eventsource().map_err(|e| ArtemisError::Network {
