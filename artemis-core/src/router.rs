@@ -61,14 +61,19 @@ pub fn normalize_model_id(model_id: &str) -> String {
         mid
     };
 
-    let mid = mid.trim_start_matches("us.anthropic.").to_string();
-    let mid = mid.trim_start_matches("us.amazon.").to_string();
-    let mid = mid.trim_start_matches("us.meta.").to_string();
+    let mid = mid.trim_start_matches("us.anthropic.");
+    let mid = mid.trim_start_matches("us.amazon.");
+    let mid = mid.trim_start_matches("us.meta.");
 
-    let mid = RE_SUFFIX.replace(&mid, "").to_string();
+    let mid = RE_SUFFIX.replace(&mid, "").into_owned();
 
     if mid.starts_with("claude-") {
-        return RE_DOTS.replace_all(&mid, "$1-$2").to_string();
+        let replaced = RE_DOTS.replace_all(&mid, "$1-$2");
+        return if matches!(replaced, std::borrow::Cow::Owned(_)) {
+            replaced.into_owned()
+        } else {
+            mid.to_string()
+        };
     }
 
     mid
