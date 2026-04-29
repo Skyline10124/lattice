@@ -1,27 +1,17 @@
-use artemis_core::{resolve, chat, Role, Message};
-use futures::StreamExt;
+use artemis_core::resolve;
+use artemis_agent::Agent;
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Create our own runtime instead of using SHARED_RUNTIME
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let resolved = resolve("deepseek-v4-pro").expect("resolve");
-    println!("provider={}, model={}", resolved.provider, resolved.api_model_id);
+    println!("provider={}", resolved.provider);
     
-    let msg = Message {
-        role: Role::User, content: "Say hi".into(),
-        reasoning_content: None, tool_calls: None, tool_call_id: None, name: None,
-    };
+    let mut agent = Agent::new(resolved);
+    println!("calling send_message via our runtime...");
     
-    match chat(&resolved, &[msg.clone()], &[]).await {
-        Ok(mut stream) => {
-            while let Some(event) = stream.next().await {
-                match event {
-                    artemis_core::StreamEvent::Token { content } => print!("{}", content),
-                    artemis_core::StreamEvent::Done { .. } => println!(" [Done]"),
-                    artemis_core::StreamEvent::Error { message } => eprintln!("Error: {}", message),
-                    _ => {}
-                }
-            }
-        }
-        Err(e) => eprintln!("ERR: {:?}", e),
-    }
+    let events = agent.send_message("Say hi in one word.");
+    println!("got {} events", events.len());
+    
+    drop(rt);
 }

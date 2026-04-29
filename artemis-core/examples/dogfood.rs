@@ -22,9 +22,13 @@ fn main() {
     let config = PluginConfig { max_turns: 3, ..Default::default() };
 
     let input = serde_json::json!({ "diff": code });
+    println!("DEBUG: creating PluginRunner...");
     let mut runner = PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None, None);
     
-    match runner.run(&input) {
+    println!("DEBUG: calling runner.run...");
+    let result = runner.run(&input);
+    println!("DEBUG: runner.run returned");
+    match result {
         Ok(result) => println!("Turns: {}\n{}", result.turns, result.output),
         Err(e) => eprintln!("Error: {}", e),
     }

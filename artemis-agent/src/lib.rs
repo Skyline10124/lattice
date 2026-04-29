@@ -64,9 +64,10 @@ impl Agent {
 
     /// Send a user message, returning streaming events.
     /// Each event is either a Token, ToolCallRequired, Done, or Error.
-    pub fn send(&mut self, content: &str) -> Vec<LoopEvent> {
+    pub fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
-        self.run_chat()
+        let events = self.run_chat();
+        events
     }
 
     /// Submit tool call results, continue the conversation.
@@ -203,10 +204,12 @@ impl Agent {
             ));
 
             match result {
-                Ok(stream) => return Ok(stream),
-                Err(e) => {
-                    if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(&e) {
-                        return Err(e);
+                Ok(stream) => {
+                    return Ok(stream)
+                }
+                Err(ref e) => {
+                    if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(e) {
+                        return Err(e.clone());
                     }
                     let delay = self.retry.jittered_backoff(attempt);
                     SHARED_RUNTIME.block_on(async {
@@ -255,7 +258,7 @@ impl artemis_plugin::PluginAgent for Agent {
     }
 
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let events = self.send(message);
+        let events = self.send_message(message);
         let mut content = String::new();
         let mut has_error = false;
         for event in &events {
