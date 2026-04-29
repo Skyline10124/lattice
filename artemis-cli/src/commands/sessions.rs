@@ -17,9 +17,13 @@ pub fn run(action: SessionAction) -> Result<()> {
         }
         SessionAction::Show { id } => {
             println!("Session: {}", id.bold());
+            println!("(Session persistence not yet implemented in MVP)");
         }
         SessionAction::Rm { id } => {
-            println!("{} Removed session {}", "\u{2713}".green(), id);
+            println!("{} Session removal not yet implemented ({})",
+                "\u{2717}".red(),
+                id
+            );
         }
     }
     Ok(())

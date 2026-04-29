@@ -7,6 +7,13 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    /// LLM streaming token delivered from background task.
+    StreamToken {
+        content: String,
+        reasoning: Option<String>,
+        done: bool,
+        error: Option<String>,
+    },
 }
 
 pub struct EventHandler {
@@ -56,5 +63,9 @@ impl EventHandler {
 
     pub async fn next(&mut self) -> Option<Event> {
         self.rx.recv().await
+    }
+
+    pub fn sender(&self) -> mpsc::UnboundedSender<Event> {
+        self._tx.clone()
     }
 }

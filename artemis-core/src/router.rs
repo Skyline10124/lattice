@@ -84,6 +84,9 @@ pub struct ModelRouter {
     catalog: &'static Catalog,
     custom_models: HashMap<String, ModelCatalogEntry>,
     credential_cache: Mutex<HashMap<(String, String), Option<String>>>,
+    /// Nix Phase 1: externally supplied credentials.
+    /// When non-empty, these take priority over env var lookups.
+    external_credentials: HashMap<String, String>,
 }
 
 impl Default for ModelRouter {
@@ -98,7 +101,17 @@ impl ModelRouter {
             catalog: Catalog::get().expect("catalog data.json is embedded at compile time"),
             custom_models: HashMap::new(),
             credential_cache: Mutex::new(HashMap::new()),
+            external_credentials: HashMap::new(),
         }
+    }
+
+    /// Create a router with externally-supplied credentials.
+    /// This avoids the need for `std::env::set_var` injection
+    /// and makes `resolve()` a pure function w.r.t. the provided creds.
+    pub fn with_credentials(creds: HashMap<String, String>) -> Self {
+        let mut router = Self::new();
+        router.external_credentials = creds;
+        router
     }
 
     /// Core resolution pipeline:
@@ -282,41 +295,50 @@ impl ModelRouter {
             }
         }
 
+        // 1. Check entry's credential_keys against external_credentials first, then env.
         for env_var in entry.credential_keys.values() {
+            if let Some(val) = self.external_credentials.get(env_var) {
+                let trimmed = val.trim().to_string();
+                if !trimmed.is_empty() {
+                    let result = Some(trimmed);
+                    self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                    return result;
+                }
+            }
             if let Ok(val) = std::env::var(env_var) {
                 let trimmed = val.trim().to_string();
                 if !trimmed.is_empty() {
                     let result = Some(trimmed);
-                    self.credential_cache
-                        .lock()
-                        .unwrap()
-                        .insert(cache_key, result.clone());
+                    self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
                     return result;
                 }
             }
         }
 
+        // 2. Check PROVIDER_CREDENTIALS_MAP (external first, then env).
         let provider_id = &entry.provider_id;
         if let Some(creds) = PROVIDER_CREDENTIALS_MAP.get(provider_id.as_str()) {
             for (env_var, _field_name) in *creds {
+                if let Some(val) = self.external_credentials.get(*env_var) {
+                    let trimmed = val.trim().to_string();
+                    if !trimmed.is_empty() {
+                        let result = Some(trimmed);
+                        self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                        return result;
+                    }
+                }
                 if let Ok(val) = std::env::var(env_var) {
                     let trimmed = val.trim().to_string();
                     if !trimmed.is_empty() {
                         let result = Some(trimmed);
-                        self.credential_cache
-                            .lock()
-                            .unwrap()
-                            .insert(cache_key, result.clone());
+                        self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
                         return result;
                     }
                 }
             }
         }
 
-        self.credential_cache
-            .lock()
-            .unwrap()
-            .insert(cache_key, None);
+        self.credential_cache.lock().unwrap().insert(cache_key, None);
         None
     }
 

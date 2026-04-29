@@ -236,3 +236,27 @@ struct ToolCallAccum {
     name: String,
     arguments: String,
 }
+
+// ---------------------------------------------------------------------------
+// PluginAgent impl — bridges artemis-agent to artemis-plugin
+// ---------------------------------------------------------------------------
+
+impl artemis_plugin::PluginAgent for Agent {
+    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let events = self.send(message);
+        let mut content = String::new();
+        let mut has_error = false;
+        for event in &events {
+            match event {
+                LoopEvent::Token { text } => content.push_str(text),
+                LoopEvent::Error { .. } => has_error = true,
+                _ => {}
+            }
+        }
+        if has_error && content.is_empty() {
+            Err("Agent returned an error with no content".into())
+        } else {
+            Ok(content)
+        }
+    }
+}

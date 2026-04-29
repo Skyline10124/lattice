@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
     // Create app and event handler
     let mut app = App::new();
     let mut events = EventHandler::new(250);
+    app.event_tx = Some(events.sender());
 
     let res = run_app(&mut terminal, &mut app, &mut events).await;
 
@@ -61,6 +62,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                 event::Event::Key(key) => app.handle_key(key).await?,
                 event::Event::Mouse(mouse) => app.handle_mouse(mouse).await?,
                 event::Event::Resize(_, _) => {}
+                event::Event::StreamToken {
+                    content,
+                    reasoning,
+                    done,
+                    error,
+                } => {
+                    app.apply_stream_token(content, reasoning, done, error);
+                }
             }
         }
     }

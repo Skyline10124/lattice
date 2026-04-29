@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -75,8 +75,12 @@ impl Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let path = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("artemis")
+            .join("config.toml");
         Self {
-            path: PathBuf::from("artemis.toml"),
+            path,
             core: Default::default(),
             ui: Default::default(),
             providers: Default::default(),

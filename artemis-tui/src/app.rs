@@ -1,6 +1,10 @@
 use anyhow::Result;
-use artemis_core::types::{Message, Role};
+use artemis_core::types::{Message as CoreMessage, Role};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use futures::StreamExt;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::event::Event;
 
 /// A single message in the chat.
 #[derive(Debug, Clone)]
@@ -22,6 +26,7 @@ pub struct App {
     pub token_count: usize,
     pub show_reasoning: bool,
     pub scroll_offset: usize,
+    pub event_tx: Option<UnboundedSender<Event>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +50,7 @@ impl App {
             token_count: 0,
             show_reasoning: true,
             scroll_offset: 0,
+            event_tx: None,
         }
     }
 
@@ -101,7 +107,6 @@ impl App {
                 }
             }
             KeyCode::Esc => {
-                // Cancel streaming or clear input
                 if !self.input.is_empty() {
                     self.input.clear();
                     self.input_cursor = 0;
@@ -150,26 +155,135 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.scroll_offset = 0;
-
-        // In MVP, we do a placeholder assistant response.
-        // Full streaming integration will call artemis_core::chat() here.
         self.status = AppStatus::Streaming;
-        
-        // Placeholder: add a fake assistant response for demo
-        // In real implementation, this would spawn an async task
-        // that consumes the SSE stream and pushes tokens into the message.
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        
+
+        // Placeholder assistant message that will be filled by the stream
         self.messages.push(ChatMessage {
             role: Role::Assistant,
-            content: format!("(MVP placeholder response to: {})", text),
-            reasoning: Some("Thinking process placeholder".into()),
+            content: String::new(),
+            reasoning: None,
         });
-        
-        self.token_count += text.len() / 4; // rough estimate
-        self.status = AppStatus::Ready;
+
+        let tx = match self.event_tx.clone() {
+            Some(tx) => tx,
+            None => {
+                self.status = AppStatus::Error("Event channel not initialized".into());
+                return Ok(());
+            }
+        };
+        let model = self.current_model.clone();
+
+        tokio::spawn(async move {
+            let resolved = match artemis_core::resolve(&model) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(Event::StreamToken {
+                        content: String::new(),
+                        reasoning: None,
+                        done: true,
+                        error: Some(e.to_string()),
+                    });
+                    return;
+                }
+            };
+
+            let messages = vec![CoreMessage::new(
+                Role::User,
+                text.into(),
+                None,
+                None,
+                None,
+            )];
+
+            let mut stream = match artemis_core::chat(&resolved, &messages, &[]).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(Event::StreamToken {
+                        content: String::new(),
+                        reasoning: None,
+                        done: true,
+                        error: Some(e.to_string()),
+                    });
+                    return;
+                }
+            };
+
+            while let Some(event) = stream.next().await {
+                match event {
+                    artemis_core::StreamEvent::Token { content } => {
+                        let _ = tx.send(Event::StreamToken {
+                            content,
+                            reasoning: None,
+                            done: false,
+                            error: None,
+                        });
+                    }
+                    artemis_core::StreamEvent::Reasoning { content } => {
+                        let _ = tx.send(Event::StreamToken {
+                            content: String::new(),
+                            reasoning: Some(content),
+                            done: false,
+                            error: None,
+                        });
+                    }
+                    artemis_core::StreamEvent::Done { usage, .. } => {
+                        if let Some(u) = usage {
+                            let _ = tx.send(Event::StreamToken {
+                                content: format!("\n\n[{} tok]", u.total_tokens),
+                                reasoning: None,
+                                done: true,
+                                error: None,
+                            });
+                        } else {
+                            let _ = tx.send(Event::StreamToken {
+                                content: String::new(),
+                                reasoning: None,
+                                done: true,
+                                error: None,
+                            });
+                        }
+                        break;
+                    }
+                    artemis_core::StreamEvent::Error { message } => {
+                        let _ = tx.send(Event::StreamToken {
+                            content: String::new(),
+                            reasoning: None,
+                            done: true,
+                            error: Some(message),
+                        });
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
 
         Ok(())
+    }
+
+    /// Apply a streaming token to the last assistant message.
+    pub fn apply_stream_token(&mut self, content: String, reasoning: Option<String>, done: bool, error: Option<String>) {
+        if let Some(last) = self.messages.last_mut() {
+            if last.role == Role::Assistant {
+                if !content.is_empty() {
+                    last.content.push_str(&content);
+                    self.token_count += content.len() / 4;
+                }
+                if let Some(r) = reasoning {
+                    match last.reasoning {
+                        Some(ref mut existing) => existing.push_str(&r),
+                        None => last.reasoning = Some(r),
+                    }
+                }
+            }
+        }
+
+        if done {
+            self.status = match error {
+                Some(msg) => AppStatus::Error(msg),
+                None => AppStatus::Ready,
+            };
+        }
     }
 }
 

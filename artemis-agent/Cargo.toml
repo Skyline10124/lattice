@@ -9,3 +9,4 @@ artemis-memory = { path = "../artemis-memory" }
 artemis-token-pool = { path = "../artemis-token-pool" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
+artemis-plugin = { path = "../artemis-plugin" }

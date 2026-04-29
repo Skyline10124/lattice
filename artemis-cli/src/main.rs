@@ -80,12 +80,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref())?;
     let creds = CredentialStore::from_config(&config)?;
-    creds.inject_env(); // Phase 1: explicit injection instead of hidden env reads
+    // Credentials loaded explicitly; passed to ModelRouter::with_credentials()
 
     // Print mode (single-turn streaming)
     if let Some(prompt) = cli.print {
         let model = cli.model.unwrap_or_else(|| config.default_model());
-        return print::run(&model, &prompt, cli.provider.as_deref(), cli.verbose, cli.json).await;
+        return print::run(&model, &prompt, cli.provider.as_deref(), cli.verbose, cli.json, &creds).await;
     }
 
     // Default: enter TUI (if no subcommand)

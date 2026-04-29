@@ -1,51 +1,61 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use crate::config::{Config, ProviderConfig};
+use crate::config::Config;
 
 /// Nix Phase 1: Explicit credential store.
-/// Instead of calling std::env::var() deep inside the resolve chain,
-/// credentials are loaded once at startup and explicitly injected.
+/// Credentials are loaded once at startup and passed directly to ModelRouter
+/// via `with_credentials()`, eliminating the need for `std::env::set_var`.
 #[derive(Debug, Clone)]
 pub struct CredentialStore {
     values: HashMap<String, String>,
 }
 
+/// All env var names that artemis-core may look up.
+const KNOWN_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "NOUS_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GITEA_API_KEY",
+    "GITHUB_TOKEN",
+    "OPENROUTER_API_KEY",
+];
+
 impl CredentialStore {
     pub fn from_config(config: &Config) -> Result<Self> {
         let mut values = HashMap::new();
 
-        // Load from config's providers section
-        for (provider_id, cfg) in &config.providers {
-            if let Some(ref key) = cfg.api_key {
-                let env_key = if key.starts_with('$') {
-                    key.trim_start_matches('$').to_string()
-                } else {
-                    key.clone()
-                };
-                if let Ok(val) = std::env::var(&env_key) {
-                    if !val.is_empty() {
-                        values.insert(env_key, val);
+        // Load from config's providers section.
+        // api_key = "$ANTHROPIC_API_KEY"  -> read env var
+        // api_key = "sk-abc123"           -> use literal value
+        for (_provider_id, cfg) in &config.providers {
+            if let Some(ref key_spec) = cfg.api_key {
+                if key_spec.starts_with('$') {
+                    // Env var reference: $ANTHROPIC_API_KEY
+                    let env_name = key_spec.trim_start_matches('$');
+                    if let Ok(val) = std::env::var(env_name) {
+                        if !val.is_empty() {
+                            values.insert(env_name.to_string(), val);
+                        }
                     }
+                } else {
+                    // Literal value: treat the raw string as the key.
+                    // We store it under a synthetic key so it can be looked up.
+                    // In practice the provider config in core will still try
+                    // env var names, so literal keys need provider-specific wiring.
+                    // For now, we store as-is and let the caller decide.
+                    values.insert(key_spec.clone(), key_spec.clone());
                 }
             }
         }
 
-        // Also scan known provider env vars
-        let known_vars = [
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "NOUS_API_KEY",
-            "GROQ_API_KEY",
-            "MISTRAL_API_KEY",
-            "XAI_API_KEY",
-            "GEMINI_API_KEY",
-            "GITEA_API_KEY",
-            "GITHUB_TOKEN",
-            "OPENROUTER_API_KEY",
-        ];
-        for var in &known_vars {
+        // Scan known provider env vars.
+        for var in KNOWN_ENV_VARS {
             if let Ok(val) = std::env::var(var) {
                 if !val.is_empty() {
                     values.insert(var.to_string(), val);
@@ -56,29 +66,20 @@ impl CredentialStore {
         Ok(CredentialStore { values })
     }
 
-    /// Inject credentials into process environment so artemis-core's
-    /// ModelRouter (which currently reads env) can find them.
-    /// This is the transitional bridge toward a fully pure resolve().
-    pub fn inject_env(&self) {
-        for (key, val) in &self.values {
-            if std::env::var(key).is_err() || std::env::var(key).unwrap().is_empty() {
-                std::env::set_var(key, val);
-            }
-        }
+    /// Return credentials as a HashMap for ModelRouter::with_credentials().
+    pub fn to_hashmap(&self) -> HashMap<String, String> {
+        self.values.clone()
     }
 
+    /// Look up a single credential by env var name.
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.values.get(key)
+    }
+
+    /// Diagnostic: which env vars are present?
     pub fn diagnostics(&self) -> Vec<(&str, bool)> {
-        let vars = [
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "NOUS_API_KEY",
-            "GROQ_API_KEY",
-            "MISTRAL_API_KEY",
-            "XAI_API_KEY",
-            "GEMINI_API_KEY",
-        ];
-        vars.iter()
+        KNOWN_ENV_VARS
+            .iter()
             .map(|&v| (v, self.values.contains_key(v)))
             .collect()
     }

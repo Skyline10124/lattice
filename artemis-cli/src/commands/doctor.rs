@@ -2,7 +2,6 @@ use anyhow::Result;
 use artemis_core::catalog::Catalog;
 use artemis_core::router::ModelRouter;
 use colored::Colorize;
-use std::time::Duration;
 
 use crate::config::Config;
 use crate::credentials::CredentialStore;
@@ -20,12 +19,14 @@ pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
 
     // Models
     println!("\n{}", "Models:".bold());
-    let router = ModelRouter::new();
+    let router = ModelRouter::with_credentials(creds.to_hashmap());
     let authed = router.list_authenticated_models();
     let all = router.list_models();
+    let authed_set: std::collections::HashSet<_> = authed.iter().cloned().collect();
+
     for m in &all[..all.len().min(20)] {
-        let icon = if authed.contains(m) { "\u{2713}" } else { "\u{2717}" };
-        let color = if authed.contains(m) { m.green() } else { m.red() };
+        let icon = if authed_set.contains(m) { "\u{2713}" } else { "\u{2717}" };
+        let color = if authed_set.contains(m) { m.green() } else { m.red() };
         println!("  {} {}", icon, color);
     }
     if all.len() > 20 {

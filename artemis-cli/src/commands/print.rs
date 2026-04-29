@@ -1,6 +1,6 @@
 use anyhow::Result;
-use artemis_core::{chat_complete, resolve};
-use artemis_core::types::{Message, Role};
+use artemis_core::router::ModelRouter;
+use artemis_core::{chat_complete, types::{Message, Role}};
 use colored::Colorize;
 use std::time::Instant;
 
@@ -10,6 +10,7 @@ pub async fn run(
     provider_override: Option<&str>,
     verbose: bool,
     json: bool,
+    creds: &crate::credentials::CredentialStore,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -17,7 +18,8 @@ pub async fn run(
         eprintln!("{}", format!("resolve: {} ...", model).dimmed());
     }
 
-    let resolved = resolve(model)?;
+    let router = ModelRouter::with_credentials(creds.to_hashmap());
+    let resolved = router.resolve(model, provider_override)?;
 
     if verbose {
         eprintln!("{}", format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan());
