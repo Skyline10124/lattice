@@ -56,6 +56,8 @@ pub struct TokenUsage {
 pub enum StreamEvent {
     /// A chunk of generated text content.
     Token { content: String },
+    /// A chunk of reasoning/thinking content (e.g., DeepSeek R1/V4 thinking chain).
+    Reasoning { content: String },
     /// A tool call has been requested — contains the tool id and name.
     /// Subsequent argument fragments arrive via [`ToolCallDelta`].
     ToolCallStart { id: String, name: String },
@@ -147,6 +149,16 @@ impl SseParser for OpenAiSseParser {
             for choice in choices {
                 let delta = &choice["delta"];
                 let finish_reason = choice["finish_reason"].as_str();
+
+                // Reasoning (thinking) tokens stream before regular content tokens,
+                // so check reasoning_content first.
+                if let Some(reasoning) = delta["reasoning_content"].as_str() {
+                    if !reasoning.is_empty() {
+                        events.push(StreamEvent::Reasoning {
+                            content: reasoning.to_string(),
+                        });
+                    }
+                }
 
                 if let Some(content) = delta["content"].as_str() {
                     if !content.is_empty() {
@@ -1182,5 +1194,60 @@ mod tests {
         assert!(ends.contains(&"call_a"));
         assert!(ends.contains(&"call_b"));
         assert!(matches!(all[6], StreamEvent::Done { .. }));
+    }
+
+    #[test]
+    fn test_openai_reasoning_content() {
+        let mut parser = OpenAiSseParser::new();
+        // DeepSeek-style delta with reasoning_content before regular content
+        let chunk = r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":"Let me think about this step by step.\n\nFirst, I need to understand the problem."},"finish_reason":null}]}"#;
+        let events = parser.parse_chunk("message", chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::Reasoning {
+                content: "Let me think about this step by step.\n\nFirst, I need to understand the problem.".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_openai_reasoning_content_empty_skipped() {
+        let mut parser = OpenAiSseParser::new();
+        // Empty reasoning_content should not emit any event
+        let chunk = r#"{"choices":[{"index":0,"delta":{"content":null,"reasoning_content":""},"finish_reason":null}]}"#;
+        let events = parser.parse_chunk("message", chunk).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_openai_reasoning_with_content() {
+        let mut parser = OpenAiSseParser::new();
+        // Reasoning content appears alongside regular content (thinking first, then text)
+        let chunk = r#"{"choices":[{"index":0,"delta":{"reasoning_content":"Hmm, interesting question.","content":"The answer is 42."},"finish_reason":null}]}"#;
+        let events = parser.parse_chunk("message", chunk).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            StreamEvent::Reasoning {
+                content: "Hmm, interesting question.".into()
+            }
+        );
+        assert_eq!(
+            events[1],
+            StreamEvent::Token {
+                content: "The answer is 42.".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_reasoning_roundtrip() {
+        let event = StreamEvent::Reasoning {
+            content: "Let me think...".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: StreamEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, back);
     }
 }
