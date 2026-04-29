@@ -9,9 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 artemis-core = { path = "../artemis-core" }
-artemis-agent = { path = "../artemis-agent" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
-tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
