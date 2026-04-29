@@ -8,8 +8,6 @@ pub mod tokens;
 pub mod transport;
 pub mod types;
 
-mod mock;
-
 // Re-export key types for convenience
 pub use catalog::ResolvedModel;
 pub use errors::ArtemisError;
