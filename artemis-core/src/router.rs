@@ -320,8 +320,14 @@ impl ModelRouter {
         None
     }
 
-    /// Clear the credential cache, forcing re-checking of environment variables
-    /// on the next call to resolve_credentials.
+    /// Clear the credential cache, forcing re-check of environment variables.
+    pub fn clear_credential_cache(&self) {
+        self.credential_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
     /// Normalize a user-provided model string to a canonical ID.
     ///
     /// Checks catalog aliases, catalog model keys, custom models, and applies
