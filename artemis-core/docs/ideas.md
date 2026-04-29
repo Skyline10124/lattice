@@ -201,44 +201,7 @@ CLI：        无 AI 的纯代码工具
 
 ---
 
-## 四、Nix 范式
-
-### 4.1 LLM 即 Builder
-
-```nix
-# Nix
-derivation {
-  name = "code-review";
-  builder = llm("sonnet");        # LLM = builder
-  args = [review_prompt, diff];   # 输入严格受控
-  output = [review_result.json];  # 输出可验证
-}
-```
-
-代码决定构建图，LLM 只执行推理。Nix 从来不问 builder 要不要 build。
-
-### 4.2 声明式配置 + lockfile
-
-```
-artemis.toml          # model = "sonnet", budget = "$50"
-artemis.lock          # provider=anthropic, model=claude-sonnet-4-6-20250514, 可审计可复现
-```
-
-### 4.3 内容寻址缓存
-
-```
-sha256(prompt + model + params) → response
-```
-
-### 4.4 Overlay 模式
-
-```rust
-let overlay = CatalogOverlay::new()
-    .add_model("my-fine-tune", ...)
-    .patch_provider("anthropic", |p| p.timeout = 60);
-let catalog = Catalog::default().with_overlay(overlay);
-```
-
+## 五、
 ---
 
 ## 五、Dogfooding
@@ -285,14 +248,8 @@ let catalog = Catalog::default().with_overlay(overlay);
 - [ ] Python 胶水层：插件加载 + 组合
 - [ ] artemis-agent-protocol：handoff 路由
 
-### 第五阶段：Nix 范式落地
 
-- [ ] 声明式配置 + lockfile
-- [ ] 内容寻址缓存
-- [ ] Derivation 式任务模型
-
----
-
+## 七、
 ## 七、竞品与参考
 
 | 项目 | 类型 | 参考价值 |
