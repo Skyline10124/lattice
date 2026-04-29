@@ -59,9 +59,15 @@ impl Agent {
     }
 
     /// Submit tool call results, continue the conversation.
-    pub fn submit_tools(&mut self, results: Vec<(String, String)>) -> Vec<LoopEvent> {
+    /// `max_size` optionally limits the byte size of each tool result
+    /// (default: 1 MB). Larger results are truncated with a note.
+    pub fn submit_tools(
+        &mut self,
+        results: Vec<(String, String)>,
+        max_size: Option<usize>,
+    ) -> Vec<LoopEvent> {
         for (call_id, result) in &results {
-            self.state.push_tool_result(call_id, result);
+            self.state.push_tool_result(call_id, result, max_size);
         }
         self.run_chat()
     }

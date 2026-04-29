@@ -39,10 +39,16 @@ impl AgentState {
         });
     }
 
-    pub fn push_tool_result(&mut self, call_id: &str, result: &str) {
+    pub fn push_tool_result(&mut self, call_id: &str, result: &str, max_size: Option<usize>) {
+        let max = max_size.unwrap_or(1_048_576); // default 1MB
+        let content = if result.len() > max {
+            format!("{}... (truncated to {} bytes)", &result[..max], max)
+        } else {
+            result.to_string()
+        };
         self.messages.push(Message {
             role: Role::Tool,
-            content: result.to_string(),
+            content,
             tool_calls: None,
             tool_call_id: Some(call_id.to_string()),
             name: None,
