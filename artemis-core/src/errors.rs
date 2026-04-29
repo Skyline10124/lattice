@@ -107,12 +107,11 @@ pub enum ArtemisError {
 
 /// Classifies HTTP error responses into typed `ArtemisError` variants.
 ///
-/// Mirrors the priority-ordered classification logic from the Python
-/// `hermes-agent/agent/error_classifier.py` for the common status-code
-/// codepath. Body-text pattern matching (context overflow signals,
-/// billing vs rate-limit disambiguation) is delegated to the Python side
-/// for now — the Rust classifier handles the deterministic status-code
-/// mapping.
+/// Classifies HTTP error responses into typed `ArtemisError` variants
+/// based on status codes. Body-text pattern matching (context overflow
+/// signals, billing vs rate-limit disambiguation) is delegated to the
+/// Python side for now — the Rust classifier handles the deterministic
+/// status-code mapping.
 pub struct ErrorClassifier;
 
 impl ErrorClassifier {

@@ -138,4 +138,4 @@ Two SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`) implement `SseParser` 
 
 ### Catalog
 
-`src/catalog/data.json` generated from [hermes-agent](https://github.com/astrin/hermes-agent) `model-centric` branch by `scripts/generate_catalog.py`. 98+ models, 37 aliases, 20+ providers.
+`src/catalog/data.json` is the built-in model catalog (manually maintained).
