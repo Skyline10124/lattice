@@ -63,8 +63,8 @@ pub async fn chat(
     tools: &[ToolDefinition],
 ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, ArtemisError> {
     // Auto-configure DeepSeek thinking mode based on model name.
-    let (thinking, reasoning_effort) = match resolved.canonical_id.as_str() {
-        "deepseek-v4-pro" | "deepseek-reasoner" => (
+    let (thinking, reasoning_effort) = match resolved.api_model_id.as_str() {
+        "deepseek-v4-pro" | "deepseek-reasoner" | "deepseek/deepseek-v4-pro" => (
             Some(serde_json::json!({"type": "enabled"})),
             Some("high".to_string()),
         ),
