@@ -166,9 +166,9 @@ pub struct PluginConfig {
     pub max_turns: u32,
     /// Maximum output size in bytes. Default: 1 MB.
     pub max_output_bytes: usize,
-    /// Whether to check context length before sending. Default: true.
+    /// Reserved for future use: whether to check context length before sending. Default: true.
     pub context_check: bool,
-    /// Timeout per LLM call in seconds. Default: 120.
+    /// Reserved for future use: timeout per LLM call in seconds. Default: 120.
     pub timeout_per_call_secs: u64,
 }
 
@@ -198,6 +198,7 @@ pub struct PluginRunner<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> {
     hooks: Option<&'a dyn PluginHooks>,
     retry_policy: Option<&'a RetryPolicy>,
     memory: Option<Box<dyn Memory>>,
+    /// Reserved for future budget enforcement.
     #[allow(dead_code)]
     token_pool: Option<&'a dyn TokenPool>,
     _phantom: PhantomData<(P::Input, P::Output)>,
@@ -261,10 +262,15 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                 return Err(PluginError::MaxTurnsExceeded(self.config.max_turns));
             }
 
+            let tokens_before = self.agent.token_usage();
+
             let raw = self
                 .agent
                 .send(&prompt)
                 .map_err(|e| PluginError::Other(e.to_string()))?;
+
+            let tokens_after = self.agent.token_usage();
+            let token_delta = tokens_after.saturating_sub(tokens_before);
 
             match self.plugin.parse_output(&raw) {
                 Ok(output) => {
@@ -272,7 +278,15 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                     let action = self.behavior.decide(confidence);
 
                     if let Some(hooks) = self.hooks {
-                        hooks.on_turn(attempt, None, &action);
+                        hooks.on_turn(
+                            attempt,
+                            Some(TokenUsage {
+                                prompt_tokens: 0,
+                                completion_tokens: token_delta as u32,
+                                total_tokens: token_delta as u32,
+                            }),
+                            &action,
+                        );
                     }
 
                     match action {
@@ -380,6 +394,12 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
 /// Minimal interface for an LLM-calling agent.
 pub trait PluginAgent {
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Returns the agent's cumulative token usage so far.
+    /// Defaults to 0 for agents that do not track tokens.
+    fn token_usage(&self) -> u64 {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,8 +445,7 @@ pub enum PluginError {
 fn extract_confidence(raw: &str) -> f64 {
     // Look for "confidence": 0.85 or similar JSON field
     for line in raw.lines() {
-        if let Some(pos) = line.find("\"confidence\"") {
-            let after = &line[pos + 12..];
+        if let Some((_, after)) = line.split_once("\"confidence\"") {
             if let Some(colon) = after.find(':') {
                 let val = after[colon + 1..]
                     .trim()
