@@ -62,6 +62,16 @@ pub async fn chat(
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, ArtemisError> {
+    // Auto-configure DeepSeek thinking mode based on model name.
+    let (thinking, reasoning_effort) = match resolved.canonical_id.as_str() {
+        "deepseek-v4-pro" | "deepseek-reasoner" => (
+            Some(serde_json::json!({"type": "enabled"})),
+            Some("high".to_string()),
+        ),
+        "deepseek-v4-flash" => (None, None), // thinking OFF for flash
+        _ => (None, None), // other providers don't use these params
+    };
+
     let request = ChatRequest {
         messages: messages.to_vec(),
         tools: tools.to_vec(),
@@ -70,6 +80,8 @@ pub async fn chat(
         max_tokens: None,
         stream: true,
         resolved: resolved.clone(),
+        thinking,
+        reasoning_effort,
     };
 
     let client = crate::provider::shared_http_client();
@@ -179,6 +191,7 @@ pub async fn chat_complete(
     let mut stream = chat(resolved, messages, tools).await?;
 
     let mut content = String::new();
+    let mut reasoning_content = String::new();
     let mut tool_calls_map: std::collections::HashMap<String, ToolCallBuilder> =
         std::collections::HashMap::new();
     let mut finish_reason = String::from("stop");
@@ -188,6 +201,9 @@ pub async fn chat_complete(
         match event {
             StreamEvent::Token { content: c } => {
                 content.push_str(&c);
+            }
+            StreamEvent::Reasoning { content: r } => {
+                reasoning_content.push_str(&r);
             }
             StreamEvent::ToolCallStart { id, name } => {
                 tool_calls_map.insert(
@@ -249,6 +265,11 @@ pub async fn chat_complete(
             None
         } else {
             Some(content)
+        },
+        reasoning_content: if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
         },
         tool_calls,
         usage,
