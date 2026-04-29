@@ -953,7 +953,7 @@ fn resolve_permissive_uses_provider_defaults_for_gemini() {
     assert!(result.is_ok());
     let model = result.unwrap();
     assert_eq!(model.provider, "gemini");
-    assert_eq!(model.api_protocol, ApiProtocol::GeminiGenerateContent);
+    assert_eq!(model.api_protocol, ApiProtocol::OpenAiChat);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

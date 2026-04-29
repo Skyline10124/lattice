@@ -55,7 +55,7 @@ fn test_permissive_fallback_gemini_model() {
 
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "gemini");
-    assert_eq!(resolved.api_protocol, ApiProtocol::GeminiGenerateContent);
+    assert_eq!(resolved.api_protocol, ApiProtocol::OpenAiChat);
 }
 
 #[test]

@@ -112,12 +112,18 @@ pub async fn chat(
 
             let mut req = client.post(&url).json(&body);
             if let Some(ref api_key) = resolved.api_key {
-                req = req.header(
-                    transport.auth_header_name(),
-                    transport.auth_header_value(api_key),
-                );
+                match resolved.provider_specific.get("auth_type").map(|s| s.as_str()) {
+                    Some("x-goog-api-key") => {
+                        req = req.header("x-goog-api-key", api_key.as_str());
+                    }
+                    _ => {
+                        req = req.header(
+                            transport.auth_header_name(),
+                            transport.auth_header_value(api_key),
+                        );
+                    }
+                }
             }
-            // Inject extra headers from provider_specific (e.g. OpenRouter HTTP-Referer)
             for (key, value) in &resolved.provider_specific {
                 if let Some(header_name) = key.strip_prefix("header:") {
                     req = req.header(header_name, value);

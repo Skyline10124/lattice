@@ -781,9 +781,11 @@
           "credential_keys": {
             "api_key": "GEMINI_API_KEY"
           },
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "google-gemini-cli",
@@ -791,9 +793,11 @@
           "priority": 1,
           "weight": 1,
           "credential_keys": {},
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "kilocode",
@@ -849,9 +853,11 @@
           "credential_keys": {
             "api_key": "GEMINI_API_KEY"
           },
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "google-gemini-cli",
@@ -859,9 +865,11 @@
           "priority": 1,
           "weight": 1,
           "credential_keys": {},
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "kilocode",
@@ -917,9 +925,11 @@
           "credential_keys": {
             "api_key": "GEMINI_API_KEY"
           },
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "google-gemini-cli",
@@ -927,9 +937,11 @@
           "priority": 1,
           "weight": 1,
           "credential_keys": {},
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "ai-gateway",
@@ -973,9 +985,11 @@
           "credential_keys": {
             "api_key": "GEMINI_API_KEY"
           },
-          "base_url": null,
-          "api_protocol": "gemini_generate_content",
-          "provider_specific": {}
+          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "api_protocol": "chat_completions",
+          "provider_specific": {
+            "auth_type": "x-goog-api-key"
+          }
         },
         {
           "provider_id": "ai-gateway",
@@ -3609,16 +3623,18 @@
       "base_url": "https://api.openai.com/v1"
     },
     "gemini": {
-      "api_protocol": "gemini_generate_content",
+      "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "GEMINI_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
     },
     "google-gemini-cli": {
-      "api_protocol": "gemini_generate_content",
-      "credential_keys": {},
-      "base_url": ""
+      "api_protocol": "chat_completions",
+      "credential_keys": {
+        "api_key": "GEMINI_API_KEY"
+      },
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
     },
     "deepseek": {
       "api_protocol": "chat_completions",
