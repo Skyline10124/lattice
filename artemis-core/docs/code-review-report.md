@@ -4,6 +4,8 @@
 **状态**: 历史记录 / 修复完成于当时审查口径
 
 > **当前状态提示**：本报告保留为历史审查记录。后续静态扫描发现当前 workspace 仍存在 Python API 未闭环、catalog `base_url` 默认值未合并、streaming finish reason、error/retry 未贯通等问题。请优先参考 [`current-implementation-review.md`](current-implementation-review.md) 作为当前实现状态基线。
+>
+> **2026-04-29 更新**：本报告中的 15 个修复项已全部落地，P0/高优 100% 清零。当前实现状态详见 [`current-implementation-review.md`](current-implementation-review.md)。
 
 ---
 
