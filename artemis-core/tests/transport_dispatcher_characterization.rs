@@ -14,7 +14,7 @@
 //!    transport, identified by `api_mode()`.
 //! 3. **`dispatch_for_resolved()`**: convenience method delegates to `dispatch()`
 //!    using `ResolvedModel.api_protocol`.
-//! 4. **Unregistered protocols**: `BedrockConverse` and `CodexResponses` return
+//! 4. **Unregistered protocols**: `CodexResponses` returns
 //!    `None` from `dispatch()`.
 //! 5. **AnthropicDispatchTransport adapter**: the private adapter bridges the
 //!    `FormatTransport` trait (AnthropicTransport) to the `Transport` trait
@@ -181,17 +181,17 @@ mod dispatcher_construction {
     fn register_adds_and_replaces() {
         let mut dispatcher = TransportDispatcher::new();
 
-        // BedrockConverse is not registered by default
-        assert!(dispatcher.dispatch(&ApiProtocol::BedrockConverse).is_none());
+        // CodexResponses is not registered by default
+        assert!(dispatcher.dispatch(&ApiProtocol::CodexResponses).is_none());
 
         // Register it
         dispatcher.register(
-            ApiProtocol::BedrockConverse,
+            ApiProtocol::CodexResponses,
             Box::new(ChatCompletionsTransport::with_base_url(
-                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "https://api.openai.com/v1",
             )),
         );
-        assert!(dispatcher.dispatch(&ApiProtocol::BedrockConverse).is_some());
+        assert!(dispatcher.dispatch(&ApiProtocol::CodexResponses).is_some());
 
         // Replace existing OpenAiChat with custom base URL
         let custom_url = "http://custom:9999/v1";
@@ -306,19 +306,6 @@ mod dispatch_for_resolved {
         assert_eq!(transport.api_mode(), "gemini");
     }
 
-    /// CHARACTERIZATION: dispatch_for_resolved with ApiProtocol::BedrockConverse
-    /// returns None — Bedrock is not a registered transport.
-    #[test]
-    fn bedrock_converse_resolved_model_returns_none() {
-        let dispatcher = TransportDispatcher::new();
-        let resolved = make_resolved(
-            "bedrock",
-            ApiProtocol::BedrockConverse,
-            "https://bedrock-runtime.us-east-1.amazonaws.com",
-        );
-        assert!(dispatcher.dispatch_for_resolved(&resolved).is_none());
-    }
-
     /// CHARACTERIZATION: dispatch_for_resolved with ApiProtocol::CodexResponses
     /// returns None — Codex is not a registered transport.
     #[test]
@@ -351,19 +338,6 @@ mod dispatch_for_resolved {
 
 mod unregistered_protocols {
     use super::*;
-
-    /// CHARACTERIZATION: BedrockConverse is not registered in the default
-    /// dispatcher. This test documents that fact — if Bedrock is added later,
-    /// this test will need updating (and the characterization has served its
-    /// purpose by catching the change).
-    #[test]
-    fn bedrock_converse_not_registered() {
-        let dispatcher = TransportDispatcher::new();
-        assert!(
-            dispatcher.dispatch(&ApiProtocol::BedrockConverse).is_none(),
-            "BedrockConverse should NOT be registered by default"
-        );
-    }
 
     /// CHARACTERIZATION: CodexResponses is not registered in the default
     /// dispatcher.

@@ -325,7 +325,6 @@ fn regress_transport_type_api_protocol_works() {
         ApiProtocol::OpenAiChat,
         ApiProtocol::AnthropicMessages,
         ApiProtocol::GeminiGenerateContent,
-        ApiProtocol::BedrockConverse,
         ApiProtocol::CodexResponses,
     ];
 
@@ -360,7 +359,6 @@ fn regress_transport_type_all_variants_serialize() {
             ApiProtocol::GeminiGenerateContent,
             "gemini_generate_content",
         ),
-        (ApiProtocol::BedrockConverse, "bedrock_converse"),
         (ApiProtocol::CodexResponses, "codex_responses"),
     ];
 
@@ -409,11 +407,11 @@ fn regress_lazylock_normalize_model_id_correctness() {
             "anthropic/claude-sonnet-4-6",
         ),
         ("anthropic/claude-opus-4-7", "claude-opus-4-7"),
-        // Bedrock prefix stripping
+        // Cloud provider prefix stripping
         ("us.anthropic.claude-sonnet-4-6-v1:0", "claude-sonnet-4-6"),
         ("us.amazon.titan-v1:0", "titan"),
         ("us.meta.llama-v1", "llama"),
-        // Bedrock suffix stripping
+        // Cloud provider suffix stripping
         ("claude-haiku-3.5-v2:0", "claude-haiku-3-5"),
         ("claude-sonnet-4-6-v1:0", "claude-sonnet-4-6"),
         // Claude dot-to-hyphen conversion

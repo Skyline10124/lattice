@@ -5,8 +5,8 @@
 //! and adding credential caching (T22).
 //!
 //! KEY BEHAVIORS DOCUMENTED:
-//! - _PROVIDER_CREDENTIALS maps 21 providers to env var names
-//! - Ollama and Bedrock have empty credential_keys (credentialless)
+//! - _PROVIDER_CREDENTIALS maps 20 providers to env var names
+//! - Ollama has empty credential_keys (credentialless)
 //! - Priority loop (resolve() lines 150-167) skips providers where api_key is None
 //! - Fallback path (lines 169-179) returns first sorted provider with api_key: None
 //! - BUG: Ollama (priority 1, no creds needed) is NOT selected over Anthropic
@@ -51,11 +51,11 @@ fn restore_env_batch(saved: Vec<(&str, Option<String>)>) {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-fn provider_credentials_has_21_entries() {
+fn provider_credentials_has_20_entries() {
     assert_eq!(
         _PROVIDER_CREDENTIALS.len(),
-        21,
-        "_PROVIDER_CREDENTIALS should have exactly 21 provider entries"
+        20,
+        "_PROVIDER_CREDENTIALS should have exactly 20 provider entries"
     );
 }
 
@@ -78,7 +78,6 @@ fn provider_credentials_all_provider_slugs() {
         "kilocode",
         "ai-gateway",
         "openai-codex",
-        "bedrock",
         "minimax",
         "qwen",
         "volces",
@@ -142,12 +141,12 @@ fn provider_credentials_env_var_mapping() {
 }
 
 #[test]
-fn ollama_and_bedrock_are_credentialless() {
-    // CHARACTERIZATION: Ollama and Bedrock have empty credential lists.
-    // This means resolve_credentials() returns None for them, and the
-    // priority loop in resolve() skips them (because api_key.is_some() is false).
+fn ollama_is_credentialless() {
+    // CHARACTERIZATION: Ollama has an empty credential list.
+    // This means resolve_credentials() returns None for it, and the
+    // priority loop in resolve() skips it (because api_key.is_some() is false).
     for (slug, creds) in _PROVIDER_CREDENTIALS {
-        if *slug == "ollama" || *slug == "bedrock" {
+        if *slug == "ollama" {
             assert!(
                 creds.is_empty(),
                 "provider '{}' should have empty credential_keys (credentialless)",
@@ -207,8 +206,8 @@ fn resolve_credentials_finds_env_var_for_provider() {
 
 #[test]
 fn resolve_credentials_returns_none_for_credentialless_provider() {
-    // Ollama and Bedrock have empty credential entries in _PROVIDER_CREDENTIALS,
-    // so resolve_credentials() returns None for them regardless of env vars.
+    // Ollama has empty credential entries in _PROVIDER_CREDENTIALS,
+    // so resolve_credentials() returns None for it regardless of env vars.
     let ollama_entry = _PROVIDER_CREDENTIALS
         .iter()
         .find(|(s, _)| *s == "ollama")
@@ -216,15 +215,6 @@ fn resolve_credentials_returns_none_for_credentialless_provider() {
     assert!(
         ollama_entry.1.is_empty(),
         "Ollama has no credential entries"
-    );
-
-    let bedrock_entry = _PROVIDER_CREDENTIALS
-        .iter()
-        .find(|(s, _)| *s == "bedrock")
-        .unwrap();
-    assert!(
-        bedrock_entry.1.is_empty(),
-        "Bedrock has no credential entries"
     );
 }
 
@@ -615,7 +605,7 @@ fn normalize_strips_openrouter_vendor_prefix() {
 }
 
 #[test]
-fn normalize_strips_bedrock_prefix() {
+fn normalize_strips_prefix() {
     assert_eq!(
         normalize_model_id("us.anthropic.claude-sonnet-4-6-v1:0"),
         "claude-sonnet-4-6"
@@ -628,7 +618,7 @@ fn normalize_strips_bedrock_prefix() {
 }
 
 #[test]
-fn normalize_strips_bedrock_suffix() {
+fn normalize_strips_suffix() {
     assert_eq!(
         normalize_model_id("claude-sonnet-4-6-v1:0"),
         "claude-sonnet-4-6"
@@ -833,8 +823,8 @@ fn bug_ollama_not_selected_when_anthropic_has_creds() {
 
 #[test]
 fn all_19_credentialed_providers_have_env_var_mapping() {
-    // CHARACTERIZATION: Of the 21 entries in _PROVIDER_CREDENTIALS,
-    // 19 have at least one env var mapping, and 2 (ollama, bedrock) have none.
+    // CHARACTERIZATION: Of the 20 entries in _PROVIDER_CREDENTIALS,
+    // 19 have at least one env var mapping, and 1 (ollama) has none.
     let credentialed: Vec<&&str> = _PROVIDER_CREDENTIALS
         .iter()
         .filter(|(_, creds)| !creds.is_empty())
@@ -853,11 +843,10 @@ fn all_19_credentialed_providers_have_env_var_mapping() {
     );
     assert_eq!(
         credentialless.len(),
-        2,
-        "2 providers should be credentialless"
+        1,
+        "1 provider should be credentialless"
     );
     assert_eq!(*credentialless[0], "ollama");
-    assert_eq!(*credentialless[1], "bedrock");
 }
 
 #[test]

@@ -1217,8 +1217,8 @@ mod dispatcher {
     fn dispatch_unregistered_protocol_returns_none() {
         let dispatcher = TransportDispatcher::new();
 
-        // BedrockConverse is not registered by default
-        let result = dispatcher.dispatch(&ApiProtocol::BedrockConverse);
+        // CodexResponses is not registered by default
+        let result = dispatcher.dispatch(&ApiProtocol::CodexResponses);
         assert!(result.is_none());
     }
 
@@ -1378,19 +1378,19 @@ mod dispatcher {
     fn register_custom_transport_and_dispatch() {
         let mut dispatcher = TransportDispatcher::new();
 
-        // Register a custom transport for Bedrock
+        // Register a custom transport for CodexResponses
         dispatcher.register(
-            ApiProtocol::BedrockConverse,
+            ApiProtocol::CodexResponses,
             Box::new(ChatCompletionsTransport::with_base_url(
-                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "https://api.openai.com/v1",
             )),
         );
 
-        let transport = dispatcher.dispatch(&ApiProtocol::BedrockConverse).unwrap();
+        let transport = dispatcher.dispatch(&ApiProtocol::CodexResponses).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
         assert_eq!(
             transport.base_url(),
-            "https://bedrock-runtime.us-east-1.amazonaws.com"
+            "https://api.openai.com/v1"
         );
     }
 }
