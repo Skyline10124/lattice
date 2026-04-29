@@ -1,11 +1,17 @@
 pub mod state;
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use artemis_core::retry::RetryPolicy;
 use artemis_core::streaming::StreamEvent;
 use artemis_core::types::ToolDefinition;
 use artemis_core::ResolvedModel;
+
+/// Global tokio runtime shared by all Agent instances.
+static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Runtime::new().expect("Failed to create shared tokio runtime")
+});
 
 #[allow(dead_code)]
 pub struct Agent {
@@ -15,11 +21,12 @@ pub struct Agent {
     retry: RetryPolicy,
     memory: Option<Box<dyn artemis_memory::Memory>>,
     token_pool: Option<Box<dyn artemis_token_pool::TokenPool>>,
-    runtime: tokio::runtime::Runtime,
 }
 
 impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self {
+        // Force lazy init so first Agent creation pays the cost, not first send().
+        LazyLock::force(&SHARED_RUNTIME);
         Self {
             resolved: resolved.clone(),
             state: state::AgentState::new(resolved),
@@ -27,7 +34,6 @@ impl Agent {
             retry: RetryPolicy::default(),
             memory: None,
             token_pool: None,
-            runtime: tokio::runtime::Runtime::new().expect("Failed to create tokio runtime"),
         }
     }
 
@@ -93,7 +99,7 @@ impl Agent {
         let mut reasoning_buf = String::new();
         let mut tool_builders: HashMap<String, ToolCallAccum> = HashMap::new();
 
-        self.runtime.block_on(async {
+        SHARED_RUNTIME.block_on(async {
             while let Some(event) = stream.next().await {
                 match event {
                     StreamEvent::Token { content: c } => {
@@ -182,7 +188,7 @@ impl Agent {
         let mut attempt = 0u32;
 
         loop {
-            let result = self.runtime.block_on(artemis_core::chat(
+            let result = SHARED_RUNTIME.block_on(artemis_core::chat(
                 &self.state.resolved,
                 &self.state.messages,
                 &self.tools,
@@ -195,7 +201,7 @@ impl Agent {
                         return Err(e);
                     }
                     let delay = self.retry.jittered_backoff(attempt);
-                    self.runtime.block_on(async {
+                    SHARED_RUNTIME.block_on(async {
                         tokio::time::sleep(delay).await;
                     });
                     attempt += 1;
