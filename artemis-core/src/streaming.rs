@@ -96,7 +96,8 @@ pub trait SseParser: Send + Sync {
 /// Parser for the OpenAI `chat.completion.chunk` SSE format.
 ///
 /// Handles:
-/// - `data: [DONE]` sentinel → [`StreamEvent::Done`]
+/// - `data: [DONE]` sentinel → ignored (transport signal, stream end is detected
+///   when the event source returns `None`)
 /// - Content delta chunks → [`StreamEvent::Token`]
 /// - Tool-call delta chunks → [`StreamEvent::ToolCallStart`] / [`StreamEvent::ToolCallDelta`]
 /// - Finish-reason chunks → [`StreamEvent::ToolCallEnd`] + [`StreamEvent::Done`]
@@ -127,10 +128,7 @@ impl SseParser for OpenAiSseParser {
     ) -> Result<Vec<StreamEvent>, Box<dyn std::error::Error>> {
         let trimmed = data.trim();
         if trimmed == "[DONE]" {
-            return Ok(vec![StreamEvent::Done {
-                finish_reason: "stop".into(),
-                usage: None,
-            }]);
+            return Ok(vec![]);
         }
 
         let root: Value = serde_json::from_str(trimmed)?;
@@ -217,6 +215,23 @@ impl SseParser for OpenAiSseParser {
 
         Ok(events)
     }
+}
+
+/// Maps Anthropic stop reasons to OpenAI-style finish reasons, matching the
+/// logic in [`AnthropicTransport::denormalize_response`].
+const ANTHROPIC_STOP_REASON_MAP: &[(&str, &str)] = &[
+    ("end_turn", "stop"),
+    ("tool_use", "tool_calls"),
+    ("max_tokens", "length"),
+    ("stop_sequence", "stop"),
+];
+
+fn map_stop_reason(reason: &str) -> String {
+    ANTHROPIC_STOP_REASON_MAP
+        .iter()
+        .find(|(k, _)| *k == reason)
+        .map(|(_, v)| v.to_string())
+        .unwrap_or_else(|| "stop".to_string())
 }
 
 /// Parser for the Anthropic message-streaming SSE format.
@@ -333,6 +348,7 @@ impl SseParser for AnthropicSseParser {
             }
             "message_delta" => {
                 let stop_reason = root["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
+                let finish_reason = map_stop_reason(stop_reason);
                 let output_tokens = root["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
                 let total_tokens = self.input_tokens + output_tokens;
                 let usage = root["usage"].as_object().map(|_| TokenUsage {
@@ -341,7 +357,7 @@ impl SseParser for AnthropicSseParser {
                     total_tokens,
                 });
                 Ok(vec![StreamEvent::Done {
-                    finish_reason: stop_reason.to_string(),
+                    finish_reason,
                     usage,
                 }])
             }
@@ -603,17 +619,10 @@ mod tests {
     fn test_openai_done_sentinel() {
         let mut parser = OpenAiSseParser::new();
         let events = parser.parse_chunk("message", "[DONE]").unwrap();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::Done {
-                finish_reason,
-                usage,
-            } => {
-                assert_eq!(finish_reason, "stop");
-                assert!(usage.is_none());
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
+        assert!(
+            events.is_empty(),
+            "[DONE] is a transport signal only, not a semantic event"
+        );
     }
 
     #[test]
@@ -842,7 +851,7 @@ mod tests {
                 finish_reason,
                 usage,
             } => {
-                assert_eq!(finish_reason, "end_turn");
+                assert_eq!(finish_reason, "stop", "end_turn maps to stop");
                 let usage = usage.as_ref().expect("expected usage");
                 assert_eq!(usage.prompt_tokens, 10, "input_tokens from message_start");
                 assert_eq!(usage.completion_tokens, 50);
@@ -1037,10 +1046,13 @@ mod tests {
         let input = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
         let mut parser = OpenAiSseParser::new();
         let events = parse_sse_text(input, &mut parser).unwrap();
-        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events.len(),
+            2,
+            "[DONE] is a transport signal, no Done event emitted"
+        );
         assert!(matches!(events[0], StreamEvent::Token { .. }));
         assert!(matches!(events[1], StreamEvent::Token { .. }));
-        assert!(matches!(events[2], StreamEvent::Done { .. }));
     }
 
     #[test]
@@ -1114,8 +1126,10 @@ mod tests {
     fn test_openai_whitespace_done() {
         let mut parser = OpenAiSseParser::new();
         let events = parser.parse_chunk("message", "  [DONE]  ").unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], StreamEvent::Done { .. }));
+        assert!(
+            events.is_empty(),
+            "[DONE] with whitespace is still a transport signal"
+        );
     }
 
     #[test]
