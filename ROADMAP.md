@@ -1,47 +1,52 @@
 # Roadmap
 
-## Phase 1: Core stabilization (current)
+## Phase 1: Core stabilization (complete)
 
 Fix remaining issues from the second code review:
 
-- [ ] Fix `run_with_fallback` — check `is_retryable()` before retrying non-retryable errors
-- [ ] Fix `trim_conversation` — O(n²) removal, tool-call pair splitting, double clone
-- [ ] Add size limits to tool call results (DoS prevention)
-- [ ] Remove unused dependencies (`uuid`, `chrono`, `pyo3-async-runtimes`)
-- [ ] Fix `ToolDefinition::set_parameters` — return error instead of silently ignoring
-- [ ] Fix HTTP 408 classification as retryable
-- [ ] Fix `extract_retry_after` for string-valued numbers
-- [ ] Reduce provider boilerplate with macro (~1300 lines → ~75 lines)
+- [x] Fix `run_with_fallback` -- check `is_retryable()` before retrying non-retryable errors
+- [x] Fix `trim_conversation` -- O(n^2) removal, tool-call pair splitting, double clone
+- [x] Add size limits to tool call results (DoS prevention)
+- [x] Remove unused dependencies (`uuid`, `chrono`, `pyo3-async-runtimes`)
+- [x] Fix `ToolDefinition::set_parameters` -- return error instead of silently ignoring
+- [x] Fix HTTP 408 classification as retryable
+- [x] Fix `extract_retry_after` for string-valued numbers
+- [x] Reduce provider boilerplate with macro (~1300 lines -> ~75 lines)
 
-**Target**: production-ready core, <10 known issues.
+**Result**: 34/44 code review issues fixed (77% fix rate). All P0 and high-priority items cleared. 409+ tests pass, 0 fail.
 
-## Phase 2: Kernel separation
+## Phase 2: Kernel separation (complete)
 
-Split the monolithic crate:
+Split the monolithic crate into a 5-crate workspace:
 
 ```
-artemis-core        # Only: catalog, router, provider, transport, streaming, retry, tokens, errors
-artemis-agent-loop  # AgentLoop, budget tracking, fallback (separate crate)
-artemis-python      # PyO3 bindings, engine, streaming_bridge (separate crate)
+artemis-core        # Pure Rust: catalog, router, provider, transport, streaming, retry, tokens, errors
+artemis-agent       # Agent state, tool boundary, retry (separate crate)
+artemis-memory      # Memory trait + InMemoryMemory (shared trait crate)
+artemis-token-pool  # TokenPool trait + UnlimitedPool (shared trait crate)
+artemis-python      # PyO3 bindings (resolver only, for now)
 ```
 
-- [ ] Move `agent_loop` out of core
-- [ ] Move `tool_boundary` up to agent layer
-- [ ] Move `streaming_bridge` to python crate
-- [ ] Shared tokio runtime handle instead of independent runtimes
-- [ ] `ChatRequest` supports borrowed messages
+- [x] Move agent logic out of core into `artemis-agent`
+- [x] Move tool boundary up to agent layer
+- [x] Create `artemis-memory` and `artemis-token-pool` trait crates
+- [x] Create `artemis-python` with PyO3 bindings (resolver)
+- [x] `artemis-core` is pure Rust (rlib only, no PyO3 dependency)
+- [x] Transport trait unified, shared `reqwest::Client`
+- [x] HTTPS enforced for non-localhost base URLs
+- [x] Catalog base_url properly falls back to provider_defaults
 
-**Target**: `artemis-core` is truly minimal — just model routing + inference. ~5k lines.
+**Result**: Clean separation. artemis-core is truly minimal -- just model routing + inference.
 
-## Phase 3: Typed plugin system
+## Phase 3: Typed plugin system (next)
 
 - [ ] Plugin trait: `Input` / `Output` types, `to_prompt()`, `from_output()`, `should_handoff()`
-- [ ] Output validation + retry framework (parse error → retry N times → fallback)
+- [ ] Output validation + retry framework (parse error -> retry N times -> fallback)
 - [ ] Python glue layer: `importlib` loading, plugin registry, composition
 - [ ] Built-in plugins: `code-review`, `refactor`, `test-gen`
 - [ ] Plugin distribution via `pip` (`pip install artemis-code-review-plugin`)
 
-**Target**: dogfooding — use artemis plugins to develop artemis itself.
+**Target**: dogfooding -- use artemis plugins to develop artemis itself.
 
 ## Phase 4: Agent communication
 
@@ -54,20 +59,30 @@ artemis-python      # PyO3 bindings, engine, streaming_bridge (separate crate)
 
 ## Phase 5: Nix paradigm
 
-- [ ] `artemis.toml` + `artemis.lock` — declarative config, reproducible builds
-- [ ] Content-addressed response cache: `sha256(prompt + model + params) → response`
-- [ ] Derivation-style task model: `InferenceTask { inputs → build → output }`
+- [ ] `artemis.toml` + `artemis.lock` -- declarative config, reproducible builds
+- [ ] Content-addressed response cache: `sha256(prompt + model + params) -> response`
+- [ ] Derivation-style task model: `InferenceTask { inputs -> build -> output }`
 - [ ] Overlay pattern for catalog extension
 - [ ] Sandboxed tool execution
 
 **Target**: every inference is a derivation. Reproducible, cacheable, auditable.
 
+## Current focus
+
+The project is in **alpha / dogfooding** stage. Phase 1 and 2 are complete. Current priorities:
+
+1. **Python API expansion**: expose `Message`, `Role`, `chat_complete()` in `artemis-python`
+2. **Runtime correctness**: finish reason mapping, error classification贯通, streaming timeout fix
+3. **Agent productionization**: memory/token_pool integration, tool name mapping, UTF-8 safe truncation
+
+After Python API parity and runtime hardening, move to Phase 3 (typed plugin system).
+
 ## Timeline
 
 ```
-Phase 1  ████████░░  (in progress)
-Phase 2  ░░░░░░░░░░
-Phase 3  ░░░░░░░░░░
+Phase 1  ██████████  (complete)
+Phase 2  ██████████  (complete)
+Phase 3  ░░░░░░░░░░  (next)
 Phase 4  ░░░░░░░░░░
 Phase 5  ░░░░░░░░░░
 ```
@@ -78,6 +93,6 @@ No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
 
 - [Design vision and ideas](artemis-core/docs/ideas.md)
 - [Architecture overview](artemis-core/docs/architecture.md)
-- [Code review report](artemis-core/docs/code-review-report.md)
+- [Code review report (historical)](artemis-core/docs/code-review-report.md)
 - [Current implementation review](artemis-core/docs/current-implementation-review.md)
 - [Development guide](CLAUDE.md)
