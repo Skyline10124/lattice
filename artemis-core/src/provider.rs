@@ -8,7 +8,6 @@ use crate::types::{Message, ToolCall, ToolDefinition};
 static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
         .build()
         .expect("Failed to build shared reqwest::Client")
 });
