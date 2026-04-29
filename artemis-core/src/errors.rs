@@ -191,8 +191,13 @@ fn truncate_body(s: &str) -> String {
     if s.len() <= MAX_ERROR_BODY_LENGTH {
         return s.to_string();
     }
+    let end = s.char_indices()
+        .take_while(|&(i, ch)| i + ch.len_utf8() <= MAX_ERROR_BODY_LENGTH)
+        .map(|(i, ch)| i + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
     let mut truncated = String::with_capacity(MAX_ERROR_BODY_LENGTH + 16);
-    truncated.push_str(&s[..MAX_ERROR_BODY_LENGTH]);
+    truncated.push_str(&s[..end]);
     truncated.push_str("... (truncated)");
     truncated
 }
