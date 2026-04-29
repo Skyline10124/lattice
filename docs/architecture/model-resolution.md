@@ -27,7 +27,7 @@
    - 检查 `credential_keys`（环境变量是否存在）
    - 如果有凭证 → 选中
    - 如果凭证为空列表 → 视为 credentialless（Ollama 等）
-3. 同一 priority 的 credentialless provider 优先级更高
+3. 同一 priority 下有凭据的 provider 优先于 credentialless
 4. 全部无凭证 → 返回最高 priority 的 provider（api_key: None）
 
 ## 宽容回退
