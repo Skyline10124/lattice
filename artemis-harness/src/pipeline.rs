@@ -15,7 +15,7 @@ use crate::runner::AgentRunner;
 pub struct Pipeline {
     pub name: String,
     pub registry: Arc<AgentRegistry>,
-    pub shared_memory: Option<Box<dyn Memory>>,
+    pub shared_memory: Option<Arc<dyn Memory>>,
 }
 
 pub struct PipelineRun {
@@ -40,7 +40,7 @@ pub struct AgentError {
 }
 
 impl Pipeline {
-    pub fn new(name: &str, registry: Arc<AgentRegistry>, memory: Option<Box<dyn Memory>>) -> Self {
+    pub fn new(name: &str, registry: Arc<AgentRegistry>, memory: Option<Arc<dyn Memory>>) -> Self {
         Self {
             name: name.to_string(),
             registry,
@@ -105,6 +105,9 @@ impl Pipeline {
             }
 
             let mut runner = AgentRunner::from_profile(profile.clone(), agent);
+            if let Some(ref mem) = self.shared_memory {
+                runner = runner.with_memory(Arc::clone(mem));
+            }
 
             match runner.run(&current_input) {
                 Ok((output, next)) => {
