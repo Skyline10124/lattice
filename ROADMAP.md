@@ -79,4 +79,5 @@ No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
 - [Design vision and ideas](artemis-core/docs/ideas.md)
 - [Architecture overview](artemis-core/docs/architecture.md)
 - [Code review report](artemis-core/docs/code-review-report.md)
+- [Current implementation review](artemis-core/docs/current-implementation-review.md)
 - [Development guide](CLAUDE.md)

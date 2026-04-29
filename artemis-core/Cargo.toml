@@ -51,3 +51,6 @@ name = "minimax_debug"
 [[example]]
 name = "dogfood"
 
+
+[[example]]
+name = "demo"
