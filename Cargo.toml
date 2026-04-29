@@ -5,8 +5,9 @@ members = [
     "artemis-memory",
     "artemis-token-pool",
     "artemis-agent",
-    "artemis-python",
     "artemis-plugin",
+    "artemis-python",
     "artemis-cli",
     "artemis-tui",
+    "artemis-harness",
 ]
