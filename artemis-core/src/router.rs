@@ -84,7 +84,7 @@ pub fn normalize_model_id(model_id: &str) -> String {
 pub struct ModelRouter {
     catalog: &'static Catalog,
     custom_models: HashMap<String, ModelCatalogEntry>,
-    credential_cache: Mutex<HashMap<String, Option<String>>>,
+    credential_cache: Mutex<HashMap<(String, String), Option<String>>>,
 }
 
 impl Default for ModelRouter {
@@ -255,10 +255,30 @@ impl ModelRouter {
     /// Check env vars for a provider entry's credential_keys.
     /// Returns the first env var value found, or None.
     /// Results are cached per provider_id to avoid repeated env var lookups.
+    /// Build a cache key from provider_id and a fingerprint of credential_keys
+    /// to prevent cache pollution when two entries share the same provider_id
+    /// but have different credential env var requirements.
+    fn credential_cache_key(entry: &CatalogProviderEntry) -> (String, String) {
+        let mut env_vars: Vec<&String> = entry.credential_keys.values().collect();
+        env_vars.sort();
+        let fingerprint = env_vars
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<&str>>()
+            .join(",");
+        (entry.provider_id.clone(), fingerprint)
+    }
+
+    /// Check env vars for a provider entry's credential_keys.
+    /// Returns the first env var value found, or None.
+    /// Results are cached per (provider_id, credential_keys fingerprint)
+    /// to avoid repeated env var lookups and prevent cross-model cache pollution.
     fn resolve_credentials(&self, entry: &CatalogProviderEntry) -> Option<String> {
+        let cache_key = Self::credential_cache_key(entry);
+
         {
             let cache = self.credential_cache.lock().unwrap();
-            if let Some(cached) = cache.get(&entry.provider_id) {
+            if let Some(cached) = cache.get(&cache_key) {
                 return cached.clone();
             }
         }
@@ -271,7 +291,7 @@ impl ModelRouter {
                     self.credential_cache
                         .lock()
                         .unwrap()
-                        .insert(entry.provider_id.clone(), result.clone());
+                        .insert(cache_key, result.clone());
                     return result;
                 }
             }
@@ -287,7 +307,7 @@ impl ModelRouter {
                         self.credential_cache
                             .lock()
                             .unwrap()
-                            .insert(entry.provider_id.clone(), result.clone());
+                            .insert(cache_key, result.clone());
                         return result;
                     }
                 }
@@ -297,7 +317,7 @@ impl ModelRouter {
         self.credential_cache
             .lock()
             .unwrap()
-            .insert(entry.provider_id.clone(), None);
+            .insert(cache_key, None);
         None
     }
 
