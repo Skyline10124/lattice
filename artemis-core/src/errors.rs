@@ -163,10 +163,8 @@ impl ErrorClassifier {
             // Everything else: pattern-match body for special cases
             _ => {
                 if status_code == 400 && body_lower.contains("context_length_exceeded") {
-                    ArtemisError::ContextWindowExceeded {
-                        tokens: 0,
-                        limit: 0,
-                    }
+                    let (tokens, limit) = extract_context_window_tokens(response_body);
+                    ArtemisError::ContextWindowExceeded { tokens, limit }
                 } else {
                     ArtemisError::Network {
                         message: truncate_body(response_body),
@@ -200,6 +198,43 @@ fn truncate_body(s: &str) -> String {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Extract (tokens_used, context_limit) from a context-window-exceeded error
+/// body. Scans for patterns like "resulted in N tokens" and
+/// "context length is N tokens". Returns (0, 0) when extraction fails.
+fn extract_context_window_tokens(body: &str) -> (u32, u32) {
+    let lower = body.to_lowercase();
+    let mut tokens = 0u32;
+    let mut limit = 0u32;
+
+    // Look for "resulted in <N> tokens" (OpenAI style)
+    if let Some(pos) = lower.find("resulted in") {
+        let after = &lower[pos + "resulted in".len()..].trim_start();
+        if let Some(n) = scan_first_number(after) {
+            tokens = n;
+        }
+    }
+
+    // Look for "context length is <N> tokens" (OpenAI style)
+    if let Some(pos) = lower.find("context length is") {
+        let after = &lower[pos + "context length is".len()..].trim_start();
+        if let Some(n) = scan_first_number(after) {
+            limit = n;
+        }
+    }
+
+    (tokens, limit)
+}
+
+/// Scan the start of a string for an ASCII-digit number and parse it.
+fn scan_first_number(s: &str) -> Option<u32> {
+    let num_str: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if num_str.is_empty() {
+        None
+    } else {
+        num_str.parse().ok()
+    }
+}
 
 /// Extract `retry_after` seconds from a response body.
 fn extract_retry_after(body: &str) -> Option<f64> {
