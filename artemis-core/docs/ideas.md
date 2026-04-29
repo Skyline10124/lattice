@@ -247,6 +247,7 @@ CLI：        无 AI 的纯代码工具
 - [ ] 输出解析 + 校验 + 重试框架
 - [ ] Python 胶水层：插件加载 + 组合
 - [ ] artemis-agent-protocol：handoff 路由
+- [ ] 异步 agent call：Agent A 派发 sub-agent 后不阻塞，继续推进上下文，结果异步注入
 
 
 ## 七、

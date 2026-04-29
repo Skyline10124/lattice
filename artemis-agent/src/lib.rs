@@ -20,6 +20,15 @@ pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &artemis_core::types::ToolCall) -> String;
 }
 
+/// Dispatches a sub-agent by name with the given input.
+/// This is how `agent_call:security-audit` becomes a tool call:
+/// the tool executor detects the `agent_call:` prefix, extracts the agent
+/// name, and delegates to this dispatcher to run the agent and return output.
+pub trait AgentDispatcher: Send + Sync {
+    /// Run a named sub-agent with the given input. Returns the output text.
+    fn dispatch(&self, agent_name: &str, input: &str) -> String;
+}
+
 // Re-export shared default tools for convenience.
 pub use tools::{default_tool_definitions, DefaultToolExecutor};
 

@@ -1,12 +1,12 @@
 use artemis_core::types::ToolCall;
 use artemis_core::types::ToolDefinition;
 
-use crate::ToolExecutor;
+use crate::{AgentDispatcher, ToolExecutor};
 
 /// Returns the default set of tool definitions: read_file, grep, write_file,
 /// list_directory, run_test, run_clippy, bash, patch, run_command,
 /// list_processes, web_search, web_fetch, browser_navigate, browser_screenshot,
-/// browser_console, execute_code.
+/// browser_console, execute_code, agent_call.
 pub fn default_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition::new(
@@ -246,6 +246,24 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["code", "language"]
             }),
         ),
+        ToolDefinition::new(
+            "agent_call".into(),
+            "Call another agent by name. Use 'agent_call:security-audit' to run the security audit agent, or call 'agent_call' with 'name' and 'input' arguments. Available agents are listed in the registry.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Agent name to call (e.g., 'security-audit', 'refactor')"
+                    },
+                    "input": {
+                        "type": "string",
+                        "description": "Input to pass to the sub-agent"
+                    }
+                },
+                "required": ["name", "input"]
+            }),
+        ),
     ]
 }
 
@@ -254,22 +272,68 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
 /// Supports: read_file, grep, write_file, list_directory, run_test,
 /// run_clippy, bash, patch, run_command, list_processes, web_search,
 /// web_fetch, browser_navigate, browser_screenshot, browser_console,
-/// execute_code. The `project_root` is used by `write_file` and `patch`
-/// to restrict writes to project source directories.
+/// execute_code, agent_call. The `project_root` is used by `write_file`
+/// and `patch` to restrict writes to project source directories.
+///
+/// `agent_call` requires an `AgentDispatcher` to be configured via
+/// `with_agent_dispatcher()`. Without one, `agent_call` returns an
+/// error message.
 pub struct DefaultToolExecutor {
     pub project_root: String,
+    pub agent_dispatcher: Option<Box<dyn AgentDispatcher>>,
 }
 
 impl DefaultToolExecutor {
     pub fn new(project_root: &str) -> Self {
         Self {
             project_root: project_root.to_string(),
+            agent_dispatcher: None,
         }
+    }
+
+    /// Attach an agent dispatcher so that `agent_call:name` tool calls
+    /// can launch sub-agents and return their output.
+    pub fn with_agent_dispatcher(mut self, d: Box<dyn AgentDispatcher>) -> Self {
+        self.agent_dispatcher = Some(d);
+        self
     }
 }
 
 impl ToolExecutor for DefaultToolExecutor {
     fn execute(&self, call: &ToolCall) -> String {
+        // Handle agent_call:name format (e.g., agent_call:security-audit)
+        if let Some(agent_name) = call.function.name.strip_prefix("agent_call:") {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or_default();
+            let input = args
+                .get("input")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&call.function.arguments);
+            return match &self.agent_dispatcher {
+                Some(d) => d.dispatch(agent_name, input),
+                None => format!(
+                    "Error: agent_call '{}' is not available — no agent dispatcher configured",
+                    agent_name
+                ),
+            };
+        }
+
+        // Handle explicit agent_call tool with name + input arguments
+        if call.function.name == "agent_call" {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or_default();
+            let agent_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let input = args.get("input").and_then(|v| v.as_str()).unwrap_or("");
+            if agent_name.is_empty() {
+                return "Error: agent_call requires a 'name' argument".to_string();
+            }
+            return match &self.agent_dispatcher {
+                Some(d) => d.dispatch(agent_name, input),
+                None => "Error: agent_call is not available — no agent dispatcher configured"
+                    .to_string(),
+            };
+        }
+
         let args: serde_json::Value =
             serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
 
