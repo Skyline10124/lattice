@@ -375,7 +375,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -457,7 +457,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -527,7 +527,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -573,7 +573,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -723,7 +723,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -1133,7 +1133,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -1229,7 +1229,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -1595,7 +1595,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -1699,7 +1699,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -1823,7 +1823,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -1845,7 +1845,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -1901,7 +1901,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -1979,7 +1979,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -2049,7 +2049,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -2375,7 +2375,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -2491,7 +2491,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -2685,7 +2685,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3041,7 +3041,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3063,7 +3063,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3085,7 +3085,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3107,7 +3107,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3129,7 +3129,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3151,7 +3151,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3173,7 +3173,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3195,7 +3195,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3217,7 +3217,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3239,7 +3239,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3261,7 +3261,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3283,7 +3283,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3305,7 +3305,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         },
@@ -3339,7 +3339,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3361,7 +3361,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3383,7 +3383,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3405,7 +3405,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3427,7 +3427,7 @@
           "credential_keys": {
             "api_key": "OPENCODE_ZEN_API_KEY"
           },
-          "base_url": null,
+          "base_url": "https://opencode.ai/zen/v1",
           "api_protocol": "chat_completions",
           "provider_specific": {}
         }
@@ -3674,7 +3674,7 @@
       "credential_keys": {
         "api_key": "MINIMAX_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.minimax.io/v1"
     },
     "xiaomi": {
       "api_protocol": "chat_completions",
@@ -3702,7 +3702,7 @@
       "credential_keys": {
         "api_key": "MOONSHOT_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://api.moonshot.cn/v1"
     },
     "moonshot": {
       "api_protocol": "chat_completions",
@@ -3763,7 +3763,7 @@
       "credential_keys": {
         "api_key": "OPENCODE_ZEN_API_KEY"
       },
-      "base_url": ""
+      "base_url": "https://opencode.ai/zen/v1"
     },
     "opencode-go": {
       "api_protocol": "chat_completions",
