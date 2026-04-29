@@ -149,7 +149,7 @@ impl ModelRouter {
                         canonical_id: canonical_id.clone(),
                         provider: pe.provider_id.clone(),
                         api_key,
-                        base_url: pe.base_url.clone().unwrap_or_default(),
+                        base_url: self.resolve_base_url(&pe.provider_id, &pe.base_url),
                         api_protocol: pe.api_protocol.clone(),
                         api_model_id: pe.api_model_id.clone(),
                         context_length: entry.context_length,
@@ -178,7 +178,7 @@ impl ModelRouter {
                         canonical_id: canonical_id.clone(),
                         provider: cpe.provider_id.clone(),
                         api_key: None,
-                        base_url: cpe.base_url.clone().unwrap_or_default(),
+                        base_url: self.resolve_base_url(&cpe.provider_id, &cpe.base_url),
                         api_protocol: cpe.api_protocol.clone(),
                         api_model_id: cpe.api_model_id.clone(),
                         context_length: entry.context_length,
@@ -201,7 +201,7 @@ impl ModelRouter {
                     canonical_id: canonical_id.clone(),
                     provider: pe.provider_id.clone(),
                     api_key,
-                    base_url: pe.base_url.clone().unwrap_or_default(),
+                    base_url: self.resolve_base_url(&pe.provider_id, &pe.base_url),
                     api_protocol: pe.api_protocol.clone(),
                     api_model_id: pe.api_model_id.clone(),
                     context_length: entry.context_length,
@@ -215,7 +215,7 @@ impl ModelRouter {
                 canonical_id: canonical_id.clone(),
                 provider: cpe.provider_id.clone(),
                 api_key: None,
-                base_url: cpe.base_url.clone().unwrap_or_default(),
+                base_url: self.resolve_base_url(&cpe.provider_id, &cpe.base_url),
                 api_protocol: cpe.api_protocol.clone(),
                 api_model_id: cpe.api_model_id.clone(),
                 context_length: entry.context_length,
@@ -228,7 +228,7 @@ impl ModelRouter {
             canonical_id: canonical_id.clone(),
             provider: best.provider_id.clone(),
             api_key: None,
-            base_url: best.base_url.clone().unwrap_or_default(),
+            base_url: self.resolve_base_url(&best.provider_id, &best.base_url),
             api_protocol: best.api_protocol.clone(),
             api_model_id: best.api_model_id.clone(),
             context_length: entry.context_length,
@@ -429,6 +429,22 @@ impl ModelRouter {
             }
         }
         canonical_id.to_string()
+    }
+
+    /// Resolve the effective base_url for a provider entry:
+    /// 1. entry's base_url (if set and non-empty)
+    /// 2. fall back to provider_defaults
+    /// 3. empty string if neither is set
+    fn resolve_base_url(&self, provider_id: &str, entry_url: &Option<String>) -> String {
+        if let Some(url) = entry_url {
+            if !url.is_empty() {
+                return url.clone();
+            }
+        }
+        self.catalog
+            .get_provider_defaults(provider_id)
+            .map(|d| d.base_url.clone())
+            .unwrap_or_default()
     }
 }
 

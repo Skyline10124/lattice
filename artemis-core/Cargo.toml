@@ -31,9 +31,6 @@ harness = false
 name = "chat_test"
 
 [[example]]
-name = "tool_test"
-
-[[example]]
 name = "think_test"
 
 [[example]]
@@ -48,9 +45,3 @@ name = "opencode_test"
 [[example]]
 name = "minimax_debug"
 
-[[example]]
-name = "dogfood"
-
-
-[[example]]
-name = "demo"
