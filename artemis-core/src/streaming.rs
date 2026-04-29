@@ -420,9 +420,7 @@ impl<Parser: SseParser> SseStream<Parser> {
 
 /// A boxed, pinned SSE event stream that implements [`futures::Stream`].
 ///
-/// This is the type expected by the [`Provider`](crate::provider::Provider)
-/// trait's `chat_stream` method.  Construct it from an
-/// [`EventSource`] + [`SseParser`].
+/// Construct it from an [`EventSource`] + [`SseParser`].
 ///
 /// # Stream item type
 ///
