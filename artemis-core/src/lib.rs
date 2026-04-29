@@ -217,6 +217,11 @@ pub async fn chat_complete(
                 usage = u;
             }
             StreamEvent::Error { message: m } => {
+                // "Stream ended" is normal SSE connection close.
+                // Treat as Done if we received content or tool calls.
+                if m.contains("Stream ended") && (!content.is_empty() || !tool_calls_map.is_empty()) {
+                    break;
+                }
                 return Err(ArtemisError::Streaming { message: m });
             }
         }
