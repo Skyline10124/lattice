@@ -117,6 +117,15 @@ impl Agent {
         let mut all_events = Vec::new();
 
         for _ in 0..max_turns {
+            // Trim old messages to stay within the model's context window.
+            // Some catalog entries have context_length=0; fall back to 128k.
+            let context_len = if self.state.resolved.context_length > 0 {
+                self.state.resolved.context_length
+            } else {
+                131072
+            };
+            self.state.trim_messages(context_len, 15); // 15% safety margin
+
             let events = self.run_chat();
             let mut tool_calls = Vec::new();
 
