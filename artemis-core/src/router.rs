@@ -301,7 +301,10 @@ impl ModelRouter {
                 let trimmed = val.trim().to_string();
                 if !trimmed.is_empty() {
                     let result = Some(trimmed);
-                    self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                    self.credential_cache
+                        .lock()
+                        .unwrap()
+                        .insert(cache_key, result.clone());
                     return result;
                 }
             }
@@ -309,7 +312,10 @@ impl ModelRouter {
                 let trimmed = val.trim().to_string();
                 if !trimmed.is_empty() {
                     let result = Some(trimmed);
-                    self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                    self.credential_cache
+                        .lock()
+                        .unwrap()
+                        .insert(cache_key, result.clone());
                     return result;
                 }
             }
@@ -323,7 +329,10 @@ impl ModelRouter {
                     let trimmed = val.trim().to_string();
                     if !trimmed.is_empty() {
                         let result = Some(trimmed);
-                        self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                        self.credential_cache
+                            .lock()
+                            .unwrap()
+                            .insert(cache_key, result.clone());
                         return result;
                     }
                 }
@@ -331,14 +340,20 @@ impl ModelRouter {
                     let trimmed = val.trim().to_string();
                     if !trimmed.is_empty() {
                         let result = Some(trimmed);
-                        self.credential_cache.lock().unwrap().insert(cache_key, result.clone());
+                        self.credential_cache
+                            .lock()
+                            .unwrap()
+                            .insert(cache_key, result.clone());
                         return result;
                     }
                 }
             }
         }
 
-        self.credential_cache.lock().unwrap().insert(cache_key, None);
+        self.credential_cache
+            .lock()
+            .unwrap()
+            .insert(cache_key, None);
         None
     }
 

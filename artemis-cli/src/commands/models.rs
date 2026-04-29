@@ -13,8 +13,16 @@ pub fn run(auth_only: bool) -> Result<()> {
     };
 
     for m in models {
-        let icon = if authed.contains(&m) { "\u{2713}" } else { "\u{2717}" };
-        let color = if authed.contains(&m) { m.green() } else { m.red() };
+        let icon = if authed.contains(&m) {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        };
+        let color = if authed.contains(&m) {
+            m.green()
+        } else {
+            m.red()
+        };
         println!("{} {}", icon, color);
     }
 

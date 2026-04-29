@@ -7,7 +7,7 @@ mod config;
 mod credentials;
 mod session;
 
-use commands::{doctor, print, resolve, sessions, models, config_cmd, stats};
+use commands::{config_cmd, doctor, models, print, resolve, sessions, stats};
 use config::Config;
 use credentials::CredentialStore;
 
@@ -85,12 +85,24 @@ async fn main() -> Result<()> {
     // Print mode (single-turn streaming)
     if let Some(prompt) = cli.print {
         let model = cli.model.unwrap_or_else(|| config.default_model());
-        return print::run(&model, &prompt, cli.provider.as_deref(), cli.verbose, cli.json, &creds).await;
+        return print::run(
+            &model,
+            &prompt,
+            cli.provider.as_deref(),
+            cli.verbose,
+            cli.json,
+            &creds,
+        )
+        .await;
     }
 
     // Default: enter TUI (if no subcommand)
     match cli.command {
-        Some(Commands::Resolve { model, trace, provider }) => {
+        Some(Commands::Resolve {
+            model,
+            trace,
+            provider,
+        }) => {
             resolve::run(&model, provider.as_deref(), trace, cli.json)?;
         }
         Some(Commands::Models { auth }) => {
@@ -110,7 +122,10 @@ async fn main() -> Result<()> {
         }
         None => {
             // No command and no -p: launch TUI
-            eprintln!("{}", "Launching TUI (not yet implemented in MVP). Use -p for single-turn mode.".dimmed());
+            eprintln!(
+                "{}",
+                "Launching TUI (not yet implemented in MVP). Use -p for single-turn mode.".dimmed()
+            );
         }
     }
 

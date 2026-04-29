@@ -137,8 +137,7 @@ impl Agent {
                     }
                     StreamEvent::Done { usage, .. } => {
                         if let Some(ref u) = usage {
-                            self.state
-                                .add_token_usage(u.total_tokens as u64);
+                            self.state.add_token_usage(u.total_tokens as u64);
                         }
                         if !tool_builders.is_empty() {
                             let calls: Vec<artemis_core::types::ToolCall> = tool_builders

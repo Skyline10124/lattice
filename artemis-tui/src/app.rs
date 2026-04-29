@@ -187,13 +187,7 @@ impl App {
                 }
             };
 
-            let messages = vec![CoreMessage::new(
-                Role::User,
-                text.into(),
-                None,
-                None,
-                None,
-            )];
+            let messages = vec![CoreMessage::new(Role::User, text.into(), None, None, None)];
 
             let mut stream = match artemis_core::chat(&resolved, &messages, &[]).await {
                 Ok(s) => s,
@@ -262,7 +256,13 @@ impl App {
     }
 
     /// Apply a streaming token to the last assistant message.
-    pub fn apply_stream_token(&mut self, content: String, reasoning: Option<String>, done: bool, error: Option<String>) {
+    pub fn apply_stream_token(
+        &mut self,
+        content: String,
+        reasoning: Option<String>,
+        done: bool,
+        error: Option<String>,
+    ) {
         if let Some(last) = self.messages.last_mut() {
             if last.role == Role::Assistant {
                 if !content.is_empty() {

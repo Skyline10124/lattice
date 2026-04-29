@@ -1,4 +1,4 @@
-use artemis_core::{resolve, chat_complete, Message, Role};
+use artemis_core::{chat_complete, resolve, Message, Role};
 
 #[tokio::main]
 async fn main() {
@@ -22,27 +22,42 @@ async fn main() {
     for (model, family, has_thinking) in &models {
         let resolved = match resolve(model) {
             Ok(r) => {
-                if r.provider != "opencode-go" { continue; }
+                if r.provider != "opencode-go" {
+                    continue;
+                }
                 r
             }
-            Err(_) => { println!("{} RESOLVE FAILED", model); continue; }
+            Err(_) => {
+                println!("{} RESOLVE FAILED", model);
+                continue;
+            }
         };
 
         let msg = Message {
-            role: Role::User, content: "Say hi in one word.".into(),
-            tool_calls: None, tool_call_id: None, name: None, reasoning_content: None,
+            role: Role::User,
+            content: "Say hi in one word.".into(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            reasoning_content: None,
         };
 
         match chat_complete(&resolved, &[msg], &[]).await {
             Ok(r) => {
                 let think = if let Some(ref t) = r.reasoning_content {
                     format!("[think:{}b]", t.len())
-                } else { String::new() };
+                } else {
+                    String::new()
+                };
                 let content = r.content.as_deref().unwrap_or("(empty)");
                 let preview = &content[..content.len().min(60)];
-                let status = if *has_thinking && r.reasoning_content.is_some() { "OK+think" }
-                    else if *has_thinking { "OK(no think)" }
-                    else { "OK" };
+                let status = if *has_thinking && r.reasoning_content.is_some() {
+                    "OK+think"
+                } else if *has_thinking {
+                    "OK(no think)"
+                } else {
+                    "OK"
+                };
                 println!("{} {} {} {} {}", model, family, status, think, preview);
             }
             Err(e) => println!("{} {} ERROR: {:?}", model, family, e),

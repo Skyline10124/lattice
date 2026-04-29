@@ -1,6 +1,9 @@
 use anyhow::Result;
 use artemis_core::router::ModelRouter;
-use artemis_core::{chat_complete, types::{Message, Role}};
+use artemis_core::{
+    chat_complete,
+    types::{Message, Role},
+};
 use colored::Colorize;
 use std::time::Instant;
 
@@ -22,16 +25,13 @@ pub async fn run(
     let resolved = router.resolve(model, provider_override)?;
 
     if verbose {
-        eprintln!("{}", format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan());
+        eprintln!(
+            "{}",
+            format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan()
+        );
     }
 
-    let messages = vec![Message::new(
-        Role::User,
-        prompt.into(),
-        None,
-        None,
-        None,
-    )];
+    let messages = vec![Message::new(Role::User, prompt.into(), None, None, None)];
 
     if verbose {
         eprintln!("{}", "streaming...".dimmed());
@@ -56,7 +56,8 @@ pub async fn run(
         }
         if verbose {
             if let Some(usage) = response.usage {
-                eprintln!("\n{}: {} tok (prompt: {}, completion: {}) | {} ms",
+                eprintln!(
+                    "\n{}: {} tok (prompt: {}, completion: {}) | {} ms",
                     "usage".dimmed(),
                     usage.total_tokens,
                     usage.prompt_tokens,

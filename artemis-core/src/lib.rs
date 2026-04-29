@@ -69,7 +69,7 @@ pub async fn chat(
             Some("high".to_string()),
         ),
         "deepseek-v4-flash" => (None, None), // thinking OFF for flash
-        _ => (None, None), // other providers don't use these params
+        _ => (None, None),                   // other providers don't use these params
     };
 
     let request = ChatRequest {
@@ -112,7 +112,11 @@ pub async fn chat(
 
             let mut req = client.post(&url).json(&body);
             if let Some(ref api_key) = resolved.api_key {
-                match resolved.provider_specific.get("auth_type").map(|s| s.as_str()) {
+                match resolved
+                    .provider_specific
+                    .get("auth_type")
+                    .map(|s| s.as_str())
+                {
                     Some("x-goog-api-key") => {
                         req = req.header("x-goog-api-key", api_key.as_str());
                     }

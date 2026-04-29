@@ -597,16 +597,20 @@ mod tests {
 
     impl PluginHooks for TestHooks {
         fn on_start(&self, _plugin: &str, _input_tokens: u32) {
-            self.starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         fn on_turn(&self, _attempt: u32, _tokens: Option<TokenUsage>, _action: &Action) {
-            self.turns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.turns
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         fn on_error(&self, _attempt: u32, _error: &PluginError) {
-            self.errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.errors
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         fn on_complete(&self, _result: &RunResult) {
-            self.completes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.completes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -683,14 +687,7 @@ mod tests {
             ..Default::default()
         };
         let mut runner = PluginRunner::new(
-            &plugin,
-            &behavior,
-            &mut agent,
-            &config,
-            None,
-            None,
-            None,
-            None,
+            &plugin, &behavior, &mut agent, &config, None, None, None, None,
         );
 
         let input = serde_json::json!({});
@@ -731,14 +728,7 @@ mod tests {
             ..Default::default()
         };
         let mut runner = PluginRunner::new(
-            &plugin,
-            &behavior,
-            &mut agent,
-            &config,
-            None,
-            None,
-            None,
-            None,
+            &plugin, &behavior, &mut agent, &config, None, None, None, None,
         );
 
         let input = serde_json::json!({});

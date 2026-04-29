@@ -21,13 +21,28 @@ pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool
     }
 
     if trace {
-        println!("{}", format!("resolve: {} \u{2192} {}@{}", model, resolved.canonical_id, resolved.provider).cyan());
+        println!(
+            "{}",
+            format!(
+                "resolve: {} \u{2192} {}@{}",
+                model, resolved.canonical_id, resolved.provider
+            )
+            .cyan()
+        );
         println!("  {}: {}", "Provider".bold(), resolved.provider);
         println!("  {}: {}", "Model".bold(), resolved.api_model_id);
         println!("  {}: {:?}", "Protocol".bold(), resolved.api_protocol);
         println!("  {}: {}", "Base URL".bold(), resolved.base_url);
         println!("  {}: {}", "Context".bold(), resolved.context_length);
-        println!("  {}: {}", "Auth".bold(), if resolved.api_key.is_some() { "\u{2713} set".green() } else { "\u{2717} missing".red() });
+        println!(
+            "  {}: {}",
+            "Auth".bold(),
+            if resolved.api_key.is_some() {
+                "\u{2713} set".green()
+            } else {
+                "\u{2717} missing".red()
+            }
+        );
     } else {
         println!("{}: {}", "Provider".bold(), resolved.provider);
         println!("{}: {}", "Model".bold(), resolved.api_model_id);

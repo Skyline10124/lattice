@@ -1,4 +1,4 @@
-use artemis_core::{resolve, chat_complete, Message, Role, ToolDefinition};
+use artemis_core::{chat_complete, resolve, Message, Role, ToolDefinition};
 use serde_json::json;
 
 #[tokio::main]
@@ -21,10 +21,14 @@ async fn main() {
         role: Role::User,
         content: "What's the weather in Beijing? Use the get_weather tool.".into(),
         reasoning_content: None,
-        tool_calls: None, tool_call_id: None, name: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
     }];
 
-    let response = chat_complete(&resolved, &messages, &tools).await.expect("chat");
+    let response = chat_complete(&resolved, &messages, &tools)
+        .await
+        .expect("chat");
     println!("content: {:?}", response.content);
     println!("tool_calls: {:?}", response.tool_calls);
     println!("finish: {}", response.finish_reason);

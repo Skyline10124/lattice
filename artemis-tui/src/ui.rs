@@ -18,9 +18,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),          // chat messages
-            Constraint::Length(3),       // input box
-            Constraint::Length(1),       // statusline
+            Constraint::Min(3),    // chat messages
+            Constraint::Length(3), // input box
+            Constraint::Length(1), // statusline
         ])
         .split(size);
 
@@ -39,7 +39,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     // Render messages (bottom-up, with scroll offset)
     let message_height = 2usize; // rough height per message for MVP
     let visible_count = inner_chat.height as usize / message_height;
-    let start = app.messages.len().saturating_sub(visible_count + app.scroll_offset);
+    let start = app
+        .messages
+        .len()
+        .saturating_sub(visible_count + app.scroll_offset);
     let end = app.messages.len().saturating_sub(app.scroll_offset);
 
     let message_chunks = Layout::default()
@@ -57,19 +60,20 @@ pub fn draw(f: &mut Frame, app: &App) {
     let input_text = if app.input.is_empty() {
         Line::from(Span::styled(
             " Type a message... (Enter to send, Shift+Enter for newline, Ctrl+C to quit)",
-            Style::default().fg(theme.subtext).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.subtext)
+                .add_modifier(Modifier::ITALIC),
         ))
     } else {
-        Line::from(Span::styled(
-            app.input.clone(),
-            theme.input_style(),
-        ))
+        Line::from(Span::styled(app.input.clone(), theme.input_style()))
     };
 
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme.border_style());
-    let input_para = Paragraph::new(input_text).block(input_block).wrap(Wrap { trim: true });
+    let input_para = Paragraph::new(input_text)
+        .block(input_block)
+        .wrap(Wrap { trim: true });
     f.render_widget(input_para, input_area);
 
     // Set cursor position

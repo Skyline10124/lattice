@@ -36,7 +36,10 @@ impl Statusline {
         let tokens = format!("{} tok", app.token_count);
 
         let left = vec![
-            Span::styled(model_provider.clone(), self.theme.statusline_style().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                model_provider.clone(),
+                self.theme.statusline_style().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::styled(status_icon.to_string(), Style::default().fg(status_color)),
             Span::raw("  "),
@@ -46,7 +49,10 @@ impl Statusline {
         let right = vec![
             Span::styled("/help".to_string(), Style::default().fg(self.theme.subtext)),
             Span::raw("  "),
-            Span::styled("\u{F06A9}".to_string(), Style::default().fg(self.theme.highlight)),
+            Span::styled(
+                "\u{F06A9}".to_string(),
+                Style::default().fg(self.theme.highlight),
+            ),
         ];
 
         let block = Block::default()

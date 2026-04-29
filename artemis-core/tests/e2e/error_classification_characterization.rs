@@ -419,7 +419,8 @@ fn retry_after_string_encoded_number_bug() {
     match err {
         ArtemisError::RateLimit { retry_after, .. } => {
             assert_eq!(
-                retry_after, Some(30.0),
+                retry_after,
+                Some(30.0),
                 "M5 FIXED: string-encoded '30' should now be parsed"
             );
         }

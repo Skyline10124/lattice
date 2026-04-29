@@ -31,8 +31,7 @@ impl ArtemisEngine {
             .map_err(convert_core_error)?;
 
         // Security: reject non-localhost HTTP
-        artemis_core::router::validate_base_url(&resolved.base_url)
-            .map_err(convert_core_error)?;
+        artemis_core::router::validate_base_url(&resolved.base_url).map_err(convert_core_error)?;
 
         Ok(PyResolvedModel { inner: resolved })
     }

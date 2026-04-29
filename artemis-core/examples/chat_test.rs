@@ -3,8 +3,12 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() {
     let resolved = artemis_core::resolve("deepseek-v4-pro").expect("resolve failed");
-    println!("provider={}, model={}, key={}",
-        resolved.provider, resolved.api_model_id, resolved.api_key.is_some());
+    println!(
+        "provider={}, model={}, key={}",
+        resolved.provider,
+        resolved.api_model_id,
+        resolved.api_key.is_some()
+    );
 
     let msg = artemis_core::Message {
         role: artemis_core::Role::User,

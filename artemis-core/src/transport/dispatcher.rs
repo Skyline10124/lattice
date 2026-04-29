@@ -243,10 +243,7 @@ mod tests {
 
         let transport = dispatcher.dispatch(&ApiProtocol::CodexResponses).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
-        assert_eq!(
-            transport.base_url(),
-            "https://api.openai.com/v1"
-        );
+        assert_eq!(transport.base_url(), "https://api.openai.com/v1");
     }
 
     #[test]

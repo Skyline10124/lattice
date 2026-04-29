@@ -42,17 +42,21 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
 }
 
-fn default_model() -> String { "sonnet".into() }
-fn default_theme() -> String { "dark".into() }
-fn default_true() -> bool { true }
+fn default_model() -> String {
+    "sonnet".into()
+}
+fn default_theme() -> String {
+    "dark".into()
+}
+fn default_true() -> bool {
+    true
+}
 
 impl Config {
     pub fn load(path: Option<&str>) -> Result<Self> {
         let path = path
             .map(PathBuf::from)
-            .or_else(|| {
-                dirs::config_dir().map(|d| d.join("artemis").join("config.toml"))
-            })
+            .or_else(|| dirs::config_dir().map(|d| d.join("artemis").join("config.toml")))
             .unwrap_or_else(|| PathBuf::from("artemis.toml"));
 
         if path.exists() {

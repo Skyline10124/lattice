@@ -32,12 +32,10 @@ impl<'a> MessageWidget<'a> {
             artemis_core::types::Role::Tool => self.theme.tool_style(),
         };
 
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
-                Span::styled(self.msg.content.clone(), style),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
+            Span::styled(self.msg.content.clone(), style),
+        ])];
 
         // Thinking block (collapsible, shown inline for MVP)
         if let Some(ref reasoning) = self.msg.reasoning {

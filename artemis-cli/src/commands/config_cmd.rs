@@ -33,7 +33,11 @@ theme = "dark"
 show_reasoning = true
 "#;
             std::fs::write(&config_path, default)?;
-            println!("{} config initialized at {}", "\u{2713}".green(), config_path.display());
+            println!(
+                "{} config initialized at {}",
+                "\u{2713}".green(),
+                config_path.display()
+            );
         }
         ConfigAction::Get { key } => {
             let config = Config::load(Some(config_path.to_str().unwrap()))?;
@@ -47,7 +51,8 @@ show_reasoning = true
             }
         }
         ConfigAction::Set { key, value } => {
-            println!("{} {} = {} (not yet persisted — edit {} directly)",
+            println!(
+                "{} {} = {} (not yet persisted — edit {} directly)",
                 "\u{2713}".green(),
                 key.bold(),
                 value,
