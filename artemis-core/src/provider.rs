@@ -31,6 +31,10 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     pub stream: bool,
     pub resolved: ResolvedModel,
+    /// DeepSeek thinking mode: `{"type": "enabled"}` or `{"type": "disabled"}`.
+    pub thinking: Option<serde_json::Value>,
+    /// DeepSeek reasoning effort: `"high"` or `"max"`.
+    pub reasoning_effort: Option<String>,
 }
 
 impl ChatRequest {
@@ -49,6 +53,8 @@ impl ChatRequest {
             max_tokens: None,
             stream: false,
             resolved,
+            thinking: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -57,6 +63,8 @@ impl ChatRequest {
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     pub content: Option<String>,
+    /// Reasoning/thinking content (e.g., DeepSeek R1/V4 thinking chain).
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub usage: Option<TokenUsage>,
     pub finish_reason: String,
@@ -92,6 +100,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "hello".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,

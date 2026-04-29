@@ -149,6 +149,10 @@ impl Transport for ChatCompletionsTransport {
                 m["name"] = serde_json::Value::String(name.clone());
             }
 
+            if let Some(reasoning) = &msg.reasoning_content {
+                m["reasoning_content"] = serde_json::Value::String(reasoning.clone());
+            }
+
             messages.push(m);
         }
 
@@ -184,6 +188,14 @@ impl Transport for ChatCompletionsTransport {
             body["stream"] = serde_json::Value::Bool(true);
         }
 
+        if let Some(ref thinking) = request.thinking {
+            body["thinking"] = thinking.clone();
+        }
+
+        if let Some(ref effort) = request.reasoning_effort {
+            body["reasoning_effort"] = serde_json::Value::String(effort.clone());
+        }
+
         Ok(body)
     }
 
@@ -195,6 +207,12 @@ impl Transport for ChatCompletionsTransport {
             .as_array()
             .and_then(|choices| choices.first())
             .and_then(|choice| choice["message"]["content"].as_str())
+            .map(|s| s.to_string());
+
+        let reasoning_content = response["choices"]
+            .as_array()
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice["message"]["reasoning_content"].as_str())
             .map(|s| s.to_string());
 
         let tool_calls = response["choices"]
@@ -238,6 +256,7 @@ impl Transport for ChatCompletionsTransport {
 
         Ok(ChatResponse {
             content,
+            reasoning_content,
             tool_calls,
             usage,
             finish_reason,
@@ -289,6 +308,7 @@ mod tests {
                 Message {
                     role: Role::System,
                     content: "You are helpful.".into(),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -296,6 +316,7 @@ mod tests {
                 Message {
                     role: Role::User,
                     content: "Hello!".into(),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -306,6 +327,8 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: crate::catalog::ResolvedModel {
                 canonical_id: "gpt-4o".into(),
                 provider: "openai".into(),
@@ -339,6 +362,7 @@ mod tests {
             messages: vec![Message {
                 role: Role::User,
                 content: "What's the weather?".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -352,6 +376,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: crate::catalog::ResolvedModel {
                 canonical_id: "gpt-4o".into(),
                 provider: "openai".into(),
@@ -378,6 +404,7 @@ mod tests {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -387,6 +414,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: true,
+            thinking: None,
+            reasoning_effort: None,
             resolved: crate::catalog::ResolvedModel {
                 canonical_id: "gpt-4o".into(),
                 provider: "openai".into(),
@@ -483,6 +512,7 @@ mod tests {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello!".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -492,6 +522,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: crate::catalog::ResolvedModel {
                 canonical_id: "gpt-4o".into(),
                 provider: "openai".into(),

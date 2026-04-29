@@ -9,6 +9,7 @@ async fn main() {
     let msg = artemis_core::Message {
         role: artemis_core::Role::User,
         content: "Say hello in one sentence.".into(),
+        reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
         name: None,

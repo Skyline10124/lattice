@@ -276,6 +276,7 @@ mod tests {
                 crate::types::Message {
                     role: crate::types::Role::System,
                     content: "You are helpful.".into(),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -283,6 +284,7 @@ mod tests {
                 crate::types::Message {
                     role: crate::types::Role::User,
                     content: "Hello!".into(),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -293,6 +295,8 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: Some(200),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "claude-3-opus".into(),
                 provider: "anthropic".into(),

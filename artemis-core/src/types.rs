@@ -42,6 +42,8 @@ impl ToolCall {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
@@ -58,10 +60,17 @@ impl Message {
         Message {
             role,
             content,
+            reasoning_content: None,
             tool_calls,
             tool_call_id,
             name,
         }
+    }
+
+    /// Attach reasoning/thinking content to this message.
+    pub fn with_reasoning(mut self, reasoning: String) -> Self {
+        self.reasoning_content = Some(reasoning);
+        self
     }
 }
 
@@ -129,6 +138,7 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: "Hello, world!".into(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -143,6 +153,7 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: String::new(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".into(),
                 function: FunctionCall {
@@ -163,6 +174,7 @@ mod tests {
         let msg = Message {
             role: Role::Tool,
             content: r#"{"result": "sunny"}"#.into(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_1".into()),
             name: Some("get_weather".into()),

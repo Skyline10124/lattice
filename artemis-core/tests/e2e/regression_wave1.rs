@@ -231,6 +231,7 @@ fn regress_deprecated_consolidation_types_compile() {
     let _msg = Message {
         role: Role::User,
         content: "test".into(),
+        reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
         name: None,
@@ -267,6 +268,7 @@ fn regress_deprecated_consolidation_provider_compile() {
     assert_eq!(request.model, "test");
     let _response = ChatResponse {
         content: None,
+        reasoning_content: None,
         tool_calls: None,
         usage: None,
         finish_reason: "stop".into(),

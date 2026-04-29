@@ -48,6 +48,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::System,
             content: "You are a helpful assistant.".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -55,6 +56,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::User,
             content: "What's the weather in Tokyo?".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -62,6 +64,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::Assistant,
             content: "Let me check the weather.".to_string(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_abc".to_string(),
                 function: FunctionCall {
@@ -75,6 +78,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::Tool,
             content: r#"{"temp": 22, "condition": "sunny"}"#.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
             name: Some("get_weather".to_string()),
@@ -251,6 +255,7 @@ mod openai_chat_completions {
             vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -269,6 +274,7 @@ mod openai_chat_completions {
         let messages = vec![Message {
             role: Role::Assistant,
             content: String::new(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_stream".to_string(),
                 function: FunctionCall {
@@ -294,6 +300,7 @@ mod openai_chat_completions {
             vec![Message {
                 role: Role::User,
                 content: "Done test".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -1118,6 +1125,7 @@ mod cross_transport {
         let msg = Message {
             role: Role::User,
             content: "What is 2+2?".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1228,6 +1236,8 @@ mod dispatcher {
             temperature: Some(0.7),
             max_tokens: Some(200),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "claude-3-opus".into(),
                 provider: "anthropic".into(),
@@ -1279,6 +1289,8 @@ mod dispatcher {
             temperature: Some(0.5),
             max_tokens: Some(150),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "gemini-2.5-flash".into(),
                 provider: "gemini".into(),
@@ -1334,6 +1346,8 @@ mod dispatcher {
             temperature: Some(0.3),
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "openai",
                 ApiProtocol::OpenAiChat,

@@ -227,6 +227,7 @@ impl GeminiTransport {
             _ => {
                 return Ok(ChatResponse {
                     content: None,
+                    reasoning_content: None,
                     tool_calls: None,
                     usage: None,
                     finish_reason: "stop".to_string(),
@@ -287,6 +288,7 @@ impl GeminiTransport {
             } else {
                 Some(text_pieces.join(""))
             },
+            reasoning_content: None,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -458,6 +460,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "gemini-2.5-flash".into(),
                 provider: "gemini".into(),
@@ -479,6 +483,7 @@ mod tests {
             Message {
                 role: Role::System,
                 content: "You are a helpful assistant.".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -486,6 +491,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: "Hello!".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -513,6 +519,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "What is Rust?".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -537,6 +544,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: String::new(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_abc".to_string(),
                 function: FunctionCall {
@@ -571,6 +579,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Tool,
             content: r#"{"temperature": 22, "condition": "sunny"}"#.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
             name: Some("get_weather".to_string()),
@@ -889,6 +898,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Tool,
             content: "The weather is sunny".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_xyz".to_string()),
             name: Some("get_weather".to_string()),
@@ -932,6 +942,7 @@ mod tests {
             Message {
                 role: Role::System,
                 content: "System part 1".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -939,6 +950,7 @@ mod tests {
             Message {
                 role: Role::System,
                 content: "System part 2".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -961,6 +973,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: "Hello".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,

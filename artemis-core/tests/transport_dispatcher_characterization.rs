@@ -67,6 +67,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::System,
             content: "You are a helpful assistant.".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -74,6 +75,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::User,
             content: "What's the weather in Tokyo?".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -81,6 +83,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::Assistant,
             content: "Let me check the weather.".to_string(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "call_abc".to_string(),
                 function: FunctionCall {
@@ -94,6 +97,7 @@ fn sample_messages() -> Vec<Message> {
         Message {
             role: Role::Tool,
             content: r#"{"temp": 22, "condition": "sunny"}"#.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("call_abc".to_string()),
             name: Some("get_weather".to_string()),
@@ -415,6 +419,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: Some(200),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -443,6 +449,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -452,6 +459,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: None, // ← None, should default to 4096
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -474,6 +483,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -483,6 +493,8 @@ mod anthropic_dispatch_adapter {
             temperature: Some(0.7),
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -497,6 +509,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -506,6 +519,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -530,6 +545,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -539,6 +555,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: Some(100),
             stream: true,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -553,6 +571,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -562,6 +581,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -586,6 +607,7 @@ mod anthropic_dispatch_adapter {
             messages: vec![Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -595,6 +617,8 @@ mod anthropic_dispatch_adapter {
             temperature: None,
             max_tokens: Some(100),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,
@@ -693,6 +717,8 @@ mod anthropic_dispatch_adapter {
             temperature: Some(0.5),
             max_tokens: Some(200),
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: make_resolved(
                 "anthropic",
                 ApiProtocol::AnthropicMessages,

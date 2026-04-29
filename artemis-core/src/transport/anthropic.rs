@@ -138,6 +138,7 @@ impl Transport for AnthropicTransport {
             } else {
                 Some(text_parts.join(""))
             },
+            reasoning_content: None,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -344,6 +345,7 @@ mod tests {
         Message {
             role,
             content: content.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -383,6 +385,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: "Let me check.".to_string(),
+            reasoning_content: None,
             tool_calls: Some(vec![ToolCall {
                 id: "toolu_123".to_string(),
                 function: FunctionCall {
@@ -412,6 +415,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Tool,
             content: r##"{"temp": 22}"##.to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some("toolu_123".to_string()),
             name: Some("get_weather".to_string()),
@@ -595,6 +599,7 @@ mod tests {
             Message {
                 role: Role::Tool,
                 content: "sunny".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some("toolu_1".to_string()),
                 name: None,
@@ -602,6 +607,7 @@ mod tests {
             Message {
                 role: Role::Tool,
                 content: "rainy".to_string(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: Some("toolu_2".to_string()),
                 name: None,
@@ -621,6 +627,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::Assistant,
             content: String::new(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,

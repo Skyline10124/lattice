@@ -86,6 +86,7 @@ mod tests {
             messages: vec![crate::types::Message {
                 role: crate::types::Role::User,
                 content: "Hello".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -95,6 +96,8 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: None,
             stream: false,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "llama3".into(),
                 provider: "ollama".into(),
@@ -140,6 +143,7 @@ mod tests {
             messages: vec![crate::types::Message {
                 role: crate::types::Role::User,
                 content: "What's the weather?".into(),
+                reasoning_content: None,
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -153,6 +157,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stream: true,
+            thinking: None,
+            reasoning_effort: None,
             resolved: ResolvedModel {
                 canonical_id: "llama-3".into(),
                 provider: "groq".into(),

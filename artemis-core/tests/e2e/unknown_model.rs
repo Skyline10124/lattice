@@ -7,6 +7,7 @@ fn user_message(content: &str) -> Message {
     Message {
         role: Role::User,
         content: content.to_string(),
+        reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
         name: None,

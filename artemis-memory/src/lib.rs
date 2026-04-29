@@ -62,6 +62,7 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: "hello".to_string(),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -87,6 +88,7 @@ mod tests {
                 &Message {
                     role: Role::User,
                     content: format!("msg{}", i),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,

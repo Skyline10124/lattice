@@ -20,6 +20,7 @@ async fn main() {
     let messages = vec![Message {
         role: Role::User,
         content: "What's the weather in Beijing? Use the get_weather tool.".into(),
+        reasoning_content: None,
         tool_calls: None, tool_call_id: None, name: None,
     }];
 

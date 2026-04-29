@@ -79,6 +79,7 @@ fn make_conversation_messages(n: usize) -> Vec<Message> {
                          references where possible.",
                         i
                     ),
+                    reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -92,6 +93,7 @@ fn make_conversation_messages(n: usize) -> Vec<Message> {
                          research with numerous breakthroughs happening each year.",
                         i
                     ),
+                    reasoning_content: None,
                     tool_calls: Some(vec![ToolCall {
                         id: format!("call_{}", i),
                         function: FunctionCall {
