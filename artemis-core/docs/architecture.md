@@ -7,10 +7,10 @@ Artemis Core is a model-centric LLM engine. The user specifies a model, and the 
 ## Component Diagram
 
 ```
-User Code (Python)
+User Code (Python / Rust)
      │
      ▼
-ArtemisEngine (PyO3)
+resolve(model_name) → chat(resolved, messages)
      │
      ▼
 ModelRouter ─────────── Catalog (98+ models, 37 aliases)
@@ -32,12 +32,12 @@ Transport  Transport Transport  (Ollama/Groq/
 HTTP (reqwest)
      │
      ▼
-SseParser → StreamEvent → Event → Python
+SseParser → StreamEvent
 ```
 
 ## Model Resolution Data Flow
 
-When a user calls `set_model("sonnet")` or `run_conversation(..., model="sonnet")`:
+When a user calls `resolve("sonnet")`:
 
 1. **Input**: `model_name = "sonnet"` (alias or canonical ID)
 
@@ -60,21 +60,15 @@ When a user calls `set_model("sonnet")` or `run_conversation(..., model="sonnet"
 
 | Module | Purpose |
 |--------|---------|
-| `catalog` | Model catalog, aliases, provider defaults, types |
-| `router` | ModelRouter: normalize, resolve alias, select provider, resolve credentials |
-| `engine` | ArtemisEngine PyClass, Event, ToolCallInfo, PyResolvedModel |
-| `provider` | Provider trait, ChatRequest/ChatResponse, ModelRegistry |
-| `providers` | Concrete provider implementations (OpenAI, Anthropic, etc.) |
-| `transport` | Transport trait, ChatCompletions, Anthropic, Gemini, OpenAICompat, Dispatcher |
-| `streaming` | SSE parsers (OpenAI, Anthropic), SseStream, EventStream, StreamEvent |
-| `streaming_bridge` | StreamIterator (PyO3 PyIterator over LoopEvent) |
-| `agent_loop` | AgentLoop: run with fallback, interrupt, budget tracking |
-| `tool_boundary` | ToolCallRequest/ToolCallResult: Rust yields, Python executes |
-| `retry` | ErrorClassifier, RetryPolicy with jittered exponential backoff |
-| `tokens` | TokenEstimator: rough count, context window check |
-| `errors` | ArtemisError enum, Python exception hierarchy, ErrorClassifier |
-| `types` | Role, Message, ToolDefinition, ToolCall, FunctionCall, TransportType |
-| `mock` | MockProvider for testing |
+| `catalog` | Model catalog, aliases, provider defaults, `ApiProtocol`, `ResolvedModel` types |
+| `router` | `ModelRouter`: normalize model IDs, resolve aliases, select provider by priority, resolve credentials from env vars |
+| `provider` | `ChatRequest`/`ChatResponse` types, shared HTTP client factory |
+| `transport` | `Transport` trait, `TransportDispatcher`, ChatCompletions, Anthropic, Gemini, OpenAICompat transports |
+| `streaming` | SSE parsers (OpenAI, Anthropic), `SseStream`, `EventStream`, `StreamEvent` enum |
+| `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
+| `tokens` | `TokenEstimator`: tiktoken for OpenAI models, rough char/4 estimation for others |
+| `errors` | `ArtemisError` Rust enum + error classification |
+| `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
 ## Key Types and Relationships
 
@@ -139,35 +133,28 @@ SseStream<Parser>
 StreamEvent (Token / ToolCallStart / ToolCallDelta / ToolCallEnd / Done / Error)
      │
      ▼
-EventStream (implements futures::Stream)
+EventStream (implements futures::Stream<Item = StreamEvent>)
      │
      ▼
-StreamIterator (PyO3 PyIterator) → Python for-loop
+Consumer code (e.g., chat_complete() accumulator, or Python via PyO3)
 ```
 
 Both parsers are stateful: they track tool call IDs across chunks because OpenAI omits the `id` field from delta chunks after the first one, and Anthropic uses index-based tracking.
 
 ## Tool Execution Boundary
 
-Rust and Python split tool execution across a process boundary:
+Tool execution is a higher-level concern handled by consumer code (e.g., the `artemis-python` crate or an agent loop). The core library provides the building blocks:
 
 ```
-Rust: ArtemisEngine.run_conversation()
-  → sends request to provider
-  → receives response with tool_calls
-  → yields Event(kind="tool_call_required", tool_calls=[...])
-  → PAUSES
-
-Python: receives Event, executes tools locally
-  → calls e.submit_tool_results([(call_id, result), ...])
-
-Rust: resumes conversation
-  → appends tool results to message history
-  → sends follow-up request
-  → yields final events
+Consumer code:
+  → calls chat(&resolved, &messages, &tools)
+  → receives StreamEvent::ToolCallStart/Delta/End
+  → executes tool locally
+  → builds new Message with tool results
+  → calls chat() again to continue the conversation
 ```
 
-This design keeps Python in control of tool execution (file access, network calls, sandboxed code) while Rust handles API communication, streaming, and retries.
+This design keeps the consumer in control of tool execution (file access, network calls, sandboxed code) while artemis-core handles API communication, streaming, and retries.
 
 ## Error Classification and Retry
 
@@ -190,26 +177,6 @@ ErrorClassifier.is_retryable(error)
      ▼
 RetryPolicy (defaults: max_retries=3, base_delay=1s, max_delay=60s)
   → jittered_backoff(attempt) = min(base * 2^attempt + jitter, max_delay)
-     │
-     ▼
-AgentLoop.run_with_fallback()
-  → tries providers in priority order
-  → sleeps with jittered backoff between attempts
-  → returns first successful result or final error
 ```
 
-Python exception hierarchy mirrors the Rust enum:
-
-```
-Exception
-  └─ ArtemisError
-       ├─ RateLimitError (.retry_after, .provider)
-       ├─ AuthenticationError (.provider)
-       ├─ ModelNotFoundError (.model)
-       ├─ ProviderUnavailableError (.provider, .reason)
-       ├─ ContextWindowExceededError (.tokens, .limit)
-       ├─ ToolExecutionError (.tool, .message)
-       ├─ StreamingError (.message)
-       ├─ ConfigError (.message)
-       └─ NetworkError (.message, .status)
-```
+Retryable errors: `RateLimit` and `ProviderUnavailable`. Provider-level fallback is handled by consumer code (e.g., try provider A, if RateLimit → try provider B).
