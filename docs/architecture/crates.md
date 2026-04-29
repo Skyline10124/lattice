@@ -15,7 +15,7 @@
 | `catalog/` | data.json、模型条目、provider 默认值、ApiProtocol、ResolvedModel |
 | `router.rs` | ModelRouter：归一化、别名、provider 选择、凭证解析 |
 | `provider.rs` | ChatRequest/ChatResponse、共享 HTTP client |
-| `transport/` | Transport trait、TransportDispatcher、ChatCompletions/Anthropic/Gemini |
+| `transport/` | Transport trait、TransportDispatcher、ChatCompletions/Anthropic/Gemini。`NormalizedResponse` 历史上定义于此，已作为 dead code 移除 |
 | `streaming.rs` | SseParser trait、OpenAiSseParser、AnthropicSseParser、StreamEvent |
 | `retry.rs` | RetryPolicy（指数退避 + jitter） |
 | `errors.rs` | ArtemisError 枚举、ErrorClassifier |
