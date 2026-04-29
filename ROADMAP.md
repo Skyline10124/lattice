@@ -13,7 +13,7 @@ Fix remaining issues from the second code review:
 - [x] Fix `extract_retry_after` for string-valued numbers
 - [x] Reduce provider boilerplate with macro (~1300 lines -> ~75 lines)
 
-**Result**: 34/44 code review issues fixed (77% fix rate). All P0 and high-priority items cleared. 409+ tests pass, 0 fail.
+**Result**: 34/44 code review issues fixed (77% fix rate). All P0 and high-priority items cleared. Tests pass.
 
 ## Phase 2: Kernel separation (complete)
 
@@ -38,21 +38,35 @@ artemis-python      # PyO3 bindings (resolver only, for now)
 
 **Result**: Clean separation. artemis-core is truly minimal -- just model routing + inference.
 
-## Phase 3: Typed plugin system (next)
+## Phase 3: Dogfooding + Agent runtime (complete)
 
-- [ ] Plugin trait: `Input` / `Output` types, `to_prompt()`, `from_output()`, `should_handoff()`
+- [x] Agent runtime: `Agent::run()` with auto tool loop
+- [x] 17 built-in tools: read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call
+- [x] Context trimming: `AgentState::trim_messages`
+- [x] Sandbox safety: `SandboxConfig` (paths, commands, domains)
+- [x] Async Memory trait + `SqliteMemory` (FTS5) with auto-save in `Agent::run()`
+- [x] `EntryKind`: SessionLog, Fact, Decision, ProjectContext
+- [x] `AgentDispatcher` trait + `agent_call:name` tool
+- [x] `artemis-harness`: AgentProfile (TOML), AgentRegistry, AgentRunner, Pipeline, Python handoff
+- [x] `artemis-plugin`: Plugin trait (Input/Output), Behavior trait (Strict/Yolo), PluginRunner, PluginHooks, CodeReviewPlugin
+- [x] `artemis-cli`: run/print/resolve/models subcommands
+- [x] `artemis-tui`: Ratatui TUI with Agent streaming
+- [x] Credential error on missing keys (P2-1)
+
+**Result**: 9 crates, 17 tools, ~440+ tests. Dogfooding validated.
+
+## Phase 4: Typed plugin system (in progress)
+
+- [x] Plugin trait: `Input` / `Output` types
+- [x] `Behavior` trait: Strict / Yolo
+- [x] `PluginRunner`, `PluginHooks`, `PluginConfig`
+- [x] `CodeReviewPlugin` (built-in)
+- [ ] `to_prompt()` / `from_output()` trait formalization
 - [ ] Output validation + retry framework (parse error -> retry N times -> fallback)
 - [ ] Python glue layer: `importlib` loading, plugin registry, composition
-- [ ] Built-in plugins: `code-review`, `refactor`, `test-gen`
 - [ ] Plugin distribution via `pip` (`pip install artemis-code-review-plugin`)
-
-**Target**: dogfooding -- use artemis plugins to develop artemis itself.
-
-## Phase 4: Agent communication
-
 - [ ] Handoff protocol: structured `{ target, payload, context_summary }`
 - [ ] Agent routing: code-controlled dispatch based on output type + confidence
-- [ ] YOLO mode: LLM-suggested handoff (with type boundaries enforced)
 - [ ] Multi-agent composition: overlay merge of plugin sets
 
 **Target**: compose vertical agents from plugins + route between them.
@@ -69,21 +83,21 @@ artemis-python      # PyO3 bindings (resolver only, for now)
 
 ## Current focus
 
-The project is in **alpha / dogfooding** stage. Phase 1 and 2 are complete. Current priorities:
+The project is in **alpha / dogfooding** stage. Phases 1-3 are complete. Current priorities:
 
-1. **Python API expansion**: expose `Message`, `Role`, `chat_complete()` in `artemis-python`
-2. **Runtime correctness**: finish reason mapping, streaming timeout fix
-3. **Agent productionization**: memory/token_pool integration
+1. **Phase 4 completion**: `to_prompt()`/`from_output()` formalization, Python glue layer, pip distribution
+2. **Handoff protocol**: agent-to-agent communication with structured payloads
+3. **Multi-agent composition**: overlay merge of plugin sets, Pipeline chaining
 
-After Python API parity and runtime hardening, move to Phase 3 (typed plugin system).
+After Phase 4, move to Phase 5 (Nix paradigm).
 
 ## Timeline
 
 ```
 Phase 1  ██████████  (complete)
 Phase 2  ██████████  (complete)
-Phase 3  ░░░░░░░░░░  (next)
-Phase 4  ░░░░░░░░░░
+Phase 3  ██████████  (complete)
+Phase 4  ██████░░░░  (in progress)
 Phase 5  ░░░░░░░░░░
 ```
 

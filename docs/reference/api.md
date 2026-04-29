@@ -51,11 +51,32 @@ impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self;
     pub fn with_tools(self, tools: Vec<ToolDefinition>) -> Self;
     pub fn with_retry(self, policy: RetryPolicy) -> Self;
-    pub fn with_memory(self, memory: Box<dyn Memory>) -> Self;  //（setter available, behavior not yet wired — stores reference for future use）
-    pub fn with_token_pool(self, pool: Box<dyn TokenPool>) -> Self;  //（setter available, behavior not yet wired — stores reference for future use）
+    pub fn with_memory(self, memory: Box<dyn Memory>) -> Self;
+    pub fn with_token_pool(self, pool: Box<dyn TokenPool>) -> Self;
+    pub fn with_sandbox(self, config: SandboxConfig) -> Self;
 
+    /// 自动 tool loop：反复调用 LLM，自动执行工具，直到 LLM 不再请求工具或达到上限
+    pub async fn run(&mut self, content: &str) -> Result<RunResult, ArtemisError>;
+
+    /// 单次发送消息（手动 tool loop）
     pub fn send(&mut self, content: &str) -> Vec<LoopEvent>;
     pub fn submit_tools(&mut self, results: Vec<(String, String)>, max_size: Option<usize>) -> Vec<LoopEvent>;
+}
+
+/// Tool 执行器 trait
+pub trait ToolExecutor {
+    fn execute(&self, name: &str, args: &str) -> Result<String, ToolError>;
+}
+
+/// Agent 间派发 trait（agent_call 工具）
+pub trait AgentDispatcher {
+    fn dispatch(&self, name: &str, prompt: &str) -> Result<String, AgentError>;
+}
+
+pub struct SandboxConfig {
+    pub allowed_paths: Vec<String>,
+    pub allowed_commands: Vec<String>,
+    pub allowed_domains: Vec<String>,
 }
 
 pub enum LoopEvent {
@@ -65,6 +86,49 @@ pub enum LoopEvent {
     Done { usage: Option<TokenUsage> },
     Error { message: String },
 }
+```
+
+### 17 个内置工具
+
+read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call
+
+### Context Trimming
+
+`AgentState::trim_messages` 在 token 超限时自动裁剪最早的消息，保留 system prompt 和最近的消息。
+
+## artemis-harness
+
+```rust
+/// 从 TOML 文件加载 Agent 配置
+pub struct AgentProfile {
+    pub name: String,
+    pub model: String,
+    pub system_prompt: String,
+    pub tools: Vec<String>,
+}
+
+pub struct AgentRegistry {
+    pub fn load(path: &str) -> Result<Self>;
+    pub fn get(&self, name: &str) -> Option<&AgentProfile>;
+}
+
+pub struct AgentRunner {
+    /// 创建 AgentRunner（自动加载 SQLite 记忆并回放历史）
+    pub fn new(profile: &AgentProfile) -> Result<Self>;
+    pub async fn run(&mut self, input: &str) -> Result<String>;
+}
+
+/// 顺序链式编排
+pub struct Pipeline {
+    pub fn new(stages: Vec<PipelineStage>) -> Self;
+    /// skip: 条件跳过 stage
+    /// fallback: stage 失败时回退到指定 stage
+    pub async fn run(&mut self, input: &str) -> Result<String>;
+}
+
+/// agent_call:name 工具的 harness 层派发器
+pub struct HarnessAgentDispatcher;
+impl AgentDispatcher for HarnessAgentDispatcher { ... }
 ```
 
 ## artemis-python
