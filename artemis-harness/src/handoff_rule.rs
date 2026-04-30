@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 // ---------------------------------------------------------------------------
 // HandoffRule — TOML-based agent routing rules
@@ -109,8 +110,9 @@ fn parse_path(path: &str) -> Vec<PathSegment> {
                     segments.push(PathSegment::Any);
                 } else if let Ok(i) = current.parse::<usize>() {
                     segments.push(PathSegment::Index(i));
+                } else {
+                    warn!("Malformed path segment [{current}] in handoff condition — skipping");
                 }
-                // else: malformed, skip
                 current.clear();
             }
             _ => current.push(ch),
@@ -124,11 +126,52 @@ fn parse_path(path: &str) -> Vec<PathSegment> {
 
 /// Evaluate a single condition against `output`.
 fn eval_condition(cond: &HandoffCondition, output: &serde_json::Value) -> bool {
+    // If the path contains [any], split into prefix (→ array) + suffix (→ per-element)
+    if let Some((prefix, suffix)) = split_at_any(&cond.field) {
+        let arr = match resolve_field(output, &prefix) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => return false,
+        };
+        return arr.iter().any(|elem| {
+            match resolve_field(elem, &suffix) {
+                Some(v) => eval_operator(v, cond),
+                None => false,
+            }
+        });
+    }
+
     let field_val = match resolve_field(output, &cond.field) {
         Some(v) => v,
-        None => return false, // field doesn't exist → no match
+        None => return false,
     };
+    eval_operator(field_val, cond)
+}
 
+/// Split `issues[any].severity` into `("issues", "severity")`.
+fn split_at_any(path: &str) -> Option<(String, String)> {
+    let segments = parse_path(path);
+    let any_pos = segments.iter().position(|s| matches!(s, PathSegment::Any))?;
+    let prefix = rebuild_path(&segments[..any_pos]);
+    let suffix = rebuild_path(&segments[any_pos + 1..]);
+    Some((prefix, suffix))
+}
+
+fn rebuild_path(segments: &[PathSegment]) -> String {
+    segments.iter().fold(String::new(), |mut s, seg| {
+        match seg {
+            PathSegment::Key(k) => {
+                if !s.is_empty() { s.push('.'); }
+                s.push_str(k);
+            }
+            PathSegment::Index(i) => s.push_str(&format!("[{i}]")),
+            PathSegment::Any => s.push_str("[any]"),
+        }
+        s
+    })
+}
+
+/// Apply the condition operator to a single value (no array iteration).
+fn eval_operator(field_val: &serde_json::Value, cond: &HandoffCondition) -> bool {
     match cond.op.as_str() {
         "==" => values_equal(field_val, &cond.value),
         "!=" => !values_equal(field_val, &cond.value),
@@ -523,15 +566,33 @@ target = "next"
     // --- [any] array matching ---
 
     #[test]
-    fn test_contains_on_array_serialization() {
+    fn test_any_array_severity_match() {
         let output = json_output();
-        // "contains" on a string field works — the array is not a string,
-        // so this returns false. Array [any] iteration is a future extension.
         let rule: HandoffRule = toml::from_str(r#"
-condition = { field = "issues", op = "contains", value = "critical" }
+condition = { field = "issues[any].severity", op = "==", value = "critical" }
+target = "next"
+"#).unwrap();
+        assert!(rule.eval(&output));
+    }
+
+    #[test]
+    fn test_any_array_no_match() {
+        let output = json_output();
+        let rule: HandoffRule = toml::from_str(r#"
+condition = { field = "issues[any].severity", op = "==", value = "blocker" }
 target = "next"
 "#).unwrap();
         assert!(!rule.eval(&output));
+    }
+
+    #[test]
+    fn test_any_array_with_contains() {
+        let output = json_output();
+        let rule: HandoffRule = toml::from_str(r#"
+condition = { field = "issues[any].file", op = "contains", value = "src/b" }
+target = "next"
+"#).unwrap();
+        assert!(rule.eval(&output));
     }
 
     #[test]

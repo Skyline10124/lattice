@@ -4,7 +4,7 @@ use artemis_core::router::ModelRouter;
 use colored::Colorize;
 use std::io::Write;
 
-pub fn run(
+pub async fn run(
     prompt: String,
     model: String,
     provider_override: Option<&str>,
@@ -35,7 +35,7 @@ pub fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.run(&prompt, 10);
+    let events = agent.run_async(&prompt, 10).await;
     display_events(&agent, events, verbose, json)?;
 
     Ok(())

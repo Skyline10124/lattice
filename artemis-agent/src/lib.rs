@@ -222,6 +222,47 @@ impl Agent {
         all_events
     }
 
+    /// Async variant of run — for use within a tokio runtime.
+    pub async fn run_async(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
+        self.state.push_user_message(content);
+        let mut all_events = Vec::new();
+
+        for _ in 0..max_turns {
+            let context_len = if self.state.resolved.context_length > 0 {
+                self.state.resolved.context_length
+            } else {
+                131072
+            };
+            self.state.trim_messages(context_len, 15);
+
+            let events = self.run_chat_async().await;
+
+            let mut tool_calls = Vec::new();
+            for event in &events {
+                if let LoopEvent::ToolCallRequired { calls } = event {
+                    tool_calls.extend(calls.clone());
+                }
+            }
+
+            all_events.extend(events);
+
+            if tool_calls.is_empty() {
+                break;
+            }
+            if self.tool_executor.is_none() {
+                break;
+            }
+            if let Some(ref executor) = self.tool_executor {
+                for call in &tool_calls {
+                    let result = executor.execute(call);
+                    self.state.push_tool_result(&call.id, &result, None);
+                }
+            }
+        }
+
+        all_events
+    }
+
     /// Internal: call artemis_core::chat() with the current conversation state,
     /// consume the stream, update state, and return LoopEvents.
     fn run_chat(&mut self) -> Vec<LoopEvent> {
