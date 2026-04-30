@@ -4,16 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-**Artemis** is a model-centric LLM engine split into five Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
+**Artemis** is a model-centric LLM engine split into nine Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
 
 **Crate architecture** (one-way deps):
 
 ```
-artemis-python       PyO3 bindings (pip package: artemis-core)
-  → artemis-agent      AgentLoop, conversation state, tool boundary
-    → artemis-memory     Memory trait + InMemoryMemory
-    → artemis-token-pool TokenPool trait + UnlimitedPool
-      → artemis-core       resolve() + chat() — model routing + inference
+artemis-tui           Terminal UI (ratatui)
+  → artemis-cli         CLI: resolve, run, print, validate, debug, models, doctor
+    → artemis-harness     Pipeline runner, TOML profiles, hot reload, WebSocket events
+      → artemis-agent       AgentLoop, conversation state, tool boundary
+        → artemis-memory     Memory trait + InMemoryMemory
+        → artemis-token-pool TokenPool trait + UnlimitedPool
+          → artemis-core       resolve() + chat() — model routing + inference
+      → artemis-plugin       Plugin trait (placeholder)
+  → artemis-python       PyO3 bindings (pip package: artemis-core)
 ```
 
 - **Rust workspace**: Cargo workspace at repo root, all crates under `artemis-*/`
@@ -60,10 +64,11 @@ cargo fmt --all
 ## Architecture
 
 ```
-User Code (Python / Rust)
+User Code (Python / Rust / CLI)
   → artemis_core::resolve("sonnet")      → ResolvedModel
   → artemis_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
   → artemis_agent::Agent::new(resolved)  → send(), submit_tools()
+  → artemis_harness::Pipeline::new()     → run() → multi-agent TOML pipeline
 ```
 
 ### Crate map
@@ -71,9 +76,13 @@ User Code (Python / Rust)
 | Crate | Purpose |
 |-------|---------|
 | `artemis-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
-| `artemis-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback |
+| `artemis-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API |
 | `artemis-memory` | `Memory` trait (`save`/`history`/`search`) + `InMemoryMemory` default impl |
 | `artemis-token-pool` | `TokenPool` trait (`acquire`/`release`/`remaining`) + `UnlimitedPool` default impl |
+| `artemis-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine, hot reload, JSON schema validation, WebSocket events |
+| `artemis-plugin` | Plugin trait (placeholder — not yet functional) |
+| `artemis-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
+| `artemis-tui` | Terminal UI (ratatui-based — early stage) |
 | `artemis-python` | PyO3 bindings: `ArtemisEngine`, exceptions, `StreamIterator` (pip: `artemis-core`) |
 
 ### artemis-core module map
@@ -85,11 +94,25 @@ User Code (Python / Rust)
 | `provider` | `Provider` trait, `ChatRequest`/`ChatResponse`, shared HTTP client |
 | `providers/` | Concrete providers: `openai`, `anthropic`, `deepseek`, `gemini`, `groq`, `mistral`, `ollama`, `xai` |
 | `transport/` | Unified `Transport` trait, `TransportDispatcher`, protocol adapters |
-| `streaming` | SSE parsers (OpenAI, Anthropic), `SseStream`, `EventStream`, `StreamEvent` |
+| `streaming` | SSE parsers (OpenAI, Anthropic) via `sse_from_bytes_stream`, `StreamEvent` |
 | `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI models, char/4 estimation for others |
 | `errors` | `ArtemisError` enum (pure Rust, no PyO3), `ErrorClassifier` |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
+
+### artemis-harness module map
+
+| Module | Purpose |
+|--------|---------|
+| `pipeline` | `Pipeline`: multi-agent chain execution, handoff rule evaluation, dry_run validation |
+| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry |
+| `profile` | `AgentProfile` + `HandoffConfig`: TOML-deserialized agent configuration |
+| `handoff_rule` | `HandoffRule`, `HandoffCondition`: TOML-based routing with AND/OR/default + `[any]` array matching |
+| `registry` | `AgentRegistry`: load agent profiles from directory, hot reload via `notify` |
+| `events` | `PipelineEvent` + `EventBus`: broadcast channel for pipeline status events |
+| `watcher` | File watcher for agent directory changes, triggers registry reload |
+| `ws` | WebSocket endpoint for live pipeline events (feature-gated behind `axum`) |
+| `dispatch` | Pipeline dispatch: resolve agent model, create AgentRunner |
 
 ### Model resolution flow
 
@@ -102,6 +125,29 @@ User Code (Python / Rust)
 ### Credential resolution
 
 Credentials come from **environment variables only**. Provider credential map in `router.rs`.
+
+### Handoff rule engine
+
+Agent profiles use TOML `[[handoff.rules]]` for deterministic routing:
+
+```toml
+[[handoff.rules]]
+condition = { field = "confidence", op = ">", value = "0.5" }
+target = "refactor"
+
+[[handoff.rules]]
+condition = { field = "issues[any].severity", op = "==", value = "critical" }
+target = "escalate"
+
+[[handoff.rules]]
+default = true
+```
+
+Evaluation: rules checked in order, first match wins. Supports `condition` (single), `all` (AND), `any` (OR), `default` (unconditional). `[any]` iterates array elements. Operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`.
+
+### JSON schema validation
+
+When `output_schema` is set in an agent profile, the runner validates LLM output against the schema (jsonschema crate). Invalid output triggers up to 2 retries with correction hints.
 
 ### Tool execution boundary
 
@@ -134,7 +180,7 @@ Retryable errors: `RateLimit` and `ProviderUnavailable`. Default policy: 3 retri
 
 ### Streaming pipeline
 
-Two SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`) implement `SseParser` trait. Both are **stateful**: track tool call IDs across chunks.
+Two SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`) implement `SseParser` trait. Both are **stateful**: track tool call IDs across chunks. Raw HTTP `bytes_stream` + manual line-based parsing (no `reqwest-eventsource` dependency).
 
 ### Catalog
 
