@@ -6,11 +6,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
 
     // Load agents from ~/.artemis/agents/
-    let agents_dir = std::env::var("ARTEMIS_AGENTS_DIR")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            format!("{}/.artemis/agents", home)
-        });
+    let agents_dir = std::env::var("ARTEMIS_AGENTS_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        format!("{}/.artemis/agents", home)
+    });
 
     println!("Loading agents from: {}", agents_dir);
     let registry = Arc::new(AgentRegistry::load_dir(std::path::Path::new(&agents_dir))?);
@@ -18,7 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = registry.list();
     println!("Loaded {} agent(s):", profiles.len());
     for p in &profiles {
-        println!("  - {} (model: {}, rules: {})",
+        println!(
+            "  - {} (model: {}, rules: {})",
             p.agent.name,
             p.agent.model,
             p.handoff.handoff_rules.len()

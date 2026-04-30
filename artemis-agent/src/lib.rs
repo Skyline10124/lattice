@@ -503,12 +503,7 @@ impl Agent {
         let mut attempt = 0u32;
 
         loop {
-            match artemis_core::chat(
-                &self.state.resolved,
-                &self.state.messages,
-                &self.tools,
-            )
-            .await
+            match artemis_core::chat(&self.state.resolved, &self.state.messages, &self.tools).await
             {
                 Ok(stream) => return Ok(stream),
                 Err(ref e) => {

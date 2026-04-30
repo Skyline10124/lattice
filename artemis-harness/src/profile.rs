@@ -209,7 +209,10 @@ mod tests {
         assert_eq!(profile.agent.name, "test-agent");
         assert_eq!(profile.handoff.fallback.as_deref(), Some("fallback-agent"));
         assert_eq!(profile.handoff.handoff_rules.len(), 2);
-        assert_eq!(profile.handoff.handoff_rules[0].target.as_deref(), Some("human-review"));
+        assert_eq!(
+            profile.handoff.handoff_rules[0].target.as_deref(),
+            Some("human-review")
+        );
         assert!(profile.handoff.handoff_rules[1].default);
     }
 }

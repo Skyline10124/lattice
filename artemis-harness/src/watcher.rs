@@ -32,16 +32,13 @@ impl Watcher {
             notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
                     // Only react to agent.toml file changes
-                    let is_agent_toml = event.paths.iter().any(|p| {
-                        p.file_name()
-                            .map(|n| n == "agent.toml")
-                            .unwrap_or(false)
-                    });
+                    let is_agent_toml = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().map(|n| n == "agent.toml").unwrap_or(false));
                     if is_agent_toml {
                         match event.kind {
-                            EventKind::Create(_)
-                            | EventKind::Modify(_)
-                            | EventKind::Remove(_) => {
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                                 let _ = tx.send(());
                             }
                             _ => {}

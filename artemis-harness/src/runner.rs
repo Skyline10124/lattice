@@ -54,28 +54,24 @@ impl AgentRunner {
         input: &str,
         max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let schema = self
-            .profile
-            .handoff
-            .output_schema
-            .as_ref()
-            .and_then(|s| {
-                match serde_json::from_str::<serde_json::Value>(s) {
-                    Ok(schema_json) => {
-                        match jsonschema::validator_for(&schema_json) {
-                            Ok(validator) => Some((schema_json, validator)),
-                            Err(e) => {
-                                warn!("Invalid output_schema for {}: {e}", self.profile.agent.name);
-                                None
-                            }
-                        }
-                    }
+        let schema = self.profile.handoff.output_schema.as_ref().and_then(|s| {
+            match serde_json::from_str::<serde_json::Value>(s) {
+                Ok(schema_json) => match jsonschema::validator_for(&schema_json) {
+                    Ok(validator) => Some((schema_json, validator)),
                     Err(e) => {
-                        warn!("output_schema is not valid JSON for {}: {e}", self.profile.agent.name);
+                        warn!("Invalid output_schema for {}: {e}", self.profile.agent.name);
                         None
                     }
+                },
+                Err(e) => {
+                    warn!(
+                        "output_schema is not valid JSON for {}: {e}",
+                        self.profile.agent.name
+                    );
+                    None
                 }
-            });
+            }
+        });
 
         let enriched_input = self.enrich_input(input);
         let mut output = self.run_once(&enriched_input, max_turns)?;
@@ -185,10 +181,8 @@ impl AgentRunner {
             trimmed.to_string()
         };
 
-        let output: serde_json::Value =
-            serde_json::from_str(&json_str).unwrap_or_else(|_| {
-                serde_json::json!({"content": content})
-            });
+        let output: serde_json::Value = serde_json::from_str(&json_str)
+            .unwrap_or_else(|_| serde_json::json!({"content": content}));
 
         Ok(output)
     }

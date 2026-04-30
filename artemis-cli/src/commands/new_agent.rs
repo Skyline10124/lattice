@@ -39,11 +39,7 @@ pub fn run(name: String) -> Result<()> {
     let dir = agents_dir().join(&name);
 
     if dir.exists() {
-        bail!(
-            "Agent '{}' already exists at '{}'",
-            name,
-            dir.display()
-        );
+        bail!("Agent '{}' already exists at '{}'", name, dir.display());
     }
 
     std::fs::create_dir_all(&dir)?;

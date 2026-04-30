@@ -44,7 +44,7 @@ impl Default for SandboxConfig {
                 ".git/credentials".into(),
             ],
             max_read_size: 10 * 1024 * 1024, // 10 MB
-            max_write_size: 1024 * 1024, // 1 MB
+            max_write_size: 1024 * 1024,     // 1 MB
             command_allowlist: vec![
                 "cargo test".into(),
                 "cargo clippy".into(),
