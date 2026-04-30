@@ -52,6 +52,7 @@ impl AgentRunner {
     pub fn run(
         &mut self,
         input: &str,
+        max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let schema = self
             .profile
@@ -77,7 +78,7 @@ impl AgentRunner {
             });
 
         let enriched_input = self.enrich_input(input);
-        let mut output = self.run_once(&enriched_input)?;
+        let mut output = self.run_once(&enriched_input, max_turns)?;
 
         // JSON Schema validation + retry loop
         if let Some((ref schema_json, ref validator)) = schema {
@@ -112,7 +113,7 @@ impl AgentRunner {
                     serde_json::to_string_pretty(schema_json).unwrap_or_default()
                 );
 
-                output = self.run_once(&correction_hint)?;
+                output = self.run_once(&correction_hint, max_turns)?;
             }
         }
 
@@ -158,8 +159,9 @@ impl AgentRunner {
     fn run_once(
         &mut self,
         input: &str,
+        max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let events = self.agent.run(input, 10);
+        let events = self.agent.run(input, max_turns);
         let mut content = String::new();
         for event in &events {
             if let artemis_agent::LoopEvent::Token { text } = event {

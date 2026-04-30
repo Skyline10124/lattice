@@ -135,7 +135,7 @@ impl Pipeline {
                 runner = runner.with_memory(Arc::clone(mem));
             }
 
-            match runner.run(&current_input) {
+            match runner.run(&current_input, agent_max_turns) {
                 Ok(output) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -336,7 +336,7 @@ impl Pipeline {
 
             match next {
                 Some(ref n) => {
-                    if !self.registry.get(n).is_some() {
+                    if self.registry.get(n).is_none() {
                         report.issues.push(format!(
                             "Default route from '{}' -> '{}' targets unregistered agent",
                             profile.agent.name, n

@@ -49,7 +49,7 @@ impl AgentDispatcher for HarnessAgentDispatcher {
         let mut runner = AgentRunner::from_profile(profile.clone(), agent);
         runner.shared_memory = self.memory.clone();
 
-        match runner.run(input) {
+        match runner.run(input, 10) {
             Ok(output) => output.to_string(),
             Err(e) => format!("Error running agent '{}': {}", agent_name, e),
         }
