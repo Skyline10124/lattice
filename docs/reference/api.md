@@ -1,6 +1,6 @@
 # API 参考
 
-## artemis-core
+## lattice-core
 
 ```rust
 /// 解析模型名到连接详情
@@ -42,7 +42,7 @@ pub enum StreamEvent {
 - `ChatResponse` — 完整响应（content, tool_calls, usage, reasoning_content）
 - `ToolDefinition` — 工具定义（name, description, parameters JSON Schema）
 
-## artemis-agent
+## lattice-agent
 
 > **Known issue**: `Agent.send_message()` currently hangs in synchronous contexts (`fn main` without `#[tokio::main]`). Being tracked.
 
@@ -98,7 +98,7 @@ read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, 
 
 `AgentState::trim_messages` 在 token 超限时自动裁剪最早的消息，保留 system prompt 和最近的消息。
 
-## artemis-harness
+## lattice-harness
 
 ```rust
 /// 从 TOML 文件加载 Agent 配置
@@ -133,7 +133,7 @@ pub struct HarnessAgentDispatcher;
 impl AgentDispatcher for HarnessAgentDispatcher { ... }
 ```
 
-## artemis-python
+## lattice-python
 
 ```python
 class ArtemisEngine:

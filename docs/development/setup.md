@@ -13,11 +13,11 @@
 cargo build
 
 # 单独 crate
-cargo build -p artemis-core
-cargo build -p artemis-agent
+cargo build -p lattice-core
+cargo build -p lattice-agent
 
 # Python bindings
-cd artemis-python && maturin develop
+cd lattice-python && maturin develop
 ```
 
 ## 运行
@@ -27,10 +27,10 @@ cd artemis-python && maturin develop
 cargo test
 
 # 特定 crate 测试
-cargo test -p artemis-core
+cargo test -p lattice-core
 
 # 带 Python 运行时（PyO3 异常往返测试）
-cargo test --features python-bindings -p artemis-python
+cargo test --features python-bindings -p lattice-python
 ```
 
 ## Lint

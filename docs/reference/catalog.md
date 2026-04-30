@@ -2,7 +2,7 @@
 
 ## 什么是 Catalog
 
-`artemis-core/src/catalog/data.json` — 编译时嵌入的模型黄页。98 个模型、37 别名、27 个 provider 默认配置（其中 23 个带 base_url）。
+`lattice-core/src/catalog/data.json` — 编译时嵌入的模型黄页。98 个模型、37 别名、27 个 provider 默认配置（其中 23 个带 base_url）。
 
 ## 模型条目
 

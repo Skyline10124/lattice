@@ -19,7 +19,7 @@ can't make progress, and reqwest HTTP requests stall indefinitely.
 5. **Root cause** → Sync methods directly called `block_on()` without handling "already inside runtime" scenario
 
 ### Fix
-Added `run_async()` helper in `artemis-agent/src/lib.rs`:
+Added `run_async()` helper in `lattice-agent/src/lib.rs`:
 - **Outside any runtime**: `SHARED_RUNTIME.block_on(future)` directly (fast path)
 - **Inside a runtime**: `Handle::try_current()` → `spawn_blocking()` + `SHARED_RUNTIME.block_on()` + `mpsc::channel`. The blocking thread pool runs outside any runtime context, so `block_on()` is safe. Works on both `current_thread` and `multi_thread` runtimes.
 
@@ -32,16 +32,16 @@ Additional changes:
 - Harness callers: `clone_box()` → `clone_arc()`
 
 ### Files Modified
-- `artemis-agent/src/lib.rs` — run_async() helper, all 4 block_on() calls replaced, memory Arc refactor
-- `artemis-memory/src/lib.rs` — added `clone_arc()` to Memory trait
-- `artemis-harness/src/pipeline.rs` — `clone_box()` → `clone_arc()`
-- `artemis-harness/src/dispatch.rs` — `clone_box()` → `clone_arc()`
+- `lattice-agent/src/lib.rs` — run_async() helper, all 4 block_on() calls replaced, memory Arc refactor
+- `lattice-memory/src/lib.rs` — added `clone_arc()` to Memory trait
+- `lattice-harness/src/pipeline.rs` — `clone_box()` → `clone_arc()`
+- `lattice-harness/src/dispatch.rs` — `clone_box()` → `clone_arc()`
 
 ### Test Results
-- artemis-agent: 3/3 passed
-- artemis-memory: 6/6 passed
-- artemis-token-pool: 3/3 passed
-- artemis-core (excluding pre-existing router mutex failures): 155/155 passed
+- lattice-agent: 3/3 passed
+- lattice-memory: 6/6 passed
+- lattice-token-pool: 3/3 passed
+- lattice-core (excluding pre-existing router mutex failures): 155/155 passed
 
 ### Pre-existing Issues (NOT from this fix)
 - `router::tests` — 8 tests fail due to global Mutex poisoning (PoisonError cascade from one panic). These are a pre-existing concurrency bug in the router's credential cache, unrelated to this fix.
@@ -49,6 +49,6 @@ Additional changes:
 ## Remaining Work
 - P0-1: Python API only exposes resolver, no chat/streaming
 - P1-4: ErrorClassifier not wired through streaming phase
-- W-1: artemis-cli compilation failures (16 E0583 errors)
-- W-2: artemis-tui directory missing (but now exists with skeleton)
+- W-1: lattice-cli compilation failures (16 E0583 errors)
+- W-2: lattice-tui directory missing (but now exists with skeleton)
 - Router Mutex poisoning (newly surfaced)

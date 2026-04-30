@@ -17,7 +17,7 @@ fn code_review(diff: &str) -> Result<ReviewOutput, ReviewError> {
 
 ## 对比
 
-| | 传统 Agent | artemis |
+| | 传统 Agent | LATTICE |
 |---|-----------|---------|
 | 决策者 | LLM | 代码 |
 | 工具调用 | LLM 自由选择 | 白名单约束 |
@@ -27,4 +27,4 @@ fn code_review(diff: &str) -> Result<ReviewOutput, ReviewError> {
 
 ## vs Prompt 工程
 
-Prompt 工程是"告诉 LLM 怎么做"（说服）。artemis 插件是"限制 LLM 只能做什么"（约束）。说服不可靠，约束可靠。
+Prompt 工程是"告诉 LLM 怎么做"（说服）。LATTICE 插件是"限制 LLM 只能做什么"（约束）。说服不可靠，约束可靠。

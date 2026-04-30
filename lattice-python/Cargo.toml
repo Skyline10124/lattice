@@ -1,0 +1,15 @@
+[package]
+name = "lattice-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lattice_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+lattice-core = { path = "../lattice-core" }
+pyo3 = { version = "0.28", features = ["extension-module"] }
+
+[dev-dependencies]
+pyo3 = { version = "0.28", features = ["auto-initialize"] }

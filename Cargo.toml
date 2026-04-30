@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "artemis-core",
-    "artemis-memory",
-    "artemis-token-pool",
-    "artemis-agent",
-    "artemis-plugin",
-    "artemis-python",
-    "artemis-cli",
-    "artemis-tui",
-    "artemis-harness",
+    "lattice-core",
+    "lattice-memory",
+    "lattice-token-pool",
+    "lattice-agent",
+    "lattice-plugin",
+    "lattice-python",
+    "lattice-cli",
+    "lattice-tui",
+    "lattice-harness",
 ]

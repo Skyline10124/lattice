@@ -1,4 +1,4 @@
-# artemis wiki
+# LATTICE wiki
 
 模型为中心的 LLM 推理引擎。Rust 内核，Python 绑定。
 
@@ -52,6 +52,6 @@ alpha / dogfooding。Rust 侧 resolve + chat + chat_complete 可用，Python 绑
 
 ## 外部链接
 
-- [GitHub](https://github.com/Skyline10124/artemis)
+- [GitHub](https://github.com/Skyline10124/LATTICE)
 - [CLAUDE.md](../CLAUDE.md) — AI 助手指南
 - [README](../README.md) — 项目首页

@@ -2,17 +2,17 @@
 
 | Crate | 职责 | 依赖 |
 |-------|------|------|
-| **artemis-core** | 模型解析、HTTP 请求、SSE 解析、retry、token 估算 | tokio, reqwest, serde |
-| **artemis-agent** | Agent 状态、多轮对话、tool boundary、context trimming、sandbox、17 tools | core, memory, token-pool, plugin |
-| **artemis-memory** | `Memory` trait (async) + `SqliteMemory` (FTS5) + `EntryKind` | core (Message 类型) |
-| **artemis-token-pool** | `TokenPool` trait + `UnlimitedPool` | 无 |
-| **artemis-plugin** | `Plugin` trait (Input/Output) + `Behavior` trait (Strict/Yolo) + `PluginRunner` + `PluginHooks` + `CodeReviewPlugin` | core |
-| **artemis-harness** | `AgentProfile` (TOML) + `AgentRegistry` + `AgentRunner` (implicit memory recall) + `Pipeline` (sequential chaining + skip/fallback) + Python handoff | agent, memory, plugin |
-| **artemis-python** | PyO3 绑定（resolver only），pip 包 `artemis-core` | core |
-| **artemis-cli** | CLI: `run`/`print`/`resolve`/`models` 子命令 | agent, harness |
-| **artemis-tui** | Ratatui TUI + Agent streaming | agent |
+| **lattice-core** | 模型解析、HTTP 请求、SSE 解析、retry、token 估算 | tokio, reqwest, serde |
+| **lattice-agent** | Agent 状态、多轮对话、tool boundary、context trimming、sandbox、17 tools | core, memory, token-pool, plugin |
+| **lattice-memory** | `Memory` trait (async) + `SqliteMemory` (FTS5) + `EntryKind` | core (Message 类型) |
+| **lattice-token-pool** | `TokenPool` trait + `UnlimitedPool` | 无 |
+| **lattice-plugin** | `Plugin` trait (Input/Output) + `Behavior` trait (Strict/Yolo) + `PluginRunner` + `PluginHooks` + `CodeReviewPlugin` | core |
+| **lattice-harness** | `AgentProfile` (TOML) + `AgentRegistry` + `AgentRunner` (implicit memory recall) + `Pipeline` (sequential chaining + skip/fallback) + Python handoff | agent, memory, plugin |
+| **lattice-python** | PyO3 绑定（resolver only），pip 包 `lattice-core` | core |
+| **lattice-cli** | CLI: `run`/`print`/`resolve`/`models` 子命令 | agent, harness |
+| **lattice-tui** | Ratatui TUI + Agent streaming | agent |
 
-## artemis-core 模块
+## lattice-core 模块
 
 | 模块 | 作用 |
 |------|------|

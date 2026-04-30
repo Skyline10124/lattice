@@ -1,4 +1,4 @@
-# artemis
+# LATTICE
 
 A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-agent harness.
 
@@ -7,16 +7,16 @@ A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-ag
 ## Design
 
 ```
-artemis/ (Cargo workspace)
-├── artemis-core/       Pure Rust: resolve + chat + streaming + retry
-├── artemis-agent/      Agent struct, conversation state, tool boundary, memory
-├── artemis-memory/     Memory trait + InMemoryMemory + SqliteMemory (async)
-├── artemis-token-pool/ TokenPool trait + UnlimitedPool
-├── artemis-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload
-├── artemis-plugin/     Plugin trait (typed Input → LLM → Output)
-├── artemis-cli/        CLI: run, validate, debug, list agents
-├── artemis-tui/        Terminal UI (ratatui)
-└── artemis-python/     PyO3 bindings (pip: artemis-core)
+LATTICE/ (Cargo workspace)
+├── lattice-core/       Pure Rust: resolve + chat + streaming + retry
+├── lattice-agent/      Agent struct, conversation state, tool boundary, memory
+├── lattice-memory/     Memory trait + InMemoryMemory + SqliteMemory (async)
+├── lattice-token-pool/ TokenPool trait + UnlimitedPool
+├── lattice-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload
+├── lattice-plugin/     Plugin trait (typed Input → LLM → Output)
+├── lattice-cli/        CLI: run, validate, debug, list agents
+├── lattice-tui/        Terminal UI (ratatui)
+└── lattice-python/     PyO3 bindings (pip: lattice-core)
 ```
 
 ### Four principles
@@ -44,7 +44,7 @@ class CodeReviewPlugin(Plugin):
 
 ### Agent pipeline (harness)
 
-Agents are defined as TOML files in `~/.artemis/agents/`. The harness runs them in sequence, using TOML handoff rules to route between agents. Fork targets run multiple agents in parallel:
+Agents are defined as TOML files in `~/.LATTICE/agents/`. The harness runs them in sequence, using TOML handoff rules to route between agents. Fork targets run multiple agents in parallel:
 
 ```toml
 [agent]
@@ -78,15 +78,15 @@ Handoff rule operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`. Compound r
 ### Rust
 
 ```rust
-use artemis_core;
+use lattice_core;
 
 // Resolve a model alias to a specific provider + credentials
-let resolved = artemis_core::resolve("sonnet")?;
+let resolved = lattice_core::resolve("sonnet")?;
 // -> ResolvedModel { provider: "anthropic", api_model_id: "claude-sonnet-4-6", ... }
 
 // Streaming: get tokens as they arrive
 let messages = vec![Message { role: Role::User, content: "Hello".into() }];
-let stream = artemis_core::chat(&resolved, &messages, &[])?;
+let stream = lattice_core::chat(&resolved, &messages, &[])?;
 // -> impl Stream<Item = StreamEvent>
 
 // Agent with tools + memory
@@ -100,31 +100,31 @@ let output = agent.send("Review this code").await?;
 
 ```bash
 # Run a single agent
-artemis run "Review src/router.rs" --agent code-review
+LATTICE run "Review src/router.rs" --agent code-review
 
 # Run a pipeline
-artemis run "Review src/router.rs" --pipeline review
+LATTICE run "Review src/router.rs" --pipeline review
 
 # Validate pipeline chain without calling any LLM
-artemis validate review
+LATTICE validate review
 
 # List loaded agents
-artemis list agents
+LATTICE list agents
 
 # Debug model resolution
-artemis debug sonnet
+LATTICE debug sonnet
 ```
 
 ### Python
 
 ```bash
-cd artemis-python && maturin develop
+cd lattice-python && maturin develop
 ```
 
 ```python
-import artemis_core
+import lattice_core
 
-engine = artemis_core.ArtemisEngine()
+engine = lattice_core.ArtemisEngine()
 engine.resolve_model("sonnet")
 # -> PyResolvedModel(provider="anthropic", api_model_id="claude-sonnet-4-6", ...)
 
@@ -149,8 +149,8 @@ Artemis is in **alpha / dogfooding** stage. What works:
 ## Project structure
 
 ```
-artemis/                 Git root (Cargo workspace)
-├── artemis-core/        Pure Rust: resolve, chat, streaming, retry
+LATTICE/                 Git root (Cargo workspace)
+├── lattice-core/        Pure Rust: resolve, chat, streaming, retry
 │   ├── src/
 │   │   ├── catalog/     Model catalog, aliases, provider defaults
 │   │   ├── router.rs    Model resolution, credential resolution
@@ -162,10 +162,10 @@ artemis/                 Git root (Cargo workspace)
 │   │   ├── errors.rs    ArtemisError enum
 │   │   └── types.rs     Role, Message, ToolDefinition, ToolCall, FunctionCall
 │   └── tests/e2e/       End-to-end + regression tests
-├── artemis-agent/       Agent struct, conversation state, tool boundary
-├── artemis-memory/      Memory trait + InMemoryMemory + SqliteMemory
-├── artemis-token-pool/  TokenPool trait + UnlimitedPool
-├── artemis-harness/     Pipeline orchestrator, TOML rule engine, hot reload
+├── lattice-agent/       Agent struct, conversation state, tool boundary
+├── lattice-memory/      Memory trait + InMemoryMemory + SqliteMemory
+├── lattice-token-pool/  TokenPool trait + UnlimitedPool
+├── lattice-harness/     Pipeline orchestrator, TOML rule engine, hot reload
 │   ├── src/
 │   │   ├── pipeline.rs  Pipeline + PipelineRun + DryRunReport (sequential + fork)
 │   │   ├── handoff_rule.rs  HandoffTarget (Single/Fork) + TOML rule parsing + evaluation
@@ -173,19 +173,19 @@ artemis/                 Git root (Cargo workspace)
 │   │   ├── registry.rs  AgentRegistry loading + hot reload
 │   │   ├── runner.rs    AgentRunner (wraps Agent + profile)
 │   │   └── events.rs    EventBus + PipelineEvent
-├── artemis-plugin/      Plugin trait (typed Input → LLM → Output)
-├── artemis-cli/         CLI commands: run, validate, debug, list
-├── artemis-tui/         Terminal UI (ratatui)
-└── artemis-python/      PyO3 bindings (pip: artemis-core)
+├── lattice-plugin/      Plugin trait (typed Input → LLM → Output)
+├── lattice-cli/         CLI commands: run, validate, debug, list
+├── lattice-tui/         Terminal UI (ratatui)
+└── lattice-python/      PyO3 bindings (pip: lattice-core)
 ```
 
 ## Why not X?
 
-- **OpenRouter / LiteLLM**: SaaS/model gateways. artemis is a library you embed.
-- **LangGraph / CrewAI**: Heavy multi-agent frameworks. artemis gives you primitives + lightweight orchestration.
-- **n8n / Dify**: Visual workflow builders for non-developers. artemis is for developers.
+- **OpenRouter / LiteLLM**: SaaS/model gateways. LATTICE is a library you embed.
+- **LangGraph / CrewAI**: Heavy multi-agent frameworks. LATTICE gives you primitives + lightweight orchestration.
+- **n8n / Dify**: Visual workflow builders for non-developers. LATTICE is for developers.
 - **MCP**: Model-to-tool protocol. Complementary — plugins reference tools via MCP internally.
-- **A2A**: Agent-to-agent protocol. Reference for artemis's handoff layer.
+- **A2A**: Agent-to-agent protocol. Reference for LATTICE's handoff layer.
 
 ## Requirements
 
@@ -212,15 +212,15 @@ See `.env.example` for the full list of supported variables.
 cargo build                    # Debug build (all crates)
 cargo build --release          # Release build
 cargo test                     # Run all Rust unit tests
-cargo test -p artemis-core     # Single crate tests
-cargo test -p artemis-core <test_name>  # Single test
+cargo test -p lattice-core     # Single crate tests
+cargo test -p lattice-core <test_name>  # Single test
 cargo clippy -- -D warnings    # Lint (warnings as errors)
 cargo fmt --check --all        # Format check
 cargo fmt --all                # Format code
-cargo bench -p artemis-core    # Benchmarks
+cargo bench -p lattice-core    # Benchmarks
 
 # Python bindings
-cd artemis-python && maturin develop
+cd lattice-python && maturin develop
 ```
 
 See [CLAUDE.md](CLAUDE.md) for detailed development guide.

@@ -16,8 +16,8 @@ derivation {
 ## 声明式配置
 
 ```
-artemis.toml     # model = "sonnet", budget = "$50"
-artemis.lock     # provider=anthropic, model=claude-sonnet-4-6-20250514
+LATTICE.toml     # model = "sonnet", budget = "$50"
+LATTICE.lock     # provider=anthropic, model=claude-sonnet-4-6-20250514
 ```
 
 ## 内容寻址缓存

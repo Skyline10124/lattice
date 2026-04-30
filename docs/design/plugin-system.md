@@ -3,7 +3,7 @@
 ## 插件结构
 
 ```
-artemis-code-review/
+lattice-code-review/
   setup.py
   prompts/review.md      # 自然语言：agent 身份 + 推理策略
   src/

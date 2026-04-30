@@ -1,0 +1,55 @@
+[package]
+name = "lattice-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lattice_core"
+crate-type = ["rlib"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"] }
+thiserror = "2"
+futures = "0.3"
+tiktoken-rs = "0.11"
+regex = "1"
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time", "local-time"] }
+
+[dev-dependencies]
+lattice-agent = { path = "../lattice-agent" }
+lattice-plugin = { path = "../lattice-plugin" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[[example]]
+name = "chat_test"
+
+[[example]]
+name = "think_test"
+
+[[example]]
+name = "minimax_test"
+
+[[example]]
+name = "minimax_think"
+
+[[example]]
+name = "opencode_test"
+
+[[example]]
+name = "minimax_debug"
+
+
+[[example]]
+name = "dogfood"
+
+[[example]]
+name = "agent_test"

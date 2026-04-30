@@ -18,5 +18,5 @@
 
 ## 详细报告
 
-- `artemis-core/docs/code-review-report.md` — 历史审查记录
-- `artemis-core/docs/current-implementation-review.md` — 当前实现审查
+- `lattice-core/docs/code-review-report.md` — 历史审查记录
+- `lattice-core/docs/current-implementation-review.md` — 当前实现审查

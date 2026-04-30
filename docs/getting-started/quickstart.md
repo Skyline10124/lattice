@@ -3,12 +3,12 @@
 ## 30 秒
 
 ```bash
-cd artemis-core && cargo build --release
+cd lattice-core && cargo build --release
 ```
 
 ```rust
-let resolved = artemis_core::resolve("sonnet")?;
-let response = artemis_core::chat_complete(&resolved, &messages, &[])?;
+let resolved = lattice_core::resolve("sonnet")?;
+let response = lattice_core::chat_complete(&resolved, &messages, &[])?;
 ```
 
 ## 你需要
@@ -26,17 +26,17 @@ export OPENAI_API_KEY="sk-xxx"
 ## Python
 
 ```bash
-cd artemis-python && maturin develop
+cd lattice-python && maturin develop
 ```
 
 ```python
-import artemis_core
-engine = artemis_core.ArtemisEngine()
+import lattice_core
+engine = lattice_core.ArtemisEngine()
 resolved = engine.resolve_model("sonnet")
 # Python 目前只支持 resolve，chat 走 Rust
 ```
 
-> **注意**: `Agent.send_message()` 目前需要 `#[tokio::main]`。同步代码请使用 `artemis_core::chat_complete()` 配合 `futures::executor::block_on()` 和 tokio runtime。
+> **注意**: `Agent.send_message()` 目前需要 `#[tokio::main]`。同步代码请使用 `lattice_core::chat_complete()` 配合 `futures::executor::block_on()` 和 tokio runtime。
 
 ## 下一步
 

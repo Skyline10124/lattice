@@ -2,11 +2,11 @@
 
 ## Rust
 
-artemis 是 Cargo workspace，直接 `cargo build`：
+LATTICE 是 Cargo workspace，直接 `cargo build`：
 
 ```bash
-git clone https://github.com/Skyline10124/artemis
-cd artemis
+git clone https://github.com/Skyline10124/LATTICE
+cd LATTICE
 cargo build --release
 ```
 
@@ -15,7 +15,7 @@ cargo build --release
 ## Python
 
 ```bash
-cd artemis-python
+cd lattice-python
 pip install maturin
 maturin develop
 ```

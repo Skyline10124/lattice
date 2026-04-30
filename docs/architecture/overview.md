@@ -3,19 +3,19 @@
 ## Crate 结构
 
 ```
-artemis-cli          命令行（run/print/resolve/models）
-artemis-tui          Ratatui TUI + Agent streaming
+lattice-cli          命令行（run/print/resolve/models）
+lattice-tui          Ratatui TUI + Agent streaming
     ↓
-artemis-harness       AgentProfile, Pipeline, AgentRunner
-artemis-python        PyO3 绑定（pip: artemis-core）
+lattice-harness       AgentProfile, Pipeline, AgentRunner
+lattice-python        PyO3 绑定（pip: lattice-core）
     ↓
-artemis-agent         AgentLoop + 对话状态 + tool boundary + 17 tools
+lattice-agent         AgentLoop + 对话状态 + tool boundary + 17 tools
     ↓
-artemis-memory        跨 session 记忆（trait, async, SqliteMemory FTS5）
-artemis-token-pool    共享 token 预算（trait）
-artemis-plugin        类型化插件系统（Plugin + Behavior trait）
+lattice-memory        跨 session 记忆（trait, async, SqliteMemory FTS5）
+lattice-token-pool    共享 token 预算（trait）
+lattice-plugin        类型化插件系统（Plugin + Behavior trait）
     ↓
-artemis-core          模型解析 + 推理（纯 Rust，无 PyO3）
+lattice-core          模型解析 + 推理（纯 Rust，无 PyO3）
 ```
 
 依赖单向：上层依赖下层，下层不知道上层存在。

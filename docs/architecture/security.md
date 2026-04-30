@@ -30,7 +30,7 @@
 
 | 层 | 持凭证 | 可扩展 |
 |----|--------|--------|
-| artemis-core | 是 | 不可（通过 trait，非任意代码） |
-| artemis-agent | 否 | 不可 |
-| artemis-plugin | 否 | 可（Plugin: to_prompt, from_output; Behavior: Strict/Yolo） |
-| artemis-harness | 否 | 可（AgentProfile TOML, Pipeline 编排） |
+| lattice-core | 是 | 不可（通过 trait，非任意代码） |
+| lattice-agent | 否 | 不可 |
+| lattice-plugin | 否 | 可（Plugin: to_prompt, from_output; Behavior: Strict/Yolo） |
+| lattice-harness | 否 | 可（AgentProfile TOML, Pipeline 编排） |

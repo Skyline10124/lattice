@@ -44,6 +44,6 @@
 
 以下 14 个模型通过 opencode-go provider 全部实测通过（`OPENCODE_GO_API_KEY`）。
 
-artemis 当前提供 17 个内置工具：read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call。
+LATTICE 当前提供 17 个内置工具：read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call。
 
 glm-5.1, glm-5, kimi-k2.6, kimi-k2.5, deepseek-v4-pro, deepseek-v4-flash, mimo-v2-pro, mimo-v2-omni, mimo-v2.5-pro, mimo-v2.5, minimax-m2.7, minimax-m2.5, qwen3.6-plus, qwen3.5-plus

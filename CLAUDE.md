@@ -9,19 +9,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Crate architecture** (one-way deps):
 
 ```
-artemis-tui           Terminal UI (ratatui)
-  → artemis-cli         CLI: resolve, run, print, validate, debug, models, doctor
-    → artemis-harness     Pipeline runner, TOML profiles, hot reload, WebSocket events
-      → artemis-agent       AgentLoop, conversation state, tool boundary
-        → artemis-memory     Memory trait + InMemoryMemory
-        → artemis-token-pool TokenPool trait + UnlimitedPool
-          → artemis-core       resolve() + chat() — model routing + inference
-      → artemis-plugin       Plugin trait (placeholder)
-  → artemis-python       PyO3 bindings (pip package: artemis-core)
+lattice-tui           Terminal UI (ratatui)
+  → lattice-cli         CLI: resolve, run, print, validate, debug, models, doctor
+    → lattice-harness     Pipeline runner, TOML profiles, hot reload, WebSocket events
+      → lattice-agent       AgentLoop, conversation state, tool boundary
+        → lattice-memory     Memory trait + InMemoryMemory
+        → lattice-token-pool TokenPool trait + UnlimitedPool
+          → lattice-core       resolve() + chat() — model routing + inference
+      → lattice-plugin       Plugin trait (placeholder)
+  → lattice-python       PyO3 bindings (pip package: lattice-core)
 ```
 
-- **Rust workspace**: Cargo workspace at repo root, all crates under `artemis-*/`
-- **Python package**: `artemis-core` (from `artemis-python/`) via [maturin](https://github.com/PyO3/maturin)
+- **Rust workspace**: Cargo workspace at repo root, all crates under `lattice-*/`
+- **Python package**: `lattice-core` (from `lattice-python/`) via [maturin](https://github.com/PyO3/maturin)
 
 ## Build, test, lint
 
@@ -35,19 +35,19 @@ cargo build
 cargo build --release
 
 # Build and install Python bindings into the active venv
-cd artemis-python && maturin develop
+cd lattice-python && maturin develop
 
 # Run all Rust unit tests (no Python runtime required)
 cargo test
 
 # Run a single crate's tests
-cargo test -p artemis-core
+cargo test -p lattice-core
 
 # Run a single test
-cargo test -p artemis-core <test_name>
+cargo test -p lattice-core <test_name>
 
 # Run benchmarks
-cargo bench -p artemis-core
+cargo bench -p lattice-core
 
 # Lint (treat warnings as errors)
 cargo clippy -- -D warnings
@@ -65,27 +65,27 @@ cargo fmt --all
 
 ```
 User Code (Python / Rust / CLI)
-  → artemis_core::resolve("sonnet")      → ResolvedModel
-  → artemis_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
-  → artemis_agent::Agent::new(resolved)  → send(), submit_tools()
-  → artemis_harness::Pipeline::new()     → run() → multi-agent TOML pipeline (sequential + fork parallel)
+  → lattice_core::resolve("sonnet")      → ResolvedModel
+  → lattice_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
+  → lattice_agent::Agent::new(resolved)  → send(), submit_tools()
+  → lattice_harness::Pipeline::new()     → run() → multi-agent TOML pipeline (sequential + fork parallel)
 ```
 
 ### Crate map
 
 | Crate | Purpose |
 |-------|---------|
-| `artemis-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
-| `artemis-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API |
-| `artemis-memory` | `Memory` trait (`save`/`history`/`search`) + `InMemoryMemory` default impl |
-| `artemis-token-pool` | `TokenPool` trait (`acquire`/`release`/`remaining`) + `UnlimitedPool` default impl |
-| `artemis-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
-| `artemis-plugin` | Plugin trait (placeholder — not yet functional) |
-| `artemis-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
-| `artemis-tui` | Terminal UI (ratatui-based — early stage) |
-| `artemis-python` | PyO3 bindings: `ArtemisEngine`, exceptions, `StreamIterator` (pip: `artemis-core`) |
+| `lattice-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
+| `lattice-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API |
+| `lattice-memory` | `Memory` trait (`save`/`history`/`search`) + `InMemoryMemory` default impl |
+| `lattice-token-pool` | `TokenPool` trait (`acquire`/`release`/`remaining`) + `UnlimitedPool` default impl |
+| `lattice-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
+| `lattice-plugin` | Plugin trait (placeholder — not yet functional) |
+| `lattice-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
+| `lattice-tui` | Terminal UI (ratatui-based — early stage) |
+| `lattice-python` | PyO3 bindings: `ArtemisEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
 
-### artemis-core module map
+### lattice-core module map
 
 | Module | Purpose |
 |--------|---------|
@@ -100,7 +100,7 @@ User Code (Python / Rust / CLI)
 | `errors` | `ArtemisError` enum (pure Rust, no PyO3), `ErrorClassifier` |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
-### artemis-harness module map
+### lattice-harness module map
 
 | Module | Purpose |
 |--------|---------|
@@ -156,13 +156,13 @@ When `output_schema` is set in an agent profile, the runner validates LLM output
 Rust and Python split tool execution across crates:
 
 ```
-artemis-agent: Agent.send() → yields ToolCallRequired → caller executes tools
+lattice-agent: Agent.send() → yields ToolCallRequired → caller executes tools
                Agent.submit_tools(results) → resumes conversation
 ```
 
 ### Error taxonomy
 
-`ArtemisError` Rust enum in `artemis-core`. PyO3 exception hierarchy in `artemis-python/errors.rs`:
+`ArtemisError` Rust enum in `lattice-core`. PyO3 exception hierarchy in `lattice-python/errors.rs`:
 
 ```
 Exception
