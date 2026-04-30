@@ -9,6 +9,25 @@ use artemis_core::retry::RetryPolicy;
 use artemis_core::streaming::StreamEvent;
 use artemis_core::types::ToolDefinition;
 use artemis_core::ResolvedModel;
+use tokio::runtime::Handle;
+
+/// Run an async task, safely handling both runtime contexts.
+/// If called from within a tokio runtime, uses Handle::block_on instead
+/// of creating a new Runtime (avoids nested runtime panic).
+/// If called from outside any runtime, uses the global SHARED_RUNTIME.
+fn run_async<F, T>(f: F) -> T
+where
+    F: futures::Future<Output = T>,
+{
+    if let Ok(_handle) = Handle::try_current() {
+        // We're inside a tokio runtime. block_in_place tells tokio to
+        // lend us this thread so SHARED_RUNTIME.block_on won't starve
+        // the runtime's IO driver.
+        tokio::task::block_in_place(|| SHARED_RUNTIME.block_on(f))
+    } else {
+        SHARED_RUNTIME.block_on(f)
+    }
+}
 
 /// Global tokio runtime shared by all Agent instances.
 static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
@@ -217,7 +236,7 @@ impl Agent {
         let mut reasoning_buf = String::new();
         let mut tool_builders: HashMap<String, ToolCallAccum> = HashMap::new();
 
-        SHARED_RUNTIME.block_on(async {
+        run_async(async {
             while let Some(event) = stream.next().await {
                 match event {
                     StreamEvent::Token { content: c } => {
@@ -309,7 +328,7 @@ impl Agent {
         let mut attempt = 0u32;
 
         loop {
-            let result = SHARED_RUNTIME.block_on(artemis_core::chat(
+            let result = run_async(artemis_core::chat(
                 &self.state.resolved,
                 &self.state.messages,
                 &self.tools,
@@ -322,7 +341,7 @@ impl Agent {
                         return Err(e.clone());
                     }
                     let delay = self.retry.jittered_backoff(attempt);
-                    SHARED_RUNTIME.block_on(async {
+                    run_async(async {
                         tokio::time::sleep(delay).await;
                     });
                     attempt += 1;

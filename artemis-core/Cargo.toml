@@ -18,6 +18,8 @@ futures = "0.3"
 tiktoken-rs = "0.11"
 regex = "1"
 rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time", "local-time"] }
 
 [dev-dependencies]
 artemis-agent = { path = "../artemis-agent" }

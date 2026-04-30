@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod errors;
+pub mod logging;
 pub mod provider;
 pub mod retry;
 pub mod router;
@@ -11,6 +12,7 @@ pub mod types;
 // Re-export key types for convenience
 pub use catalog::ResolvedModel;
 pub use errors::ArtemisError;
+pub use logging::{init_debug_logging, init_logging};
 pub use streaming::StreamEvent;
 pub use types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 

@@ -130,6 +130,19 @@ artemis/                 Git root (Cargo workspace)
 - Python 3.12+ (optional, for Python bindings)
 - Credentials in environment variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.
 
+## Configuration
+
+### `.env` file
+
+Artemis CLI loads a `.env` file from the working directory on startup (via `dotenvy`). This lets you set provider credentials without polluting your shell profile.
+
+1. Copy the template: `cp .env.example .env`
+2. Fill in your API keys
+
+Only variables that are set are used — leave unused providers blank or omit them entirely. Shell environment variables take precedence over `.env` values.
+
+See `.env.example` for the full list of supported variables.
+
 ## Development
 
 ```bash

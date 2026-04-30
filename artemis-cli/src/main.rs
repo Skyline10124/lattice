@@ -7,7 +7,7 @@ mod config;
 mod credentials;
 mod session;
 
-use commands::{config_cmd, doctor, models, print, resolve, run, sessions, stats};
+use commands::{config_cmd, debug, doctor, models, print, resolve, run, sessions, stats};
 use config::Config;
 use credentials::CredentialStore;
 
@@ -79,11 +79,39 @@ enum Commands {
         #[arg(short, long, help = "Model alias or canonical ID")]
         model: Option<String>,
     },
+    #[command(about = "Debug mode: trace-level logging with colored output")]
+    Debug {
+        #[arg(help = "Prompt to send (optional, for chat debugging)")]
+        prompt: Option<String>,
+        #[arg(short, long, help = "Model alias or canonical ID")]
+        model: Option<String>,
+        #[arg(long, help = "Provider override")]
+        provider: Option<String>,
+        #[arg(long, help = "Only resolve, don't chat")]
+        resolve_only: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
     let cli = Cli::parse();
+
+    // Initialize logging based on verbose or debug mode.
+    if cli.verbose {
+        artemis_core::init_logging(true);
+    } else if matches!(cli.command, Some(Commands::Debug { .. })) {
+        let log_dir = dirs::home_dir()
+            .map(|h| h.join(".artemis"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let log_path = log_dir.join("debug.log");
+        let _ = artemis_core::init_debug_logging(
+            log_path.to_str().unwrap_or("/tmp/artemis-debug.log"),
+        );
+    } else {
+        let _ = artemis_core::init_logging(false);
+    }
+
     let config = Config::load(cli.config.as_deref())?;
     let creds = CredentialStore::from_config(&config)?;
     // Credentials loaded explicitly; passed to ModelRouter::with_credentials()
@@ -137,6 +165,17 @@ async fn main() -> Result<()> {
                 cli.json,
                 &creds,
             )?;
+        }
+        Some(Commands::Debug {
+            prompt,
+            model,
+            provider,
+            resolve_only,
+        }) => {
+            let model = model
+                .or_else(|| cli.model.clone())
+                .unwrap_or_else(|| config.default_model());
+            debug::run(prompt, model, provider, resolve_only, &creds).await?;
         }
         None => {
             // No command and no -p: launch TUI

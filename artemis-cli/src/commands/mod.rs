@@ -1,4 +1,5 @@
 pub mod config_cmd;
+pub mod debug;
 pub mod doctor;
 pub mod models;
 pub mod print;

@@ -6,3 +6,4 @@ __pycache__/
 Cargo.lock
 .sisyphus/
 .worktrees/
+.env

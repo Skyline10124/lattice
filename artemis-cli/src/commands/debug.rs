@@ -5,7 +5,7 @@ use colored::Colorize;
 use std::io::Write;
 use std::time::Instant;
 
-pub fn run(
+pub async fn run(
     prompt: Option<String>,
     model: String,
     provider_override: Option<String>,
