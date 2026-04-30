@@ -75,11 +75,15 @@ enum Commands {
         #[command(subcommand)]
         action: commands::sessions::SessionAction,
     },
-    #[command(about = "Run a prompt through the model")]
+    #[command(about = "Run a prompt through the model or pipeline")]
     Run {
         prompt: String,
         #[arg(short, long, help = "Model alias or canonical ID")]
         model: Option<String>,
+        #[arg(long, help = "Run as pipeline (start agent name)")]
+        pipeline: Option<String>,
+        #[arg(long, help = "Agent directory path (default: ~/.artemis/agents/)")]
+        agents_dir: Option<String>,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
@@ -174,19 +178,34 @@ async fn main() -> Result<()> {
         Some(Commands::Sessions { action }) => {
             sessions::run(action)?;
         }
-        Some(Commands::Run { prompt, model }) => {
-            let model = model
-                .or_else(|| cli.model.clone())
-                .unwrap_or_else(|| config.default_model());
-            run::run(
-                prompt,
-                model,
-                cli.provider.as_deref(),
-                cli.verbose,
-                cli.json,
-                &creds,
-            )
-            .await?;
+        Some(Commands::Run {
+            prompt,
+            model,
+            pipeline,
+            agents_dir,
+        }) => {
+            if let Some(start_agent) = pipeline {
+                run::run_pipeline(
+                    &prompt,
+                    &start_agent,
+                    agents_dir.as_deref(),
+                    cli.verbose,
+                    cli.json,
+                )?;
+            } else {
+                let model = model
+                    .or_else(|| cli.model.clone())
+                    .unwrap_or_else(|| config.default_model());
+                run::run(
+                    prompt,
+                    model,
+                    cli.provider.as_deref(),
+                    cli.verbose,
+                    cli.json,
+                    &creds,
+                )
+                .await?;
+            }
         }
         Some(Commands::Debug {
             prompt,
