@@ -2,7 +2,6 @@ use anyhow::Result;
 use artemis_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
 use artemis_core::router::ModelRouter;
 use colored::Colorize;
-use std::io::Write;
 use std::time::Instant;
 
 pub async fn run(
@@ -136,7 +135,7 @@ pub async fn run(
         println!(
             "  {} {}",
             "tool_calls:".dimmed(),
-            format!("{}", tool_call_names.join(", ")).yellow()
+            tool_call_names.join(", ").yellow()
         );
     }
 

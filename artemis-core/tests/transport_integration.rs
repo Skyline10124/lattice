@@ -500,71 +500,18 @@ mod anthropic {
     }
 
     #[test]
-    fn denormalize_stream_chunk_text_delta() {
+    fn denormalize_stream_chunk_returns_empty_vec() {
+        // denormalize_stream_chunk is deprecated — Anthropic transport uses SseParser instead.
         let transport = AnthropicTransport::new();
-        let data = json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "Hello"}
-        });
-
-        let events = transport.denormalize_stream_chunk("content_block_delta", &data);
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            StreamEvent::Token {
-                content: "Hello".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn denormalize_stream_chunk_tool_call_delta() {
-        let transport = AnthropicTransport::new();
-
-        // content_block_start → ToolCallStart
-        let start_data = json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "tool_use", "id": "toolu_stream", "name": "search"}
-        });
-        let events = transport.denormalize_stream_chunk("content_block_start", &start_data);
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            StreamEvent::ToolCallStart {
-                id: "toolu_stream".to_string(),
-                name: "search".to_string()
-            }
-        );
-
-        // content_block_delta → ToolCallDelta
-        let delta_data = json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": r#"{"q":"ru"#}
-        });
-        let events = transport.denormalize_stream_chunk("content_block_delta", &delta_data);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::ToolCallDelta {
-                arguments_delta, ..
-            } => {
-                assert_eq!(arguments_delta, r#"{"q":"ru"#);
-            }
-            other => panic!("expected ToolCallDelta, got {other:?}"),
-        }
-
-        // content_block_stop → ToolCallEnd
-        let stop_data = json!({"type": "content_block_stop", "index": 0});
-        let events = transport.denormalize_stream_chunk("content_block_stop", &stop_data);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], StreamEvent::ToolCallEnd { .. }));
-    }
-
-    #[test]
-    fn denormalize_stream_chunk_ignored_events() {
-        let transport = AnthropicTransport::new();
+        assert!(transport
+            .denormalize_stream_chunk(
+                "content_block_delta",
+                &json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}})
+            )
+            .is_empty());
+        assert!(transport
+            .denormalize_stream_chunk("content_block_start", &json!({}))
+            .is_empty());
         assert!(transport
             .denormalize_stream_chunk("message_start", &json!({}))
             .is_empty());

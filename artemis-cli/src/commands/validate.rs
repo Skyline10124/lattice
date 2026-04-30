@@ -13,12 +13,14 @@ pub fn run(dir: Option<String>) -> Result<()> {
     };
 
     if !path.exists() {
-        println!("Directory '{}' does not exist. Nothing to validate.", path.display());
+        println!(
+            "Directory '{}' does not exist. Nothing to validate.",
+            path.display()
+        );
         return Ok(());
     }
 
-    let registry = AgentRegistry::load_dir(&path)
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let registry = AgentRegistry::load_dir(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
     let profile_count = registry.list().len();
 
     if profile_count == 0 {
@@ -49,7 +51,7 @@ pub fn run(dir: Option<String>) -> Result<()> {
 
         for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
             if let Some(ref target) = rule.target {
-                if !registry.get(target).is_some() {
+                if registry.get(target).is_none() {
                     println!(
                         "    rule[{}]: target '{}' is not a registered agent",
                         i, target
@@ -60,7 +62,7 @@ pub fn run(dir: Option<String>) -> Result<()> {
         }
 
         if let Some(ref fallback) = profile.handoff.fallback {
-            if !registry.get(fallback).is_some() {
+            if registry.get(fallback).is_none() {
                 println!("    fallback: '{}' is not a registered agent", fallback);
                 errors += 1;
             }

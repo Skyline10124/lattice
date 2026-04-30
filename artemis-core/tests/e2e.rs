@@ -18,6 +18,29 @@ pub mod env_lock {
     }
 }
 
+/// Every env var that could affect model credential resolution.
+/// Tests that need clean env must isolate ALL of these, not just a subset.
+pub const ALL_CREDENTIAL_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "NOUS_API_KEY",
+    "GITHUB_TOKEN",
+    "OPENROUTER_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
+    "KILO_API_KEY",
+    "AI_GATEWAY_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "MINIMAX_API_KEY",
+    "QWEN_API_KEY",
+    "ARK_API_KEY",
+    "INFINI_AI_API_KEY",
+];
+
 #[path = "e2e/unknown_model.rs"]
 mod unknown_model;
 

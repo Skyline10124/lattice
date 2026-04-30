@@ -292,7 +292,9 @@ impl Pipeline {
             let profile = match self.registry.get(&current) {
                 Some(p) => p,
                 None => {
-                    report.issues.push(format!("Agent '{}' not found in registry", current));
+                    report
+                        .issues
+                        .push(format!("Agent '{}' not found in registry", current));
                     break;
                 }
             };
@@ -353,7 +355,9 @@ impl Pipeline {
         }
 
         if report.agents_in_chain.len() >= 100 {
-            report.issues.push("Chain exceeded 100 steps (infinite loop?)".into());
+            report
+                .issues
+                .push("Chain exceeded 100 steps (infinite loop?)".into());
         }
 
         report.valid = report.issues.is_empty() && report.reachable_end && !report.circular;
@@ -393,8 +397,11 @@ mod tests {
     use std::sync::Arc;
 
     fn test_registry() -> Arc<AgentRegistry> {
-        // Build registry in-memory without temp files
-        let dir = std::env::temp_dir().join("artemis_test_dry_run");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("artemis_test_dry_run_{ts}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("code-review")).unwrap();
         std::fs::create_dir_all(dir.join("refactor")).unwrap();

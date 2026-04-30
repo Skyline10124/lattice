@@ -432,25 +432,25 @@ fn fallback_returns_config_error_when_no_credentials() {
 }
 
 #[test]
-fn fallback_errors_on_missing_provider_metadata() {
-    // CHARACTERIZATION: The fallback path preserves api_protocol,
-    // api_model_id from the first sorted provider, even though api_key is None.
+fn fallback_errors_when_no_credentials_available() {
+    // CHARACTERIZATION: When no credential env vars are set for any provider,
+    // resolve() correctly returns an error (no fallback to api_key=None).
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(&[
-        "ANTHROPIC_API_KEY",
-        "NOUS_API_KEY",
-        "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY",
-        "KILO_API_KEY",
-        "AI_GATEWAY_API_KEY",
-    ]);
+    let prev_keys = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
-    let resolved = router.resolve("claude-sonnet-4-6", None).unwrap();
+    let result = router.resolve("claude-sonnet-4-6", None);
 
-    assert!(!resolved.canonical_id.is_empty());
-    assert!(!resolved.provider.is_empty());
-    assert!(!resolved.api_model_id.is_empty());
+    assert!(
+        result.is_err(),
+        "resolve should error when no credentials are available"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("API_KEY") || msg.contains("credential") || msg.contains("requires"),
+        "error should mention missing credential, got: {}",
+        msg
+    );
 
     restore_env_batch(prev_keys);
 }
@@ -547,18 +547,17 @@ fn permissive_fails_without_slash() {
 
 #[test]
 fn permissive_provider_model_becomes_canonical_id() {
-    // CHARACTERIZATION: The full "provider/model" string becomes canonical_id.
+    // CHARACTERIZATION: The model part becomes canonical_id (without provider prefix).
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
-    env::remove_var("ANTHROPIC_API_KEY");
+    let prev_keys = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
     let resolved = router
         .resolve_permissive("anthropic/claude-sonnet-4.6")
         .unwrap();
-    assert_eq!(resolved.canonical_id, "anthropic/claude-sonnet-4.6");
+    assert_eq!(resolved.canonical_id, "claude-sonnet-4.6");
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    restore_env_batch(prev_keys);
 }
 
 #[test]

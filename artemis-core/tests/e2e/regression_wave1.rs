@@ -737,51 +737,26 @@ fn regress_engine_mock_provider_auth_error_typed() {
     restore_env_batch(&saved);
 }
 
-/// When credential is missing, the router falls back to the first provider
-/// with api_key=None — but crucially, the provider name is real (not "mock").
+/// When no credential is available for sonnet's providers, resolve returns an error.
 #[test]
 fn regress_missing_credential_errors() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&[
-        "ANTHROPIC_API_KEY",
-        "NOUS_API_KEY",
-        "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY",
-        "KILO_API_KEY",
-        "AI_GATEWAY_API_KEY",
-        "OPENAI_API_KEY",
-    ]);
-
-    for key in &[
-        "ANTHROPIC_API_KEY",
-        "NOUS_API_KEY",
-        "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY",
-        "KILO_API_KEY",
-        "AI_GATEWAY_API_KEY",
-    ] {
-        env::remove_var(key);
-    }
-    env::set_var("OPENAI_API_KEY", "sk-openai-test");
+    let saved = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
     let result = router.resolve("sonnet", None);
 
-    // With no Anthropic-compatible credentials, fallback returns api_key=None
-    // but the provider must NOT be "mock" or some hardcoded value
+    // Without any credential for sonnet's providers (anthropic, nous, etc),
+    // resolve correctly returns an error
     assert!(
-        result.is_ok(),
-        "sonnet should resolve via fallback, not fail"
+        result.is_err(),
+        "sonnet should fail when no credentials are available"
     );
-    let resolved = result.unwrap();
-    assert_ne!(
-        resolved.provider, "mock",
-        "Fallback provider must NOT be 'mock'. Got '{}'",
-        resolved.provider
-    );
+    let msg = result.unwrap_err().to_string();
     assert!(
-        resolved.api_key.is_none(),
-        "Fallback model expects api_key=None when no credential is set"
+        msg.contains("API_KEY") || msg.contains("credential") || msg.contains("requires"),
+        "error should mention missing credential, got: {}",
+        msg
     );
 
     restore_env_batch(&saved);

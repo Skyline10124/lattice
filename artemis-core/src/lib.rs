@@ -377,10 +377,12 @@ struct ToolCallBuilder {
 #[cfg(test)]
 mod resolve_tests {
     use super::*;
+    use crate::router::test_support::{restore_all, save_and_clear_all, ENV_MUTEX};
 
     #[test]
     fn test_resolve_sonnet_alias_missing_credential() {
-        // Without ANTHROPIC_API_KEY, resolve should error with a Config message.
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
         let result = resolve("sonnet");
         match result {
             Ok(r) => panic!(
@@ -396,25 +398,26 @@ mod resolve_tests {
                 );
             }
         }
+        restore_all(&saved);
     }
 
     #[test]
     fn test_resolve_sonnet_alias_with_credential() {
-        let prev = std::env::var("ANTHROPIC_API_KEY").ok();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
         std::env::set_var("ANTHROPIC_API_KEY", "sk-test");
         let result = resolve("sonnet");
         assert!(result.is_ok());
         if let Ok(r) = result {
             assert_eq!(r.canonical_id, "claude-sonnet-4-6");
         }
-        match prev {
-            Some(k) => std::env::set_var("ANTHROPIC_API_KEY", k),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
-        }
+        restore_all(&saved);
     }
 
     #[test]
     fn resolve_gpt4o_missing_credential_errors() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
         let result = resolve("gpt-4o");
         match result {
             Ok(r) => panic!(
@@ -430,21 +433,20 @@ mod resolve_tests {
                 );
             }
         }
+        restore_all(&saved);
     }
 
     #[test]
     fn test_resolve_gpt4o_with_key_ok() {
-        let prev = std::env::var("OPENAI_API_KEY").ok();
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
         std::env::set_var("OPENAI_API_KEY", "sk-test");
         let result = resolve("gpt-4o");
         assert!(result.is_ok());
         if let Ok(r) = result {
             assert_eq!(r.api_protocol, catalog::ApiProtocol::OpenAiChat);
         }
-        match prev {
-            Some(k) => std::env::set_var("OPENAI_API_KEY", k),
-            None => std::env::remove_var("OPENAI_API_KEY"),
-        }
+        restore_all(&saved);
     }
 
     #[test]

@@ -132,11 +132,9 @@ fn eval_condition(cond: &HandoffCondition, output: &serde_json::Value) -> bool {
             Some(serde_json::Value::Array(arr)) => arr,
             _ => return false,
         };
-        return arr.iter().any(|elem| {
-            match resolve_field(elem, &suffix) {
-                Some(v) => eval_operator(v, cond),
-                None => false,
-            }
+        return arr.iter().any(|elem| match resolve_field(elem, &suffix) {
+            Some(v) => eval_operator(v, cond),
+            None => false,
         });
     }
 
@@ -150,7 +148,9 @@ fn eval_condition(cond: &HandoffCondition, output: &serde_json::Value) -> bool {
 /// Split `issues[any].severity` into `("issues", "severity")`.
 fn split_at_any(path: &str) -> Option<(String, String)> {
     let segments = parse_path(path);
-    let any_pos = segments.iter().position(|s| matches!(s, PathSegment::Any))?;
+    let any_pos = segments
+        .iter()
+        .position(|s| matches!(s, PathSegment::Any))?;
     let prefix = rebuild_path(&segments[..any_pos]);
     let suffix = rebuild_path(&segments[any_pos + 1..]);
     Some((prefix, suffix))
@@ -160,7 +160,9 @@ fn rebuild_path(segments: &[PathSegment]) -> String {
     segments.iter().fold(String::new(), |mut s, seg| {
         match seg {
             PathSegment::Key(k) => {
-                if !s.is_empty() { s.push('.'); }
+                if !s.is_empty() {
+                    s.push('.');
+                }
                 s.push_str(k);
             }
             PathSegment::Index(i) => s.push_str(&format!("[{i}]")),
@@ -177,8 +179,14 @@ fn eval_operator(field_val: &serde_json::Value, cond: &HandoffCondition) -> bool
         "!=" => !values_equal(field_val, &cond.value),
         "<" => compare_values(field_val, &cond.value) == Some(std::cmp::Ordering::Less),
         ">" => compare_values(field_val, &cond.value) == Some(std::cmp::Ordering::Greater),
-        "<=" => matches!(compare_values(field_val, &cond.value), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
-        ">=" => matches!(compare_values(field_val, &cond.value), Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+        "<=" => matches!(
+            compare_values(field_val, &cond.value),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
+        ">=" => matches!(
+            compare_values(field_val, &cond.value),
+            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+        ),
         "contains" => string_contains(field_val, &cond.value),
         _ => false,
     }
@@ -189,21 +197,21 @@ fn values_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
         (serde_json::Value::String(s), serde_json::Value::String(t)) => s == t,
         (serde_json::Value::Number(n), serde_json::Value::String(s)) => {
             if let Ok(f) = s.parse::<f64>() {
-                n.as_f64().map_or(false, |nf| (nf - f).abs() < f64::EPSILON)
+                n.as_f64().is_some_and(|nf| (nf - f).abs() < f64::EPSILON)
             } else {
                 false
             }
         }
         (serde_json::Value::String(s), serde_json::Value::Number(n)) => {
             if let Ok(f) = s.parse::<f64>() {
-                n.as_f64().map_or(false, |nf| (nf - f).abs() < f64::EPSILON)
+                n.as_f64().is_some_and(|nf| (nf - f).abs() < f64::EPSILON)
             } else {
                 false
             }
         }
         (serde_json::Value::Bool(b1), serde_json::Value::Bool(b2)) => b1 == b2,
         (serde_json::Value::Bool(b), serde_json::Value::String(s)) => {
-            s.parse::<bool>().map_or(false, |b2| *b == b2)
+            s.parse::<bool>().is_ok_and(|b2| *b == b2)
         }
         (serde_json::Value::Null, serde_json::Value::Null) => true,
         _ => a == b,
@@ -242,7 +250,10 @@ fn string_contains(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 
 /// Evaluate a list of rules in order; return the target of the first match.
 pub fn eval_rules(rules: &[HandoffRule], output: &serde_json::Value) -> Option<String> {
-    rules.iter().find(|r| r.eval(output)).and_then(|r| r.target.clone())
+    rules
+        .iter()
+        .find(|r| r.eval(output))
+        .and_then(|r| r.target.clone())
 }
 
 // ---------------------------------------------------------------------------
@@ -325,90 +336,117 @@ default = true
     #[test]
     fn test_eval_op_gt_true() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "confidence", op = ">", value = "0.5" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_eval_op_gt_false() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "confidence", op = ">", value = "0.9" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
     #[test]
     fn test_eval_op_equals() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[0].severity", op = "==", value = "minor" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_eval_op_not_equal() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "confidence", op = "!=", value = "0" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_eval_op_contains() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "summary", op = "contains", value = "good" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_eval_op_contains_false() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "summary", op = "contains", value = "terrible" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
     #[test]
     fn test_eval_missing_field() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "nonexistent", op = "==", value = "x" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
     #[test]
     fn test_eval_number_comparison() {
         let output = serde_json::json!({"score": 75});
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "score", op = ">=", value = "70" }
 target = "pass"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_eval_bool_equals() {
         let output = serde_json::json!({"passed": true});
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "passed", op = "==", value = "true" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
@@ -417,36 +455,45 @@ target = "next"
     #[test]
     fn test_all_both_true() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 all = [
   { field = "confidence", op = ">", value = "0.5" },
   { field = "summary", op = "contains", value = "good" },
 ]
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_all_one_false() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 all = [
   { field = "confidence", op = ">", value = "0.5" },
   { field = "confidence", op = "<", value = "0.1" },
 ]
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
     #[test]
     fn test_all_empty() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 all = []
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
@@ -455,26 +502,32 @@ target = "next"
     #[test]
     fn test_any_one_true() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 any = [
   { field = "confidence", op = "<", value = "0.5" },
   { field = "summary", op = "contains", value = "good" },
 ]
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_any_all_false() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 any = [
   { field = "confidence", op = "<", value = "0.5" },
   { field = "summary", op = "contains", value = "terrible" },
 ]
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
@@ -483,9 +536,12 @@ target = "next"
     #[test]
     fn test_default_matches_always() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 default = true
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
@@ -499,7 +555,8 @@ default = true
     #[test]
     fn test_eval_rules_first_match_wins() {
         let output = json_output();
-        let list: RuleList = toml::from_str(r#"
+        let list: RuleList = toml::from_str(
+            r#"
 [[rules]]
 condition = { field = "confidence", op = ">", value = "0.5" }
 target = "agent-a"
@@ -507,25 +564,31 @@ target = "agent-a"
 [[rules]]
 condition = { field = "confidence", op = ">", value = "0.1" }
 target = "agent-b"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(eval_rules(&list.rules, &output), Some("agent-a".into()));
     }
 
     #[test]
     fn test_eval_rules_no_match() {
         let output = json_output();
-        let list: RuleList = toml::from_str(r#"
+        let list: RuleList = toml::from_str(
+            r#"
 [[rules]]
 condition = { field = "confidence", op = "<", value = "0.1" }
 target = "agent-a"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(eval_rules(&list.rules, &output), None);
     }
 
     #[test]
     fn test_eval_rules_default_fallback() {
         let output = json_output();
-        let list: RuleList = toml::from_str(r#"
+        let list: RuleList = toml::from_str(
+            r#"
 [[rules]]
 condition = { field = "confidence", op = "<", value = "0.1" }
 target = "agent-a"
@@ -533,21 +596,29 @@ target = "agent-a"
 [[rules]]
 default = true
 target = "fallback-agent"
-"#).unwrap();
-        assert_eq!(eval_rules(&list.rules, &output), Some("fallback-agent".into()));
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_rules(&list.rules, &output),
+            Some("fallback-agent".into())
+        );
     }
 
     #[test]
     fn test_eval_rules_default_null_ends_pipeline() {
         let output = json_output();
-        let list: RuleList = toml::from_str(r#"
+        let list: RuleList = toml::from_str(
+            r#"
 [[rules]]
 condition = { field = "confidence", op = "<", value = "0.1" }
 target = "agent-a"
 
 [[rules]]
 default = true
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert_eq!(eval_rules(&list.rules, &output), None);
     }
 
@@ -556,10 +627,13 @@ default = true
     #[test]
     fn test_nested_array_index() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[1].severity", op = "==", value = "critical" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
@@ -568,50 +642,65 @@ target = "next"
     #[test]
     fn test_any_array_severity_match() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[any].severity", op = "==", value = "critical" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_any_array_no_match() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[any].severity", op = "==", value = "blocker" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 
     #[test]
     fn test_any_array_with_contains() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[any].file", op = "contains", value = "src/b" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_string_field_contains() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "issues[1].file", op = "contains", value = "src/b" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(rule.eval(&output));
     }
 
     #[test]
     fn test_invalid_operator() {
         let output = json_output();
-        let rule: HandoffRule = toml::from_str(r#"
+        let rule: HandoffRule = toml::from_str(
+            r#"
 condition = { field = "confidence", op = "??", value = "0.5" }
 target = "next"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(!rule.eval(&output));
     }
 }

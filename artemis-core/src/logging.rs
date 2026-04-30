@@ -30,14 +30,24 @@ pub fn init_logging(verbose: bool) -> Result<(), io::Error> {
             .with_line_number(true)
             .with_ansi(true)
             .try_init()
-            .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "tracing subscriber already initialized"))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "tracing subscriber already initialized",
+                )
+            })
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .compact()
             .with_ansi(false)
             .try_init()
-            .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "tracing subscriber already initialized"))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "tracing subscriber already initialized",
+                )
+            })
     }
 }
 
@@ -81,5 +91,10 @@ pub fn init_debug_logging(log_path: &str) -> Result<(), io::Error> {
         .with(console_layer)
         .with(file_layer)
         .try_init()
-        .map_err(|_| io::Error::new(io::ErrorKind::AlreadyExists, "tracing subscriber already initialized"))
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "tracing subscriber already initialized",
+            )
+        })
 }

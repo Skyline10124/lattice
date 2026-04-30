@@ -420,7 +420,8 @@ impl ModelRouter {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
             let provider_lower = provider_part.to_lowercase();
             let model_lower = model_part.to_lowercase();
-            if let Some(defaults) = self.catalog.get_provider_defaults(&provider_lower) {
+            let defaults = self.catalog.get_provider_defaults(&provider_lower);
+            if let Some(defaults) = defaults {
                 let api_key = self.resolve_credentials(&CatalogProviderEntry {
                     provider_id: provider_lower.clone(),
                     api_model_id: model_lower.clone(),
@@ -569,24 +570,62 @@ pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::catalog::ApiProtocol;
+pub(crate) mod test_support {
     use std::env;
     use std::sync::{LazyLock, Mutex};
 
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    pub static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-    fn save_env(key: &str) -> Option<String> {
-        env::var(key).ok()
+    pub const ALL_CREDENTIAL_ENV_VARS: &[&str] = &[
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "XAI_API_KEY",
+        "NOUS_API_KEY",
+        "GITHUB_TOKEN",
+        "OPENROUTER_API_KEY",
+        "OPENCODE_ZEN_API_KEY",
+        "KILO_API_KEY",
+        "AI_GATEWAY_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "MINIMAX_API_KEY",
+        "QWEN_API_KEY",
+        "ARK_API_KEY",
+        "INFINI_AI_API_KEY",
+        "MY_CUSTOM_KEY",
+    ];
+
+    pub fn save_and_clear_all() -> Vec<(String, Option<String>)> {
+        ALL_CREDENTIAL_ENV_VARS
+            .iter()
+            .map(|k| {
+                let key = k.to_string();
+                let prev = env::var(&key).ok();
+                env::remove_var(&key);
+                (key, prev)
+            })
+            .collect()
     }
 
-    fn restore_env(key: &str, prev: Option<String>) {
-        match prev {
-            Some(v) => env::set_var(key, v),
-            None => env::remove_var(key),
+    pub fn restore_all(saved: &[(String, Option<String>)]) {
+        for (key, prev) in saved {
+            match prev {
+                Some(v) => env::set_var(key, v),
+                None => env::remove_var(key),
+            }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::ApiProtocol;
+    use crate::router::test_support::{restore_all, save_and_clear_all, ENV_MUTEX};
+    use std::env;
 
     #[test]
     fn test_normalize_model_id_openrouter_prefix() {
@@ -600,6 +639,8 @@ mod tests {
     #[test]
     fn test_custom_registration() {
         let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+
         let mut router = ModelRouter::new();
         let custom = ModelCatalogEntry {
             canonical_id: "my-custom-model".to_string(),
@@ -631,7 +672,6 @@ mod tests {
             "list_models should include custom model"
         );
 
-        let prev = save_env("MY_CUSTOM_KEY");
         env::set_var("MY_CUSTOM_KEY", "custom-key");
         let resolved = router
             .resolve("my-custom-model", None)
@@ -645,7 +685,7 @@ mod tests {
             .expect("should resolve via alias after normalization");
         assert_eq!(resolved_alias.canonical_id, "my-custom-model");
 
-        restore_env("MY_CUSTOM_KEY", prev);
+        restore_all(&saved);
     }
 
     #[test]
@@ -665,15 +705,9 @@ mod tests {
     #[test]
     fn test_list_authenticated_models() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev_ant = save_env("ANTHROPIC_API_KEY");
-        let prev_oai = save_env("OPENAI_API_KEY");
-        let prev_nous = save_env("NOUS_API_KEY");
-        let prev_gh = save_env("GITHUB_TOKEN");
+        let saved = save_and_clear_all();
 
         env::set_var("ANTHROPIC_API_KEY", "test-ant");
-        env::remove_var("OPENAI_API_KEY");
-        env::remove_var("NOUS_API_KEY");
-        env::remove_var("GITHUB_TOKEN");
 
         let router = ModelRouter::new();
         let authed = router.list_authenticated_models();
@@ -683,19 +717,14 @@ mod tests {
             "claude-sonnet-4-6 should be authenticated with ANTHROPIC_API_KEY set"
         );
 
-        restore_env("ANTHROPIC_API_KEY", prev_ant);
-        restore_env("OPENAI_API_KEY", prev_oai);
-        restore_env("NOUS_API_KEY", prev_nous);
-        restore_env("GITHUB_TOKEN", prev_gh);
+        restore_all(&saved);
     }
 
     #[test]
     fn test_provider_override() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev_ant = save_env("ANTHROPIC_API_KEY");
-        let prev_nous = save_env("NOUS_API_KEY");
+        let saved = save_and_clear_all();
 
-        env::remove_var("ANTHROPIC_API_KEY");
         env::set_var("NOUS_API_KEY", "nous-key");
 
         let router = ModelRouter::new();
@@ -704,14 +733,14 @@ mod tests {
             .expect("should resolve with provider override");
         assert_eq!(resolved.provider, "anthropic");
 
-        restore_env("ANTHROPIC_API_KEY", prev_ant);
-        restore_env("NOUS_API_KEY", prev_nous);
+        restore_all(&saved);
     }
 
     #[test]
     fn test_resolve_with_normalized_name() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev = save_env("ANTHROPIC_API_KEY");
+        let saved = save_and_clear_all();
+
         env::set_var("ANTHROPIC_API_KEY", "test-ant");
 
         let router = ModelRouter::new();
@@ -720,13 +749,14 @@ mod tests {
             .expect("should resolve normalized name");
         assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
 
-        restore_env("ANTHROPIC_API_KEY", prev);
+        restore_all(&saved);
     }
 
     #[test]
     fn test_resolve_deepseek_with_direct_key() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev = save_env("DEEPSEEK_API_KEY");
+        let saved = save_and_clear_all();
+
         env::set_var("DEEPSEEK_API_KEY", "ds-key");
 
         let router = ModelRouter::new();
@@ -736,7 +766,7 @@ mod tests {
         assert_eq!(resolved.provider, "deepseek");
         assert_eq!(resolved.api_key.as_deref(), Some("ds-key"));
 
-        restore_env("DEEPSEEK_API_KEY", prev);
+        restore_all(&saved);
     }
 
     #[test]
@@ -761,7 +791,8 @@ mod tests {
     #[test]
     fn test_credentialless_provider_wins_over_lower_priority_credentialed() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev_ant = save_env("ANTHROPIC_API_KEY");
+        let saved = save_and_clear_all();
+
         env::set_var("ANTHROPIC_API_KEY", "ant-key");
 
         let mut router = ModelRouter::new();
@@ -809,13 +840,14 @@ mod tests {
         );
         assert!(resolved.api_key.is_none());
 
-        restore_env("ANTHROPIC_API_KEY", prev_ant);
+        restore_all(&saved);
     }
 
     #[test]
     fn test_credentialed_provider_wins_over_credentialless_at_same_priority() {
         let _lock = ENV_MUTEX.lock().unwrap();
-        let prev_ant = save_env("ANTHROPIC_API_KEY");
+        let saved = save_and_clear_all();
+
         env::set_var("ANTHROPIC_API_KEY", "ant-key");
 
         let mut router = ModelRouter::new();
@@ -863,7 +895,7 @@ mod tests {
         );
         assert_eq!(resolved.api_key.as_deref(), Some("ant-key"));
 
-        restore_env("ANTHROPIC_API_KEY", prev_ant);
+        restore_all(&saved);
     }
 
     #[test]

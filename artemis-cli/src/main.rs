@@ -7,7 +7,9 @@ mod config;
 mod credentials;
 mod session;
 
-use commands::{config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats, validate};
+use commands::{
+    config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats, validate,
+};
 use config::Config;
 use credentials::CredentialStore;
 
@@ -118,15 +120,14 @@ async fn main() -> Result<()> {
 
     // Initialize logging based on verbose or debug mode.
     if cli.verbose {
-        artemis_core::init_logging(true);
+        let _ = artemis_core::init_logging(true);
     } else if matches!(cli.command, Some(Commands::Debug { .. })) {
         let log_dir = dirs::home_dir()
             .map(|h| h.join(".artemis"))
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
         let log_path = log_dir.join("debug.log");
-        let _ = artemis_core::init_debug_logging(
-            log_path.to_str().unwrap_or("/tmp/artemis-debug.log"),
-        );
+        let _ =
+            artemis_core::init_debug_logging(log_path.to_str().unwrap_or("/tmp/artemis-debug.log"));
     } else {
         let _ = artemis_core::init_logging(false);
     }
