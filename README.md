@@ -12,7 +12,7 @@ artemis/ (Cargo workspace)
 ├── artemis-agent/      Agent struct, conversation state, tool boundary, memory
 ├── artemis-memory/     Memory trait + InMemoryMemory + SqliteMemory (async)
 ├── artemis-token-pool/ TokenPool trait + UnlimitedPool
-├── artemis-harness/    Pipeline orchestrator, TOML rule engine, hot reload
+├── artemis-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload
 ├── artemis-plugin/     Plugin trait (typed Input → LLM → Output)
 ├── artemis-cli/        CLI: run, validate, debug, list agents
 ├── artemis-tui/        Terminal UI (ratatui)
@@ -44,7 +44,7 @@ class CodeReviewPlugin(Plugin):
 
 ### Agent pipeline (harness)
 
-Agents are defined as TOML files in `~/.artemis/agents/`. The harness runs them in sequence, using TOML handoff rules to route between agents:
+Agents are defined as TOML files in `~/.artemis/agents/`. The harness runs them in sequence, using TOML handoff rules to route between agents. Fork targets run multiple agents in parallel:
 
 ```toml
 [agent]
@@ -59,13 +59,19 @@ fallback = "human-review"
 
 [[handoff.rules]]
 condition = { field = "issues[any].severity", op = "==", value = "critical" }
+target = "fork:security,performance"
+
+[[handoff.rules]]
+condition = { field = "confidence", op = ">", value = "0.5" }
 target = "refactor"
 
 [[handoff.rules]]
 default = true
 ```
 
-Handoff rule operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`. Compound rules: `all` (AND), `any` (OR). Array matching: `[any]` iterates all elements. JSON schema validation with automatic retry.
+Fork syntax: `target = "fork:security,performance"` runs both agents in parallel, merges outputs as `{security: ..., performance: ...}`, and feeds the merged result to the next agent.
+
+Handoff rule operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`. Compound rules: `all` (AND), `any` (OR). Array matching: `[any]` iterates all elements. Fork targets: `target = "fork:A,B"` runs A and B in parallel. JSON schema validation with automatic retry.
 
 ## Quick start
 
@@ -135,7 +141,7 @@ Artemis is in **alpha / dogfooding** stage. What works:
 - **Streaming**: SSE parsers for both protocols, tool call tracking across chunks
 - **Thinking mode**: DeepSeek v4-pro (OpenAI reasoning_content), MiniMax M2.7 (Anthropic thinking_delta)
 - **Agent**: multi-turn conversation, tool execution boundary, memory, token budget
-- **Harness**: TOML-defined pipelines, handoff rule engine, dry-run validation, hot reload
+- **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
 - **CLI**: run, validate, debug, list agents
 - **HTTPS enforced**: non-localhost HTTP base URLs rejected at the engine level
@@ -161,8 +167,8 @@ artemis/                 Git root (Cargo workspace)
 ├── artemis-token-pool/  TokenPool trait + UnlimitedPool
 ├── artemis-harness/     Pipeline orchestrator, TOML rule engine, hot reload
 │   ├── src/
-│   │   ├── pipeline.rs  Pipeline + PipelineRun + DryRunReport
-│   │   ├── handoff_rule.rs  TOML rule parsing + evaluation
+│   │   ├── pipeline.rs  Pipeline + PipelineRun + DryRunReport (sequential + fork)
+│   │   ├── handoff_rule.rs  HandoffTarget (Single/Fork) + TOML rule parsing + evaluation
 │   │   ├── profile.rs   AgentProfile TOML parsing
 │   │   ├── registry.rs  AgentRegistry loading + hot reload
 │   │   ├── runner.rs    AgentRunner (wraps Agent + profile)

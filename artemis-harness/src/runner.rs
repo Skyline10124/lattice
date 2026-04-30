@@ -12,7 +12,7 @@ use crate::profile::AgentProfile;
 // ---------------------------------------------------------------------------
 
 /// Shared tokio runtime for async Memory operations.
-static MEMORY_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+pub(crate) static MEMORY_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Runtime::new().expect("Failed to create memory tokio runtime")
 });
 

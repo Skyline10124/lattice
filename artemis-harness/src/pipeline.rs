@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::Instant;
 
 use artemis_agent::Agent;
@@ -9,16 +8,7 @@ use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
 use crate::profile::AgentProfile;
 use crate::registry::AgentRegistry;
-use crate::runner::AgentRunner;
-
-// ---------------------------------------------------------------------------
-// Pipeline — orchestrates multiple agents in sequence or parallel (fork)
-// ---------------------------------------------------------------------------
-
-/// Shared tokio runtime for async Memory operations.
-static MEMORY_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new().expect("Failed to create memory tokio runtime")
-});
+use crate::runner::{AgentRunner, MEMORY_RT};
 
 pub struct Pipeline {
     pub name: String,
@@ -39,13 +29,6 @@ pub struct AgentResult {
     pub agent_name: String,
     pub output: serde_json::Value,
     pub next: Option<HandoffTarget>,
-    pub duration_ms: u64,
-}
-
-/// Result from a single fork branch.
-pub struct ForkBranchResult {
-    pub agent_name: String,
-    pub output: serde_json::Value,
     pub duration_ms: u64,
 }
 
@@ -80,7 +63,7 @@ impl Pipeline {
         let mut current_input = input.to_string();
         let mut completed = false;
 
-        let pipeline_max_agents: u32 = 20;
+        let pipeline_max_agents = 20;
 
         for _turn in 0..pipeline_max_agents {
             let profile = match self.registry.get(&current_agent) {
@@ -98,7 +81,6 @@ impl Pipeline {
             let agent_max_turns = profile.handoff.max_turns.unwrap_or(10);
             let start = Instant::now();
 
-            // Emit agent started event
             if let Some(ref bus) = self.event_bus {
                 bus.send(PipelineEvent::AgentStarted {
                     agent: profile.agent.name.clone(),
@@ -106,7 +88,6 @@ impl Pipeline {
                 });
             }
 
-            // Resolve model and create Agent
             let resolved = match artemis_core::resolve(&profile.agent.model) {
                 Ok(r) => r,
                 Err(e) => {
@@ -118,9 +99,7 @@ impl Pipeline {
                     if profile.agent.skippable {
                         skipped.push(profile.agent.name.clone());
                         errors.push(err);
-                        if let Some(next_name) =
-                            handle_fallback(&profile, &self.registry, &mut current_agent)
-                        {
+                        if let Some(next_name) = handle_fallback(&profile, &self.registry) {
                             current_agent = next_name;
                         } else {
                             break;
@@ -147,17 +126,14 @@ impl Pipeline {
                 Ok(output) => {
                     let duration_ms = start.elapsed().as_millis() as u64;
 
-                    // Evaluate handoff rules to determine next agent(s)
                     let next = if profile.handoff.handoff_rules.is_empty() {
                         profile.handoff.fallback.clone()
                     } else {
                         eval_rules(&profile.handoff.handoff_rules, &output)
                     };
 
-                    // Save session log to shared memory
                     self.save_memory_entry(&profile, &output);
 
-                    // Emit agent completed event
                     if let Some(ref bus) = self.event_bus {
                         let preview: String = output.to_string().chars().take(500).collect();
                         bus.send(PipelineEvent::AgentCompleted {
@@ -194,7 +170,6 @@ impl Pipeline {
                                 });
                             }
 
-                            // Run fork branches in parallel
                             let fork_results = self.run_fork(
                                 &targets,
                                 &output.to_string(),
@@ -203,11 +178,9 @@ impl Pipeline {
                                 &mut skipped,
                             );
 
-                            // Merge fork outputs into a single JSON
                             let merged = self.merge_fork_outputs(&fork_results);
 
-                            // Find a common next agent from the fork branches
-                            // (use the first non-None next target, or fallback from the originating profile)
+                            // Use first non-None next target, or fallback from the originating profile
                             let fork_next = fork_results
                                 .iter()
                                 .find_map(|r| r.next.clone())
@@ -220,7 +193,6 @@ impl Pipeline {
                                     current_agent = n;
                                 }
                                 Some(HandoffTarget::Fork(_)) => {
-                                    // Nested forks — continue the outer loop
                                     current_agent =
                                         fork_results[0].next.clone().unwrap().agent_names()[0]
                                             .to_string();
@@ -254,9 +226,7 @@ impl Pipeline {
                     if profile.agent.skippable {
                         skipped.push(profile.agent.name.clone());
                         errors.push(err);
-                        if let Some(next_name) =
-                            handle_fallback(&profile, &self.registry, &mut current_agent)
-                        {
+                        if let Some(next_name) = handle_fallback(&profile, &self.registry) {
                             current_agent = next_name;
                         } else {
                             break;
@@ -267,10 +237,6 @@ impl Pipeline {
                         break;
                     }
                 }
-            }
-
-            if results.len() > agent_max_turns as usize * 5 {
-                break;
             }
         }
 
@@ -317,34 +283,27 @@ impl Pipeline {
                 let memory_box = memory_box.clone();
 
                 std::thread::spawn(move || {
-                    let name_for_msg = agent_name.clone();
                     let profile = match registry.get(&agent_name) {
                         Some(p) => p.clone(),
                         None => {
-                            let msg = format!("Agent '{}' not found in registry", agent_name);
-                            return (
-                                agent_name,
-                                Err(AgentError {
-                                    agent_name: name_for_msg,
-                                    message: msg,
-                                    skippable: false,
-                                }),
-                            );
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
+                                message: format!("Agent '{}' not found in registry", agent_name),
+                                skippable: false,
+                            };
+                            return (agent_name, Err(err));
                         }
                     };
 
                     let resolved = match artemis_core::resolve(&profile.agent.model) {
                         Ok(r) => r,
                         Err(e) => {
-                            let msg = format!("Resolve failed: {}", e);
-                            return (
-                                agent_name,
-                                Err(AgentError {
-                                    agent_name: name_for_msg,
-                                    message: msg,
-                                    skippable: profile.agent.skippable,
-                                }),
-                            );
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
+                                message: format!("Resolve failed: {}", e),
+                                skippable: profile.agent.skippable,
+                            };
+                            return (agent_name, Err(err));
                         }
                     };
 
@@ -371,20 +330,19 @@ impl Pipeline {
                             };
                             (agent_name, Ok((output, duration_ms, next)))
                         }
-                        Err(e) => (
-                            agent_name,
-                            Err(AgentError {
-                                agent_name: name_for_msg,
+                        Err(e) => {
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
                                 message: e.to_string(),
                                 skippable: profile.agent.skippable,
-                            }),
-                        ),
+                            };
+                            (agent_name, Err(err))
+                        }
                     }
                 })
             })
             .collect();
 
-        // Collect results
         let mut fork_results = Vec::new();
         for (i, handle) in handles.into_iter().enumerate() {
             let (agent_name, result) = match handle.join() {
@@ -406,7 +364,6 @@ impl Pipeline {
                         errors.push(err);
                     } else {
                         errors.push(err);
-                        // Non-skippable error in a fork branch stops the whole pipeline
                         return fork_results;
                     }
                 }
@@ -428,15 +385,12 @@ impl Pipeline {
     /// Save a session log entry to shared memory.
     fn save_memory_entry(&self, profile: &AgentProfile, output: &serde_json::Value) {
         if let Some(ref mem) = self.shared_memory {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let entry = artemis_memory::MemoryEntry {
-                id: format!(
-                    "{}-{}",
-                    profile.agent.name,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                ),
+                id: format!("{}-{}", profile.agent.name, now_secs),
                 kind: artemis_memory::EntryKind::SessionLog,
                 session_id: profile.agent.name.clone(),
                 summary: format!(
@@ -446,13 +400,7 @@ impl Pipeline {
                 ),
                 content: output.to_string(),
                 tags: profile.agent.tags.clone(),
-                created_at: format!(
-                    "{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                ),
+                created_at: now_secs.to_string(),
             };
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 tokio::task::block_in_place(|| handle.block_on(mem.save_entry(entry)));
@@ -491,7 +439,6 @@ impl Pipeline {
 
             report.agents_in_chain.push(profile.agent.name.clone());
 
-            // Check each handoff rule target
             for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
                 if let Some(ref target) = rule.target {
                     for name in target.agent_names() {
@@ -505,7 +452,6 @@ impl Pipeline {
                 }
             }
 
-            // Check fallback target
             if let Some(ref fallback) = profile.handoff.fallback {
                 for name in fallback.agent_names() {
                     if self.registry.get(name).is_none() {
@@ -589,24 +535,17 @@ pub struct DryRunReport {
 }
 
 /// Try to route to the fallback agent. Returns the fallback agent name if valid.
-fn handle_fallback(
-    profile: &AgentProfile,
-    registry: &AgentRegistry,
-    current_agent: &mut String,
-) -> Option<String> {
+fn handle_fallback(profile: &AgentProfile, registry: &AgentRegistry) -> Option<String> {
     if let Some(ref fallback) = profile.handoff.fallback {
         match fallback {
             HandoffTarget::Single(name) => {
                 if registry.get(name).is_some() {
-                    *current_agent = name.clone();
                     return Some(name.clone());
                 }
             }
             HandoffTarget::Fork(names) => {
-                // For fallback, use the first valid fork target
                 if let Some(first) = names.first() {
                     if registry.get(first).is_some() {
-                        *current_agent = first.clone();
                         return Some(first.clone());
                     }
                 }

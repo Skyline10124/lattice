@@ -68,7 +68,7 @@ User Code (Python / Rust / CLI)
   → artemis_core::resolve("sonnet")      → ResolvedModel
   → artemis_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
   → artemis_agent::Agent::new(resolved)  → send(), submit_tools()
-  → artemis_harness::Pipeline::new()     → run() → multi-agent TOML pipeline
+  → artemis_harness::Pipeline::new()     → run() → multi-agent TOML pipeline (sequential + fork parallel)
 ```
 
 ### Crate map
@@ -79,7 +79,7 @@ User Code (Python / Rust / CLI)
 | `artemis-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API |
 | `artemis-memory` | `Memory` trait (`save`/`history`/`search`) + `InMemoryMemory` default impl |
 | `artemis-token-pool` | `TokenPool` trait (`acquire`/`release`/`remaining`) + `UnlimitedPool` default impl |
-| `artemis-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine, hot reload, JSON schema validation, WebSocket events |
+| `artemis-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
 | `artemis-plugin` | Plugin trait (placeholder — not yet functional) |
 | `artemis-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
 | `artemis-tui` | Terminal UI (ratatui-based — early stage) |
@@ -104,10 +104,10 @@ User Code (Python / Rust / CLI)
 
 | Module | Purpose |
 |--------|---------|
-| `pipeline` | `Pipeline`: multi-agent chain execution, handoff rule evaluation, dry_run validation |
-| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry |
+| `pipeline` | `Pipeline`: multi-agent chain/fork execution, handoff rule evaluation, dry_run validation |
+| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry, shared `MEMORY_RT` |
 | `profile` | `AgentProfile` + `HandoffConfig`: TOML-deserialized agent configuration |
-| `handoff_rule` | `HandoffRule`, `HandoffCondition`: TOML-based routing with AND/OR/default + `[any]` array matching |
+| `handoff_rule` | `HandoffTarget` (Single/Fork), `HandoffRule`, `HandoffCondition`: TOML routing with AND/OR/default + `[any]` array matching + `fork:A,B` parallel syntax |
 | `registry` | `AgentRegistry`: load agent profiles from directory, hot reload via `notify` |
 | `events` | `PipelineEvent` + `EventBus`: broadcast channel for pipeline status events |
 | `watcher` | File watcher for agent directory changes, triggers registry reload |
@@ -144,6 +144,8 @@ default = true
 ```
 
 Evaluation: rules checked in order, first match wins. Supports `condition` (single), `all` (AND), `any` (OR), `default` (unconditional). `[any]` iterates array elements. Operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`.
+
+Targets can be a single agent (`"refactor"`) or a fork (`"fork:security,performance"`). Fork runs multiple agents in parallel via `std::thread::spawn`, merges outputs as `{agent_name: output}` JSON, and feeds the merged result to the next agent in the chain. TOML syntax: `target = "fork:A,B"` → `HandoffTarget::Fork(["A","B"])`.
 
 ### JSON schema validation
 
