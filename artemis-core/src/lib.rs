@@ -36,11 +36,9 @@ use std::pin::Pin;
 use std::sync::LazyLock;
 
 use futures::{Stream, StreamExt};
-use reqwest_eventsource::RequestBuilderExt;
 
 use crate::catalog::ApiProtocol;
 use crate::provider::{ChatRequest, ChatResponse};
-use crate::streaming::EventStream;
 use crate::transport::TransportDispatcher;
 
 static DISPATCHER: LazyLock<TransportDispatcher> = LazyLock::new(TransportDispatcher::new);
@@ -136,12 +134,24 @@ pub async fn chat(
                 }
             }
 
-            let event_source = req.eventsource().map_err(|e| ArtemisError::Network {
-                message: format!("Failed to create event source: {}", e),
-                status: None,
+            let response = req.send().await.map_err(|e| ArtemisError::Network {
+                message: format!("HTTP request failed: {}", e),
+                status: e.status().map(|s| s.as_u16()),
             })?;
 
-            let stream = EventStream::new(event_source, transport.create_sse_parser());
+            let status = response.status();
+            if !status.is_success() {
+                let body_text = response.text().await.unwrap_or_default();
+                return Err(ArtemisError::ProviderUnavailable {
+                    provider: resolved.provider.clone(),
+                    reason: format!("HTTP {}: {}", status.as_u16(), body_text),
+                });
+            }
+
+            let stream = crate::streaming::sse_from_bytes_stream(
+                response.bytes_stream(),
+                transport.create_sse_parser(),
+            );
             Ok(Box::pin(stream))
         }
 
@@ -152,12 +162,13 @@ pub async fn chat(
                     message: "AnthropicMessages transport not registered".into(),
                 })?;
 
-            let body =
+            let mut body =
                 transport
                     .normalize_request(&request)
                     .map_err(|e| ArtemisError::Streaming {
                         message: e.to_string(),
                     })?;
+            body["stream"] = serde_json::Value::Bool(true);
 
             let base_url = resolved.base_url.trim_end_matches('/');
             let endpoint = resolved
@@ -177,19 +188,30 @@ pub async fn chat(
                     transport.auth_header_value(api_key),
                 );
             }
-            // Inject extra headers from provider_specific
             for (key, value) in &resolved.provider_specific {
                 if let Some(header_name) = key.strip_prefix("header:") {
                     req = req.header(header_name, value);
                 }
             }
 
-            let event_source = req.eventsource().map_err(|e| ArtemisError::Network {
-                message: format!("Failed to create event source: {}", e),
-                status: None,
+            let response = req.send().await.map_err(|e| ArtemisError::Network {
+                message: format!("HTTP request failed: {}", e),
+                status: e.status().map(|s| s.as_u16()),
             })?;
 
-            let stream = EventStream::new(event_source, transport.create_sse_parser());
+            let status = response.status();
+            if !status.is_success() {
+                let body_text = response.text().await.unwrap_or_default();
+                return Err(ArtemisError::ProviderUnavailable {
+                    provider: resolved.provider.clone(),
+                    reason: format!("HTTP {}: {}", status.as_u16(), body_text),
+                });
+            }
+
+            let stream = crate::streaming::sse_from_bytes_stream(
+                response.bytes_stream(),
+                transport.create_sse_parser(),
+            );
             Ok(Box::pin(stream))
         }
 

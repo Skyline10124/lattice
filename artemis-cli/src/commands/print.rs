@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::io::Write;
 use std::time::Instant;
 
-pub fn run(
+pub async fn run(
     model: &str,
     prompt: &str,
     provider_override: Option<&str>,
@@ -38,7 +38,7 @@ pub fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.send_message(prompt);
+    let events = agent.send_message_async(prompt).await;
     run_conversation(&mut agent, events, verbose, json)?;
 
     let elapsed = start.elapsed().as_millis();

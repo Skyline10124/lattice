@@ -74,9 +74,15 @@ fn default_max_retries() -> u32 {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct HandoffConfig {
     #[serde(default)]
-    pub handoff_file: Option<String>, // path to handoff.py
+    pub handoff_file: Option<String>, // path to handoff.py (DEPRECATED — use rules)
+    #[serde(default, rename = "rules")]
+    pub handoff_rules: Vec<crate::handoff_rule::HandoffRule>,
     #[serde(default)]
-    pub fallback: Option<String>, // default next agent if handoff returns None
+    pub fallback: Option<String>, // default next agent if no rule matches
+    #[serde(default)]
+    pub output_schema: Option<String>, // JSON schema for output validation
+    #[serde(default)]
+    pub max_turns: Option<u32>, // max agent turns in pipeline (default: 10)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,5 +183,33 @@ mod tests {
         let profile: AgentProfile = toml::from_str(toml_str).unwrap();
         assert!(!profile.agent.skippable);
         assert!(profile.agent.tags.is_empty());
+    }
+
+    #[test]
+    fn test_handoff_rules_deserialization() {
+        let toml_str = r#"
+        [agent]
+        name = "test-agent"
+        model = "sonnet"
+
+        [system]
+        prompt = "Test"
+
+        [handoff]
+        fallback = "fallback-agent"
+
+        [[handoff.rules]]
+        condition = { field = "confidence", op = "<", value = "0.5" }
+        target = "human-review"
+
+        [[handoff.rules]]
+        default = true
+        "#;
+        let profile: AgentProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.agent.name, "test-agent");
+        assert_eq!(profile.handoff.fallback.as_deref(), Some("fallback-agent"));
+        assert_eq!(profile.handoff.handoff_rules.len(), 2);
+        assert_eq!(profile.handoff.handoff_rules[0].target.as_deref(), Some("human-review"));
+        assert!(profile.handoff.handoff_rules[1].default);
     }
 }

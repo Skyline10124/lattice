@@ -12,17 +12,11 @@ use artemis_core::ResolvedModel;
 use tokio::runtime::Handle;
 
 /// Run an async task, safely handling both runtime contexts.
-/// If called from within a tokio runtime, uses Handle::block_on instead
-/// of creating a new Runtime (avoids nested runtime panic).
-/// If called from outside any runtime, uses the global SHARED_RUNTIME.
 fn run_async<F, T>(f: F) -> T
 where
     F: futures::Future<Output = T>,
 {
     if let Ok(_handle) = Handle::try_current() {
-        // We're inside a tokio runtime. block_in_place tells tokio to
-        // lend us this thread so SHARED_RUNTIME.block_on won't starve
-        // the runtime's IO driver.
         tokio::task::block_in_place(|| SHARED_RUNTIME.block_on(f))
     } else {
         SHARED_RUNTIME.block_on(f)
@@ -116,6 +110,13 @@ impl Agent {
         self.run_chat()
     }
 
+    /// Async variant — use this from within a tokio runtime to avoid
+    /// the `block_in_place` + `block_on` nesting that can hang.
+    pub async fn send_message_async(&mut self, content: &str) -> Vec<LoopEvent> {
+        self.state.push_user_message(content);
+        self.run_chat_async().await
+    }
+
     /// Submit tool call results, continue the conversation.
     /// `max_size` optionally limits the byte size of each tool result
     /// (default: 1 MB). Larger results are truncated with a note.
@@ -173,6 +174,12 @@ impl Agent {
             all_events.extend(events);
 
             if tool_calls.is_empty() {
+                break;
+            }
+
+            // If the model requested tools but no executor is registered,
+            // we can't make progress — stop to avoid burning tokens in a loop.
+            if self.tool_executor.is_none() {
                 break;
             }
 
@@ -317,6 +324,100 @@ impl Agent {
         events
     }
 
+    /// Async variant of run_chat — no run_async wrapper.
+    async fn run_chat_async(&mut self) -> Vec<LoopEvent> {
+        use futures::StreamExt;
+
+        let mut stream = match self.chat_with_retry_async().await {
+            Ok(s) => s,
+            Err(e) => {
+                return vec![LoopEvent::Error {
+                    message: e.to_string(),
+                }]
+            }
+        };
+
+        let mut events = Vec::new();
+        let mut content_buf = String::new();
+        let mut reasoning_buf = String::new();
+        let mut tool_builders: HashMap<String, ToolCallAccum> = HashMap::new();
+
+        while let Some(event) = stream.next().await {
+            match event {
+                StreamEvent::Token { content: c } => {
+                    content_buf.push_str(&c);
+                    events.push(LoopEvent::Token { text: c });
+                }
+                StreamEvent::Reasoning { content: r } => {
+                    reasoning_buf.push_str(&r);
+                    events.push(LoopEvent::Reasoning { text: r });
+                }
+                StreamEvent::ToolCallStart { id, name } => {
+                    tool_builders.insert(
+                        id,
+                        ToolCallAccum {
+                            name,
+                            arguments: String::new(),
+                        },
+                    );
+                }
+                StreamEvent::ToolCallDelta {
+                    id,
+                    arguments_delta,
+                } => {
+                    if let Some(tc) = tool_builders.get_mut(&id) {
+                        tc.arguments.push_str(&arguments_delta);
+                    }
+                }
+                StreamEvent::ToolCallEnd { .. } => {}
+                StreamEvent::Done { usage, .. } => {
+                    if let Some(ref u) = usage {
+                        self.state.add_token_usage(u.total_tokens as u64);
+                    }
+                    if !tool_builders.is_empty() {
+                        let calls: Vec<artemis_core::types::ToolCall> = tool_builders
+                            .iter()
+                            .map(|(id, tc)| artemis_core::types::ToolCall {
+                                id: id.clone(),
+                                function: artemis_core::types::FunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: tc.arguments.clone(),
+                                },
+                            })
+                            .collect();
+                        events.push(LoopEvent::ToolCallRequired { calls });
+                    }
+                    events.push(LoopEvent::Done { usage });
+                }
+                StreamEvent::Error { message } => {
+                    events.push(LoopEvent::Error { message });
+                }
+            }
+        }
+
+        let tool_calls = if tool_builders.is_empty() {
+            None
+        } else {
+            Some(
+                tool_builders
+                    .into_iter()
+                    .map(|(id, tc)| artemis_core::types::ToolCall {
+                        id,
+                        function: artemis_core::types::FunctionCall {
+                            name: tc.name,
+                            arguments: tc.arguments,
+                        },
+                    })
+                    .collect(),
+            )
+        };
+
+        self.state
+            .push_assistant_message(&content_buf, &reasoning_buf, tool_calls);
+
+        events
+    }
+
     /// Call chat() with retry logic. Retries only on retryable errors.
     fn chat_with_retry(
         &self,
@@ -344,6 +445,37 @@ impl Agent {
                     run_async(async {
                         tokio::time::sleep(delay).await;
                     });
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Async variant of chat_with_retry — no run_async wrapper.
+    async fn chat_with_retry_async(
+        &self,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
+        artemis_core::ArtemisError,
+    > {
+        use artemis_core::errors::ErrorClassifier;
+        let mut attempt = 0u32;
+
+        loop {
+            match artemis_core::chat(
+                &self.state.resolved,
+                &self.state.messages,
+                &self.tools,
+            )
+            .await
+            {
+                Ok(stream) => return Ok(stream),
+                Err(ref e) => {
+                    if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(e) {
+                        return Err(e.clone());
+                    }
+                    let delay = self.retry.jittered_backoff(attempt);
+                    tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
             }

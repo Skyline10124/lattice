@@ -8,35 +8,13 @@
 //! - [`SseParser`] trait — pluggable parsing strategy per provider
 //! - [`OpenAiSseParser`] — parses the OpenAI `chat.completion.chunk` format
 //! - [`AnthropicSseParser`] — parses the Anthropic message-streaming format
-//! - [`SseStream`] — async `next_event()` interface over [`reqwest_eventsource::EventSource`]
-//! - [`EventStream`] — boxed [`Stream`] for ergonomic use with stream combinators
-//! - [`parse_raw_sse`] — fallback synchronous parser for raw SSE text
+//! - [`parse_raw_sse`] — synchronous parser for raw SSE text
+//! - [`sse_from_bytes_stream`] — async SSE parser from raw HTTP response body
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use futures::{Stream, StreamExt};
-use reqwest_eventsource::{self as re, Event, EventSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// Errors that can occur during SSE streaming.
-#[derive(Debug, thiserror::Error)]
-pub enum SseError {
-    /// A generic parse error (e.g. unexpected format).
-    #[error("SSE parse error: {0}")]
-    Parse(String),
-
-    /// An error from the underlying [`reqwest_eventsource`] stream.
-    #[error(transparent)]
-    ReqwestEventsource(#[from] re::Error),
-
-    /// An error from JSON deserialisation of a chunk payload.
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
-}
 
 /// Token usage statistics returned by the provider in the final stream chunk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -375,168 +353,6 @@ impl SseParser for AnthropicSseParser {
     }
 }
 
-/// An SSE stream that wraps a [`reqwest_eventsource::EventSource`] and parses
-/// events using a pluggable [`SseParser`].
-///
-/// Provides a simple async `next_event()` method for callers that want to
-/// process events one at a time without pulling in the [`Stream`] machinery.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use reqwest_eventsource::RequestBuilderExt;
-///
-/// let client = reqwest::Client::new();
-/// let es = client
-///     .get("https://api.openai.com/v1/chat/completions")
-///     .header("Authorization", "Bearer sk-...")
-///     .eventsource()?;
-///
-/// let mut stream = SseStream::new(es, OpenAiSseParser::new());
-/// while let Some(event) = stream.next_event().await? {
-///     match event {
-///         StreamEvent::Token { content } => print!("{content}"),
-///         StreamEvent::Done { .. } => break,
-///         _ => {}
-///     }
-/// }
-/// ```
-pub struct SseStream<Parser: SseParser> {
-    event_source: Pin<Box<EventSource>>,
-    parser: Parser,
-    buffer: VecDeque<StreamEvent>,
-}
-
-impl<Parser: SseParser> SseStream<Parser> {
-    /// Create a new stream from an [`EventSource`] and a parser.
-    pub fn new(event_source: EventSource, parser: Parser) -> Self {
-        Self {
-            event_source: Box::pin(event_source),
-            parser,
-            buffer: VecDeque::new(),
-        }
-    }
-
-    /// Read and parse the next SSE event, returning the resulting
-    /// [`StreamEvent`].
-    ///
-    /// Returns `Ok(None)` when the underlying event source has been exhausted
-    /// (normal stream end).
-    pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, SseError> {
-        loop {
-            // Drain buffered events first
-            if let Some(event) = self.buffer.pop_front() {
-                return Ok(Some(event));
-            }
-
-            match self.event_source.next().await {
-                Some(Ok(Event::Open)) => continue,
-                Some(Ok(Event::Message(msg))) => {
-                    let events = self
-                        .parser
-                        .parse_chunk(&msg.event, &msg.data)
-                        .map_err(|e| SseError::Parse(e.to_string()))?;
-                    self.buffer.extend(events);
-                }
-                Some(Err(e)) => return Err(SseError::from(e)),
-                None => return Ok(None),
-            }
-        }
-    }
-
-    /// Get a reference to the underlying parser (e.g. to access accumulated
-    /// state after the stream finishes).
-    pub fn parser(&self) -> &Parser {
-        &self.parser
-    }
-
-    /// Consume the stream and return the parser.
-    pub fn into_parser(self) -> Parser {
-        self.parser
-    }
-}
-
-/// A boxed, pinned SSE event stream that implements [`futures::Stream`].
-///
-/// Construct it from an [`EventSource`] + [`SseParser`].
-///
-/// # Stream item type
-///
-/// `Item = StreamEvent` — network / parse errors are surfaced through the
-/// [`StreamEvent::Error`] variant.  Stream termination (normal or error)
-/// is signalled via `Poll::Ready(None)`.
-pub struct EventStream {
-    event_source: Pin<Box<EventSource>>,
-    parser: Box<dyn SseParser>,
-    buffer: VecDeque<StreamEvent>,
-}
-
-impl EventStream {
-    /// Create a new event stream from an [`EventSource`] and a boxed parser.
-    pub fn new(event_source: EventSource, parser: Box<dyn SseParser>) -> Self {
-        Self {
-            event_source: Box::pin(event_source),
-            parser,
-            buffer: VecDeque::new(),
-        }
-    }
-}
-
-impl Stream for EventStream {
-    type Item = StreamEvent;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        if let Some(event) = this.buffer.pop_front() {
-            return Poll::Ready(Some(event));
-        }
-
-        loop {
-            match this.event_source.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(Event::Open))) => continue,
-                Poll::Ready(Some(Ok(Event::Message(msg)))) => {
-                    match this.parser.parse_chunk(&msg.event, &msg.data) {
-                        Ok(events) => {
-                            if events.is_empty() {
-                                continue;
-                            }
-                            let mut iter = events.into_iter();
-                            // Return first event, buffer the rest
-                            let first = iter.next().expect("checked !is_empty()");
-                            this.buffer.extend(iter);
-                            return Poll::Ready(Some(first));
-                        }
-                        Err(e) => {
-                            return Poll::Ready(Some(StreamEvent::Error {
-                                message: e.to_string(),
-                            }));
-                        }
-                    }
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    let message = match &e {
-                        re::Error::InvalidStatusCode(status, _) => {
-                            format!("HTTP {}: {}", status.as_u16(), e)
-                        }
-                        re::Error::Transport(reqwest_err) => {
-                            if let Some(status) = reqwest_err.status() {
-                                format!("HTTP {}: {}", status.as_u16(), e)
-                            } else {
-                                e.to_string()
-                            }
-                        }
-                        _ => e.to_string(),
-                    };
-                    return Poll::Ready(Some(StreamEvent::Error { message }));
-                }
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
 /// A raw SSE event produced by [`parse_raw_sse`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSseEvent {
@@ -604,6 +420,50 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
     }
 
     events
+}
+
+/// Parse a stream of byte chunks (from a raw HTTP response body) into SSE events.
+///
+/// This bypasses `reqwest_eventsource` and works with any SSE endpoint.
+pub fn sse_from_bytes_stream(
+    body: impl futures::Stream<Item = Result<impl AsRef<[u8]>, impl std::fmt::Display>> + Send + 'static,
+    parser: Box<dyn SseParser>,
+) -> impl futures::Stream<Item = StreamEvent> + Send {
+    use futures::StreamExt;
+
+    let mut parser = parser;
+    let mut buf = String::new();
+
+    body.flat_map(move |chunk| {
+        let text = match chunk {
+            Ok(bytes) => String::from_utf8_lossy(bytes.as_ref()).to_string(),
+            Err(e) => {
+                return futures::stream::iter(vec![StreamEvent::Error {
+                    message: format!("HTTP body stream error: {e}"),
+                }])
+            }
+        };
+
+        buf.push_str(&text);
+
+        // Parse complete SSE events (delimited by blank lines)
+        let mut events = Vec::new();
+        while let Some(pos) = buf.find("\n\n") {
+            let raw = buf[..pos].to_string();
+            buf = buf[pos + 2..].to_string();
+
+            for raw_event in parse_raw_sse(&raw) {
+                match parser.parse_chunk(&raw_event.event, &raw_event.data) {
+                    Ok(evts) => events.extend(evts),
+                    Err(e) => events.push(StreamEvent::Error {
+                        message: format!("SSE parse error: {e}"),
+                    }),
+                }
+            }
+        }
+
+        futures::stream::iter(events)
+    })
 }
 
 /// Convenience function: parse raw SSE text through a parser and collect all

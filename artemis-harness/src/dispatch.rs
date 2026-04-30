@@ -50,7 +50,7 @@ impl AgentDispatcher for HarnessAgentDispatcher {
         runner.shared_memory = self.memory.clone();
 
         match runner.run(input) {
-            Ok((output, _)) => output.to_string(),
+            Ok(output) => output.to_string(),
             Err(e) => format!("Error running agent '{}': {}", agent_name, e),
         }
     }

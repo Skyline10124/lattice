@@ -11,6 +11,7 @@ path = "src/main.rs"
 artemis-core = { path = "../artemis-core" }
 artemis-agent = { path = "../artemis-agent" }
 artemis-memory = { path = "../artemis-memory" }
+artemis-harness = { path = "../artemis-harness" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 clap = { version = "4", features = ["derive", "env"] }

@@ -7,7 +7,7 @@ mod config;
 mod credentials;
 mod session;
 
-use commands::{config_cmd, debug, doctor, models, print, resolve, run, sessions, stats};
+use commands::{config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats, validate};
 use config::Config;
 use credentials::CredentialStore;
 
@@ -90,6 +90,25 @@ enum Commands {
         #[arg(long, help = "Only resolve, don't chat")]
         resolve_only: bool,
     },
+    #[command(about = "Validate agent profiles in ~/.artemis/agents/")]
+    Validate {
+        #[arg(help = "Optional path to agents directory")]
+        dir: Option<String>,
+    },
+    #[command(about = "Create a new agent profile")]
+    New {
+        #[command(subcommand)]
+        action: NewAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum NewAction {
+    #[command(about = "Create a new agent profile from template")]
+    Agent {
+        #[arg(help = "Agent name")]
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -126,7 +145,8 @@ async fn main() -> Result<()> {
             cli.verbose,
             cli.json,
             &creds,
-        );
+        )
+        .await;
     }
 
     // Default: enter TUI (if no subcommand)
@@ -177,6 +197,12 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| config.default_model());
             debug::run(prompt, model, provider, resolve_only, &creds).await?;
         }
+        Some(Commands::Validate { dir }) => {
+            validate::run(dir)?;
+        }
+        Some(Commands::New { action }) => match action {
+            NewAction::Agent { name } => new_agent::run(name)?,
+        },
         None => {
             // No command and no -p: launch TUI
             eprintln!(
