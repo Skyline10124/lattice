@@ -4,6 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 pub struct Theme {
     pub bg: Color,
     pub surface: Color,
+    #[allow(dead_code)]
     pub overlay: Color,
     pub text: Color,
     pub subtext: Color,
@@ -54,6 +55,7 @@ impl Theme {
         Style::default().fg(self.tool_accent)
     }
 
+    #[allow(dead_code)]
     pub fn error_style(&self) -> Style {
         Style::default().fg(self.error)
     }

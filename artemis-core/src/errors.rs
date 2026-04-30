@@ -161,9 +161,27 @@ impl ErrorClassifier {
 
             // Everything else: pattern-match body for special cases
             _ => {
-                if status_code == 400 && body_lower.contains("context_length_exceeded") {
-                    let (tokens, limit) = extract_context_window_tokens(response_body);
-                    ArtemisError::ContextWindowExceeded { tokens, limit }
+                if status_code == 400 {
+                    if body_lower.contains("context_length_exceeded") {
+                        let (tokens, limit) = extract_context_window_tokens(response_body);
+                        ArtemisError::ContextWindowExceeded { tokens, limit }
+                    } else if body_lower.contains("overloaded_error") {
+                        ArtemisError::ProviderUnavailable {
+                            provider: provider.to_string(),
+                            reason: truncate_body(response_body),
+                        }
+                    } else if body_lower.contains("rate_limit_error") {
+                        let retry_after = extract_retry_after(response_body);
+                        ArtemisError::RateLimit {
+                            retry_after,
+                            provider: provider.to_string(),
+                        }
+                    } else {
+                        ArtemisError::Network {
+                            message: truncate_body(response_body),
+                            status: Some(status_code),
+                        }
+                    }
                 } else {
                     ArtemisError::Network {
                         message: truncate_body(response_body),
@@ -434,6 +452,32 @@ mod tests {
         assert!(
             matches!(err, ArtemisError::Network { .. }),
             "Expected Network, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_400_overloaded_error() {
+        let err = ErrorClassifier::classify(
+            400,
+            r#"{"error": {"type": "overloaded_error", "message": "Overloaded"}}"#,
+            "anthropic",
+        );
+        assert!(
+            matches!(err, ArtemisError::ProviderUnavailable { .. }),
+            "Expected ProviderUnavailable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_classify_400_rate_limit_error() {
+        let err = ErrorClassifier::classify(
+            400,
+            r#"{"error": {"type": "rate_limit_error", "message": "Rate limited"}}"#,
+            "anthropic",
+        );
+        assert!(
+            matches!(err, ArtemisError::RateLimit { .. }),
+            "Expected RateLimit, got {err:?}"
         );
     }
 

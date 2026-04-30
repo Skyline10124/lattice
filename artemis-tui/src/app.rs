@@ -26,6 +26,7 @@ pub struct App {
     pub current_model: String,
     pub current_provider: String,
     pub token_count: usize,
+    #[allow(dead_code)]
     pub show_reasoning: bool,
     pub scroll_offset: usize,
     pub event_tx: Option<UnboundedSender<Event>>,
@@ -35,6 +36,7 @@ pub struct App {
 pub enum AppStatus {
     Ready,
     Streaming,
+    #[allow(dead_code)]
     Waiting,
     Error(String),
 }
@@ -77,26 +79,18 @@ impl App {
                 self.input.insert(self.input_cursor, c);
                 self.input_cursor += 1;
             }
-            KeyCode::Backspace => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                    self.input.remove(self.input_cursor);
-                }
+            KeyCode::Backspace if self.input_cursor > 0 => {
+                self.input_cursor -= 1;
+                self.input.remove(self.input_cursor);
             }
-            KeyCode::Delete => {
-                if self.input_cursor < self.input.len() {
-                    self.input.remove(self.input_cursor);
-                }
+            KeyCode::Delete if self.input_cursor < self.input.len() => {
+                self.input.remove(self.input_cursor);
             }
-            KeyCode::Left => {
-                if self.input_cursor > 0 {
-                    self.input_cursor -= 1;
-                }
+            KeyCode::Left if self.input_cursor > 0 => {
+                self.input_cursor -= 1;
             }
-            KeyCode::Right => {
-                if self.input_cursor < self.input.len() {
-                    self.input_cursor += 1;
-                }
+            KeyCode::Right if self.input_cursor < self.input.len() => {
+                self.input_cursor += 1;
             }
             KeyCode::Home => self.input_cursor = 0,
             KeyCode::End => self.input_cursor = self.input.len(),
@@ -108,16 +102,12 @@ impl App {
                     self.submit().await?;
                 }
             }
-            KeyCode::Esc => {
-                if !self.input.is_empty() {
-                    self.input.clear();
-                    self.input_cursor = 0;
-                }
+            KeyCode::Esc if !self.input.is_empty() => {
+                self.input.clear();
+                self.input_cursor = 0;
             }
-            KeyCode::Up => {
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                }
+            KeyCode::Up if self.scroll_offset > 0 => {
+                self.scroll_offset -= 1;
             }
             KeyCode::Down => {
                 self.scroll_offset += 1;
@@ -129,10 +119,8 @@ impl App {
 
     pub async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                if self.scroll_offset > 0 {
-                    self.scroll_offset -= 1;
-                }
+            MouseEventKind::ScrollUp if self.scroll_offset > 0 => {
+                self.scroll_offset -= 1;
             }
             MouseEventKind::ScrollDown => {
                 self.scroll_offset += 1;

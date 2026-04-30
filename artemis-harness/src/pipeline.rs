@@ -209,7 +209,6 @@ fn handle_fallback(
     if let Some(ref fallback) = profile.handoff.fallback {
         if registry.get(fallback).is_some() {
             *current_agent = fallback.clone();
-            return;
         }
     }
     // No valid fallback — pipeline stops by not updating current_agent

@@ -515,9 +515,20 @@ impl Stream for EventStream {
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(StreamEvent::Error {
-                        message: e.to_string(),
-                    }));
+                    let message = match &e {
+                        re::Error::InvalidStatusCode(status, _) => {
+                            format!("HTTP {}: {}", status.as_u16(), e)
+                        }
+                        re::Error::Transport(reqwest_err) => {
+                            if let Some(status) = reqwest_err.status() {
+                                format!("HTTP {}: {}", status.as_u16(), e)
+                            } else {
+                                e.to_string()
+                            }
+                        }
+                        _ => e.to_string(),
+                    };
+                    return Poll::Ready(Some(StreamEvent::Error { message }));
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Pending => return Poll::Pending,

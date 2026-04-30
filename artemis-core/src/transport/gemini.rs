@@ -23,7 +23,6 @@ use crate::streaming::TokenUsage;
 use crate::transport::chat_completions::{Transport, TransportError};
 use crate::types::Role;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Stream chunk (lightweight intermediate for streaming)
@@ -95,11 +94,8 @@ impl GeminiTransport {
         }
     }
 
-    fn generate_call_id() -> String {
-        format!(
-            "call_{}",
-            &Uuid::new_v4().to_string().replace("-", "")[..12]
-        )
+    fn generate_call_id(name: &str, index: usize) -> String {
+        format!("tc_{name}_{index}")
     }
 
     /// Build the Gemini `contents` array and `systemInstruction` from internal messages.
@@ -239,7 +235,7 @@ impl GeminiTransport {
         let mut text_pieces: Vec<String> = Vec::new();
         let mut tool_calls: Vec<crate::types::ToolCall> = Vec::new();
 
-        for part in &content_parts {
+        for (i, part) in content_parts.iter().enumerate() {
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                 continue;
             }
@@ -251,7 +247,7 @@ impl GeminiTransport {
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(crate::types::ToolCall {
-                    id: Self::generate_call_id(),
+                    id: Self::generate_call_id(name, i),
                     function: crate::types::FunctionCall {
                         name: name.to_string(),
                         arguments: args_str,
@@ -352,9 +348,10 @@ impl GeminiTransport {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+                let idx = results.len();
                 results.push(StreamChunk::ToolCallDelta {
-                    index: results.len(),
-                    id: Self::generate_call_id(),
+                    index: idx,
+                    id: Self::generate_call_id(name, idx),
                     name: name.to_string(),
                     arguments: args_str,
                 });
@@ -662,6 +659,7 @@ mod tests {
         assert!(response.content.is_none());
         let tool_calls = response.tool_calls.unwrap();
         assert_eq!(tool_calls.len(), 1);
+        assert!(tool_calls[0].id.starts_with("tc_"));
         assert_eq!(tool_calls[0].function.name, "get_weather");
         let args: Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["city"], "Paris");

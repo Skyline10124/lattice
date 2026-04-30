@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::provider::{ChatRequest, ChatResponse};
-use crate::streaming::{AnthropicSseParser, SseParser, StreamEvent, TokenUsage};
+use crate::streaming::{AnthropicSseParser, SseParser, TokenUsage};
 use crate::transport::chat_completions::TransportError;
 use crate::transport::{NormalizedMessages, Transport};
 use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
@@ -283,82 +283,6 @@ impl Transport for AnthropicTransport {
     fn create_sse_parser(&self) -> Box<dyn SseParser> {
         Box::new(AnthropicSseParser::new())
     }
-
-    fn denormalize_stream_chunk(&self, event_type: &str, data: &Value) -> Vec<StreamEvent> {
-        match event_type {
-            "message_start" => vec![],
-            "content_block_start" => {
-                let block = &data["content_block"];
-                match block.get("type").and_then(|t| t.as_str()) {
-                    Some("tool_use") => {
-                        let id = block["id"].as_str().unwrap_or("").to_string();
-                        let name = block["name"].as_str().unwrap_or("").to_string();
-                        vec![StreamEvent::ToolCallStart { id, name }]
-                    }
-                    _ => vec![],
-                }
-            }
-            "content_block_delta" => {
-                let delta = &data["delta"];
-                match delta.get("type").and_then(|t| t.as_str()) {
-                    Some("text_delta") => {
-                        let text = delta["text"].as_str().unwrap_or("");
-                        if text.is_empty() {
-                            vec![]
-                        } else {
-                            vec![StreamEvent::Token {
-                                content: text.to_string(),
-                            }]
-                        }
-                    }
-                    Some("input_json_delta") => {
-                        let partial = delta["partial_json"].as_str().unwrap_or("");
-                        let idx = data["index"].as_u64().unwrap_or(0) as u32;
-                        if partial.is_empty() {
-                            vec![]
-                        } else {
-                            vec![StreamEvent::ToolCallDelta {
-                                id: format!("idx_{}", idx),
-                                arguments_delta: partial.to_string(),
-                            }]
-                        }
-                    }
-                    Some("thinking_delta") => {
-                        let thinking = delta["thinking"].as_str().unwrap_or("");
-                        if thinking.is_empty() {
-                            vec![]
-                        } else {
-                            vec![StreamEvent::Token {
-                                content: thinking.to_string(),
-                            }]
-                        }
-                    }
-                    _ => vec![],
-                }
-            }
-            "content_block_stop" => {
-                let idx = data["index"].as_u64().unwrap_or(0) as u32;
-                vec![StreamEvent::ToolCallEnd {
-                    id: format!("idx_{}", idx),
-                }]
-            }
-            "message_delta" => {
-                let stop_reason = data["delta"]["stop_reason"].as_str().unwrap_or("end_turn");
-                let finish_reason = map_stop_reason(stop_reason);
-                let usage = data.get("usage").map(|u| TokenUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-                    total_tokens: u["output_tokens"].as_u64().unwrap_or(0) as u32,
-                });
-                vec![StreamEvent::Done {
-                    finish_reason,
-                    usage,
-                }]
-            }
-            "message_stop" | "ping" => vec![],
-            _ => vec![],
-        }
-    }
 }
 
 #[cfg(test)]
@@ -525,101 +449,6 @@ mod tests {
         assert_eq!(result.content.as_deref(), Some("Let me check."));
         // Reasoning is discarded in unified transport
         assert_eq!(result.finish_reason, "stop");
-    }
-
-    #[test]
-    fn test_stream_text_delta() {
-        let transport = AnthropicTransport::new();
-        let data = json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "text_delta", "text": "Hello"},
-        });
-        let events = transport.denormalize_stream_chunk("content_block_delta", &data);
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            StreamEvent::Token {
-                content: "Hello".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn test_stream_tool_use_delta() {
-        let transport = AnthropicTransport::new();
-
-        let start_data = json!({
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "search"},
-        });
-        let events = transport.denormalize_stream_chunk("content_block_start", &start_data);
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0],
-            StreamEvent::ToolCallStart {
-                id: "toolu_1".to_string(),
-                name: "search".to_string(),
-            }
-        );
-
-        let delta_data = json!({
-            "type": "content_block_delta",
-            "index": 0,
-            "delta": {"type": "input_json_delta", "partial_json": r#"{"q":"ru"#},
-        });
-        let events = transport.denormalize_stream_chunk("content_block_delta", &delta_data);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::ToolCallDelta {
-                arguments_delta, ..
-            } => {
-                assert_eq!(arguments_delta, r#"{"q":"ru"#);
-            }
-            other => panic!("expected ToolCallDelta, got {other:?}"),
-        }
-
-        let stop_data = json!({"type": "content_block_stop", "index": 0});
-        let events = transport.denormalize_stream_chunk("content_block_stop", &stop_data);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], StreamEvent::ToolCallEnd { .. }));
-
-        let msg_delta_data = json!({
-            "type": "message_delta",
-            "delta": {"stop_reason": "tool_use"},
-            "usage": {"output_tokens": 50},
-        });
-        let events = transport.denormalize_stream_chunk("message_delta", &msg_delta_data);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            StreamEvent::Done {
-                finish_reason,
-                usage,
-            } => {
-                assert_eq!(finish_reason, "tool_calls");
-                let usage = usage.as_ref().expect("expected usage");
-                assert_eq!(usage.completion_tokens, 50);
-            }
-            other => panic!("expected Done, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_stream_ignored_events() {
-        let transport = AnthropicTransport::new();
-
-        let events = transport.denormalize_stream_chunk(
-            "message_start",
-            &json!({"type": "message_start", "message": {}}),
-        );
-        assert!(events.is_empty());
-
-        let events = transport.denormalize_stream_chunk("ping", &json!({}));
-        assert!(events.is_empty());
-
-        let events = transport.denormalize_stream_chunk("message_stop", &json!({}));
-        assert!(events.is_empty());
     }
 
     #[test]

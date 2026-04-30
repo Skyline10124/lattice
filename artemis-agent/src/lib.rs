@@ -117,6 +117,7 @@ impl Agent {
     pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         let mut all_events = Vec::new();
+        const MAX_STREAM_RETRIES: u32 = 2;
 
         for _ in 0..max_turns {
             // Trim old messages to stay within the model's context window.
@@ -128,7 +129,20 @@ impl Agent {
             };
             self.state.trim_messages(context_len, 15); // 15% safety margin
 
-            let events = self.run_chat();
+            let mut events = self.run_chat();
+
+            // Retry on mid-stream errors (up to MAX_STREAM_RETRIES).
+            let mut retry_count = 0u32;
+            while retry_count < MAX_STREAM_RETRIES {
+                let has_only_errors = events.iter().all(|e| matches!(e, LoopEvent::Error { .. }));
+                let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
+                if !has_error || !has_only_errors {
+                    break;
+                }
+                retry_count += 1;
+                events = self.run_chat();
+            }
+
             let mut tool_calls = Vec::new();
 
             for event in &events {

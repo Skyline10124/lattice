@@ -6,6 +6,7 @@ pub enum Event {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
+    #[allow(dead_code)]
     Resize(u16, u16),
     /// LLM streaming token delivered from background task.
     StreamToken {

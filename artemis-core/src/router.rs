@@ -419,10 +419,11 @@ impl ModelRouter {
     pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, ArtemisError> {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
             let provider_lower = provider_part.to_lowercase();
+            let model_lower = model_part.to_lowercase();
             if let Some(defaults) = self.catalog.get_provider_defaults(&provider_lower) {
                 let api_key = self.resolve_credentials(&CatalogProviderEntry {
                     provider_id: provider_lower.clone(),
-                    api_model_id: model_part.to_string(),
+                    api_model_id: model_lower.clone(),
                     priority: 1,
                     weight: 1,
                     credential_keys: defaults.credential_keys.clone(),
@@ -432,12 +433,12 @@ impl ModelRouter {
                 });
 
                 return Ok(ResolvedModel {
-                    canonical_id: model_name.to_string(),
+                    canonical_id: model_lower.clone(),
                     provider: provider_lower,
                     api_key,
                     base_url: defaults.base_url.clone(),
                     api_protocol: defaults.api_protocol.clone(),
-                    api_model_id: model_part.to_string(),
+                    api_model_id: model_lower,
                     context_length: 131072,
                     provider_specific: HashMap::new(),
                 });
