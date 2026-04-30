@@ -7,6 +7,7 @@ use crate::profile::AgentProfile;
 // AgentRegistry — loads and indexes agent profiles from a directory
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct AgentRegistry {
     agents: HashMap<String, AgentProfile>,
     #[allow(dead_code)]

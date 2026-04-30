@@ -444,7 +444,8 @@ pub fn sse_from_bytes_stream(
             }
         };
 
-        buf.push_str(&text);
+        // Normalize CRLF to LF so SSE framing works across all servers
+        buf.push_str(&text.replace("\r\n", "\n"));
 
         // Parse complete SSE events (delimited by blank lines)
         let mut events = Vec::new();

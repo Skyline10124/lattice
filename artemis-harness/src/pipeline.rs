@@ -73,10 +73,9 @@ impl Pipeline {
         let mut current_input = input.to_string();
         let mut completed = false;
 
-        // Default max turns; overridden by agent profile if set.
-        let global_max_turns: u32 = 10;
+        let pipeline_max_agents: u32 = 10;
 
-        for _turn in 0..global_max_turns {
+        for _turn in 0..pipeline_max_agents {
             let profile = match self.registry.get(&current_agent) {
                 Some(p) => p.clone(),
                 None => {
@@ -89,8 +88,9 @@ impl Pipeline {
                 }
             };
 
-            // Use agent-specific max_turns override if present
-            let max_turns = profile.handoff.max_turns.unwrap_or(global_max_turns);
+            // Per-agent max_turns controls the Agent's internal tool-calling loop.
+            // The pipeline loop is bounded by pipeline_max_agents (a safety limit).
+            let agent_max_turns = profile.handoff.max_turns.unwrap_or(10);
 
             let start = Instant::now();
 
@@ -246,7 +246,7 @@ impl Pipeline {
             }
 
             // Use agent-specific max_turns for results limit too
-            if results.len() > max_turns as usize * 5 {
+            if results.len() > agent_max_turns as usize * 5 {
                 break;
             }
         }

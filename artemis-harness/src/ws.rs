@@ -55,4 +55,5 @@ async fn handle_socket(socket: WebSocket, bus: Arc<EventBus>) {
     while receiver.next().await.is_some() {}
 
     send_task.abort();
+    let _ = send_task.await;
 }

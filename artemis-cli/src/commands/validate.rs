@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use artemis_harness::AgentRegistry;
+use artemis_harness::{AgentRegistry, Pipeline};
 
 /// Validate all agent profiles in the default agents directory or a given path.
 pub fn run(dir: Option<String>) -> Result<()> {
@@ -66,39 +67,21 @@ pub fn run(dir: Option<String>) -> Result<()> {
         }
     }
 
-    // Detect circular handoff chains
+    // Detect circular handoff chains via Pipeline::dry_run
     for profile in registry.list() {
-        let mut visited = HashSet::new();
-        let mut current = profile.agent.name.clone();
-        visited.insert(current.clone());
-
-        loop {
-            let next = match registry.get(&current) {
-                Some(p) => {
-                    if p.handoff.handoff_rules.is_empty() {
-                        p.handoff.fallback.clone()
-                    } else {
-                        // Check first matching rule (simplified — assumes condition met)
-                        p.handoff.handoff_rules.first().and_then(|r| r.target.clone())
-                            .or_else(|| p.handoff.fallback.clone())
-                    }
-                }
-                None => break,
-            };
-
-            match next {
-                Some(ref n) => {
-                    if n == &profile.agent.name || !visited.insert(n.clone()) {
-                        println!(
-                            "    ERROR: circular handoff detected — '{}' → ... → '{}'",
-                            profile.agent.name, n
-                        );
-                        errors += 1;
-                        break;
-                    }
-                    current = n.clone();
-                }
-                None => break,
+        let pipeline = Pipeline::new("validate", Arc::new(registry.clone()), None, None);
+        let report = pipeline.dry_run(&profile.agent.name);
+        if report.circular {
+            println!(
+                "    ERROR: circular handoff detected starting from '{}'",
+                profile.agent.name
+            );
+            errors += 1;
+        }
+        for issue in &report.issues {
+            if issue.contains("not found") || issue.contains("unregistered") {
+                println!("    ERROR: {}", issue);
+                errors += 1;
             }
         }
     }
