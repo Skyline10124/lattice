@@ -51,20 +51,24 @@ pub fn run(dir: Option<String>) -> Result<()> {
 
         for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
             if let Some(ref target) = rule.target {
-                if registry.get(target).is_none() {
-                    println!(
-                        "    rule[{}]: target '{}' is not a registered agent",
-                        i, target
-                    );
-                    errors += 1;
+                for name in target.agent_names() {
+                    if registry.get(name).is_none() {
+                        println!(
+                            "    rule[{}]: target '{}' is not a registered agent",
+                            i, name
+                        );
+                        errors += 1;
+                    }
                 }
             }
         }
 
         if let Some(ref fallback) = profile.handoff.fallback {
-            if registry.get(fallback).is_none() {
-                println!("    fallback: '{}' is not a registered agent", fallback);
-                errors += 1;
+            for name in fallback.agent_names() {
+                if registry.get(name).is_none() {
+                    println!("    fallback: '{}' is not a registered agent", name);
+                    errors += 1;
+                }
             }
         }
     }

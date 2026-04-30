@@ -1,5 +1,68 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// HandoffTarget — single or parallel routing target
+// ---------------------------------------------------------------------------
+
+/// The target of a handoff rule.  `Single("refactor")` routes to one agent;
+/// `Fork(["security","performance"])` runs multiple agents in parallel and
+/// merges their outputs.
+///
+/// TOML syntax: `target = "refactor"` or `target = "fork:security,performance"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffTarget {
+    Single(String),
+    Fork(Vec<String>),
+}
+
+impl std::fmt::Display for HandoffTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandoffTarget::Single(name) => write!(f, "{}", name),
+            HandoffTarget::Fork(names) => write!(f, "fork:{}", names.join(",")),
+        }
+    }
+}
+
+impl HandoffTarget {
+    /// Parse a target string.  `"fork:A,B"` → `Fork(["A","B"])`,
+    /// anything else → `Single(s)`.
+    pub fn parse(s: &str) -> Self {
+        if let Some(rest) = s.strip_prefix("fork:") {
+            let targets = rest.split(',').map(|t| t.trim().to_string()).collect();
+            HandoffTarget::Fork(targets)
+        } else {
+            HandoffTarget::Single(s.to_string())
+        }
+    }
+
+    /// Return all agent names referenced by this target.
+    pub fn agent_names(&self) -> Vec<&str> {
+        match self {
+            HandoffTarget::Single(name) => vec![name],
+            HandoffTarget::Fork(names) => names.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+}
+
+impl Serialize for HandoffTarget {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            HandoffTarget::Single(name) => serializer.serialize_str(name),
+            HandoffTarget::Fork(names) => {
+                serializer.serialize_str(&format!("fork:{}", names.join(",")))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HandoffTarget {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(HandoffTarget::parse(&s))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // HandoffRule — TOML-based agent routing rules
@@ -39,7 +102,7 @@ pub struct HandoffRule {
     pub default: bool,
 
     /// `None` means the pipeline ends (no further agent).
-    pub target: Option<String>,
+    pub target: Option<HandoffTarget>,
 }
 
 impl HandoffRule {
@@ -249,7 +312,7 @@ fn string_contains(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 }
 
 /// Evaluate a list of rules in order; return the target of the first match.
-pub fn eval_rules(rules: &[HandoffRule], output: &serde_json::Value) -> Option<String> {
+pub fn eval_rules(rules: &[HandoffRule], output: &serde_json::Value) -> Option<HandoffTarget> {
     rules
         .iter()
         .find(|r| r.eval(output))
@@ -288,7 +351,10 @@ target = "next-agent"
         assert!(rule.all.is_none());
         assert!(rule.any.is_none());
         assert!(!rule.default);
-        assert_eq!(rule.target.as_deref(), Some("next-agent"));
+        assert_eq!(
+            rule.target,
+            Some(HandoffTarget::Single("next-agent".into()))
+        );
     }
 
     #[test]
@@ -567,7 +633,10 @@ target = "agent-b"
 "#,
         )
         .unwrap();
-        assert_eq!(eval_rules(&list.rules, &output), Some("agent-a".into()));
+        assert_eq!(
+            eval_rules(&list.rules, &output),
+            Some(HandoffTarget::Single("agent-a".into()))
+        );
     }
 
     #[test]
@@ -601,7 +670,7 @@ target = "fallback-agent"
         .unwrap();
         assert_eq!(
             eval_rules(&list.rules, &output),
-            Some("fallback-agent".into())
+            Some(HandoffTarget::Single("fallback-agent".into()))
         );
     }
 
@@ -702,5 +771,97 @@ target = "next"
         )
         .unwrap();
         assert!(!rule.eval(&output));
+    }
+
+    // --- HandoffTarget parsing + fork syntax ---
+
+    #[test]
+    fn test_handoff_target_single() {
+        assert_eq!(
+            HandoffTarget::parse("refactor"),
+            HandoffTarget::Single("refactor".into())
+        );
+    }
+
+    #[test]
+    fn test_handoff_target_fork() {
+        assert_eq!(
+            HandoffTarget::parse("fork:security,performance"),
+            HandoffTarget::Fork(vec!["security".into(), "performance".into()])
+        );
+    }
+
+    #[test]
+    fn test_handoff_target_fork_single() {
+        assert_eq!(
+            HandoffTarget::parse("fork:review"),
+            HandoffTarget::Fork(vec!["review".into()])
+        );
+    }
+
+    #[test]
+    fn test_handoff_target_fork_whitespace() {
+        assert_eq!(
+            HandoffTarget::parse("fork: A , B "),
+            HandoffTarget::Fork(vec!["A".into(), "B".into()])
+        );
+    }
+
+    #[test]
+    fn test_handoff_target_agent_names() {
+        let single = HandoffTarget::Single("x".into());
+        assert_eq!(single.agent_names(), vec!["x"]);
+        let fork = HandoffTarget::Fork(vec!["a".into(), "b".into()]);
+        assert_eq!(fork.agent_names(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_toml_fork_target_deserialization() {
+        let toml = r#"
+condition = { field = "confidence", op = "<", value = "0.5" }
+target = "fork:security,performance"
+"#;
+        let rule: HandoffRule = toml::from_str(toml).unwrap();
+        assert_eq!(
+            rule.target,
+            Some(HandoffTarget::Fork(vec![
+                "security".into(),
+                "performance".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn test_toml_fork_target_serialization() {
+        let target = HandoffTarget::Fork(vec!["a".into(), "b".into()]);
+        let serialized = serde_json::to_string(&target).unwrap();
+        assert_eq!(serialized, "\"fork:a,b\"");
+    }
+
+    #[test]
+    fn test_toml_single_target_serialization() {
+        let target = HandoffTarget::Single("refactor".into());
+        let serialized = serde_json::to_string(&target).unwrap();
+        assert_eq!(serialized, "\"refactor\"");
+    }
+
+    #[test]
+    fn test_eval_rules_fork_target() {
+        let output = json_output();
+        let list: RuleList = toml::from_str(
+            r#"
+[[rules]]
+condition = { field = "confidence", op = ">", value = "0.5" }
+target = "fork:security,performance"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_rules(&list.rules, &output),
+            Some(HandoffTarget::Fork(vec![
+                "security".into(),
+                "performance".into()
+            ]))
+        );
     }
 }

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use crate::handoff_rule::HandoffTarget;
+
 // ---------------------------------------------------------------------------
 // PipelineEvent — real-time event stream for pipeline execution
 // ---------------------------------------------------------------------------
@@ -20,12 +22,15 @@ pub enum PipelineEvent {
     AgentCompleted {
         agent: String,
         output_preview: String, // first 500 chars
-        next: Option<String>,
+        next: Option<HandoffTarget>,
         duration_ms: u64,
     },
 
     /// A handoff rule matched, routing to the next agent.
-    Handoff { from: String, to: String },
+    Handoff { from: String, to: HandoffTarget },
+
+    /// A fork: multiple agents launched in parallel.
+    Fork { from: String, branches: Vec<String> },
 
     /// The pipeline completed (all agents finished).
     PipelineCompleted {

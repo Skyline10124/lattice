@@ -78,7 +78,7 @@ pub struct HandoffConfig {
     #[serde(default, rename = "rules")]
     pub handoff_rules: Vec<crate::handoff_rule::HandoffRule>,
     #[serde(default)]
-    pub fallback: Option<String>, // default next agent if no rule matches
+    pub fallback: Option<crate::handoff_rule::HandoffTarget>,
     #[serde(default)]
     pub output_schema: Option<String>, // JSON schema for output validation
     #[serde(default)]
@@ -207,11 +207,18 @@ mod tests {
         "#;
         let profile: AgentProfile = toml::from_str(toml_str).unwrap();
         assert_eq!(profile.agent.name, "test-agent");
-        assert_eq!(profile.handoff.fallback.as_deref(), Some("fallback-agent"));
+        assert_eq!(
+            profile.handoff.fallback,
+            Some(crate::handoff_rule::HandoffTarget::Single(
+                "fallback-agent".into()
+            ))
+        );
         assert_eq!(profile.handoff.handoff_rules.len(), 2);
         assert_eq!(
-            profile.handoff.handoff_rules[0].target.as_deref(),
-            Some("human-review")
+            profile.handoff.handoff_rules[0].target,
+            Some(crate::handoff_rule::HandoffTarget::Single(
+                "human-review".into()
+            ))
         );
         assert!(profile.handoff.handoff_rules[1].default);
     }

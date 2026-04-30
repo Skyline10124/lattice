@@ -9,7 +9,7 @@ pub mod watcher;
 
 pub use dispatch::HarnessAgentDispatcher;
 pub use events::{EventBus, PipelineEvent};
-pub use handoff_rule::{HandoffCondition, HandoffRule};
+pub use handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};
 pub use pipeline::{AgentError, AgentResult, DryRunReport, Pipeline, PipelineRun};
 pub use profile::{
     AgentConfig, AgentProfile, BehaviorConfig, HandoffConfig, SystemConfig, ToolsConfig,
