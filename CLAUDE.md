@@ -67,7 +67,7 @@ cargo fmt --all
 User Code (Python / Rust / CLI)
   → lattice_core::resolve("sonnet")      → ResolvedModel
   → lattice_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
-  → lattice_agent::Agent::new(resolved)  → send(), submit_tools()
+  → lattice_agent::Agent::new(resolved)  → send(), submit_tools() [7 tools: read_file, grep, write_file, list_directory, bash, patch, web_search]
   → lattice_harness::Pipeline::new()     → run() → multi-agent TOML pipeline (sequential + fork parallel)
 ```
 
@@ -76,10 +76,8 @@ User Code (Python / Rust / CLI)
 | Crate | Purpose |
 |-------|---------|
 | `lattice-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
-| `lattice-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API |
-| `lattice-memory` | `Memory` trait (`save`/`history`/`search`) + `InMemoryMemory` default impl |
-| `lattice-token-pool` | `TokenPool` trait (`acquire`/`release`/`remaining`) + `UnlimitedPool` default impl |
-| `lattice-harness` | `Pipeline`, `AgentRunner`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
+| `lattice-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API + `Memory` trait + `InMemoryMemory` + `SharedMemory` types |
+| `lattice-harness` | `Pipeline`, `AgentRunner`, `SqliteMemory`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
 | `lattice-plugin` | Plugin trait (placeholder — not yet functional) |
 | `lattice-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
 | `lattice-tui` | Terminal UI (ratatui-based — early stage) |
@@ -92,9 +90,9 @@ User Code (Python / Rust / CLI)
 | `catalog` | Model catalog, aliases, provider defaults, `ApiProtocol`, `ResolvedModel` |
 | `router` | `ModelRouter`: normalize model IDs, resolve aliases, select provider, resolve credentials |
 | `provider` | `Provider` trait, `ChatRequest`/`ChatResponse`, shared HTTP client |
-| `providers/` | Concrete providers: `openai`, `anthropic`, `deepseek`, `gemini`, `groq`, `mistral`, `ollama`, `xai` |
+| `transport/` | Unified Transport trait, protocol adapters (ChatCompletions, Anthropic, Gemini, OpenAICompat), dispatcher |
 | `transport/` | Unified `Transport` trait, `TransportDispatcher`, protocol adapters |
-| `streaming` | SSE parsers (OpenAI, Anthropic) via `sse_from_bytes_stream`, `StreamEvent` |
+| `streaming` | SSE parsers (OpenAI, Anthropic) via `sse_from_bytes_stream`, `StreamEvent`. Note: Gemini uses non-streaming path. |
 | `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI models, char/4 estimation for others |
 | `errors` | `LatticeError` enum (pure Rust, no PyO3), `ErrorClassifier` |
@@ -124,7 +122,9 @@ User Code (Python / Rust / CLI)
 
 ### Credential resolution
 
-Credentials come from **environment variables only**. Provider credential map in `router.rs`.
+Credentials come from **environment variables by default**, with an optional
+`with_credentials(HashMap)` override for programmatic injection (used in testing
+and embedding scenarios). Provider credential map in `router.rs`.
 
 ### Handoff rule engine
 

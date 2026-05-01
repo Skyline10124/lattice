@@ -159,8 +159,15 @@ impl GeminiTransport {
                     let response: Value = if msg.content.trim().starts_with('{')
                         || msg.content.trim().starts_with('[')
                     {
-                        serde_json::from_str(&msg.content)
-                            .unwrap_or_else(|_| json!({"output": msg.content}))
+                        match serde_json::from_str(&msg.content) {
+                            Ok(v) => v,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "Gemini tool result starts with JSON delimiter but failed to parse, wrapping as output"
+                                );
+                                json!({"output": msg.content})
+                            }
+                        }
                     } else {
                         json!({"output": msg.content})
                     };
