@@ -1,3 +1,4 @@
+pub mod bus_status;
 pub mod config_cmd;
 pub mod debug;
 pub mod doctor;

@@ -55,4 +55,12 @@ impl AgentRegistry {
     pub fn list(&self) -> Vec<&AgentProfile> {
         self.agents.values().collect()
     }
+
+    /// Merge another registry into this one. Other's agents override on name collision.
+    pub fn merge(mut self, other: Self) -> Self {
+        for (name, profile) in other.agents {
+            self.agents.insert(name, profile);
+        }
+        self
+    }
 }

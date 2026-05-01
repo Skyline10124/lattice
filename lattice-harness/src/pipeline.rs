@@ -602,7 +602,6 @@ fn handle_fallback(profile: &AgentProfile, registry: &AgentRegistry) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handoff_rule::HandoffRule;
     use std::sync::Arc;
 
     fn test_registry() -> Arc<AgentRegistry> {

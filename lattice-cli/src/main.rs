@@ -9,7 +9,7 @@ mod display;
 mod session;
 
 use commands::{
-    config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats, validate,
+    bus_status, config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats, validate,
 };
 use config::Config;
 use credentials::CredentialStore;
@@ -75,6 +75,13 @@ enum Commands {
     Sessions {
         #[command(subcommand)]
         action: commands::sessions::SessionAction,
+    },
+    #[command(about = "Show bus status: agents, subscriptions, and bus configuration")]
+    Bus {
+        #[arg(long, help = "JSON output")]
+        json: bool,
+        #[arg(long, help = "Project directory (default: current dir)")]
+        dir: Option<String>,
     },
     #[command(about = "Run a prompt through the model or pipeline")]
     Run {
@@ -169,6 +176,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Doctor) => {
             doctor::run(&config, &creds)?;
+        }
+        Some(Commands::Bus { json, dir }) => {
+            bus_status::run(json, dir)?;
         }
         Some(Commands::Stats) => {
             stats::run()?;

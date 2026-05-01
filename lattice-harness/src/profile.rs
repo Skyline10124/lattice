@@ -15,6 +15,10 @@ pub struct AgentProfile {
     pub behavior: BehaviorConfig,
     #[serde(default)]
     pub handoff: HandoffConfig,
+    #[serde(default)]
+    pub bus: BusConfigProfile,
+    #[serde(default)]
+    pub memory: MemoryConfigProfile,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -69,6 +73,24 @@ fn default_confidence_threshold() -> f64 {
 }
 fn default_max_retries() -> u32 {
     3
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct BusConfigProfile {
+    #[serde(default)]
+    pub subscribe: Vec<String>,
+    #[serde(default)]
+    pub publish: Vec<String>,
+    #[serde(default)]
+    pub rpc: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct MemoryConfigProfile {
+    #[serde(default)]
+    pub shared_read: Vec<String>,
+    #[serde(default)]
+    pub shared_write: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -181,6 +203,51 @@ mod tests {
         let profile: AgentProfile = toml::from_str(toml_str).unwrap();
         assert!(!profile.agent.skippable);
         assert!(profile.agent.tags.is_empty());
+    }
+
+    #[test]
+    fn test_bus_and_memory_sections() {
+        let toml_str = r#"
+        [agent]
+        name = "security-reviewer"
+        model = "sonnet"
+
+        [system]
+        prompt = "You are a security specialist."
+
+        [bus]
+        subscribe = ["code-changes", "review-requests"]
+        publish = ["security-findings"]
+        rpc = ["refactorer"]
+
+        [memory]
+        shared_read = ["review-results", "refactor-plans"]
+        shared_write = ["security-findings"]
+        "#;
+        let profile: AgentProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.bus.subscribe, vec!["code-changes", "review-requests"]);
+        assert_eq!(profile.bus.publish, vec!["security-findings"]);
+        assert_eq!(profile.bus.rpc, vec!["refactorer"]);
+        assert_eq!(profile.memory.shared_read, vec!["review-results", "refactor-plans"]);
+        assert_eq!(profile.memory.shared_write, vec!["security-findings"]);
+    }
+
+    #[test]
+    fn test_default_bus_and_memory() {
+        let toml_str = r#"
+        [agent]
+        name = "minimal"
+        model = "sonnet"
+
+        [system]
+        prompt = "Minimal"
+        "#;
+        let profile: AgentProfile = toml::from_str(toml_str).unwrap();
+        assert!(profile.bus.subscribe.is_empty());
+        assert!(profile.bus.publish.is_empty());
+        assert!(profile.bus.rpc.is_empty());
+        assert!(profile.memory.shared_read.is_empty());
+        assert!(profile.memory.shared_write.is_empty());
     }
 
     #[test]

@@ -1,11 +1,35 @@
 use std::sync::Arc;
 
 use lattice_agent::Agent;
-use lattice_bus::{AgentDescriptor, AgentId, AgentBusConfig, Bus, BusRequest, BusResponse, BusError};
-use lattice_memory::Memory;
+use lattice_bus::{AgentDescriptor, AgentId, AgentBusConfig, Bus, BusEvent, BusHandler, BusRequest, BusResponse, BusError};
+use lattice_memory::{Memory, SharedMemory, SharedPartition, PartitionAccess};
 use tracing::{info, warn};
 
-use crate::profile::AgentProfile;
+use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
+
+/// Convert profile [bus] section into AgentBusConfig.
+fn bus_config_from_profile(bus: &BusConfigProfile) -> AgentBusConfig {
+    AgentBusConfig {
+        subscribe: bus.subscribe.clone(),
+        publish: bus.publish.clone(),
+        rpc: bus.rpc.iter().map(AgentId::new).collect(),
+    }
+}
+
+/// Convert profile [memory] section into PartitionAccess for SharedMemory calls.
+fn partition_access_from_profile(memory: &MemoryConfigProfile) -> PartitionAccess {
+    let read: Vec<SharedPartition> = memory
+        .shared_read
+        .iter()
+        .map(|s| SharedPartition::Named(s.clone()))
+        .collect();
+    let write: Vec<SharedPartition> = memory
+        .shared_write
+        .iter()
+        .map(|s| SharedPartition::Named(s.clone()))
+        .collect();
+    PartitionAccess::new(read, write)
+}
 use crate::runner::MEMORY_RT;
 
 /// A Bus-aware micro-agent. Registers on the Bus, processes RPC requests
@@ -14,6 +38,8 @@ pub struct MicroAgent {
     pub profile: AgentProfile,
     pub bus: Arc<dyn Bus>,
     pub memory: Option<Arc<dyn Memory>>,
+    pub shared_memory: Option<Arc<dyn SharedMemory>>,
+    pub partition_access: PartitionAccess,
 }
 
 /// Handle returned by spawn(). Owns the JoinHandle for crash detection (D5).
@@ -46,18 +72,20 @@ impl MicroAgentHandle {
 
 impl MicroAgent {
     /// Create a MicroAgent from profile and bus.
-    pub fn new(profile: AgentProfile, bus: Arc<dyn Bus>, memory: Option<Arc<dyn Memory>>) -> Self {
-        Self { profile, bus, memory }
+    pub fn new(
+        profile: AgentProfile,
+        bus: Arc<dyn Bus>,
+        memory: Option<Arc<dyn Memory>>,
+        shared_memory: Option<Arc<dyn SharedMemory>>,
+    ) -> Self {
+        let partition_access = partition_access_from_profile(&profile.memory);
+        Self { profile, bus, memory, shared_memory, partition_access }
     }
 
     /// Register on Bus, resolve model, create Agent, spawn agent loop.
     /// Returns MicroAgentHandle for crash detection (D5).
     pub fn spawn(self) -> Result<MicroAgentHandle, BusError> {
-        let bus_config = AgentBusConfig {
-            subscribe: vec![], // Phase 2: subscribe from profile later
-            publish: vec![],
-            rpc: vec![],       // Phase 2: rpc whitelist from profile later
-        };
+        let bus_config = bus_config_from_profile(&self.profile.bus);
 
         let descriptor = AgentDescriptor {
             id: AgentId::new(&self.profile.agent.name),
@@ -79,33 +107,77 @@ impl MicroAgent {
         }
 
         let max_turns = self.profile.handoff.max_turns.unwrap_or(10);
-        let memory = self.memory.clone();
-        let bus = self.bus.clone();
-        let profile = self.profile;
+        let ctx = AgentLoopContext {
+            memory: self.memory.clone(),
+            shared_memory: self.shared_memory.clone(),
+            partition_access: self.partition_access.clone(),
+            bus: self.bus.clone(),
+            profile: self.profile,
+        };
+
+        // Subscribe to topics from profile [bus] section.
+        // Events are stored in private memory for recall during next RPC request.
+        let memory_for_sub = self.memory.clone();
+        let sub_agent_name = ctx.profile.agent.name.clone();
+        for topic in &ctx.profile.bus.subscribe {
+            let mem = memory_for_sub.clone();
+            let name = sub_agent_name.clone();
+            let handler = BusHandler::from_async(move |event: BusEvent| {
+                let mem = mem.clone();
+                let name = name.clone();
+                Box::pin(async move {
+                    if let Some(ref m) = mem {
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        m.save_entry(lattice_memory::MemoryEntry {
+                            id: format!("{}-event-{}", name, now_secs),
+                            kind: lattice_memory::EntryKind::SessionLog,
+                            session_id: name.clone(),
+                            summary: format!("Event on {}", event.topic),
+                            content: event.payload.to_string(),
+                            tags: vec![event.topic.clone()],
+                            created_at: now_secs.to_string(),
+                        }).await;
+                    }
+                    Ok(())
+                })
+            });
+            // Use MEMORY_RT since spawn() is called in sync context
+            MEMORY_RT.block_on(self.bus.subscribe(topic, handler))?;
+        }
 
         let join_handle = tokio::spawn(async move {
-            micro_agent_loop(agent, profile, memory, bus, max_turns, request_rx).await;
+            micro_agent_loop(agent, ctx, max_turns, request_rx).await;
         });
 
         Ok(MicroAgentHandle { id, join_handle })
     }
 }
 
+/// Context passed into the agent loop — bundles shared resources.
+struct AgentLoopContext {
+    memory: Option<Arc<dyn Memory>>,
+    shared_memory: Option<Arc<dyn SharedMemory>>,
+    partition_access: PartitionAccess,
+    bus: Arc<dyn Bus>,
+    profile: AgentProfile,
+}
+
 /// Core agent loop: receive BusRequest, run inference, send BusResponse.
 async fn micro_agent_loop(
     mut agent: Agent,
-    profile: AgentProfile,
-    memory: Option<Arc<dyn Memory>>,
-    bus: Arc<dyn Bus>,
+    ctx: AgentLoopContext,
     max_turns: u32,
     mut request_rx: tokio::sync::mpsc::Receiver<BusRequest>,
 ) {
-    let agent_name = profile.agent.name.clone();
+    let agent_name = ctx.profile.agent.name.clone();
     info!("MicroAgent '{}' loop started", agent_name);
 
     while let Some(req) = request_rx.recv().await {
         let input = extract_input(&req.payload);
-        let enriched = enrich_input(&input, &memory);
+        let enriched = enrich_input(&input, &ctx.memory);
 
         let events = agent.run_async(&enriched, max_turns).await;
 
@@ -117,8 +189,8 @@ async fn micro_agent_loop(
             warn!("MicroAgent '{}': reply channel closed, caller timed out", agent_name);
         }
 
-        // Save to shared memory
-        if let Some(ref mem) = memory {
+        // Save to private memory
+        if let Some(ref mem) = ctx.memory {
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -129,15 +201,49 @@ async fn micro_agent_loop(
                 session_id: agent_name.clone(),
                 summary: format!("{}: {} chars output", agent_name, content.len()),
                 content: content.clone(),
-                tags: profile.agent.tags.clone(),
+                tags: ctx.profile.agent.tags.clone(),
                 created_at: now_secs.to_string(),
             };
             mem.save_entry(entry).await;
         }
+
+        // Save to shared memory partition (if configured and access allows)
+        if let Some(ref smem) = ctx.shared_memory {
+            if !ctx.partition_access.write.is_empty() {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let partition = SharedPartition::Named(agent_name.clone());
+                let entry = lattice_memory::MemoryEntry {
+                    id: format!("{}-shared-{}", agent_name, now_secs),
+                    kind: lattice_memory::EntryKind::SessionLog,
+                    session_id: agent_name.clone(),
+                    summary: format!("{}: shared output", agent_name),
+                    content: content.clone(),
+                    tags: ctx.profile.agent.tags.clone(),
+                    created_at: now_secs.to_string(),
+                };
+                if let Err(e) = smem.save_shared(entry, partition, &ctx.partition_access).await {
+                    warn!("MicroAgent '{}': shared memory write failed: {:?}", agent_name, e);
+                }
+            }
+        }
+    // Publish output to configured topics
+        for topic in &ctx.profile.bus.publish {
+            let event = BusEvent {
+                topic: topic.clone(),
+                source: AgentId::new(&agent_name),
+                payload: serde_json::json!({"output": content.clone()}),
+            };
+            if let Err(e) = ctx.bus.publish(topic, event).await {
+                warn!("MicroAgent '{}': publish to '{}' failed: {:?}", agent_name, topic, e);
+            }
+        }
     }
 
     info!("MicroAgent '{}' loop ended, deregistering", agent_name);
-    bus.deregister(&AgentId::new(&agent_name)).await.ok();
+    ctx.bus.deregister(&AgentId::new(&agent_name)).await.ok();
 }
 
 /// Extract input string from BusRequest payload.

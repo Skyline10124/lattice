@@ -174,6 +174,22 @@ pub type BusHandlerFn = Arc<
         + Sync,
 >;
 
+/// Convenience wrapper for constructing BusHandlerFn from an async fn.
+pub struct BusHandler;
+
+impl BusHandler {
+    /// Create a BusHandlerFn from an async function.
+    /// Usage: `BusHandler::from_async(|event| async move { ... })`
+    pub fn from_async(
+        f: impl Fn(BusEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    ) -> BusHandlerFn {
+        Arc::new(f)
+    }
+}
+
 pub fn bus_handler(
     f: impl Fn(BusEvent)
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
@@ -182,6 +198,15 @@ pub fn bus_handler(
         + 'static,
 ) -> BusHandlerFn {
     Arc::new(f)
+}
+
+/// Macro for constructing BusHandlerFn with async block syntax.
+/// Usage: `bus_handler!(|event| { /* async body */ })`
+#[macro_export]
+macro_rules! bus_handler {
+    ($handler:expr) => {
+        $crate::BusHandler::from_async($handler)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -540,5 +565,53 @@ mod tests {
         assert_eq!(reg.id, AgentId::new("agent-a"));
         // request_rx is usable — caller can spawn their own agent loop.
         tokio::spawn(echo_agent_loop(reg.request_rx));
+    }
+
+    #[tokio::test]
+    async fn test_bus_handler_from_async() {
+        let bus = InMemoryBus::with_defaults();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let rc = received.clone();
+
+        let handler = BusHandler::from_async(move |event: BusEvent| {
+            let r = rc.clone();
+            Box::pin(async move { r.lock().await.push(event.topic); Ok(()) })
+        });
+
+        bus.subscribe("test-topic", handler).await.unwrap();
+        bus.publish("test-topic", BusEvent {
+            topic: "test-topic".into(),
+            source: AgentId::new("sender"),
+            payload: serde_json::json!({}),
+        }).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let items = received.lock().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], "test-topic");
+    }
+
+    #[tokio::test]
+    async fn test_bus_handler_macro() {
+        let bus = InMemoryBus::with_defaults();
+        let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let rc = received.clone();
+
+        let handler = bus_handler!(move |event: BusEvent| {
+            let r = rc.clone();
+            Box::pin(async move { r.lock().await.push(event.source.to_string()); Ok(()) })
+        });
+
+        bus.subscribe("macro-topic", handler).await.unwrap();
+        bus.publish("macro-topic", BusEvent {
+            topic: "macro-topic".into(),
+            source: AgentId::new("macro-sender"),
+            payload: serde_json::json!({}),
+        }).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let items = received.lock().await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], "macro-sender");
     }
 }
