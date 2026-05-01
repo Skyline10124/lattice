@@ -3,10 +3,38 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use lattice_agent::{
     default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent, ToolExecutor,
 };
-use lattice_core::types::{Role, ToolCall};
+use lattice_core::types::Role;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::Event;
+
+/// Helper: find byte index of the character just before `cursor`.
+fn prev_char_boundary(s: &str, cursor: usize) -> usize {
+    s[..cursor]
+        .char_indices()
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// Helper: byte length of the character starting at `cursor`.
+fn char_byte_len(s: &str, cursor: usize) -> usize {
+    s[cursor..]
+        .chars()
+        .next()
+        .map(|c| c.len_utf8())
+        .unwrap_or(1)
+}
+
+/// Pack an error string into a terminal StreamToken event.
+fn pack_error(msg: String) -> Event {
+    Event::StreamToken {
+        content: msg.clone(),
+        reasoning: None,
+        done: true,
+        error: Some(msg),
+    }
+}
 
 /// A single message in the chat.
 #[derive(Debug, Clone)]
@@ -72,27 +100,32 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.input_cursor, c);
-                self.input_cursor += 1;
+                self.input_cursor += c.len_utf8();
             }
             KeyCode::Backspace if self.input_cursor > 0 => {
-                self.input_cursor -= 1;
-                self.input.remove(self.input_cursor);
+                let prev = prev_char_boundary(&self.input, self.input_cursor);
+                self.input.remove(prev);
+                self.input_cursor = prev;
             }
-            KeyCode::Delete if self.input_cursor < self.input.len() => {
+            KeyCode::Delete
+                if self.input_cursor < self.input.len()
+                    && self.input.is_char_boundary(self.input_cursor) =>
+            {
                 self.input.remove(self.input_cursor);
             }
             KeyCode::Left if self.input_cursor > 0 => {
-                self.input_cursor -= 1;
+                self.input_cursor = prev_char_boundary(&self.input, self.input_cursor);
             }
             KeyCode::Right if self.input_cursor < self.input.len() => {
-                self.input_cursor += 1;
+                let len = char_byte_len(&self.input, self.input_cursor);
+                self.input_cursor = (self.input_cursor + len).min(self.input.len());
             }
             KeyCode::Home => self.input_cursor = 0,
             KeyCode::End => self.input_cursor = self.input.len(),
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.input.insert(self.input_cursor, '\n');
-                    self.input_cursor += 1;
+                    self.input_cursor += '\n'.len_utf8();
                 } else {
                     self.submit().await?;
                 }
@@ -110,6 +143,14 @@ impl App {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Insert text at the cursor (e.g. from paste or IME commit).
+    pub fn insert_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.input.insert(self.input_cursor, c);
+            self.input_cursor += c.len_utf8();
+        }
     }
 
     pub async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
@@ -142,7 +183,7 @@ impl App {
         self.scroll_offset = 0;
         self.status = AppStatus::Streaming;
 
-        // Placeholder assistant message that will be filled by the stream
+        // Thinking indicator — replaced by real content once streaming starts
         self.messages.push(ChatMessage {
             role: Role::Assistant,
             content: String::new(),
@@ -159,36 +200,37 @@ impl App {
         let model = self.current_model.clone();
 
         tokio::spawn(async move {
-            // --- Resolve model ---
-            let resolved = match lattice_core::resolve(&model) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx.send(Event::StreamToken {
-                        content: String::new(),
-                        reasoning: None,
-                        done: true,
-                        error: Some(e.to_string()),
-                    });
-                    return;
-                }
-            };
+            // --- Resolve model (in-place to avoid blocking) ---
+            let resolved =
+                match tokio::task::spawn_blocking(move || lattice_core::resolve(&model)).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        let _ = tx.send(pack_error(format!("resolve failed: {e}")));
+                        return;
+                    }
+                    Err(_) => {
+                        let _ = tx.send(pack_error("resolve task panicked".into()));
+                        return;
+                    }
+                };
 
-            // Report resolved model info to the statusline
+            // Report resolved model info
             let _ = tx.send(Event::ModelInfo {
                 model: resolved.canonical_id.clone(),
                 provider: resolved.provider.clone(),
             });
 
-            // --- Create Agent with shared default tools ---
+            // --- Create Agent ---
             let mut agent = Agent::new(resolved).with_tools(default_tool_definitions());
-            let mut events = agent.send_message(&text);
-            let mut cumulative_tokens = 0u64;
             let executor = DefaultToolExecutor::new(".");
+
+            // --- Send message (async) ---
+            let mut events = agent.send_message_async(&text).await;
+            let mut cumulative_tokens = 0u64;
 
             // --- Conversation loop (handles tool call rounds) ---
             loop {
-                let mut tool_calls: Vec<ToolCall> = Vec::new();
-                let mut usage_text = String::new();
+                let mut tool_calls = Vec::new();
 
                 for event in events {
                     match event {
@@ -214,12 +256,24 @@ impl App {
                         LoopEvent::Done { usage } => {
                             if let Some(ref u) = usage {
                                 cumulative_tokens += u.total_tokens as u64;
-                                usage_text = format!("\n\n[{} tok]", cumulative_tokens);
+                                let _ = tx.send(Event::StreamToken {
+                                    content: format!("\n\n[{} tok]", cumulative_tokens),
+                                    reasoning: None,
+                                    done: true,
+                                    error: None,
+                                });
+                            } else {
+                                let _ = tx.send(Event::StreamToken {
+                                    content: String::new(),
+                                    reasoning: None,
+                                    done: true,
+                                    error: None,
+                                });
                             }
                         }
                         LoopEvent::Error { message } => {
                             let _ = tx.send(Event::StreamToken {
-                                content: String::new(),
+                                content: message.clone(),
                                 reasoning: None,
                                 done: true,
                                 error: Some(message),
@@ -231,13 +285,7 @@ impl App {
 
                 // No tool calls — conversation round is complete
                 if tool_calls.is_empty() {
-                    let _ = tx.send(Event::StreamToken {
-                        content: usage_text,
-                        reasoning: None,
-                        done: true,
-                        error: None,
-                    });
-                    break;
+                    return;
                 }
 
                 // Notify UI that tools are being executed
@@ -248,7 +296,7 @@ impl App {
                     error: None,
                 });
 
-                // Execute tools using the shared DefaultToolExecutor
+                // Execute tools
                 let results: Vec<(String, String)> = tool_calls
                     .iter()
                     .map(|call| {
@@ -257,7 +305,7 @@ impl App {
                     })
                     .collect();
 
-                // Submit results back to the agent and get next round of events
+                // Submit results and get next round of events
                 events = agent.submit_tools(results, None);
             }
         });
@@ -283,6 +331,12 @@ impl App {
                     match last.reasoning {
                         Some(ref mut existing) => existing.push_str(&r),
                         None => last.reasoning = Some(r),
+                    }
+                }
+                // If there's an error but no content accumulated, show the error as visible text
+                if let Some(ref msg) = error {
+                    if last.content.is_empty() {
+                        last.content = format!("Error: {}", msg);
                     }
                 }
             }

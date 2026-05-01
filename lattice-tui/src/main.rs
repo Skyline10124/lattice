@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::backend::CrosstermBackend;
@@ -18,10 +18,18 @@ use event::EventHandler;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env from working directory (API keys, etc.)
+    let _ = dotenvy::dotenv();
+
     // Setup terminal
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    crossterm::execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -72,6 +80,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                 event::Event::ModelInfo { model, provider } => {
                     app.current_model = model;
                     app.current_provider = provider;
+                }
+                event::Event::Paste(text) => {
+                    app.insert_text(&text);
                 }
             }
         }

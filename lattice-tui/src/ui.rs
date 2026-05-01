@@ -5,6 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::theme::Theme;
@@ -76,8 +77,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         .wrap(Wrap { trim: true });
     f.render_widget(input_para, input_area);
 
-    // Set cursor position
-    let cursor_x = input_area.x + 1 + (app.input_cursor as u16).min(input_area.width - 2);
+    // Set cursor position (using visual width for CJK support)
+    let text_before = &app.input[..app.input_cursor];
+    let visual_x = UnicodeWidthStr::width(text_before) as u16;
+    let cursor_x = input_area.x + 1 + visual_x.min(input_area.width.saturating_sub(2));
     let cursor_y = input_area.y + 1;
     f.set_cursor_position((cursor_x, cursor_y));
 

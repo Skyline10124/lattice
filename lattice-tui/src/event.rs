@@ -6,6 +6,8 @@ pub enum Event {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
+    /// Text pasted or committed via IME.
+    Paste(String),
     /// LLM streaming token delivered from background task.
     StreamToken {
         content: String,
@@ -51,7 +53,8 @@ impl EventHandler {
                                 CEvent::Key(k) => Event::Key(k),
                                 CEvent::Mouse(m) => Event::Mouse(m),
                                 CEvent::Resize(_, _) => Event::Tick,
-                                _ => continue,
+                                CEvent::Paste(text) => Event::Paste(text),
+                                CEvent::FocusGained | CEvent::FocusLost => continue,
                             };
                             if tx_clone.send(mapped).is_err() {
                                 break;
