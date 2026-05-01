@@ -61,14 +61,36 @@ pub fn init_logging(verbose: bool) -> Result<(), io::Error> {
 pub fn init_debug_logging(log_path: &str) -> Result<(), io::Error> {
     use std::fs;
 
+    // Reject directory traversal patterns
+    if log_path.contains("..") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log_path must not contain '..' directory traversal",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        let path = std::path::Path::new(log_path);
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "log_path must be an absolute path on Unix systems",
+            ));
+        }
+    }
+
     if let Some(parent) = std::path::Path::new(log_path).parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600); // Owner-only: trace logs contain sensitive data
+    }
+    let file = opts.open(log_path)?;
 
     let file_filter = EnvFilter::new("trace");
 
