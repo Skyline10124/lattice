@@ -119,11 +119,7 @@ impl AgentRunner {
     /// Enrich input with memory recall context.
     fn enrich_input(&self, input: &str) -> String {
         if let Some(ref mem) = self.shared_memory {
-            let recall = if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                tokio::task::block_in_place(|| handle.block_on(mem.recall(input, 5)))
-            } else {
-                MEMORY_RT.block_on(mem.recall(input, 5))
-            };
+            let recall = mem.recall(input, 5);
 
             if !recall.is_empty() {
                 let context: String = recall

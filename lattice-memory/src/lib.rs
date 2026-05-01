@@ -57,16 +57,15 @@ impl MemoryEntry {
 // ---------------------------------------------------------------------------
 
 /// Cross-session persistent memory. Supports both full-text and semantic search.
-#[async_trait]
 pub trait Memory: Send + Sync {
     /// Store a memory entry.
-    async fn save_entry(&self, entry: MemoryEntry);
+    fn save_entry(&self, entry: MemoryEntry);
 
     /// Recall entries matching a natural-language query.
-    async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
+    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
 
     /// List all entries of a given kind.
-    async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
+    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
 
     /// Reflect on a conversation and extract memories.
     /// Returns summaries of what should be remembered.
@@ -168,6 +167,12 @@ impl InMemoryMemory {
             store: Arc::new(Mutex::new(Vec::new())),
         }
     }
+
+    /// Clear all stored memory entries. Useful for test isolation
+    /// or resetting state between pipeline runs.
+    pub fn clear(&self) {
+        self.store.lock().unwrap().clear();
+    }
 }
 
 impl Default for InMemoryMemory {
@@ -176,13 +181,12 @@ impl Default for InMemoryMemory {
     }
 }
 
-#[async_trait]
 impl Memory for InMemoryMemory {
-    async fn save_entry(&self, entry: MemoryEntry) {
+    fn save_entry(&self, entry: MemoryEntry) {
         self.store.lock().unwrap().push(entry);
     }
 
-    async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         self.store
             .lock()
             .unwrap()
@@ -193,7 +197,7 @@ impl Memory for InMemoryMemory {
             .collect()
     }
 
-    async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
+    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
         self.store
             .lock()
             .unwrap()
@@ -237,7 +241,7 @@ mod tests {
     #[test]
     fn test_save_and_recall_inmemory() {
         let mem = InMemoryMemory::new();
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        mem.save_entry(MemoryEntry {
             id: "1".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -245,8 +249,8 @@ mod tests {
             content: "lattice is written in Rust".into(),
             tags: vec!["project".into()],
             created_at: "2026-04-29".into(),
-        }));
-        let results = futures::executor::block_on(mem.recall("Rust", 10));
+        });
+        let results = mem.recall("Rust", 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].summary, "Project uses Rust");
     }
@@ -254,14 +258,14 @@ mod tests {
     #[test]
     fn test_recall_empty() {
         let mem = InMemoryMemory::new();
-        let results = futures::executor::block_on(mem.recall("nothing", 10));
+        let results = mem.recall("nothing", 10);
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_entries_by_kind_inmemory() {
         let mem = InMemoryMemory::new();
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        mem.save_entry(MemoryEntry {
             id: "kind-fact".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -269,8 +273,8 @@ mod tests {
             content: "First fact content".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        }));
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        });
+        mem.save_entry(MemoryEntry {
             id: "kind-decision".into(),
             kind: EntryKind::Decision,
             session_id: "s1".into(),
@@ -278,12 +282,12 @@ mod tests {
             content: "First decision content".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        }));
-        let facts = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Fact, 10));
+        });
+        let facts = mem.entries_by_kind(&EntryKind::Fact, 10);
         assert!(facts.iter().any(|e| e.id == "kind-fact"));
         assert!(!facts.iter().any(|e| e.id == "kind-decision"));
 
-        let decisions = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Decision, 10));
+        let decisions = mem.entries_by_kind(&EntryKind::Decision, 10);
         assert!(decisions.iter().any(|e| e.id == "kind-decision"));
         assert!(!decisions.iter().any(|e| e.id == "kind-fact"));
     }

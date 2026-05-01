@@ -107,9 +107,8 @@ impl SqliteMemory {
     }
 }
 
-#[async_trait]
 impl Memory for SqliteMemory {
-    async fn save_entry(&self, entry: MemoryEntry) {
+    fn save_entry(&self, entry: MemoryEntry) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -150,7 +149,7 @@ impl Memory for SqliteMemory {
         .ok();
     }
 
-    async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
+    fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -179,7 +178,7 @@ impl Memory for SqliteMemory {
         self.recall_like(query, limit)
     }
 
-    async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
+    fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
             Err(e) => {
@@ -303,7 +302,7 @@ mod tests {
     fn test_sqlite_save_and_recall() {
         let path = ":memory:";
         let mem = SqliteMemory::open(path).unwrap();
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        mem.save_entry(MemoryEntry {
             id: "1".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -311,8 +310,8 @@ mod tests {
             content: "lattice is written in Rust".into(),
             tags: vec!["project".into()],
             created_at: "2026-04-29".into(),
-        }));
-        let results = futures::executor::block_on(mem.recall("Rust", 10));
+        });
+        let results = mem.recall("Rust", 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].summary, "Project uses Rust");
     }
@@ -321,7 +320,7 @@ mod tests {
     fn test_sqlite_entries_by_kind() {
         let path = ":memory:";
         let mem = SqliteMemory::open(path).unwrap();
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        mem.save_entry(MemoryEntry {
             id: "f1".into(),
             kind: EntryKind::Fact,
             session_id: "s1".into(),
@@ -329,8 +328,8 @@ mod tests {
             content: "First fact".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        }));
-        futures::executor::block_on(mem.save_entry(MemoryEntry {
+        });
+        mem.save_entry(MemoryEntry {
             id: "d1".into(),
             kind: EntryKind::Decision,
             session_id: "s1".into(),
@@ -338,12 +337,12 @@ mod tests {
             content: "First decision".into(),
             tags: vec![],
             created_at: "2026-04-29".into(),
-        }));
-        let facts = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Fact, 10));
+        });
+        let facts = mem.entries_by_kind(&EntryKind::Fact, 10);
         assert_eq!(facts.len(), 1);
         assert_eq!(facts[0].id, "f1");
 
-        let decisions = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Decision, 10));
+        let decisions = mem.entries_by_kind(&EntryKind::Decision, 10);
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].id, "d1");
     }
@@ -352,7 +351,7 @@ mod tests {
     fn test_sqlite_recall_empty() {
         let path = ":memory:";
         let mem = SqliteMemory::open(path).unwrap();
-        let results = futures::executor::block_on(mem.recall("nothing", 10));
+        let results = mem.recall("nothing", 10);
         assert!(results.is_empty());
     }
 
