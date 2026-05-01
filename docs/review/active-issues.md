@@ -1,9 +1,8 @@
 # LATTICE 活跃问题追踪
 
 **最后更新**: 2026-05-02
-**CI 基线**: 429 passed / 4 ignored / 0 failed, clippy clean, fmt clean
-**审核来源**: lattice-core 全量代码审核（17 文件, 11245 行）
-**状态**: ALL 40 ISSUES RESOLVED
+**审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
+**状态**: 36 ISSUES — 7 CRITICAL, 9 HIGH, 12 MEDIUM, 8 LOW
 
 ---
 
@@ -11,10 +10,12 @@
 
 | 等级 | 含义 | 响应要求 |
 |------|------|---------|
-| P0 | 对外可用性阻断 | 立即修复 |
+| P0 | 对外可用性阻断 / CRITICAL 安全漏洞 | 立即修复 |
 | P1 | 运行时正确性/安全缺陷 | 本迭代修复 |
 | P2 | 设计/安全/维护问题 | 计划中 |
 | P3 | 代码质量改进 | 延后 |
+
+> 安全漏洞严重度为 CRITICAL = P0, HIGH = P1, MEDIUM = P2, LOW = P3
 
 ---
 
@@ -22,510 +23,418 @@
 
 | 等级 | 数量 |
 |------|------|
-| P1 | 9 |
-| P2 | 18 |
-| P3 | 13 |
-| **总计** | **40** |
+| P0 (CRITICAL) | 7 |
+| P1 (HIGH) | 9 |
+| P2 (MEDIUM) | 12 |
+| P3 (LOW) | 8 |
+| **总计** | **36** |
 
 ---
 
-## P1 — 安全/逻辑 HIGH（9 项）
+## P0 — CRITICAL 安全漏洞（7 项）
 
-### CORE-H1：ResolvedModel.api_key Serialize 泄露密钥
+### P0-01: sandbox check_command() 未阻止 \n/\r 换行符命令注入 [VULN-001]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H1 |
-| **等级** | P1 |
-| **维度** | 安全 |
-| **组件** | lattice-core/catalog/types.rs |
-| **位置** | `types.rs:91-92` |
-| **状态** | RESOLVED |
+| **ID** | P0-01 / VULN-001 |
+| **首次报告** | 2026-05-01 |
+| **来源** | [VULN-001](../issues/VULN-001-sandbox-newline-bypass.md) |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:119` |
+| **状态** | Open |
 
-**描述**：`ResolvedModel::api_key: Option<String>` derive `Serialize`。`Debug` impl 正确遮掩为 `"***"`，但 `serde_json::to_string(&resolved_model)` 输出明文密钥。任何日志、缓存、IPC 系统序列化此结构都会泄露密钥。
+**描述**: check_command() 的 metacharacter 黑名单未包含 \\n 和 \\r。sh -c 将换行符解析为命令分隔符。攻击路径: {"command": "cargo test\\nrm -rf /"} → cargo 通过 allowlist → 执行两条命令。
 
-**建议修复**：`api_key` 字段加 `#[serde(skip)]` 或改用 `Zeroize<String>`；需要序列化时用专用不含密钥的结构体。
+**根因**: 黑名单是基于符号 shell 操作符（;、|、&& 等）枚举构建的，未考虑 POSIX shell 也将空白字符（\\n, \\r）作为命令分隔符处理。
+
+**建议修复**: 将 \\n 和 \\r 添加到 metacharacter 黑名单。根本方案: 放弃 sh -c，用 std::process::Command 直接执行二进制。
 
 ---
 
-### CORE-H2：provider_specific header: 注入无 allowlist
+### P0-02: check_command() 未阻止 & 后台命令注入 [VULN-007]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H2 |
-| **等级** | P1 |
-| **维度** | 安全 |
-| **组件** | lattice-core |
-| **位置** | `lib.rs:76-79`, `gemini.rs:418-421`, `transport/mod.rs:243-249` |
-| **状态** | RESOLVED |
+| **ID** | P0-02 / VULN-007 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:119` |
+| **状态** | Open |
 
-**描述**：`provider_specific` 中任何以 `"header:"` 开头的键直接注入 HTTP header，无名称/值验证。可覆盖 `Authorization`、`Host` 等敏感 header。catalog 是编译时嵌入（风险可控），但 `register_model()` API 允许库消费者注入任意 header。
+**描述**: metacharacter 黑名单包含 "&&" 但不包含独立 "&"。sh -c 将 & 解析为后台操作符。{"command": "cargo test & rm -rf /"} 通过所有检查。
 
-**建议修复**：添加 header name allowlist（只允许非敏感 header），或拒绝 `authorization`/`host`/`cookie` 等受保护名称。
+**根因**: 黑名单模型不完整。独立 & 字符被遗漏。
+
+**建议修复**: 添加 & 到黑名单（注意 & 在 && 之前匹配）。根本方案: 放弃 sh -c。
 
 ---
 
-### CORE-H3：ApiProtocol serde 与 FromStr 不一致
+### P0-03: check_url() URL 解析混淆导致 SSRF [VULN-008]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H3 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/catalog/types.rs |
-| **位置** | `types.rs:17-29 vs 34-41` |
-| **状态** | RESOLVED |
+| **ID** | P0-03 / VULN-008 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:162` |
+| **状态** | Open |
 
-**描述**：`FromStr` 接受 `"anthropic"` 作为 `AnthropicMessages` 的简写，但 serde deserialize 只认 `"anthropic_messages"`。TOML/JSON 用户写 `"anthropic"` 静默变成 `Custom("anthropic")`，运行时报 "Streaming not yet supported for protocol Custom(...)"。
+**描述**: check_url() 使用 starts_with("http://localhost") 做字符串前缀匹配。根据 RFC 3986，"http://localhost@evil.com/" 中 localhost 被视为用户名而非主机。攻击者可绕过 localhost-only 限制。
 
-**建议修复**：serde 改用 `try_from` + 自定义 deserialize，统一接受简写；或文档明确只接受全称。
+**根因**: 字符串前缀匹配代替 URL 解析。应使用 url 库正确提取 host 组件。
+
+**建议修复**: 使用 url::Url::parse() 解析 host 组件，对 host 而非原始字符串做检查。
 
 ---
 
-### CORE-H4：serde(untagged) Custom 吞拼写错误
+### P0-04: HTTPS 到内网 SSRF 完全未限制 [VULN-009]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H4 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/catalog/types.rs |
-| **位置** | `types.rs:28` |
-| **状态** | RESOLVED |
+| **ID** | P0-04 / VULN-009 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:162` |
+| **状态** | Open |
 
-**描述**：`#[serde(untagged)]` `Custom(String)` 捕获所有未知字符串，包括拼写错误如 `"chat_compltions"`。不产生 deserialize 错误，运行时报误导性 "not supported for Custom"。
+**描述**: check_url() 对 https:// URL 无任何 host 检查。web_search 工具可访问 https://127.0.0.1:6379/（本地 Redis）、https://169.254.169.254/（AWS 元数据）、https://localhost:8443/ 等。
 
-**建议修复**：移除 `untagged`，对未知字符串返回 deserialize 错误，或至少 log warning。
+**根因**: https:// 被默认认为安全，但目的 host 并非如此。无内网/保留地址检查。
+
+**建议修复**: 对 https:// URL 同样检查 host，拒绝 127.0.0.1/::1/10.0.0.0/8/172.16.0.0/12/192.168.0.0/16/169.254.0.0/16。
 
 ---
 
-### CORE-H5：estimate_messages 遗漏 tool_calls/reasoning_content/name
+### P0-05: bash 命令执行无超时控制 [VULN-010]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H5 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/tokens.rs |
-| **位置** | `tokens.rs:49-54` |
-| **状态** | RESOLVED |
+| **ID** | P0-05 / VULN-010 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs + tools.rs |
+| **文件** | `sandbox.rs:20` / `tools.rs:135` |
+| **状态** | Open |
 
-**描述**：`estimate_messages_for_model` 只计算 `m.content`，忽略 `m.tool_calls`、`m.reasoning_content`、`m.name`。Tool-heavy 对话估算严重偏低，`fits_in_context` 可能误报"可以放进去"导致 API 拒绝。
+**描述**: max_command_timeout: u32 = 30 已定义但 tools.rs 中的 bash 执行完全未使用。permissive 模式下 sleep 99999 即永久阻塞 agent 线程。
 
-**建议修复**：估算中加上 tool_calls JSON arguments 长度、name 字段、reasoning_content 长度。
+**根因**: 超时字段被定义但执行路径未消费。设计与实现脱节。
+
+**建议修复**: 添加 .spawn() + .wait_timeout() 或 tokio::time::timeout 包装。
 
 ---
 
-### CORE-H6：畸形 API 响应返回 Ok 而非 Err
+### P0-06: Agent 配置文件无完整性校验 [VULN-028]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H6 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/transport/chat_completions.rs |
-| **位置** | `chat_completions.rs:190-253` |
-| **状态** | RESOLVED |
+| **ID** | P0-06 / VULN-028 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-harness/src/profile.rs |
+| **文件** | `profile.rs:114-118` |
+| **状态** | Open |
 
-**描述**：当 `response["choices"]` 缺失或非 array，`denormalize_response` 返回 `Ok(ChatResponse { content: None, finish_reason: "stop", model: "unknown" })`。HTML 错误页解析为 JSON 时产生合法 `None`，与真正空响应不可区分。
+**描述**: agent.toml 配置文件无数字签名或哈希校验。攻击者可添加 default=true 的 handoff 规则重定向到恶意 agent。watcher 自动 hot-reload 无完整性检查。
 
-**建议修复**：`choices` 缺失或 `content` + `tool_calls` 都为 None 时返回 `Err(LatticeError)`。
+**根因**: 配置文件来源不可信但被盲目信任。无签名机制。
+
+**建议修复**: 为 agent.toml 添加 SHA-256 哈希或 Ed25519 签名验证。
 
 ---
 
-### CORE-H7：GeminiTransport trait 默认值全是 OpenAI 的
+### P0-07: read_allowlist 是 dead code — 任意文件读取 [VULN-012]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H7 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/transport/gemini.rs |
-| **位置** | GeminiTransport impl Transport |
-| **状态** | RESOLVED |
+| **ID** | P0-07 / VULN-012 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:73-88` |
+| **状态** | Open |
 
-**描述**：GeminiTransport 不 override `chat_endpoint()`（默认 `/chat/completions`）、`create_sse_parser()`（默认 OpenAiSseParser）、`auth_header_name/value()`（默认 `Authorization: Bearer`）。所有 trait 默认值对 Gemini 错误。Gemini 通过独立的 `send_gemini_nonstreaming_request` 绕过 trait。
+**描述**: read_allowlist 字段被定义并文档化但 check_read() 方法从未引用它。即使设置了读取目录限制，也完全不被执行。攻击者可读取任何不被 sensitive_files 匹配的文件。
 
-**建议修复**：override 所有 trait 方法返回 Gemini 正确值，或 Gemini 不实现 Transport trait 而用独立入口。
+**根因**: 字段实现遗漏。read_allowlist 从未集成到 check_read() 的验证逻辑中。
+
+**建议修复**: 在 check_read() 中添加 read_allowlist 检查逻辑。
 
 ---
 
-### CORE-H8：Gemini streaming finish_reason 与 non-streaming 不一致
+## P1 — HIGH 安全漏洞（9 项）
+
+### P1-01: check_command() 未阻止 > 和 < 重定向 [VULN-011]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H8 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/transport/gemini.rs |
-| **位置** | `gemini.rs:359-362` vs `parse_response` |
-| **状态** | RESOLVED |
+| **ID** | P1-01 / VULN-011 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:119` |
+| **状态** | Open |
 
-**描述**：`parse_response` 在有 tool calls 时将 finish_reason override 为 `"tool_calls"`，但 `denormalize_stream_chunk` 映射原始 `"STOP"` 为 `"stop"`，不检测 tool calls 存在。同一响应两条路径产生不同 finish_reason，streaming 模式下游错过工具执行。
+**描述**: > 和 < 不在 metacharacter 黑名单中。"grep . < /etc/shadow" 读取系统文件，"cargo test > /etc/crontab" 覆盖关键文件。bash 工具仅调用 check_command()，不调用 check_read/check_write，完全绕过文件沙箱。
 
-**建议修复**：`denormalize_stream_chunk` 检测 function calls 存在时 override finish_reason 为 `"tool_calls"`。
+**根因**: shell 层和文件层之间有空隙。重定向在 shell 层操作文件，不经过路径沙箱。
+
+**建议修复**: 添加到黑名单。根本方案: 放弃 sh -c。
 
 ---
 
-### CORE-H9：Anthropic anthropic-version header 不在 transport
+### P1-02: 文件操作 TOCTOU 竞态条件 [VULN-013]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-H9 |
-| **等级** | P1 |
-| **维度** | 逻辑 |
-| **组件** | lattice-core/transport/anthropic.rs |
-| **位置** | 缺失（只在 lib.rs 调用点注入） |
-| **状态** | RESOLVED |
+| **ID** | P1-02 / VULN-013 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/tools.rs |
+| **文件** | `tools.rs:49-63, 90-99` |
+| **状态** | Open |
 
-**描述**：`anthropic-version: 2023-06-01` 是 Anthropic API 必需 header，但不在 `AnthropicTransport.extra_headers()` 中设置，只在 `lib.rs:184` 通过 `extra_headers` 参数传递。Transport 单独使用时（绕过 `chat()`）请求缺此 header，API 返回错误。
+**描述**: check_read/check_write 和实际 fs 操作之间无原子性。并发攻击可替换 symlink 指向后再执行操作。
 
-**建议修复**：`AnthropicTransport::new()` 将 `anthropic-version` 加入 `extra_headers`。
+**根因**: 检查-使用时间差。无 O_NOFOLLOW 或 canonicalize 后二次检查。
+
+**建议修复**: 先 canonicalize 路径再在 canonical 路径上做二次检查。
 
 ---
 
-## P2 — 安全/逻辑 MEDIUM（18 项）
-
-### CORE-M1：validate_base_url 定义但未在 resolve 流程中调用
+### P1-03: web_search 请求无超时 [VULN-014]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M1 |
-| **维度** | 安全 |
-| **位置** | `router.rs:569-601` |
-| **状态** | RESOLVED |
+| **ID** | P1-03 / VULN-014 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-agent/src/tools.rs |
+| **文件** | `tools.rs:195` |
+| **状态** | Open |
 
-`validate_base_url()` 检查 HTTPS，但 `resolve()`、`resolve_permissive()`、`register_model()` 均不调用。`http://evil.server.com` 可通过。
+**描述**: reqwest::blocking::get(url) 无任何超时配置。攻击者可通过 Slowloris 技术永久阻塞 agent 线程。
+
+**根因**: 使用便捷函数而非带超时配置的 Client。
+
+**建议修复**: 使用 Client::builder().timeout(30s).build()。
 
 ---
 
-### CORE-M2：Debug 日志文件默认权限 0o644
+### P1-04: sandbox write allowlist substring matching [VULN-002]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M2 |
-| **维度** | 安全 |
-| **位置** | `logging.rs:68-71` |
-| **状态** | RESOLVED |
+| **ID** | P1-04 / VULN-002 |
+| **首次报告** | 2026-05-01 |
+| **来源** | [VULN-002](../issues/VULN-002-sandbox-write-allowlist-substring-bypass.md) |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **文件** | `sandbox.rs:97` |
+| **状态** | Open |
 
-`init_debug_logging` 创建日志文件无权限控制，world-readable。trace 日志含请求/响应体和工具调用参数中的敏感数据。
+**描述**: check_write() 使用 path.contains(prefix) 子串匹配。evil-lattice-core/ 匹配 lattice-core/ 前缀。结合 symlink 可写入任意位置。
+
+**根因**: 子串匹配而非路径规范化 + 目录前缀匹配。
+
+**建议修复**: 使用 canonicalize + starts_with 目录前缀匹配。
 
 ---
 
-### CORE-M3：init_debug_logging log_path 无路径校验
+### P1-05: 进程环境变量跨请求污染 [VULN-004]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M3 |
-| **维度** | 安全 |
-| **位置** | `logging.rs:61` |
-| **状态** | RESOLVED |
+| **ID** | P1-05 / VULN-004 |
+| **首次报告** | 2026-05-01 |
+| **来源** | [VULN-004](../issues/VULN-004-process-env-cross-request-contamination.md) |
+| **组件** | lattice-cli/src/commands/resolve.rs |
+| **状态** | Open |
 
-`log_path` 直接传给 `fs::create_dir_all` 和 `fs::OpenOptions::open`，`"../../etc/cron.d/malicious"` 可写入。
+**描述**: 使用 std::env::set_var() 修改进程级环境变量。多请求并发时污染其他请求的凭证解析。
+
+**根因**: 进程级可变状态用于请求级上下文。
+
+**建议修复**: 使用 with_credentials() HashMap 而非 set_var。
 
 ---
 
-### CORE-M4：SSE 解析无事件大小/数量上限
+### P1-06: SSRF via HTTP 重定向跟踪 [VULN-020]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M4 |
-| **维度** | 安全 |
-| **位置** | `streaming.rs:381-423` |
-| **状态** | RESOLVED |
+| **ID** | P1-06 / VULN-020 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-core/src/provider.rs |
+| **文件** | `provider.rs:8-14` |
+| **状态** | Open |
 
-恶意 SSE server 可发送超长 `data:` 行或百万级小事件，无限制导致 OOM。与 SSE buffer O(n^2) 重分配结合更严重。
+**描述**: reqwest::Client 默认跟踪 HTTP 重定向。恶意端点可 302 → http://169.254.169.254/。validate_base_url() 仅检查初始 URL。Authorization header 随重定向发送。
+
+**根因**: 默认重定向策略 + URL 验证仅覆盖初始请求。
+
+**建议修复**: 设置 .redirect(Policy::none()) 或自定义验证每次重定向目标。
 
 ---
 
-### CORE-M5：Gemini api_model_id URL 拼接无编码
+### P1-07: 无界限 fork 目标线程轰炸 [VULN-029]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M5 |
-| **维度** | 安全 |
-| **位置** | `gemini.rs:410` |
-| **状态** | RESOLVED |
+| **ID** | P1-07 / VULN-029 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-harness/src/handoff_rule.rs + pipeline.rs |
+| **文件** | `handoff_rule.rs:31-38` / `pipeline.rs:535-594` |
+| **状态** | Open |
 
-`format!("{}/models/{}:generateContent", base_url, model)` 中 `model` 未 URL-encode。含 `/`、`?`、`#` 的 model ID 可产生路径注入或 SSRF。
+**描述**: HandoffTarget::parse() 接受任意数量的 fork 目标，无上限。可创建 500 个线程同时调用 LLM API。
+
+**根因**: fork 分支数无上限。
+
+**建议修复**: 在反序列化时限制 fork 分支数上限（如 10）。
 
 ---
 
-### CORE-M6：auth_header_name/value 独立 override 的 footgun
+### P1-08: system.file symlink 遍历 [VULN-032]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M6 |
-| **维度** | 安全 |
-| **位置** | `transport/mod.rs:243-249` |
-| **状态** | RESOLVED |
+| **ID** | P1-08 / VULN-032 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 蓝军自攻击安全审计 |
+| **组件** | lattice-harness/src/profile.rs |
+| **文件** | `profile.rs:127-144` |
+| **状态** | Open |
 
-默认 `auth_header_value` 格式化为 `Bearer {key}`。只 override `auth_header_name` 不 override `auth_header_value` 会发 `x-api-key: Bearer sk-xxx`（Anthropic 期望裸 key）。
+**描述**: system_prompt() 拒绝 .. 但不解析 symlink。可创建 symlink 指向敏感文件，内容作为系统提示词注入 LLM provider。
+
+**根因**: 路径检查未调用 canonicalize() 解析 symlink。
+
+**建议修复**: 在读取前 canonicalize 路径并验证在允许的目录前缀内。
 
 ---
 
-### CORE-M7：Gemini chat() 非.streaming
+### P1-09: sandbox sensitive-file 过滤非规范 [VULN-003]
 
 | 字段 | 值 |
 |------|-----|
-| **ID** | CORE-M7 |
-| **维度** | 逻辑 |
-| **位置** | `lib.rs:189-207` |
-| **状态** | RESOLVED |
+| **ID** | P1-09 / VULN-003 |
+| **首次报告** | 2026-05-01 |
+| **来源** | [VULN-003](../issues/VULN-003-sandbox-sensitive-file-filter-noncanonical.md) |
+| **组件** | lattice-agent/src/sandbox.rs |
+| **状态** | Open |
 
-Gemini 调 `send_gemini_nonstreaming_request` 全量收集后才返回，chat() 声称 streaming 但 Gemini 实际不 streaming。
+**描述**: 敏感文件过滤使用 path.contains(".env") 子串匹配，不解析路径。可能误挡合法文件，也可能被编码或 symlink 绕过。
 
----
+**根因**: 路径未 canonicalize，匹配逻辑使用子串而非路径组件匹配。
 
-### CORE-M8：resolve_permissive 硬编码 context_length 131072
-
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M8 |
-| **维度** | 逻辑 |
-| **位置** | `router.rs:473` |
-| **状态** | RESOLVED |
-
-未知 model 通过 permissive 路径 resolve 时 context_length 固定 128K，无法覆盖，误导 token budget 逻辑。
+**建议修复**: canonicalize 后做路径组件匹配而非子串匹配。
 
 ---
 
-### CORE-M9：normalize_model_id 嵌套 provider 前缀残留
+## P2 — MEDIUM 安全/设计问题（12 项）
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M9 |
-| **维度** | 逻辑 |
-| **位置** | `router.rs:59-63` |
-| **状态** | RESOLVED |
+### P2-01: 敏感文件列表严重不完整 [VULN-015]
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:36-43` | **状态**: Open
 
-`split_once('/')` 只 strip 第一段 `"openrouter"`，`"openrouter/anthropic/claude-sonnet-4.6"` 残留 `"anthropic/"` 导致 catalog lookup 失败。
+**描述**: 仅 6 项。缺少 .git/config、~/.ssh/id_*、~/.aws/credentials、.npmrc 等。
 
----
+### P2-02: DNS rebinding 绕过 HTTPS SSRF [VULN-016]
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:162` | **状态**: Open
 
-### CORE-M10：ProviderUnavailable.reason casing 不一致
+**描述**: DNS rebinding 服务（nip.io, xip.io）可解析域名到内网 IP，绕过 host 检查。
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M10 |
-| **维度** | 逻辑 |
-| **位置** | `errors.rs:158 vs 170` |
-| **状态** | RESOLVED |
+### P2-03: reqwest 默认重定向跟踪 SSRF [VULN-017]
+**组件**: lattice-agent/src/tools.rs | **文件**: `tools.rs:195` | **状态**: Open
 
-5xx 路径存 lowercased body，400/overloaded 路径存原始 case。
+**描述**: 302 重定向可绕过 URL scheme 检查，访问内网 HTTP 服务。
 
----
+### P2-04: Bash ANSI-C 引用绕过 [VULN-018]
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:119` | **状态**: Open
 
-### CORE-M11：retry_after 可解析为负数
+**描述**: $'\\n' 展开为换行符绕过黑名单。$'\\x3b' → ;。
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M11 |
-| **维度** | 逻辑 |
-| **位置** | `errors.rs:277-279` |
-| **状态** | RESOLVED |
+### P2-05: 多向量组合绕过 [VULN-019]
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:132-133` | **状态**: Open
 
-`take_while` 包含 `-` 字符，`"retry_after": -5` 解析为 `Some(-5.0)`。
+**描述**: PATH 注入 + 子进程继承 + check_command 参数不验证。
 
----
+### P2-06: URL 验证 userinfo 注入绕过 [VULN-021]
+**组件**: lattice-core/src/router.rs | **文件**: `router.rs:592-624` | **状态**: Open
 
-### CORE-M12：fits_in_context 用 < 而非 <= 或留 margin
+**描述**: https://anything@169.254.169.254/ 中 anything 被视为用户名而非 host。
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M12 |
-| **维度** | 逻辑 |
-| **位置** | `tokens.rs:61` |
-| **状态** | RESOLVED |
+### P2-07: HTTP header 注入 via header: 前缀 [VULN-022]
+**组件**: lattice-core/src/lib.rs + transport/gemini.rs | **状态**: Open
 
-`estimated == context_length` 时返回 fits，但 provider 在极限实际拒绝。应留 margin 或用 `<=` 加负偏移。
+**描述**: provider_specific 的 header: 机制可注入任意 HTTP 头，无白名单。
 
----
+### P2-08: 凭证通过错误响应体泄露 [VULN-023]
+**组件**: lattice-core/src/errors.rs + lib.rs | **状态**: Open
 
-### CORE-M13：缺失 tool arguments 默认 "{}"
+**描述**: 非 2xx 响应体存入错误消息，可能含 API key 回显。
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M13 |
-| **维度** | 逻辑 |
-| **位置** | `chat_completions.rs:215-218` |
-| **状态** | RESOLVED |
+### P2-09: WebSocket 端点无鉴权 [VULN-031]
+**组件**: lattice-harness/src/ws.rs | **文件**: `ws.rs:22-59` | **状态**: Open
 
-API 响应中 tool call 缺 `arguments` 字段时默认 `"{}"`，掩盖协议违规。
+**描述**: /ws 端点无 Origin/Token/CORS。跨域可监听 pipeline 事件泄露。
 
----
+### P2-10: LATTICE_AGENTS_DIR 环境变量毒化 [VULN-033]
+**组件**: lattice-harness + lattice-cli | **状态**: Open
 
-### CORE-M14：Anthropic tool_use 缺 id/name 默认空字符串
+**描述**: 环境变量可覆盖 agent 目录到攻击者控制的路径。
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M14 |
-| **维度** | 逻辑 |
-| **位置** | `anthropic.rs:99-108` |
-| **状态** | RESOLVED |
+### P2-11: Python binding lock poisoning [VULN-005]
+**组件**: lattice-python | **状态**: Open
 
-`tool_use` block 缺 `id`/`name` 时默认空字符串而非报错，导致 tool result round-tripping 失败。
+**描述**: Python GIL/lock 交互在异常路径上可能导致宿主进程 panic。
+
+### P2-12: schema-retry JSON fallback [VULN-006]
+**组件**: lattice-harness | **状态**: Open
+
+**描述**: schema 校验失败时的 JSON fallback 行为可能隐藏畸形 agent 输出。
 
 ---
 
-### CORE-M15：chat_response_to_stream 不发 ToolCallEnd
+## P3 — LOW 代码质量问题（8 项）
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M15 |
-| **维度** | 逻辑 |
-| **位置** | `transport/mod.rs:63-74` |
-| **状态** | RESOLVED |
+### P3-01: URL 验证接受非 HTTP 协议 [VULN-024]
+**组件**: lattice-core/src/router.rs | **状态**: Open
 
-`chat_response_to_stream` 发 ToolCallStart + ToolCallDelta 但不发 ToolCallEnd，工具调用生命周期不闭合。
+### P3-02: 缺少全局请求超时 [VULN-025]
+**组件**: lattice-core/src/provider.rs | **状态**: Open
 
----
+### P3-03: chat_endpoint 覆盖可重定向 [VULN-026]
+**组件**: lattice-core/src/lib.rs | **状态**: Open
 
-### CORE-M16：Gemini 空 User/Assistant 消息静默丢弃
+### P3-04: Gemini URL model ID 无长度限制 [VULN-027]
+**组件**: lattice-core/src/transport/gemini.rs | **状态**: Open
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M16 |
-| **维度** | 逻辑 |
-| **位置** | `gemini.rs:111-119, 120-145` |
-| **状态** | RESOLVED |
+### P3-05: SQLite FTS5 查询构造脆弱 [VULN-030]
+**组件**: lattice-harness/src/memory/sqlite.rs | **状态**: Open
 
-空 content 的 User/Assistant 消息被整体跳过，Anthropic 插入占位文本。对话历史不一致可能导致 Gemini API 拒绝。
+### P3-06: diagnostics() 凭证枚举 [VULN-034]
+**组件**: lattice-cli/src/credentials.rs | **状态**: Open
 
----
+### P3-07: 内存条目无大小限制 [VULN-035]
+**组件**: lattice-harness/src/pipeline.rs | **状态**: Open
 
-### CORE-M17：Gemini temperature 不防 NaN/Infinity
-
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M17 |
-| **维度** | 逻辑 |
-| **位置** | `gemini.rs:497-498` |
-| **状态** | RESOLVED |
-
-直接 `json!(temp)`，其他 transport 用 `apply_temperature()` 有 NaN/Infinity guard。
+### P3-08: 深度嵌套 JSON 栈溢出风险 [VULN-036]
+**组件**: lattice-harness/src/handoff_rule.rs | **状态**: Open
 
 ---
 
-### CORE-M18：CLAUDE.md 说 env-only credentials 但 with_credentials 存在
+## 交叉引用
 
-| 字段 | 值 |
-|------|-----|
-| **ID** | CORE-M18 |
-| **维度** | 文档 |
-| **位置** | `CLAUDE.md:127` vs `router.rs:113-117` |
-| **状态** | RESOLVED |
-
-文档说 "Credentials come from **environment variables only**"，但 `ModelRouter::with_credentials(creds)` 接受外部注入优先于 env vars。
-
----
-
-## P3 — 逻辑/文档/质量 LOW（13 项）
-
-### CORE-L1：stream: false 不写入 body
-
-| 位置 | `transport/mod.rs:287-291` |
-| **状态** | RESOLVED |
-
-`set_stream_flag` 只在 `stream=true` 时写入 `"stream": true`，`stream=false` 时缺字段。Ollama 等默认 streaming 的 provider 行为不一致。
-
----
-
-### CORE-L2：temperature from_f64 失败 fallback 到 0
-
-| 位置 | `transport/mod.rs:276-278` |
-| **状态** | RESOLVED |
-
-`serde_json::Number::from_f64(temp)` 返回 None 时 fallback 为 `Number::from(0)`（贪婪解码），而非 omit 或 warn。与 NaN/Infinity 分支行为不一致。
-
----
-
-### CORE-L3：contains("gpt-4o") 被 starts_with("gpt-") 覆盖是死代码
-
-| 位置 | `tokens.rs:9,13` |
-| **状态** | RESOLVED |
-
----
-
-### CORE-L4：is_openai_model 对 "o3"/"o4" 前缀有 false positive
-
-| 位置 | `tokens.rs:7-14` |
-| **状态** | RESOLVED |
-
-任何以 "o3" 开头的字符串都被当作 OpenAI 模型，包括 `"o3000-custom"` 等非 OpenAI 模型名。
-
----
-
-### CORE-L5：retry jitter 在 base >= max_delay 时无效
-
-| 位置 | `retry.rs:24-28` |
-| **状态** | RESOLVED |
-
-当 `base >= max_delay` 时 jitter 加了 50% 但 `min` 重新 clamp 到 `max_delay`，碰撞避让完全失效。
-
----
-
-### CORE-L6：from_data 静默丢弃重复 canonical_id
-
-| 位置 | `catalog/loader.rs:35-39` |
-| **状态** | RESOLVED |
-
-data.json 中相同 canonical_id 的第二条记录静默覆盖第一条，无 warning。
-
----
-
-### CORE-L7：Gemini tool result 启发式 JSON 解析
-
-| 位置 | `gemini.rs:151-158` |
-| **状态** | RESOLVED |
-
-以 `{` 或 `[` 开头的 content 强制解析为 JSON，`unwrap_or_else` 静默捕获解析失败。
-
----
-
-### CORE-L8：Gemini "OTHER" finish reason 映射为 "stop"
-
-| 位置 | `gemini.rs:91` |
-| **状态** | RESOLVED |
-
-`"OTHER"` 表示"未知原因结束"，映射为 `"stop"`（正常完成）语义不同。
-
----
-
-### CORE-L9：Gemini streaming vs non-streaming tool call ID 不稳定
-
-| 位置 | `gemini.rs:95,349` |
-| **状态** | RESOLVED |
-
-`parse_response` 和 `denormalize_stream_chunk` 对同一 tool call 产生不同 ID。
-
----
-
-### CORE-L10：SSE buffer 每次事件重分配 O(n^2)
-
-| 位置 | `streaming.rs:454` |
-| **状态** | RESOLVED |
-
-`buf = buf[pos + 2..].to_string()` 每次创建新 String，高吞吐 streaming 有性能风险。
-
----
-
-### CORE-L11：OpenAiSseParser ToolCallEnd 顺序不确定
-
-| 位置 | `streaming.rs:175-176` |
-| **状态** | RESOLVED |
-
-`HashMap::drain()` 迭代顺序不确定，多个 tool call 的 End 事件顺序随机。
-
----
-
-### CORE-L12：多处文档与代码不符
-
-| 位置 | 多处 |
-| **状态** | RESOLVED |
-
-- `CLAUDE.md` 模块表将 `ErrorClassifier` 放在 retry 模块，实际在 errors 模块
-- `transport/mod.rs` docstring 将 deprecated `denormalize_stream_chunk` 列为活跃方法
-- `lib.rs:22-28` `resolve()` 声称 "stateless"，OnceLock 使 catalog 失败永久化
-- `dispatcher.rs` docstring 不提及 OpenAICompatTransport
-- `AnthropicTransport` 未从 mod.rs re-export
+- [安全审计问题索引](../issues/README.md) — 所有 36 个 VULN 的详细描述和复现步骤
+- [VULN-001 换行符注入](../issues/VULN-001-sandbox-newline-bypass.md)
+- [VULN-002 写白名单子串匹配](../issues/VULN-002-sandbox-write-allowlist-substring-bypass.md)
+- [VULN-003 敏感文件过滤非规范](../issues/VULN-003-sandbox-sensitive-file-filter-noncanonical.md)
+- [VULN-004 进程环境变量污染](../issues/VULN-004-process-env-cross-request-contamination.md)
+- [VULN-005 Python 绑定锁中毒](../issues/VULN-005-python-binding-lock-poisoning-dos.md)
+- [VULN-006 Schema-retry JSON fallback](../issues/VULN-006-agent-json-fallback-can-mask-invalid-structured-output.md)
