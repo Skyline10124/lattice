@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // MemoryEntry — a single unit of stored information
@@ -76,6 +77,68 @@ pub struct ConversationTurn {
 }
 
 // ---------------------------------------------------------------------------
+// SharedMemory — cross-agent shared memory with partition access control (D7)
+// ---------------------------------------------------------------------------
+
+/// Shared partition identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SharedPartition {
+    Named(String),
+    All,
+}
+
+/// Agent's read/write access to shared partitions.
+#[derive(Debug, Clone, Default)]
+pub struct PartitionAccess {
+    pub read: Vec<SharedPartition>,
+    pub write: Vec<SharedPartition>,
+}
+
+impl PartitionAccess {
+    pub fn new(read: Vec<SharedPartition>, write: Vec<SharedPartition>) -> Self {
+        Self { read, write }
+    }
+
+    fn can_read(&self, partition: &SharedPartition) -> bool {
+        self.read.iter().any(|p| *p == SharedPartition::All || p == partition)
+    }
+
+    fn can_write(&self, partition: &SharedPartition) -> bool {
+        self.write.iter().any(|p| *p == SharedPartition::All || p == partition)
+    }
+}
+
+/// Memory operation errors.
+#[derive(Debug)]
+pub enum MemoryError {
+    AccessDenied(SharedPartition),
+    StorageError(String),
+}
+
+/// Cross-agent shared memory with partition-based access control.
+/// Separate trait from Memory — agents use Memory for private state,
+/// SharedMemory for cross-agent collaboration.
+#[async_trait]
+pub trait SharedMemory: Send + Sync {
+    /// Write to a shared partition. Caller declares access; denied if no write permission.
+    async fn save_shared(
+        &self,
+        entry: MemoryEntry,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+    ) -> Result<(), MemoryError>;
+
+    /// Read from a shared partition. Caller declares access; denied if no read permission.
+    async fn read_shared(
+        &self,
+        query: &str,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError>;
+}
+
+// ---------------------------------------------------------------------------
 // InMemoryMemory — HashMap-based, not persisted. Default implementation.
 // ---------------------------------------------------------------------------
 
@@ -133,13 +196,9 @@ impl Memory for InMemoryMemory {
     }
 
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String> {
-        // Default: no-op reflection. Override in SqliteMemory or use Reflect
-        // to get real LLM-based extraction.
         vec![]
     }
 }
-
-use std::sync::Mutex;
 
 struct GlobalStore {
     entries: Vec<MemoryEntry>,

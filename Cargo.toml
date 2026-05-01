@@ -10,4 +10,5 @@ members = [
     "lattice-cli",
     "lattice-tui",
     "lattice-harness",
+    "lattice-bus",
 ]

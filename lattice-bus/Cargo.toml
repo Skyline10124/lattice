@@ -1,0 +1,16 @@
+[package]
+name = "lattice-bus"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lattice_bus"
+crate-type = ["rlib"]
+
+[dependencies]
+lattice-core = { path = "../lattice-core" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"

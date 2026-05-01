@@ -1,11 +1,10 @@
-use crate::{ConversationTurn, EntryKind, Memory, MemoryEntry};
+use crate::{ConversationTurn, EntryKind, Memory, MemoryEntry, MemoryError, SharedMemory, SharedPartition, PartitionAccess};
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
 
 /// SQLite-backed persistent memory with FTS5 full-text search.
-///
-/// Interior mutability via `Mutex<Connection>` makes this type `Sync`.
+/// Implements both Memory (private) and SharedMemory (cross-agent partitioned).
 pub struct SqliteMemory {
     conn: Mutex<Connection>,
 }
@@ -23,7 +22,8 @@ impl SqliteMemory {
                 summary TEXT NOT NULL,
                 content TEXT NOT NULL,
                 tags TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                partition TEXT NOT NULL DEFAULT 'private'
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
                 summary, content, tags_str,
@@ -78,6 +78,13 @@ impl SqliteMemory {
             tags,
             created_at: row.get(6)?,
         })
+    }
+
+    fn partition_str(partition: &SharedPartition) -> String {
+        match partition {
+            SharedPartition::Named(name) => name.clone(),
+            SharedPartition::All => "_all".to_string(),
+        }
     }
 }
 
@@ -162,15 +169,86 @@ impl Memory for SqliteMemory {
     }
 
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String> {
-        // No LLM extraction in this backend.
         vec![]
+    }
+}
+
+#[async_trait]
+impl SharedMemory for SqliteMemory {
+    async fn save_shared(
+        &self,
+        entry: MemoryEntry,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+    ) -> Result<(), MemoryError> {
+        if !access.can_write(&partition) {
+            return Err(MemoryError::AccessDenied(partition));
+        }
+
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Err(MemoryError::StorageError("lock poisoned".into())),
+        };
+        let tags_json = serde_json::to_string(&entry.tags).unwrap_or_else(|_| "[]".to_string());
+        let partition_str = Self::partition_str(&partition);
+        conn.execute(
+            "INSERT OR REPLACE INTO memory (id, kind, session_id, summary, content, tags, created_at, partition)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                entry.id,
+                entry.kind_str(),
+                entry.session_id,
+                entry.summary,
+                entry.content,
+                tags_json,
+                entry.created_at,
+                partition_str,
+            ],
+        )
+        .map_err(|e| MemoryError::StorageError(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO memory_fts(rowid, summary, content, tags_str)
+             SELECT rowid, summary, content, tags FROM memory WHERE id = ?1",
+            params![entry.id],
+        )
+        .ok();
+
+        Ok(())
+    }
+
+    async fn read_shared(
+        &self,
+        query: &str,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        if !access.can_read(&partition) {
+            return Err(MemoryError::AccessDenied(partition));
+        }
+
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return Err(MemoryError::StorageError("lock poisoned".into())),
+        };
+        let partition_str = Self::partition_str(&partition);
+        let sql = "SELECT id, kind, session_id, summary, content, tags, created_at
+                   FROM memory WHERE partition = ?1 AND (summary LIKE ?2 OR content LIKE ?2)
+                   LIMIT ?3";
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(sql).map_err(|e| MemoryError::StorageError(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![partition_str, pattern, limit as i64], Self::row_to_entry)
+            .map_err(|e| MemoryError::StorageError(e.to_string()))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EntryKind, MemoryEntry};
+    use crate::{EntryKind, MemoryEntry, PartitionAccess, SharedPartition};
 
     #[test]
     fn test_sqlite_save_and_recall() {
@@ -227,5 +305,132 @@ mod tests {
         let mem = SqliteMemory::open(path).unwrap();
         let results = futures::executor::block_on(mem.recall("nothing", 10));
         assert!(results.is_empty());
+    }
+
+    // ── SharedMemory partition tests ──
+
+    #[test]
+    fn test_shared_write_and_read_with_access() {
+        let mem = SqliteMemory::open(":memory:").unwrap();
+        let access = PartitionAccess::new(
+            vec![SharedPartition::Named("review-results".into())],
+            vec![SharedPartition::Named("review-results".into())],
+        );
+
+        futures::executor::block_on(mem.save_shared(
+            MemoryEntry {
+                id: "sr1".into(),
+                kind: EntryKind::Decision,
+                session_id: "reviewer".into(),
+                summary: "Approved change".into(),
+                content: "Code looks good".into(),
+                tags: vec!["review".into()],
+                created_at: "2026-05-01".into(),
+            },
+            SharedPartition::Named("review-results".into()),
+            &access,
+        ))
+        .unwrap();
+
+        let results = futures::executor::block_on(mem.read_shared(
+            "Approved",
+            SharedPartition::Named("review-results".into()),
+            &access,
+            10,
+        ))
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary, "Approved change");
+    }
+
+    #[test]
+    fn test_shared_write_access_denied() {
+        let mem = SqliteMemory::open(":memory:").unwrap();
+        let access = PartitionAccess::new(
+            vec![SharedPartition::Named("review-results".into())],
+            vec![], // no write access
+        );
+
+        let result = futures::executor::block_on(mem.save_shared(
+            MemoryEntry {
+                id: "sr2".into(),
+                kind: EntryKind::Fact,
+                session_id: "observer".into(),
+                summary: "Trying to write".into(),
+                content: "Should be denied".into(),
+                tags: vec![],
+                created_at: "2026-05-01".into(),
+            },
+            SharedPartition::Named("review-results".into()),
+            &access,
+        ));
+        assert!(matches!(result, Err(MemoryError::AccessDenied(_))));
+    }
+
+    #[test]
+    fn test_shared_read_access_denied() {
+        let mem = SqliteMemory::open(":memory:").unwrap();
+        let write_only = PartitionAccess::new(
+            vec![], // no read access
+            vec![SharedPartition::Named("security-findings".into())],
+        );
+
+        // Write first (should succeed with write access)
+        futures::executor::block_on(mem.save_shared(
+            MemoryEntry {
+                id: "sf1".into(),
+                kind: EntryKind::Fact,
+                session_id: "scanner".into(),
+                summary: "SQL injection found".into(),
+                content: "Vulnerable endpoint".into(),
+                tags: vec!["security".into()],
+                created_at: "2026-05-01".into(),
+            },
+            SharedPartition::Named("security-findings".into()),
+            &write_only,
+        ))
+        .unwrap();
+
+        // Read should be denied
+        let result = futures::executor::block_on(mem.read_shared(
+            "SQL",
+            SharedPartition::Named("security-findings".into()),
+            &write_only,
+            10,
+        ));
+        assert!(matches!(result, Err(MemoryError::AccessDenied(_))));
+    }
+
+    #[test]
+    fn test_shared_partition_all_access() {
+        let mem = SqliteMemory::open(":memory:").unwrap();
+        let super_access = PartitionAccess::new(
+            vec![SharedPartition::All],
+            vec![SharedPartition::All],
+        );
+
+        futures::executor::block_on(mem.save_shared(
+            MemoryEntry {
+                id: "sa1".into(),
+                kind: EntryKind::Fact,
+                session_id: "admin".into(),
+                summary: "Global fact".into(),
+                content: "Everyone can see this".into(),
+                tags: vec![],
+                created_at: "2026-05-01".into(),
+            },
+            SharedPartition::Named("any-topic".into()),
+            &super_access,
+        ))
+        .unwrap();
+
+        let results = futures::executor::block_on(mem.read_shared(
+            "Global",
+            SharedPartition::Named("any-topic".into()),
+            &super_access,
+            10,
+        ))
+        .unwrap();
+        assert_eq!(results.len(), 1);
     }
 }
