@@ -22,30 +22,6 @@ use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 
-// ── Env var isolation helpers ──────────────────────────────────────────────
-
-fn save_env(key: &str) -> Option<String> {
-    env::var(key).ok()
-}
-
-fn restore_env(key: &str, prev: Option<String>) {
-    match prev {
-        Some(v) => env::set_var(key, v),
-        None => env::remove_var(key),
-    }
-}
-
-/// Save and clear a batch of env vars, returning the saved state for restore.
-fn isolate_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
-    keys.iter().map(|k| (k.to_string(), save_env(k))).collect()
-}
-
-fn restore_env_batch(saved: &[(String, Option<String>)]) {
-    for (k, v) in saved {
-        restore_env(k, v.clone());
-    }
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // T1: rig-core removal regression
 // ════════════════════════════════════════════════════════════════════════════
@@ -56,7 +32,7 @@ fn restore_env_batch(saved: &[(String, Option<String>)]) {
 #[test]
 fn regress_rig_core_model_resolution_works() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&[
+    let saved = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -71,7 +47,7 @@ fn regress_rig_core_model_resolution_works() {
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
     assert_eq!(resolved.provider, "anthropic");
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 /// Verify the aliases still resolve correctly (tests code paths that
@@ -79,7 +55,7 @@ fn regress_rig_core_model_resolution_works() {
 #[test]
 fn regress_rig_core_aliases_intact() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+    let saved = crate::isolate_env(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
 
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
     let router = ModelRouter::new();
@@ -87,7 +63,7 @@ fn regress_rig_core_aliases_intact() {
     assert!(router.resolve("sonnet", None).is_ok());
     assert!(router.resolve("opus", None).is_ok());
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -611,7 +587,7 @@ fn regress_saturating_pow_attempt_zero() {
 #[test]
 fn regress_engine_mock_provider_resolves_correctly() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&[
+    let saved = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -647,14 +623,14 @@ fn regress_engine_mock_provider_resolves_correctly() {
     );
     assert_eq!(resolved.api_protocol, ApiProtocol::AnthropicMessages);
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 /// Multiple models across different providers must resolve correctly.
 #[test]
 fn regress_engine_mock_provider_multi_provider() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+    let saved = crate::isolate_env(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
 
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-key");
     env::set_var("OPENAI_API_KEY", "sk-openai-key");
@@ -665,7 +641,7 @@ fn regress_engine_mock_provider_multi_provider() {
     let resolved = router.resolve("sonnet", None).expect("sonnet resolve");
     assert_eq!(resolved.provider, "anthropic");
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 /// ResolvedModel from the catalog must carry correct base_url and api_protocol
@@ -673,7 +649,7 @@ fn regress_engine_mock_provider_multi_provider() {
 #[test]
 fn regress_engine_mock_provider_metadata_correct() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&[
+    let saved = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -699,14 +675,14 @@ fn regress_engine_mock_provider_metadata_correct() {
         "api_protocol should be AnthropicMessages, not OpenAiChat"
     );
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 /// Resolved models with auth errors should produce Authentication error, not generic.
 #[test]
 fn regress_engine_mock_provider_auth_error_typed() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(&[
+    let saved = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -734,14 +710,14 @@ fn regress_engine_mock_provider_auth_error_typed() {
         err
     );
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }
 
 /// When no credential is available for sonnet's providers, resolve returns an error.
 #[test]
 fn regress_missing_credential_errors() {
     let _lock = crate::env_lock::lock();
-    let saved = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
+    let saved = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
     let result = router.resolve("sonnet", None);
@@ -759,5 +735,5 @@ fn regress_missing_credential_errors() {
         msg
     );
 
-    restore_env_batch(&saved);
+    crate::restore_env_batch(&saved);
 }

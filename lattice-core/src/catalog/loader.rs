@@ -63,9 +63,6 @@ impl Catalog {
     pub fn aliases(&self) -> &HashMap<String, String> {
         &self.aliases
     }
-    pub fn provider_defaults(&self) -> &HashMap<String, ProviderDefaults> {
-        &self.provider_defaults
-    }
     pub fn model_count(&self) -> usize {
         self.models.len()
     }

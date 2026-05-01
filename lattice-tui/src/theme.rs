@@ -4,8 +4,6 @@ use ratatui::style::{Color, Modifier, Style};
 pub struct Theme {
     pub bg: Color,
     pub surface: Color,
-    #[allow(dead_code)]
-    pub overlay: Color,
     pub text: Color,
     pub subtext: Color,
     pub user_accent: Color,
@@ -23,7 +21,6 @@ impl Theme {
         Self {
             bg: Color::Rgb(30, 30, 46),                  // base
             surface: Color::Rgb(49, 50, 68),             // surface0
-            overlay: Color::Rgb(69, 71, 90),             // surface1
             text: Color::Rgb(205, 214, 244),             // text
             subtext: Color::Rgb(166, 173, 200),          // subtext1
             user_accent: Color::Rgb(180, 190, 254),      // lavender
@@ -53,11 +50,6 @@ impl Theme {
 
     pub fn tool_style(&self) -> Style {
         Style::default().fg(self.tool_accent)
-    }
-
-    #[allow(dead_code)]
-    pub fn error_style(&self) -> Style {
-        Style::default().fg(self.error)
     }
 
     pub fn statusline_style(&self) -> Style {

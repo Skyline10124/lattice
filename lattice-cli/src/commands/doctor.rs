@@ -5,6 +5,7 @@ use lattice_core::router::ModelRouter;
 
 use crate::config::Config;
 use crate::credentials::CredentialStore;
+use crate::display::{credential_label, status_icon};
 
 pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
     println!("{} LATTICE v0.1.0\n", "\u{F06A9}".dimmed());
@@ -12,13 +13,16 @@ pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
     // Credentials
     println!("{}", "Credentials:".bold());
     for (key, status) in creds.diagnostics() {
-        let icon = if status { "\u{2713}" } else { "\u{2717}" };
-        let color = if status {
-            "set".green()
-        } else {
-            "not set".red()
-        };
-        println!("  {} {}: {}", icon, key, color);
+        println!(
+            "  {} {}: {}",
+            status_icon(status),
+            key,
+            if status {
+                credential_label(true)
+            } else {
+                credential_label(false)
+            }
+        );
     }
 
     // Models
@@ -29,11 +33,7 @@ pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
     let authed_set: std::collections::HashSet<_> = authed.iter().cloned().collect();
 
     for m in &all[..all.len().min(20)] {
-        let icon = if authed_set.contains(m) {
-            "\u{2713}"
-        } else {
-            "\u{2717}"
-        };
+        let icon = status_icon(authed_set.contains(m));
         let color = if authed_set.contains(m) {
             m.green()
         } else {

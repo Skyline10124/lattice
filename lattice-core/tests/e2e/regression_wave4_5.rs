@@ -31,17 +31,6 @@ use serde_json::json;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn save_env(key: &str) -> Option<String> {
-    env::var(key).ok()
-}
-
-fn restore_env(key: &str, prev: Option<String>) {
-    match prev {
-        Some(v) => env::set_var(key, v),
-        None => env::remove_var(key),
-    }
-}
-
 fn make_resolved(
     provider: &str,
     model: &str,
@@ -880,7 +869,7 @@ fn normalize_model_id_noop_for_non_claude() {
 #[test]
 fn router_resolve_uses_correct_provider_details() {
     let _lock = crate::env_lock::lock();
-    let saved_keys: Vec<(String, Option<String>)> = [
+    let saved_keys = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -888,22 +877,9 @@ fn router_resolve_uses_correct_provider_details() {
         "KILO_API_KEY",
         "AI_GATEWAY_API_KEY",
         "OPENAI_API_KEY",
-    ]
-    .iter()
-    .map(|k| (k.to_string(), save_env(k)))
-    .collect();
+    ]);
 
-    // Clear all competing credentials, set only Anthropic
-    for k in &[
-        "NOUS_API_KEY",
-        "GITHUB_TOKEN",
-        "OPENCODE_ZEN_API_KEY",
-        "KILO_API_KEY",
-        "AI_GATEWAY_API_KEY",
-        "OPENAI_API_KEY",
-    ] {
-        env::remove_var(k);
-    }
+    // Set only Anthropic
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-wave45");
 
     let router = ModelRouter::new();
@@ -916,9 +892,7 @@ fn router_resolve_uses_correct_provider_details() {
     assert_eq!(resolved.api_protocol, ApiProtocol::AnthropicMessages);
     assert_eq!(resolved.api_key.as_deref(), Some("sk-ant-test-wave45"));
 
-    for (k, v) in saved_keys {
-        restore_env(&k, v);
-    }
+    crate::restore_env_batch(&saved_keys);
 }
 
 #[test]

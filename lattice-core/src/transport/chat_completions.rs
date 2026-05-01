@@ -1,8 +1,7 @@
 //! OpenAI Chat Completions transport — format conversion for the OpenAI API.
 //!
 //! This module provides [`ChatCompletionsTransport`], which handles
-//! normalization/denormalization for the OpenAI Chat Completions API format,
-//! and re-exports the unified [`Transport`] trait for backward compatibility.
+//! normalization/denormalization for the OpenAI Chat Completions API format.
 //!
 //! Other OpenAI-compatible providers (Ollama, Groq, xAI, DeepSeek, Mistral, OpenRouter)
 //! wrap this transport via [`crate::transport::openai_compat::OpenAICompatTransport`],
@@ -11,15 +10,13 @@
 use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
+use crate::transport::TransportBase;
 
 // ---------------------------------------------------------------------------
-// Re-export the unified Transport trait
+// Re-export the unified Transport trait for convenience
 // ---------------------------------------------------------------------------
 
 /// Re-export of the unified [`crate::transport::Transport`] trait.
-///
-/// This allows provider code and tests that still import from
-/// `chat_completions::Transport` to continue working.
 pub use crate::transport::Transport;
 
 // ---------------------------------------------------------------------------
@@ -56,24 +53,21 @@ pub enum TransportError {
 /// [`crate::transport::openai_compat::OpenAICompatTransport`] to override
 /// the base URL and extra headers while reusing the same format logic.
 pub struct ChatCompletionsTransport {
-    base_url: String,
-    extra_headers: HashMap<String, String>,
+    base: TransportBase,
 }
 
 impl ChatCompletionsTransport {
     /// Create a new ChatCompletionsTransport with the default OpenAI base URL.
     pub fn new() -> Self {
         Self {
-            base_url: "https://api.openai.com/v1".to_string(),
-            extra_headers: HashMap::new(),
+            base: TransportBase::new("https://api.openai.com/v1"),
         }
     }
 
     /// Create a ChatCompletionsTransport with a custom base URL.
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            base_url: base_url.into(),
-            extra_headers: HashMap::new(),
+            base: TransportBase::new(base_url),
         }
     }
 }
@@ -86,11 +80,11 @@ impl Default for ChatCompletionsTransport {
 
 impl Transport for ChatCompletionsTransport {
     fn base_url(&self) -> &str {
-        &self.base_url
+        self.base.base_url()
     }
 
     fn extra_headers(&self) -> &HashMap<String, String> {
-        &self.extra_headers
+        self.base.extra_headers()
     }
 
     fn api_mode(&self) -> &str {
@@ -174,27 +168,13 @@ impl Transport for ChatCompletionsTransport {
             body["tools"] = serde_json::Value::Array(tools_array);
         }
 
-        if let Some(temp) = request.temperature {
-            if temp.is_nan() || temp.is_infinite() {
-                eprintln!(
-                    "WARNING: temperature value {} is NaN or infinite, omitting temperature field",
-                    temp
-                );
-            } else {
-                body["temperature"] = serde_json::Value::Number(
-                    serde_json::Number::from_f64(temp)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
-                );
-            }
-        }
+        self.apply_temperature(&mut body, request.temperature);
 
         if let Some(max_tokens) = request.max_tokens {
             body["max_tokens"] = serde_json::Value::Number(serde_json::Number::from(max_tokens));
         }
 
-        if request.stream {
-            body["stream"] = serde_json::Value::Bool(true);
-        }
+        self.set_stream_flag(&mut body, request.stream);
 
         if let Some(ref thinking) = request.thinking {
             body["thinking"] = thinking.clone();

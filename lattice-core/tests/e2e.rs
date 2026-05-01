@@ -41,6 +41,35 @@ pub const ALL_CREDENTIAL_ENV_VARS: &[&str] = &[
     "INFINI_AI_API_KEY",
 ];
 
+// ── Shared env var isolation helpers ──────────────────────────────────────────
+
+pub fn save_env(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
+pub fn restore_env(key: &str, prev: Option<String>) {
+    match prev {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+}
+
+pub fn isolate_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
+    keys.iter()
+        .map(|k| {
+            let prev = save_env(k);
+            std::env::remove_var(k);
+            (k.to_string(), prev)
+        })
+        .collect()
+}
+
+pub fn restore_env_batch(saved: &[(String, Option<String>)]) {
+    for (k, v) in saved {
+        restore_env(k, v.clone());
+    }
+}
+
 #[path = "e2e/unknown_model.rs"]
 mod unknown_model;
 

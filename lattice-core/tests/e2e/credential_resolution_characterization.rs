@@ -20,32 +20,6 @@ use lattice_core::router::{normalize_model_id, ModelRouter, PROVIDER_CREDENTIALS
 use std::collections::HashMap;
 use std::env;
 
-fn save_env(key: &str) -> Option<String> {
-    env::var(key).ok()
-}
-
-fn restore_env(key: &str, prev: Option<String>) {
-    match prev {
-        Some(v) => env::set_var(key, v),
-        None => env::remove_var(key),
-    }
-}
-
-/// Save and remove a set of env vars, returning previous values for restore.
-fn isolate_env<'a>(keys: &[&'a str]) -> Vec<(&'a str, Option<String>)> {
-    let saved: Vec<(&str, Option<String>)> = keys.iter().map(|k| (*k, save_env(k))).collect();
-    for k in keys {
-        env::remove_var(k);
-    }
-    saved
-}
-
-fn restore_env_batch(saved: Vec<(&str, Option<String>)>) {
-    for (k, v) in saved {
-        restore_env(k, v);
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════
 // SECTION 1: PROVIDER_CREDENTIALS_RAW table characterization
 // ═══════════════════════════════════════════════════════════════════════
@@ -192,7 +166,7 @@ fn copilot_uses_github_token_not_api_key() {
 #[test]
 fn resolve_credentials_finds_env_var_for_provider() {
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
+    let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key");
 
     let router = ModelRouter::new();
@@ -201,7 +175,7 @@ fn resolve_credentials_finds_env_var_for_provider() {
     let resolved = result.unwrap();
     assert_eq!(resolved.api_key.as_deref(), Some("sk-ant-test-key"));
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    crate::restore_env("ANTHROPIC_API_KEY", prev);
 }
 
 #[test]
@@ -224,8 +198,8 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
     // then falls back to PROVIDER_CREDENTIALS_RAW. If entry.credential_keys has
     // the right mapping, it wins.
     let _lock = crate::env_lock::lock();
-    let prev_custom = save_env("MY_CUSTOM_ANTHROPIC_KEY");
-    let prev_standard = save_env("ANTHROPIC_API_KEY");
+    let prev_custom = crate::save_env("MY_CUSTOM_ANTHROPIC_KEY");
+    let prev_standard = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("MY_CUSTOM_ANTHROPIC_KEY", "custom-key-value");
     env::remove_var("ANTHROPIC_API_KEY");
 
@@ -235,15 +209,11 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
 
     let custom = ModelCatalogEntry {
         canonical_id: "test-custom-cred-model".to_string(),
-        display_name: "Test Custom Cred Model".to_string(),
-        description: String::new(),
         context_length: 8192,
-        capabilities: vec![],
         providers: vec![CatalogProviderEntry {
             provider_id: "anthropic".to_string(),
             api_model_id: "test-model".to_string(),
             priority: 1,
-            weight: 1,
             credential_keys: HashMap::from([(
                 "api_key".to_string(),
                 "MY_CUSTOM_ANTHROPIC_KEY".to_string(),
@@ -263,8 +233,8 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
         "should use entry.credential_keys first, not PROVIDER_CREDENTIALS_RAW fallback"
     );
 
-    restore_env("MY_CUSTOM_ANTHROPIC_KEY", prev_custom);
-    restore_env("ANTHROPIC_API_KEY", prev_standard);
+    crate::restore_env("MY_CUSTOM_ANTHROPIC_KEY", prev_custom);
+    crate::restore_env("ANTHROPIC_API_KEY", prev_standard);
 }
 
 #[test]
@@ -272,7 +242,7 @@ fn resolve_credentials_ignores_empty_env_var_values() {
     // CHARACTERIZATION: resolve_credentials() trims env var values and
     // returns None if the trimmed value is empty.
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
+    let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "   ");
 
     let router = ModelRouter::new();
@@ -287,7 +257,7 @@ fn resolve_credentials_ignores_empty_env_var_values() {
         "empty/whitespace-only env var should not produce an api_key"
     );
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    crate::restore_env("ANTHROPIC_API_KEY", prev);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -303,7 +273,7 @@ fn priority_loop_skips_providers_without_credentials() {
     //   }
     // Providers without credentials are silently skipped.
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(&[
+    let prev_keys = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -323,7 +293,7 @@ fn priority_loop_skips_providers_without_credentials() {
     assert_eq!(resolved.provider, "copilot");
     assert_eq!(resolved.api_key.as_deref(), Some("gh-test-token"));
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 #[test]
@@ -333,8 +303,8 @@ fn priority_loop_selects_first_provider_with_credential() {
     // the first provider in the sorted order (stable sort preserves catalog order)
     // that has credentials wins.
     let _lock = crate::env_lock::lock();
-    let prev_nous = save_env("NOUS_API_KEY");
-    let prev_gh = save_env("GITHUB_TOKEN");
+    let prev_nous = crate::save_env("NOUS_API_KEY");
+    let prev_gh = crate::save_env("GITHUB_TOKEN");
 
     env::set_var("NOUS_API_KEY", "nous-key");
     env::remove_var("GITHUB_TOKEN");
@@ -348,8 +318,8 @@ fn priority_loop_selects_first_provider_with_credential() {
     assert_eq!(resolved.provider, "nous");
     assert_eq!(resolved.api_key.as_deref(), Some("nous-key"));
 
-    restore_env("NOUS_API_KEY", prev_nous);
-    restore_env("GITHUB_TOKEN", prev_gh);
+    crate::restore_env("NOUS_API_KEY", prev_nous);
+    crate::restore_env("GITHUB_TOKEN", prev_gh);
 }
 
 #[test]
@@ -367,7 +337,7 @@ fn priority_loop_bug_ollama_skipped_despite_highest_priority() {
     // has credentials, so Ollama is never selected if any other provider
     // has a key.
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(&[
+    let prev_keys = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -390,7 +360,7 @@ fn priority_loop_bug_ollama_skipped_despite_highest_priority() {
         );
     }
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -404,7 +374,7 @@ fn fallback_returns_config_error_when_no_credentials() {
     // sorted_providers is sorted by priority (ascending), so the
     // provider with the lowest priority number gets returned.
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(&[
+    let prev_keys = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "NOUS_API_KEY",
         "GITHUB_TOKEN",
@@ -428,7 +398,7 @@ fn fallback_returns_config_error_when_no_credentials() {
         );
     }
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 #[test]
@@ -436,7 +406,7 @@ fn fallback_errors_when_no_credentials_available() {
     // CHARACTERIZATION: When no credential env vars are set for any provider,
     // resolve() correctly returns an error (no fallback to api_key=None).
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
+    let prev_keys = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
     let result = router.resolve("claude-sonnet-4-6", None);
@@ -452,7 +422,7 @@ fn fallback_errors_when_no_credentials_available() {
         msg
     );
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -489,7 +459,7 @@ fn permissive_resolves_credentials_from_defaults() {
     // from provider defaults (including credential_keys) and then calls
     // resolve_credentials() on it.
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
+    let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "ant-permissive-key");
 
     let router = ModelRouter::new();
@@ -498,13 +468,13 @@ fn permissive_resolves_credentials_from_defaults() {
         .unwrap();
     assert_eq!(resolved.api_key.as_deref(), Some("ant-permissive-key"));
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    crate::restore_env("ANTHROPIC_API_KEY", prev);
 }
 
 #[test]
 fn permissive_returns_none_api_key_without_env_var() {
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
+    let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::remove_var("ANTHROPIC_API_KEY");
 
     let router = ModelRouter::new();
@@ -513,7 +483,7 @@ fn permissive_returns_none_api_key_without_env_var() {
         .unwrap();
     assert!(resolved.api_key.is_none());
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    crate::restore_env("ANTHROPIC_API_KEY", prev);
 }
 
 #[test]
@@ -549,7 +519,7 @@ fn permissive_fails_without_slash() {
 fn permissive_provider_model_becomes_canonical_id() {
     // CHARACTERIZATION: The model part becomes canonical_id (without provider prefix).
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
+    let prev_keys = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
     let resolved = router
@@ -557,7 +527,7 @@ fn permissive_provider_model_becomes_canonical_id() {
         .unwrap();
     assert_eq!(resolved.canonical_id, "claude-sonnet-4.6");
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 #[test]
@@ -566,7 +536,7 @@ fn permissive_deepseek_provider() {
     // "openrouter" is NOT in provider_defaults, so it would fail.
     // "deepseek" IS in provider_defaults.
     let _lock = crate::env_lock::lock();
-    let prev = save_env("DEEPSEEK_API_KEY");
+    let prev = crate::save_env("DEEPSEEK_API_KEY");
     env::set_var("DEEPSEEK_API_KEY", "ds-test-key");
 
     let router = ModelRouter::new();
@@ -576,7 +546,7 @@ fn permissive_deepseek_provider() {
     assert_eq!(resolved.provider, "deepseek");
     assert_eq!(resolved.api_key.as_deref(), Some("ds-test-key"));
 
-    restore_env("DEEPSEEK_API_KEY", prev);
+    crate::restore_env("DEEPSEEK_API_KEY", prev);
 }
 
 #[test]
@@ -683,8 +653,8 @@ fn resolve_with_provider_override_skips_priority_loop() {
     // directly looks for that provider in the entry, bypassing the
     // priority loop entirely.
     let _lock = crate::env_lock::lock();
-    let prev_ant = save_env("ANTHROPIC_API_KEY");
-    let prev_gh = save_env("GITHUB_TOKEN");
+    let prev_ant = crate::save_env("ANTHROPIC_API_KEY");
+    let prev_gh = crate::save_env("GITHUB_TOKEN");
 
     env::remove_var("ANTHROPIC_API_KEY");
     env::set_var("GITHUB_TOKEN", "gh-key");
@@ -701,8 +671,8 @@ fn resolve_with_provider_override_skips_priority_loop() {
         "anthropic has no key set, override still works"
     );
 
-    restore_env("ANTHROPIC_API_KEY", prev_ant);
-    restore_env("GITHUB_TOKEN", prev_gh);
+    crate::restore_env("ANTHROPIC_API_KEY", prev_ant);
+    crate::restore_env("GITHUB_TOKEN", prev_gh);
 }
 
 #[test]
@@ -720,14 +690,14 @@ fn resolve_unnormalized_input_gets_normalized() {
     // CHARACTERIZATION: resolve() calls normalize_model_id() first,
     // so "claude-sonnet-4.6" (with dot) resolves the same as "claude-sonnet-4-6".
     let _lock = crate::env_lock::lock();
-    let prev = save_env("ANTHROPIC_API_KEY");
+    let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "test-key");
 
     let router = ModelRouter::new();
     let resolved = router.resolve("claude-sonnet-4.6", None).unwrap();
     assert_eq!(resolved.canonical_id, "claude-sonnet-4-6");
 
-    restore_env("ANTHROPIC_API_KEY", prev);
+    crate::restore_env("ANTHROPIC_API_KEY", prev);
 }
 
 #[test]
@@ -736,7 +706,7 @@ fn resolve_permissive_called_for_unknown_models() {
     // resolve() calls resolve_permissive() automatically.
     // This enables "provider/model" syntax for uncataloged models.
     let _lock = crate::env_lock::lock();
-    let prev = save_env("OPENAI_API_KEY");
+    let prev = crate::save_env("OPENAI_API_KEY");
     env::set_var("OPENAI_API_KEY", "sk-test");
 
     let router = ModelRouter::new();
@@ -747,7 +717,7 @@ fn resolve_permissive_called_for_unknown_models() {
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "openai");
 
-    restore_env("OPENAI_API_KEY", prev);
+    crate::restore_env("OPENAI_API_KEY", prev);
 }
 
 #[test]
@@ -768,7 +738,7 @@ fn credentialless_provider_ollama_resolves_with_none_api_key() {
     // This is correct behavior — the bug is in the priority loop
     // that skips Ollama when other providers have credentials.
     let _lock = crate::env_lock::lock();
-    let prev_keys = isolate_env(&[
+    let prev_keys = crate::isolate_env(&[
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
@@ -789,7 +759,7 @@ fn credentialless_provider_ollama_resolves_with_none_api_key() {
         );
     }
 
-    restore_env_batch(prev_keys);
+    crate::restore_env_batch(&prev_keys);
 }
 
 #[test]
@@ -804,7 +774,7 @@ fn bug_ollama_not_selected_when_anthropic_has_creds() {
     // Current behavior: The priority loop requires api_key.is_some(),
     // so Ollama is skipped even though it's a valid provider.
     let _lock = crate::env_lock::lock();
-    let prev_ant = save_env("ANTHROPIC_API_KEY");
+    let prev_ant = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "sk-ant-key");
 
     // Priority loop logic (lines 150-167):
@@ -818,7 +788,7 @@ fn bug_ollama_not_selected_when_anthropic_has_creds() {
     // The fix for T11 should change this so that credentialless providers
     // are treated as "always available" rather than "never available."
 
-    restore_env("ANTHROPIC_API_KEY", prev_ant);
+    crate::restore_env("ANTHROPIC_API_KEY", prev_ant);
 }
 
 #[test]

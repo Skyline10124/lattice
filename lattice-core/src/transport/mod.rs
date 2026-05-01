@@ -39,6 +39,47 @@ pub struct NormalizedMessages {
 pub use chat_completions::TransportError;
 
 // ---------------------------------------------------------------------------
+// TransportBase — shared base_url + extra_headers for all transports
+// ---------------------------------------------------------------------------
+
+/// Common base for all transport implementations: base URL + extra headers.
+///
+/// Eliminates the `{base_url, extra_headers}` field duplication across
+/// ChatCompletionsTransport, AnthropicTransport, GeminiTransport, and
+/// OpenAICompatTransport.
+pub struct TransportBase {
+    base_url: String,
+    extra_headers: HashMap<String, String>,
+}
+
+impl TransportBase {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            extra_headers: HashMap::new(),
+        }
+    }
+
+    pub fn with_extra_headers(
+        base_url: impl Into<String>,
+        extra_headers: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            extra_headers,
+        }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn extra_headers(&self) -> &HashMap<String, String> {
+        &self.extra_headers
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unified Transport trait
 // ---------------------------------------------------------------------------
 
@@ -160,6 +201,38 @@ pub trait Transport: Send + Sync {
     /// Default: [`crate::streaming::OpenAiSseParser`].
     fn create_sse_parser(&self) -> Box<dyn SseParser> {
         Box::new(crate::streaming::OpenAiSseParser::new())
+    }
+
+    // ── Body-building helpers (used by normalize_request) ────────────────
+
+    /// Apply the temperature field to a request body, guarding against NaN
+    /// and Infinity values that some APIs reject.
+    ///
+    /// Default: if `temp` is NaN/Infinity, print a warning and omit the
+    /// field; otherwise set `body["temperature"]` to the numeric value.
+    fn apply_temperature(&self, body: &mut Value, temp: Option<f64>) {
+        if let Some(temp) = temp {
+            if temp.is_nan() || temp.is_infinite() {
+                eprintln!(
+                    "WARNING: temperature value {} is NaN or infinite, omitting temperature field",
+                    temp
+                );
+            } else {
+                body["temperature"] = Value::Number(
+                    serde_json::Number::from_f64(temp)
+                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                );
+            }
+        }
+    }
+
+    /// Set the `stream` flag on a request body.
+    ///
+    /// Default: `body["stream"] = true` when `stream` is true.
+    fn set_stream_flag(&self, body: &mut Value, stream: bool) {
+        if stream {
+            body["stream"] = Value::Bool(true);
+        }
     }
 }
 

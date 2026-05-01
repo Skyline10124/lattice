@@ -73,8 +73,6 @@ fn default_max_retries() -> u32 {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct HandoffConfig {
-    #[serde(default)]
-    pub handoff_file: Option<String>, // path to handoff.py (DEPRECATED — use rules)
     #[serde(default, rename = "rules")]
     pub handoff_rules: Vec<crate::handoff_rule::HandoffRule>,
     #[serde(default)]

@@ -61,7 +61,6 @@ async fn run_app<B: ratatui::backend::Backend>(
                 event::Event::Tick => app.tick(),
                 event::Event::Key(key) => app.handle_key(key).await?,
                 event::Event::Mouse(mouse) => app.handle_mouse(mouse).await?,
-                event::Event::Resize(_, _) => {}
                 event::Event::StreamToken {
                     content,
                     reasoning,

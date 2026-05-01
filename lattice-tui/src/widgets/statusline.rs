@@ -21,14 +21,12 @@ impl Statusline {
         let status_icon = match app.status {
             AppStatus::Ready => "\u{2713}",
             AppStatus::Streaming => "\u{21BB}",
-            AppStatus::Waiting => "\u{25EF}",
             AppStatus::Error(_) => "\u{2717}",
         };
 
         let status_color = match app.status {
             AppStatus::Ready => self.theme.success,
             AppStatus::Streaming => self.theme.assistant_accent,
-            AppStatus::Waiting => self.theme.thinking,
             AppStatus::Error(_) => self.theme.error,
         };
 

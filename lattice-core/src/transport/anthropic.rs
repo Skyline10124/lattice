@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-
+use crate::transport::TransportBase;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::{AnthropicSseParser, SseParser, TokenUsage};
@@ -9,8 +9,7 @@ use crate::transport::{NormalizedMessages, Transport};
 use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 
 pub struct AnthropicTransport {
-    base_url: String,
-    extra_headers: HashMap<String, String>,
+    base: TransportBase,
 }
 
 const STOP_REASON_MAP: &[(&str, &str)] = &[
@@ -31,8 +30,7 @@ fn map_stop_reason(reason: &str) -> String {
 impl AnthropicTransport {
     pub fn new() -> Self {
         Self {
-            base_url: "https://api.anthropic.com".to_string(),
-            extra_headers: HashMap::new(),
+            base: TransportBase::new("https://api.anthropic.com"),
         }
     }
 }
@@ -45,11 +43,11 @@ impl Default for AnthropicTransport {
 
 impl Transport for AnthropicTransport {
     fn base_url(&self) -> &str {
-        &self.base_url
+        self.base.base_url()
     }
 
     fn extra_headers(&self) -> &HashMap<String, String> {
-        &self.extra_headers
+        self.base.extra_headers()
     }
 
     fn api_mode(&self) -> &str {
@@ -73,23 +71,8 @@ impl Transport for AnthropicTransport {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
-        if let Some(temp) = request.temperature {
-            if temp.is_nan() || temp.is_infinite() {
-                eprintln!(
-                    "WARNING: temperature value {} is NaN or infinite, omitting temperature field",
-                    temp
-                );
-            } else {
-                body["temperature"] = serde_json::Value::Number(
-                    serde_json::Number::from_f64(temp)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
-                );
-            }
-        }
-
-        if request.stream {
-            body["stream"] = serde_json::Value::Bool(true);
-        }
+        self.apply_temperature(&mut body, request.temperature);
+        self.set_stream_flag(&mut body, request.stream);
 
         Ok(body)
     }

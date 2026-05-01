@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::streaming::TokenUsage;
 use crate::transport::chat_completions::{Transport, TransportError};
+use crate::transport::TransportBase;
 use crate::types::Role;
 use serde_json::{json, Value};
 
@@ -57,22 +58,19 @@ pub enum StreamChunk {
 
 /// Message-format normalizer for the Gemini `generateContent` API.
 pub struct GeminiTransport {
-    base_url: String,
-    extra_headers: HashMap<String, String>,
+    base: TransportBase,
 }
 
 impl GeminiTransport {
     pub fn new() -> Self {
         Self {
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-            extra_headers: HashMap::new(),
+            base: TransportBase::new("https://generativelanguage.googleapis.com/v1beta"),
         }
     }
 
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
-            base_url: base_url.into(),
-            extra_headers: HashMap::new(),
+            base: TransportBase::new(base_url),
         }
     }
 
@@ -395,11 +393,11 @@ impl Default for GeminiTransport {
 
 impl Transport for GeminiTransport {
     fn base_url(&self) -> &str {
-        &self.base_url
+        self.base.base_url()
     }
 
     fn extra_headers(&self) -> &HashMap<String, String> {
-        &self.extra_headers
+        self.base.extra_headers()
     }
 
     fn api_mode(&self) -> &str {

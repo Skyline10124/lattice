@@ -70,11 +70,6 @@ impl EventBus {
     pub fn subscribe(&self) -> broadcast::Receiver<PipelineEvent> {
         self.tx.subscribe()
     }
-
-    /// Return a clone of the sender for use in pipeline execution.
-    pub fn sender(&self) -> broadcast::Sender<PipelineEvent> {
-        self.tx.clone()
-    }
 }
 
 impl Default for EventBus {

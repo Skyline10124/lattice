@@ -24,7 +24,6 @@ fn make_model_catalog_entry(id: &str, provider_count: usize) -> ModelCatalogEntr
             provider_id: format!("provider_{}", i),
             api_model_id: format!("{}-v{}", id, i),
             priority: i as u32 + 1,
-            weight: 1,
             credential_keys: HashMap::from([(
                 "api_key".to_string(),
                 format!("PROVIDER_{}_API_KEY", i),
@@ -41,14 +40,7 @@ fn make_model_catalog_entry(id: &str, provider_count: usize) -> ModelCatalogEntr
 
     ModelCatalogEntry {
         canonical_id: id.to_string(),
-        display_name: format!("Model {}", id),
-        description: format!("A benchmark test model with id={}", id),
         context_length: 128_000,
-        capabilities: vec![
-            "chat".to_string(),
-            "tool_call".to_string(),
-            "streaming".to_string(),
-        ],
         providers,
         aliases: vec![id.split('-').next().unwrap_or("m").to_string()],
     }

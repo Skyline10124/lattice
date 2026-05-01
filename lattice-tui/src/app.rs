@@ -26,8 +26,6 @@ pub struct App {
     pub current_model: String,
     pub current_provider: String,
     pub token_count: usize,
-    #[allow(dead_code)]
-    pub show_reasoning: bool,
     pub scroll_offset: usize,
     pub event_tx: Option<UnboundedSender<Event>>,
 }
@@ -36,8 +34,6 @@ pub struct App {
 pub enum AppStatus {
     Ready,
     Streaming,
-    #[allow(dead_code)]
-    Waiting,
     Error(String),
 }
 
@@ -52,7 +48,6 @@ impl App {
             current_model: "deepseek-v4-flash".into(),
             current_provider: "".into(),
             token_count: 0,
-            show_reasoning: true,
             scroll_offset: 0,
             event_tx: None,
         }

@@ -375,6 +375,7 @@ impl ModelRouter {
     }
 
     /// Clear the credential cache, forcing re-check of environment variables.
+    #[cfg(test)]
     pub fn clear_credential_cache(&self) {
         self.credential_cache
             .lock()
@@ -426,7 +427,6 @@ impl ModelRouter {
                     provider_id: provider_lower.clone(),
                     api_model_id: model_lower.clone(),
                     priority: 1,
-                    weight: 1,
                     credential_keys: defaults.credential_keys.clone(),
                     base_url: Some(defaults.base_url.clone()),
                     api_protocol: defaults.api_protocol.clone(),
@@ -451,7 +451,7 @@ impl ModelRouter {
         })
     }
 
-    /// Register a custom model at runtime (Python-facing API).
+    /// Register a custom model at runtime.
     pub fn register_model(&mut self, entry: ModelCatalogEntry) {
         self.custom_models.insert(entry.canonical_id.clone(), entry);
     }
@@ -500,7 +500,7 @@ impl ModelRouter {
     }
 
     /// Normalize a canonical model ID to the provider-specific api_model_id.
-    /// Most models use the canonical_id directly, but some providers need prefixes or transformations.
+    #[cfg(test)]
     pub fn normalize_model_for_provider(&self, canonical_id: &str, provider_id: &str) -> String {
         if let Some(entry) = self.catalog.get_model(canonical_id) {
             for pe in &entry.providers {
@@ -644,15 +644,11 @@ mod tests {
         let mut router = ModelRouter::new();
         let custom = ModelCatalogEntry {
             canonical_id: "my-custom-model".to_string(),
-            display_name: "My Custom Model".to_string(),
-            description: String::new(),
             context_length: 8192,
-            capabilities: vec![],
             providers: vec![CatalogProviderEntry {
                 provider_id: "custom".to_string(),
                 api_model_id: "my-model".to_string(),
                 priority: 1,
-                weight: 1,
                 credential_keys: HashMap::from([(
                     "api_key".to_string(),
                     "MY_CUSTOM_KEY".to_string(),
@@ -798,16 +794,12 @@ mod tests {
         let mut router = ModelRouter::new();
         let custom = ModelCatalogEntry {
             canonical_id: "test-credless-priority".to_string(),
-            display_name: "Test".to_string(),
-            description: String::new(),
             context_length: 8192,
-            capabilities: vec![],
             providers: vec![
                 CatalogProviderEntry {
                     provider_id: "ollama".to_string(),
                     api_model_id: "test-model".to_string(),
                     priority: 1,
-                    weight: 1,
                     credential_keys: HashMap::new(),
                     base_url: Some("http://localhost:11434/v1".to_string()),
                     api_protocol: ApiProtocol::OpenAiChat,
@@ -817,7 +809,6 @@ mod tests {
                     provider_id: "anthropic".to_string(),
                     api_model_id: "test-model".to_string(),
                     priority: 5,
-                    weight: 1,
                     credential_keys: HashMap::from([(
                         "api_key".to_string(),
                         "ANTHROPIC_API_KEY".to_string(),
@@ -853,16 +844,12 @@ mod tests {
         let mut router = ModelRouter::new();
         let custom = ModelCatalogEntry {
             canonical_id: "test-cred-same-priority".to_string(),
-            display_name: "Test".to_string(),
-            description: String::new(),
             context_length: 8192,
-            capabilities: vec![],
             providers: vec![
                 CatalogProviderEntry {
                     provider_id: "ollama".to_string(),
                     api_model_id: "test-model".to_string(),
                     priority: 1,
-                    weight: 1,
                     credential_keys: HashMap::new(),
                     base_url: Some("http://localhost:11434/v1".to_string()),
                     api_protocol: ApiProtocol::OpenAiChat,
@@ -872,7 +859,6 @@ mod tests {
                     provider_id: "anthropic".to_string(),
                     api_model_id: "test-model".to_string(),
                     priority: 1,
-                    weight: 1,
                     credential_keys: HashMap::from([(
                         "api_key".to_string(),
                         "ANTHROPIC_API_KEY".to_string(),
@@ -930,7 +916,6 @@ mod tests {
             provider_id: "antrhopic".to_string(),
             api_model_id: "some-model".to_string(),
             priority: 1,
-            weight: 1,
             credential_keys: HashMap::new(),
             base_url: None,
             api_protocol: ApiProtocol::AnthropicMessages,

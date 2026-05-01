@@ -2,18 +2,17 @@ use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::transport::chat_completions::{ChatCompletionsTransport, Transport, TransportError};
+use crate::transport::TransportBase;
 
 pub struct OpenAICompatTransport {
-    base_url: String,
-    extra_headers: HashMap<String, String>,
+    base: TransportBase,
     inner: ChatCompletionsTransport,
 }
 
 impl OpenAICompatTransport {
     pub fn new(base_url: impl Into<String>, extra_headers: HashMap<String, String>) -> Self {
         Self {
-            base_url: base_url.into(),
-            extra_headers,
+            base: TransportBase::with_extra_headers(base_url, extra_headers),
             inner: ChatCompletionsTransport::new(),
         }
     }
@@ -21,11 +20,11 @@ impl OpenAICompatTransport {
 
 impl Transport for OpenAICompatTransport {
     fn base_url(&self) -> &str {
-        &self.base_url
+        self.base.base_url()
     }
 
     fn extra_headers(&self) -> &HashMap<String, String> {
-        &self.extra_headers
+        self.base.extra_headers()
     }
 
     fn api_mode(&self) -> &str {

@@ -6,8 +6,6 @@ pub enum Event {
     Tick,
     Key(KeyEvent),
     Mouse(MouseEvent),
-    #[allow(dead_code)]
-    Resize(u16, u16),
     /// LLM streaming token delivered from background task.
     StreamToken {
         content: String,
@@ -52,7 +50,7 @@ impl EventHandler {
                             let mapped = match ev {
                                 CEvent::Key(k) => Event::Key(k),
                                 CEvent::Mouse(m) => Event::Mouse(m),
-                                CEvent::Resize(w, h) => Event::Resize(w, h),
+                                CEvent::Resize(_, _) => Event::Tick,
                                 _ => continue,
                             };
                             if tx_clone.send(mapped).is_err() {

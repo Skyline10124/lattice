@@ -10,6 +10,59 @@ use crate::profile::AgentProfile;
 use crate::registry::AgentRegistry;
 use crate::runner::{AgentRunner, MEMORY_RT};
 
+/// Construct an Agent and AgentRunner from a resolved model, profile, and optional memory.
+///
+/// Eliminates the duplicated 12-line construction block that appeared in both
+/// `run()` and `run_fork()`.
+fn build_runner(
+    profile: &AgentProfile,
+    resolved: lattice_core::ResolvedModel,
+    memory: Option<Arc<dyn Memory>>,
+) -> AgentRunner {
+    let mut agent = Agent::new(resolved);
+    if let Some(ref mem) = memory {
+        agent = agent.with_memory(mem.clone_box());
+    }
+    let mut runner = AgentRunner::from_profile(profile.clone(), agent);
+    if let Some(ref mem) = memory {
+        runner = runner.with_memory(Arc::clone(mem));
+    }
+    runner
+}
+
+/// Decision after a skippable/non-skippable agent error in the main pipeline loop.
+enum LoopDecision {
+    /// Continue the pipeline with the next agent (fallback route).
+    Continue(String),
+    /// Break out of the pipeline loop.
+    Break,
+}
+
+/// Handle an agent error: if skippable, try the fallback route; otherwise break.
+///
+/// Eliminates the duplicated error-handling pattern in both the resolve-error
+/// and runner-error branches of `run()`.
+fn handle_agent_error(
+    err: AgentError,
+    profile: &AgentProfile,
+    registry: &AgentRegistry,
+    skipped: &mut Vec<String>,
+    errors: &mut Vec<AgentError>,
+) -> LoopDecision {
+    if profile.agent.skippable {
+        skipped.push(profile.agent.name.clone());
+        errors.push(err);
+        if let Some(next_name) = handle_fallback(profile, registry) {
+            LoopDecision::Continue(next_name)
+        } else {
+            LoopDecision::Break
+        }
+    } else {
+        errors.push(err);
+        LoopDecision::Break
+    }
+}
+
 pub struct Pipeline {
     pub name: String,
     pub registry: Arc<AgentRegistry>,
@@ -96,31 +149,30 @@ impl Pipeline {
                         message: format!("Resolve failed: {}", e),
                         skippable: profile.agent.skippable,
                     };
-                    if profile.agent.skippable {
-                        skipped.push(profile.agent.name.clone());
-                        errors.push(err);
-                        if let Some(next_name) = handle_fallback(&profile, &self.registry) {
-                            current_agent = next_name;
-                        } else {
-                            break;
+                    if let Some(ref bus) = self.event_bus {
+                        bus.send(PipelineEvent::PipelineError {
+                            agent: profile.agent.name.clone(),
+                            message: err.message.clone(),
+                            skippable: err.skippable,
+                        });
+                    }
+                    match handle_agent_error(
+                        err,
+                        &profile,
+                        &self.registry,
+                        &mut skipped,
+                        &mut errors,
+                    ) {
+                        LoopDecision::Continue(next) => {
+                            current_agent = next;
+                            continue;
                         }
-                        continue;
-                    } else {
-                        errors.push(err);
-                        break;
+                        LoopDecision::Break => break,
                     }
                 }
             };
 
-            let mut agent = Agent::new(resolved);
-            if let Some(ref mem) = self.shared_memory {
-                agent = agent.with_memory(mem.clone_box());
-            }
-
-            let mut runner = AgentRunner::from_profile(profile.clone(), agent);
-            if let Some(ref mem) = self.shared_memory {
-                runner = runner.with_memory(Arc::clone(mem));
-            }
+            let mut runner = build_runner(&profile, resolved, self.shared_memory.clone());
 
             match runner.run(&current_input, agent_max_turns) {
                 Ok(output) => {
@@ -223,18 +275,18 @@ impl Pipeline {
                         message: e.to_string(),
                         skippable: profile.agent.skippable,
                     };
-                    if profile.agent.skippable {
-                        skipped.push(profile.agent.name.clone());
-                        errors.push(err);
-                        if let Some(next_name) = handle_fallback(&profile, &self.registry) {
-                            current_agent = next_name;
-                        } else {
-                            break;
+                    match handle_agent_error(
+                        err,
+                        &profile,
+                        &self.registry,
+                        &mut skipped,
+                        &mut errors,
+                    ) {
+                        LoopDecision::Continue(next) => {
+                            current_agent = next;
+                            continue;
                         }
-                        continue;
-                    } else {
-                        errors.push(err);
-                        break;
+                        LoopDecision::Break => break,
                     }
                 }
             }
@@ -307,15 +359,7 @@ impl Pipeline {
                         }
                     };
 
-                    let mut agent = Agent::new(resolved);
-                    if let Some(ref mem) = memory_box {
-                        agent = agent.with_memory(mem.clone_box());
-                    }
-
-                    let mut runner = AgentRunner::from_profile(profile.clone(), agent);
-                    if let Some(ref mem) = memory_box {
-                        runner = runner.with_memory(Arc::clone(mem));
-                    }
+                    let mut runner = build_runner(&profile, resolved, memory_box.clone());
 
                     let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 

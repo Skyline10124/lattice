@@ -43,6 +43,77 @@ use crate::transport::TransportDispatcher;
 
 static DISPATCHER: LazyLock<TransportDispatcher> = LazyLock::new(TransportDispatcher::new);
 
+/// Send a streaming HTTP request through the transport layer and return the
+/// SSE event stream.
+///
+/// Unifies the URL construction, auth/header setup, HTTP send, error mapping,
+/// and SSE stream creation that was previously duplicated across protocol
+/// branches in [`chat()`].
+async fn send_streaming_request(
+    transport: &dyn crate::transport::Transport,
+    client: &reqwest::Client,
+    resolved: &ResolvedModel,
+    body: &serde_json::Value,
+    extra_headers: &[(&str, &str)],
+) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, LatticeError> {
+    let base_url = resolved.base_url.trim_end_matches('/');
+    let endpoint = resolved
+        .provider_specific
+        .get("chat_endpoint")
+        .map(|s| s.as_str())
+        .unwrap_or_else(|| transport.chat_endpoint());
+    let url = format!("{}{}", base_url, endpoint);
+
+    let mut req = client.post(&url).json(body);
+    for (name, value) in extra_headers {
+        req = req.header(*name, *value);
+    }
+
+    if let Some(ref api_key) = resolved.api_key {
+        match resolved
+            .provider_specific
+            .get("auth_type")
+            .map(|s| s.as_str())
+        {
+            Some("x-goog-api-key") => {
+                req = req.header("x-goog-api-key", api_key.as_str());
+            }
+            _ => {
+                req = req.header(
+                    transport.auth_header_name(),
+                    transport.auth_header_value(api_key),
+                );
+            }
+        }
+    }
+
+    for (key, value) in &resolved.provider_specific {
+        if let Some(header_name) = key.strip_prefix("header:") {
+            req = req.header(header_name, value);
+        }
+    }
+
+    let response = req.send().await.map_err(|e| LatticeError::Network {
+        message: format!("HTTP request failed: {}", e),
+        status: e.status().map(|s| s.as_u16()),
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(LatticeError::ProviderUnavailable {
+            provider: resolved.provider.clone(),
+            reason: format!("HTTP {}: {}", status.as_u16(), body_text),
+        });
+    }
+
+    let stream = crate::streaming::sse_from_bytes_stream(
+        response.bytes_stream(),
+        transport.create_sse_parser(),
+    );
+    Ok(Box::pin(stream))
+}
+
 /// Send messages to a resolved model and return a stream of [`StreamEvent`]s.
 ///
 /// This function handles the full HTTP+SSE pipeline:
@@ -88,131 +159,44 @@ pub async fn chat(
 
     match &resolved.api_protocol {
         ApiProtocol::OpenAiChat => {
-            let transport = &DISPATCHER
+            let transport = DISPATCHER
                 .dispatch(&ApiProtocol::OpenAiChat)
                 .ok_or_else(|| LatticeError::Config {
                     message: "OpenAiChat transport not registered".into(),
                 })?;
 
-            let mut body =
+            let body =
                 transport
                     .normalize_request(&request)
                     .map_err(|e| LatticeError::Streaming {
                         message: e.to_string(),
                     })?;
-            body["stream"] = serde_json::Value::Bool(true);
 
-            let base_url = resolved.base_url.trim_end_matches('/');
-            let endpoint = resolved
-                .provider_specific
-                .get("chat_endpoint")
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| transport.chat_endpoint());
-            let url = format!("{}{}", base_url, endpoint);
-
-            let mut req = client.post(&url).json(&body);
-            if let Some(ref api_key) = resolved.api_key {
-                match resolved
-                    .provider_specific
-                    .get("auth_type")
-                    .map(|s| s.as_str())
-                {
-                    Some("x-goog-api-key") => {
-                        req = req.header("x-goog-api-key", api_key.as_str());
-                    }
-                    _ => {
-                        req = req.header(
-                            transport.auth_header_name(),
-                            transport.auth_header_value(api_key),
-                        );
-                    }
-                }
-            }
-            for (key, value) in &resolved.provider_specific {
-                if let Some(header_name) = key.strip_prefix("header:") {
-                    req = req.header(header_name, value);
-                }
-            }
-
-            let response = req.send().await.map_err(|e| LatticeError::Network {
-                message: format!("HTTP request failed: {}", e),
-                status: e.status().map(|s| s.as_u16()),
-            })?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let body_text = response.text().await.unwrap_or_default();
-                return Err(LatticeError::ProviderUnavailable {
-                    provider: resolved.provider.clone(),
-                    reason: format!("HTTP {}: {}", status.as_u16(), body_text),
-                });
-            }
-
-            let stream = crate::streaming::sse_from_bytes_stream(
-                response.bytes_stream(),
-                transport.create_sse_parser(),
-            );
-            Ok(Box::pin(stream))
+            send_streaming_request(transport, client, resolved, &body, &[]).await
         }
 
         ApiProtocol::AnthropicMessages => {
-            let transport = &DISPATCHER
+            let transport = DISPATCHER
                 .dispatch(&ApiProtocol::AnthropicMessages)
                 .ok_or_else(|| LatticeError::Config {
                     message: "AnthropicMessages transport not registered".into(),
                 })?;
 
-            let mut body =
+            let body =
                 transport
                     .normalize_request(&request)
                     .map_err(|e| LatticeError::Streaming {
                         message: e.to_string(),
                     })?;
-            body["stream"] = serde_json::Value::Bool(true);
 
-            let base_url = resolved.base_url.trim_end_matches('/');
-            let endpoint = resolved
-                .provider_specific
-                .get("chat_endpoint")
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| transport.chat_endpoint());
-            let url = format!("{}{}", base_url, endpoint);
-
-            let mut req = client
-                .post(&url)
-                .header("anthropic-version", "2023-06-01")
-                .json(&body);
-            if let Some(ref api_key) = resolved.api_key {
-                req = req.header(
-                    transport.auth_header_name(),
-                    transport.auth_header_value(api_key),
-                );
-            }
-            for (key, value) in &resolved.provider_specific {
-                if let Some(header_name) = key.strip_prefix("header:") {
-                    req = req.header(header_name, value);
-                }
-            }
-
-            let response = req.send().await.map_err(|e| LatticeError::Network {
-                message: format!("HTTP request failed: {}", e),
-                status: e.status().map(|s| s.as_u16()),
-            })?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let body_text = response.text().await.unwrap_or_default();
-                return Err(LatticeError::ProviderUnavailable {
-                    provider: resolved.provider.clone(),
-                    reason: format!("HTTP {}: {}", status.as_u16(), body_text),
-                });
-            }
-
-            let stream = crate::streaming::sse_from_bytes_stream(
-                response.bytes_stream(),
-                transport.create_sse_parser(),
-            );
-            Ok(Box::pin(stream))
+            send_streaming_request(
+                transport,
+                client,
+                resolved,
+                &body,
+                &[("anthropic-version", "2023-06-01")],
+            )
+            .await
         }
 
         _ => Err(LatticeError::Config {

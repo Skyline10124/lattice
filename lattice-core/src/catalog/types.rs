@@ -35,8 +35,6 @@ pub struct CatalogProviderEntry {
     pub api_model_id: String,
     #[serde(default = "default_priority")]
     pub priority: u32,
-    #[serde(default = "default_weight")]
-    pub weight: u32,
     #[serde(default)]
     pub credential_keys: HashMap<String, String>,
     #[serde(default)]
@@ -50,9 +48,6 @@ pub struct CatalogProviderEntry {
 fn default_priority() -> u32 {
     1
 }
-fn default_weight() -> u32 {
-    1
-}
 fn default_api_protocol() -> ApiProtocol {
     ApiProtocol::OpenAiChat
 }
@@ -60,13 +55,8 @@ fn default_api_protocol() -> ApiProtocol {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelCatalogEntry {
     pub canonical_id: String,
-    pub display_name: String,
-    #[serde(default)]
-    pub description: String,
     #[serde(default)]
     pub context_length: u32,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     pub providers: Vec<CatalogProviderEntry>,
     #[serde(default)]
     pub aliases: Vec<String>,

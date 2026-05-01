@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::profile::AgentProfile;
 
@@ -10,8 +10,6 @@ use crate::profile::AgentProfile;
 #[derive(Clone)]
 pub struct AgentRegistry {
     agents: HashMap<String, AgentProfile>,
-    #[allow(dead_code)]
-    base_dir: PathBuf,
 }
 
 impl AgentRegistry {
@@ -19,7 +17,6 @@ impl AgentRegistry {
     pub fn load_dir(dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let mut registry = Self {
             agents: HashMap::new(),
-            base_dir: dir.to_path_buf(),
         };
 
         if !dir.exists() {

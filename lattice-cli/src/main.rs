@@ -5,6 +5,7 @@ use colored::Colorize;
 mod commands;
 mod config;
 mod credentials;
+mod display;
 mod session;
 
 use commands::{

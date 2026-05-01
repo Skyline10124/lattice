@@ -2,6 +2,8 @@ use anyhow::Result;
 use colored::Colorize;
 use lattice_core::router::ModelRouter;
 
+use crate::display::{credential_label, status_icon};
+
 pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool) -> Result<()> {
     let router = ModelRouter::new();
     let resolved = router.resolve(model, provider_override)?;
@@ -35,13 +37,10 @@ pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool
         println!("  {}: {}", "Base URL".bold(), resolved.base_url);
         println!("  {}: {}", "Context".bold(), resolved.context_length);
         println!(
-            "  {}: {}",
+            "  {}: {} {}",
             "Auth".bold(),
-            if resolved.api_key.is_some() {
-                "\u{2713} set".green()
-            } else {
-                "\u{2717} missing".red()
-            }
+            status_icon(resolved.api_key.is_some()),
+            credential_label(resolved.api_key.is_some())
         );
     } else {
         println!("{}: {}", "Provider".bold(), resolved.provider);
