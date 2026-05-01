@@ -113,10 +113,13 @@ impl GeminiTransport {
                     let mut parts: Vec<Value> = Vec::new();
                     if !msg.content.is_empty() {
                         parts.push(json!({"text": msg.content}));
+                    } else {
+                        // CORE-M16: Gemini requires every user turn to have content;
+                        // use a single-space placeholder for empty messages to
+                        // preserve role alternation.
+                        parts.push(json!({"text": " "}));
                     }
-                    if !parts.is_empty() {
-                        contents.push(json!({"role": "user", "parts": parts}));
-                    }
+                    contents.push(json!({"role": "user", "parts": parts}));
                 }
                 Role::Assistant => {
                     let mut parts: Vec<Value> = Vec::new();
@@ -140,9 +143,13 @@ impl GeminiTransport {
                             }));
                         }
                     }
-                    if !parts.is_empty() {
-                        contents.push(json!({"role": "model", "parts": parts}));
+                    // CORE-M16: Gemini requires role alternation; an empty
+                    // assistant turn with no tool calls still needs a text
+                    // placeholder so the "model" role entry is emitted.
+                    if parts.is_empty() {
+                        parts.push(json!({"text": " "}));
                     }
+                    contents.push(json!({"role": "model", "parts": parts}));
                 }
                 Role::Tool => {
                     let tool_name = msg
@@ -419,7 +426,11 @@ pub async fn send_gemini_nonstreaming_request(
 
     let base_url = resolved.base_url.trim_end_matches('/');
     let model = &resolved.api_model_id;
-    let url = format!("{}/models/{}:generateContent", base_url, model);
+    let url = format!(
+        "{}/models/{}:generateContent",
+        base_url,
+        urlencoding::encode(model)
+    );
 
     let mut req = client.post(&url).json(body);
 
