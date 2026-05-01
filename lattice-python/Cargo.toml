@@ -10,6 +10,8 @@ crate-type = ["cdylib"]
 [dependencies]
 lattice-core = { path = "../lattice-core" }
 pyo3 = { version = "0.28", features = ["extension-module"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
