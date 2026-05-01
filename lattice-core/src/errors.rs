@@ -155,7 +155,7 @@ impl ErrorClassifier {
             // 408/500/502/503/504: Provider unavailable
             408 | 500 | 502 | 503 | 504 => LatticeError::ProviderUnavailable {
                 provider: provider.to_string(),
-                reason: truncate_body(&body_lower),
+                reason: truncate_body(response_body),
             },
 
             // Everything else: pattern-match body for special cases
@@ -274,10 +274,12 @@ fn extract_retry_after(body: &str) -> Option<f64> {
                 let after_colon = after_key[colon_pos + 1..].trim().trim_matches('"');
                 let num_str: String = after_colon
                     .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
                     .collect();
                 if let Ok(val) = num_str.parse::<f64>() {
-                    return Some(val);
+                    if val >= 0.0 {
+                        return Some(val);
+                    }
                 }
             }
         }

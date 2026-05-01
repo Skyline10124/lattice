@@ -11,7 +11,7 @@
 //!    - Detects `context_length_exceeded` pattern in 400 responses
 //!    - Extracts `model` from JSON body on 404
 //!    - Fills `provider` field from third parameter
-//!    - Uses lowercased body as `reason` for ProviderUnavailable
+//!    - Uses original body casing as `reason` for ProviderUnavailable
 //!    - Third param is `provider: &str` (semantically correct)
 //!
 //! 2. `retry::ErrorClassifier` — simpler, status-code only:
@@ -138,8 +138,8 @@ fn errors_classify_500_provider_unavailable() {
         LatticeError::ProviderUnavailable { provider, reason } => {
             assert_eq!(provider, "openai", "errors:: fills provider on 500");
             assert_eq!(
-                reason, "internal server error",
-                "errors:: uses lowercased body as reason"
+                reason, "Internal Server Error",
+                "errors:: preserves original body casing as reason"
             );
         }
         _ => panic!("Expected ProviderUnavailable, got {err:?}"),
@@ -152,7 +152,7 @@ fn errors_classify_502_provider_unavailable() {
     match err {
         LatticeError::ProviderUnavailable { provider, reason } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(reason, "bad gateway", "errors:: lowercases body for reason");
+            assert_eq!(reason, "Bad Gateway", "errors:: preserves original body casing for reason");
         }
         _ => panic!("Expected ProviderUnavailable, got {err:?}"),
     }
@@ -164,7 +164,7 @@ fn errors_classify_503_provider_unavailable() {
     match err {
         LatticeError::ProviderUnavailable { provider, reason } => {
             assert_eq!(provider, "groq");
-            assert_eq!(reason, "service overloaded");
+            assert_eq!(reason, "Service Overloaded");
         }
         _ => panic!("Expected ProviderUnavailable, got {err:?}"),
     }

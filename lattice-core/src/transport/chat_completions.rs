@@ -191,23 +191,19 @@ impl Transport for ChatCompletionsTransport {
         &self,
         response: &serde_json::Value,
     ) -> Result<ChatResponse, TransportError> {
-        let choices = response["choices"]
-            .as_array()
-            .ok_or_else(|| TransportError::UnexpectedFormat(
-                "response missing 'choices' array".into()
-            ))?;
+        let choices = response["choices"].as_array().ok_or_else(|| {
+            TransportError::UnexpectedFormat("response missing 'choices' array".into())
+        })?;
 
         if choices.is_empty() {
             return Err(TransportError::UnexpectedFormat(
-                "response 'choices' array is empty".into()
+                "response 'choices' array is empty".into(),
             ));
         }
 
         let choice = &choices[0];
 
-        let content = choice["message"]["content"]
-            .as_str()
-            .map(|s| s.to_string());
+        let content = choice["message"]["content"].as_str().map(|s| s.to_string());
 
         let reasoning_content = choice["message"]["reasoning_content"]
             .as_str()
@@ -222,7 +218,10 @@ impl Transport for ChatCompletionsTransport {
                         let name = tc["function"]["name"].as_str()?.to_string();
                         let arguments = tc["function"]["arguments"]
                             .as_str()
-                            .unwrap_or("{}")
+                            .unwrap_or_else(|| {
+                                tracing::warn!("tool_call missing 'arguments' field, defaulting to empty JSON object");
+                                "{}"
+                            })
                             .to_string();
                         Some(crate::types::ToolCall {
                             id,
@@ -236,7 +235,7 @@ impl Transport for ChatCompletionsTransport {
         // Reject response with no meaningful content
         if content.is_none() && tool_calls.is_none() {
             return Err(TransportError::UnexpectedFormat(
-                "response has no content and no tool_calls".into()
+                "response has no content and no tool_calls".into(),
             ));
         }
 
@@ -552,7 +551,10 @@ mod tests {
         let transport = ChatCompletionsTransport::new();
         let response = serde_json::json!({"model": "gpt-4o"});
         let result = transport.denormalize_response(&response);
-        assert!(result.is_err(), "response without choices should return Err");
+        assert!(
+            result.is_err(),
+            "response without choices should return Err"
+        );
     }
 
     #[test]
@@ -563,6 +565,9 @@ mod tests {
             "model": "gpt-4o"
         });
         let result = transport.denormalize_response(&response);
-        assert!(result.is_err(), "response with no content and no tool_calls should return Err");
+        assert!(
+            result.is_err(),
+            "response with no content and no tool_calls should return Err"
+        );
     }
 }
