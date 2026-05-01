@@ -49,7 +49,7 @@ impl Transport for OpenAICompatTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ApiProtocol, ResolvedModel};
+    use crate::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
     use std::collections::HashMap;
 
     #[test]
@@ -106,6 +106,7 @@ mod tests {
                 api_model_id: "llama3".into(),
                 context_length: 131072,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Missing,
             },
         };
 
@@ -167,6 +168,7 @@ mod tests {
                 api_model_id: "llama-3".into(),
                 context_length: 131072,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Present,
             },
         };
 

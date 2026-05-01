@@ -10,7 +10,7 @@ pub mod transport;
 pub mod types;
 
 // Re-export key types for convenience
-pub use catalog::ResolvedModel;
+pub use catalog::{CredentialStatus, ResolvedModel};
 pub use errors::LatticeError;
 pub use logging::{init_debug_logging, init_logging};
 pub use streaming::StreamEvent;
@@ -70,21 +70,7 @@ async fn send_streaming_request(
     }
 
     if let Some(ref api_key) = resolved.api_key {
-        match resolved
-            .provider_specific
-            .get("auth_type")
-            .map(|s| s.as_str())
-        {
-            Some("x-goog-api-key") => {
-                req = req.header("x-goog-api-key", api_key.as_str());
-            }
-            _ => {
-                req = req.header(
-                    transport.auth_header_name(),
-                    transport.auth_header_value(api_key),
-                );
-            }
-        }
+        req = transport.apply_auth_to_request(req, api_key.as_str());
     }
 
     for (key, value) in &resolved.provider_specific {
@@ -101,10 +87,11 @@ async fn send_streaming_request(
     let status = response.status();
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
-        return Err(LatticeError::ProviderUnavailable {
-            provider: resolved.provider.clone(),
-            reason: format!("HTTP {}: {}", status.as_u16(), body_text),
-        });
+        return Err(crate::errors::ErrorClassifier::classify(
+            status.as_u16(),
+            &body_text,
+            &resolved.provider,
+        ));
     }
 
     let stream = crate::streaming::sse_from_bytes_stream(
@@ -195,6 +182,26 @@ pub async fn chat(
                 resolved,
                 &body,
                 &[("anthropic-version", "2023-06-01")],
+            )
+            .await
+        }
+
+        ApiProtocol::GeminiGenerateContent => {
+            let transport = DISPATCHER
+                .dispatch(&ApiProtocol::GeminiGenerateContent)
+                .ok_or_else(|| LatticeError::Config {
+                    message: "GeminiGenerateContent transport not registered".into(),
+                })?;
+
+            let body =
+                transport
+                    .normalize_request(&request)
+                    .map_err(|e| LatticeError::Streaming {
+                        message: e.to_string(),
+                    })?;
+
+            crate::transport::gemini::send_gemini_nonstreaming_request(
+                transport, client, resolved, &body,
             )
             .await
         }
@@ -437,5 +444,193 @@ mod resolve_tests {
     fn test_resolve_nonexistent_model() {
         let result = resolve("nonexistent-model-xyz-12345");
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod send_streaming_request_tests {
+    use super::*;
+    use crate::catalog::CredentialStatus;
+    use crate::transport::Transport;
+    use std::collections::HashMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Minimal mock transport for testing error classification.
+    struct MockTransport {
+        base_url: String,
+    }
+
+    impl Transport for MockTransport {
+        fn base_url(&self) -> &str {
+            &self.base_url
+        }
+
+        fn extra_headers(&self) -> &HashMap<String, String> {
+            static EMPTY: std::sync::LazyLock<HashMap<String, String>> =
+                std::sync::LazyLock::new(HashMap::new);
+            &EMPTY
+        }
+
+        fn api_mode(&self) -> &str {
+            "mock"
+        }
+
+        fn normalize_request(
+            &self,
+            _request: &ChatRequest,
+        ) -> Result<serde_json::Value, crate::transport::TransportError> {
+            Ok(serde_json::json!({"test": true}))
+        }
+
+        fn denormalize_response(
+            &self,
+            _response: &serde_json::Value,
+        ) -> Result<ChatResponse, crate::transport::TransportError> {
+            unimplemented!("denormalize_response should not be called in error path")
+        }
+
+        fn chat_endpoint(&self) -> &str {
+            "/chat/completions"
+        }
+    }
+
+    /// Helper: spawn a minimal TCP server, call send_streaming_request,
+    /// and verify the returned error variant matches expectations.
+    async fn assert_streaming_error_classification(
+        status_code: u16,
+        body: &'static str,
+        expected_variant: &str,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let port = addr.port();
+
+        let body_bytes = body.as_bytes();
+        let reason_phrase = match status_code {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            502 => "Bad Gateway",
+            503 => "Service Unavailable",
+            504 => "Gateway Timeout",
+            _ => "Error",
+        };
+        let response_bytes = format!(
+            "HTTP/1.1 {status_code} {reason_phrase}\r\nContent-Length: {}\r\n\r\n",
+            body_bytes.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body_bytes.iter().copied())
+        .collect::<Vec<_>>();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            // Read the HTTP request before responding
+            let _ = stream.read(&mut buf).await;
+            stream.write_all(&response_bytes).await.unwrap();
+        });
+
+        let transport = MockTransport {
+            base_url: format!("http://127.0.0.1:{port}"),
+        };
+        let client = reqwest::Client::new();
+
+        let resolved = ResolvedModel {
+            canonical_id: "test-model".into(),
+            provider: "test-provider".into(),
+            api_key: Some("sk-test".into()),
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_protocol: ApiProtocol::OpenAiChat,
+            api_model_id: "test-model".into(),
+            context_length: 0,
+            provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Present,
+        };
+
+        let result = send_streaming_request(
+            &transport,
+            &client,
+            &resolved,
+            &serde_json::json!({"model": "test"}),
+            &[],
+        )
+        .await;
+
+        match result {
+            Err(err) => {
+                let variant = lattice_error_variant_name(&err);
+                assert_eq!(
+                    variant, expected_variant,
+                    "For status {status_code}: expected {expected_variant}, got {variant}: {err:?}"
+                );
+            }
+            Ok(_) => panic!("Expected Err for status {status_code}, got Ok"),
+        }
+    }
+
+    fn lattice_error_variant_name(err: &LatticeError) -> &'static str {
+        match err {
+            LatticeError::RateLimit { .. } => "RateLimit",
+            LatticeError::Authentication { .. } => "Authentication",
+            LatticeError::ModelNotFound { .. } => "ModelNotFound",
+            LatticeError::ProviderUnavailable { .. } => "ProviderUnavailable",
+            LatticeError::ContextWindowExceeded { .. } => "ContextWindowExceeded",
+            LatticeError::ToolExecution { .. } => "ToolExecution",
+            LatticeError::Streaming { .. } => "Streaming",
+            LatticeError::Config { .. } => "Config",
+            LatticeError::Network { .. } => "Network",
+        }
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_429_rate_limit() {
+        assert_streaming_error_classification(429, r#"{"error": "rate limit"}"#, "RateLimit").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_401_authentication() {
+        assert_streaming_error_classification(401, "unauthorized", "Authentication").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_403_authentication() {
+        assert_streaming_error_classification(403, "forbidden", "Authentication").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_404_model_not_found() {
+        assert_streaming_error_classification(404, r#"{"model": "gpt-5"}"#, "ModelNotFound").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_500_provider_unavailable() {
+        assert_streaming_error_classification(500, "internal error", "ProviderUnavailable").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_503_provider_unavailable() {
+        assert_streaming_error_classification(503, "service overloaded", "ProviderUnavailable")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_418_network() {
+        assert_streaming_error_classification(418, "teapot", "Network").await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_error_400_context_window_exceeded() {
+        assert_streaming_error_classification(
+            400,
+            r#"{"error": {"code": "context_length_exceeded"}}"#,
+            "ContextWindowExceeded",
+        )
+        .await;
     }
 }

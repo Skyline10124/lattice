@@ -127,6 +127,7 @@ impl Default for TransportDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::CredentialStatus;
     use crate::provider::ChatRequest;
     use std::collections::HashMap;
 
@@ -174,6 +175,7 @@ mod tests {
             api_model_id: "claude-3-opus".into(),
             context_length: 200000,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Missing,
         };
         let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "anthropic");
@@ -191,6 +193,7 @@ mod tests {
             api_model_id: "gpt-4o".into(),
             context_length: 128000,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Missing,
         };
         let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "chat_completions");
@@ -208,6 +211,7 @@ mod tests {
             api_model_id: "gemini-2.0-flash".into(),
             context_length: 1048576,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Missing,
         };
         let transport = dispatcher.dispatch_for_resolved(&resolved).unwrap();
         assert_eq!(transport.api_mode(), "gemini");
@@ -225,6 +229,7 @@ mod tests {
             api_model_id: "unknown-model".into(),
             context_length: 0,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Missing,
         };
         let result = dispatcher.dispatch_for_resolved(&resolved);
         assert!(result.is_none());
@@ -303,6 +308,7 @@ mod tests {
                 api_model_id: "claude-3-opus".into(),
                 context_length: 200000,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Missing,
             },
         };
 

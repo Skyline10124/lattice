@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use lattice_core::catalog::{ApiProtocol, ResolvedModel};
+use lattice_core::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
 use lattice_core::errors::ErrorClassifier;
 use lattice_core::errors::LatticeError;
 use lattice_core::provider::ChatRequest;
@@ -46,6 +46,7 @@ fn make_resolved(
         api_model_id: model.to_string(),
         context_length: 131072,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     }
 }
 
@@ -690,6 +691,7 @@ fn chat_request_model_is_distinct_from_canonical_id() {
         api_model_id: "provider-specific-name".to_string(),
         context_length: 131072,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     };
 
     let request = ChatRequest::new(vec![user_message("Hi")], vec![], resolved);

@@ -92,6 +92,7 @@ mod tests {
             api_model_id: model_id.to_string(),
             context_length: 8192,
             provider_specific: HashMap::new(),
+            credential_status: crate::catalog::CredentialStatus::Missing,
         }
     }
 

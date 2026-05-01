@@ -326,6 +326,7 @@ mod tests {
                 api_model_id: "gpt-4o".into(),
                 context_length: 128000,
                 provider_specific: HashMap::new(),
+                credential_status: crate::catalog::CredentialStatus::Present,
             },
         };
 
@@ -375,6 +376,7 @@ mod tests {
                 api_model_id: "gpt-4o".into(),
                 context_length: 128000,
                 provider_specific: HashMap::new(),
+                credential_status: crate::catalog::CredentialStatus::Missing,
             },
         };
 
@@ -413,6 +415,7 @@ mod tests {
                 api_model_id: "gpt-4o".into(),
                 context_length: 128000,
                 provider_specific: HashMap::new(),
+                credential_status: crate::catalog::CredentialStatus::Missing,
             },
         };
 
@@ -521,6 +524,7 @@ mod tests {
                 api_model_id: "gpt-4o".into(),
                 context_length: 128000,
                 provider_specific: HashMap::new(),
+                credential_status: crate::catalog::CredentialStatus::Missing,
             },
         };
 

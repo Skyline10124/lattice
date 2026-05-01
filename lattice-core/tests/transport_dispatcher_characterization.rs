@@ -28,7 +28,7 @@
 //! 7. **GeminiTransport via dispatcher**: verify base_url, api_mode,
 //!    and normalize/denormalize roundtrip.
 
-use lattice_core::catalog::{ApiProtocol, ResolvedModel};
+use lattice_core::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
 use lattice_core::provider::ChatRequest;
 use lattice_core::transport::chat_completions::ChatCompletionsTransport;
 use lattice_core::transport::dispatcher::TransportDispatcher;
@@ -51,6 +51,7 @@ fn make_resolved(provider: &str, api_protocol: ApiProtocol, base_url: &str) -> R
         api_model_id: "test-model".to_string(),
         context_length: 131072,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     }
 }
 

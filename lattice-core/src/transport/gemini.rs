@@ -385,6 +385,73 @@ impl GeminiTransport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// send_gemini_nonstreaming_request — non-streaming Gemini REST API call
+// ---------------------------------------------------------------------------
+
+/// POST the normalized request body to the Gemini `:generateContent` endpoint,
+/// parse the JSON response, convert it to a stream of [`StreamEvent`]s.
+///
+/// Gemini uses a different URL pattern than OpenAI/Anthropic:
+/// `{base_url}/models/{model}:generateContent` for non-streaming.
+pub async fn send_gemini_nonstreaming_request(
+    transport: &dyn crate::transport::Transport,
+    client: &reqwest::Client,
+    resolved: &crate::catalog::ResolvedModel,
+    body: &serde_json::Value,
+) -> Result<
+    std::pin::Pin<Box<dyn futures::Stream<Item = crate::streaming::StreamEvent> + Send>>,
+    crate::LatticeError,
+> {
+    use crate::LatticeError;
+
+    let base_url = resolved.base_url.trim_end_matches('/');
+    let model = &resolved.api_model_id;
+    let url = format!("{}/models/{}:generateContent", base_url, model);
+
+    let mut req = client.post(&url).json(body);
+
+    if let Some(ref api_key) = resolved.api_key {
+        req = transport.apply_auth_to_request(req, api_key.as_str());
+    }
+
+    for (key, value) in &resolved.provider_specific {
+        if let Some(header_name) = key.strip_prefix("header:") {
+            req = req.header(header_name, value);
+        }
+    }
+
+    let response = req.send().await.map_err(|e| LatticeError::Network {
+        message: format!("HTTP request failed: {}", e),
+        status: e.status().map(|s| s.as_u16()),
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(crate::errors::ErrorClassifier::classify(
+            status.as_u16(),
+            &body_text,
+            &resolved.provider,
+        ));
+    }
+
+    let body_json: serde_json::Value =
+        response.json().await.map_err(|e| LatticeError::Streaming {
+            message: format!("Failed to parse Gemini response JSON: {}", e),
+        })?;
+
+    let chat_response =
+        transport
+            .denormalize_response(&body_json)
+            .map_err(|e| LatticeError::Streaming {
+                message: format!("Failed to denormalize Gemini response: {}", e),
+            })?;
+
+    let events = crate::transport::chat_response_to_stream(chat_response);
+    Ok(Box::pin(futures::stream::iter(events)))
+}
+
 impl Default for GeminiTransport {
     fn default() -> Self {
         Self::new()
@@ -392,6 +459,13 @@ impl Default for GeminiTransport {
 }
 
 impl Transport for GeminiTransport {
+    fn apply_auth_to_request(
+        &self,
+        req: reqwest::RequestBuilder,
+        api_key: &str,
+    ) -> reqwest::RequestBuilder {
+        req.header("x-goog-api-key", api_key)
+    }
     fn base_url(&self) -> &str {
         self.base.base_url()
     }
@@ -449,7 +523,7 @@ impl Transport for GeminiTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{ApiProtocol, ResolvedModel};
+    use crate::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
     use crate::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
     use std::collections::HashMap;
 
@@ -472,6 +546,7 @@ mod tests {
                 api_model_id: "gemini-2.5-flash".into(),
                 context_length: 1048576,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Present,
             },
         }
     }

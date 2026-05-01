@@ -92,6 +92,7 @@ impl MicroAgent {
 
     /// Register on Bus, resolve model, create Agent, spawn agent loop.
     /// Returns MicroAgentHandle for crash detection (D5).
+    #[allow(deprecated)]
     pub fn spawn(self) -> Result<MicroAgentHandle, BusError> {
         let bus_config = bus_config_from_profile(&self.profile.bus);
 
@@ -144,8 +145,7 @@ impl MicroAgent {
                             content: event.payload.to_string(),
                             tags: vec![event.topic.clone()],
                             created_at: ms.to_string(),
-                        })
-                        .await;
+                        });
                     }
                     Ok(())
                 })
@@ -183,7 +183,7 @@ async fn micro_agent_loop(
 
     while let Some(req) = request_rx.recv().await {
         let input = extract_input(&req.payload);
-        let enriched = enrich_input(&input, &ctx.memory).await;
+        let enriched = enrich_input(&input, &ctx.memory);
 
         let events = agent.run_async(&enriched, max_turns).await;
 
@@ -212,7 +212,7 @@ async fn micro_agent_loop(
                 tags: ctx.profile.agent.tags.clone(),
                 created_at: ms.to_string(),
             };
-            mem.save_entry(entry).await;
+            mem.save_entry(entry);
         }
 
         // Save to shared memory partitions (write to each configured partition)
@@ -273,10 +273,10 @@ fn extract_input(payload: &serde_json::Value) -> String {
     }
 }
 
-/// Enrich input with memory recall context (async — called from tokio task).
-async fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
+/// Enrich input with memory recall context.
+fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
     if let Some(ref mem) = memory {
-        let recall = mem.recall(input, 5).await;
+        let recall = mem.recall(input, 5);
         if !recall.is_empty() {
             let context: String = recall
                 .iter()

@@ -8,12 +8,13 @@ use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
 use crate::profile::AgentProfile;
 use crate::registry::AgentRegistry;
-use crate::runner::{AgentRunner, MEMORY_RT};
+use crate::runner::AgentRunner;
 
 /// Construct an Agent and AgentRunner from a resolved model, profile, and optional memory.
 ///
 /// Eliminates the duplicated 12-line construction block that appeared in both
 /// `run()` and `run_fork()`.
+#[allow(deprecated)]
 fn build_runner(
     profile: &AgentProfile,
     resolved: lattice_core::ResolvedModel,
@@ -309,6 +310,211 @@ impl Pipeline {
         }
     }
 
+    /// Async variant of `run()`. Uses `tokio::spawn` for fork parallelism.
+    pub async fn run_async(&mut self, start_agent: &str, input: &str) -> PipelineRun {
+        let pipeline_start = Instant::now();
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+        let mut skipped = Vec::new();
+        let mut current_agent = start_agent.to_string();
+        let mut current_input = input.to_string();
+        let mut completed = false;
+
+        let pipeline_max_agents = 20;
+
+        for _turn in 0..pipeline_max_agents {
+            let profile = match self.registry.get(&current_agent) {
+                Some(p) => p.clone(),
+                None => {
+                    errors.push(AgentError {
+                        agent_name: current_agent.clone(),
+                        message: format!("Agent '{}' not found in registry", current_agent),
+                        skippable: false,
+                    });
+                    break;
+                }
+            };
+
+            let agent_max_turns = profile.handoff.max_turns.unwrap_or(10);
+            let start = Instant::now();
+
+            if let Some(ref bus) = self.event_bus {
+                bus.send(PipelineEvent::AgentStarted {
+                    agent: profile.agent.name.clone(),
+                    input_size: current_input.len(),
+                });
+            }
+
+            let resolved = match lattice_core::resolve(&profile.agent.model) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err = AgentError {
+                        agent_name: profile.agent.name.clone(),
+                        message: format!("Resolve failed: {}", e),
+                        skippable: profile.agent.skippable,
+                    };
+                    if let Some(ref bus) = self.event_bus {
+                        bus.send(PipelineEvent::PipelineError {
+                            agent: profile.agent.name.clone(),
+                            message: err.message.clone(),
+                            skippable: err.skippable,
+                        });
+                    }
+                    match handle_agent_error(
+                        err,
+                        &profile,
+                        &self.registry,
+                        &mut skipped,
+                        &mut errors,
+                    ) {
+                        LoopDecision::Continue(next) => {
+                            current_agent = next;
+                            continue;
+                        }
+                        LoopDecision::Break => break,
+                    }
+                }
+            };
+
+            let mut runner = build_runner(&profile, resolved, self.shared_memory.clone());
+
+            match runner.run(&current_input, agent_max_turns) {
+                Ok(output) => {
+                    let duration_ms = start.elapsed().as_millis() as u64;
+
+                    let next = if profile.handoff.handoff_rules.is_empty() {
+                        profile.handoff.fallback.clone()
+                    } else {
+                        eval_rules(&profile.handoff.handoff_rules, &output)
+                    };
+
+                    self.save_memory_entry(&profile, &output);
+
+                    if let Some(ref bus) = self.event_bus {
+                        let preview: String = output.to_string().chars().take(500).collect();
+                        bus.send(PipelineEvent::AgentCompleted {
+                            agent: profile.agent.name.clone(),
+                            output_preview: preview,
+                            next: next.clone(),
+                            duration_ms,
+                        });
+                    }
+
+                    results.push(AgentResult {
+                        agent_name: profile.agent.name.clone(),
+                        output: output.clone(),
+                        next: next.clone(),
+                        duration_ms,
+                    });
+
+                    match next {
+                        Some(HandoffTarget::Single(n)) => {
+                            if let Some(ref bus) = self.event_bus {
+                                bus.send(PipelineEvent::Handoff {
+                                    from: profile.agent.name.clone(),
+                                    to: HandoffTarget::Single(n.clone()),
+                                });
+                            }
+                            current_input = output.to_string();
+                            current_agent = n;
+                        }
+                        Some(HandoffTarget::Fork(targets)) => {
+                            if let Some(ref bus) = self.event_bus {
+                                bus.send(PipelineEvent::Fork {
+                                    from: profile.agent.name.clone(),
+                                    branches: targets.clone(),
+                                });
+                            }
+
+                            let fork_results = self
+                                .run_fork_async(
+                                    &targets,
+                                    &output.to_string(),
+                                    agent_max_turns,
+                                    &mut errors,
+                                    &mut skipped,
+                                )
+                                .await;
+
+                            let merged = self.merge_fork_outputs(&fork_results);
+
+                            // Use first non-None next target, or fallback from the originating profile
+                            let fork_next = fork_results
+                                .iter()
+                                .find_map(|r| r.next.clone())
+                                .or_else(|| profile.handoff.fallback.clone());
+
+                            current_input = merged.to_string();
+
+                            match fork_next {
+                                Some(HandoffTarget::Single(n)) => {
+                                    current_agent = n;
+                                }
+                                Some(HandoffTarget::Fork(_)) => {
+                                    current_agent =
+                                        fork_results[0].next.clone().unwrap().agent_names()[0]
+                                            .to_string();
+                                }
+                                None => {
+                                    completed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        None => {
+                            completed = true;
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(ref bus) = self.event_bus {
+                        bus.send(PipelineEvent::PipelineError {
+                            agent: profile.agent.name.clone(),
+                            message: e.to_string(),
+                            skippable: profile.agent.skippable,
+                        });
+                    }
+
+                    let err = AgentError {
+                        agent_name: profile.agent.name.clone(),
+                        message: e.to_string(),
+                        skippable: profile.agent.skippable,
+                    };
+                    match handle_agent_error(
+                        err,
+                        &profile,
+                        &self.registry,
+                        &mut skipped,
+                        &mut errors,
+                    ) {
+                        LoopDecision::Continue(next) => {
+                            current_agent = next;
+                            continue;
+                        }
+                        LoopDecision::Break => break,
+                    }
+                }
+            }
+        }
+
+        let duration_ms = pipeline_start.elapsed().as_millis() as u64;
+        if let Some(ref bus) = self.event_bus {
+            bus.send(PipelineEvent::PipelineCompleted {
+                total_agents: results.len(),
+                duration_ms,
+            });
+        }
+
+        PipelineRun {
+            results,
+            errors,
+            completed,
+            skipped,
+            duration_ms,
+        }
+    }
+
     /// Run fork branches in parallel using std::thread::spawn.
     fn run_fork(
         &self,
@@ -425,6 +631,123 @@ impl Pipeline {
         fork_results
     }
 
+    /// Async variant of `run_fork()`. Uses `tokio::spawn` for fork parallelism.
+    async fn run_fork_async(
+        &self,
+        targets: &[String],
+        input: &str,
+        max_turns: u32,
+        errors: &mut Vec<AgentError>,
+        skipped: &mut Vec<String>,
+    ) -> Vec<AgentResult> {
+        let registry = self.registry.clone();
+        let memory_box = self.shared_memory.clone();
+
+        type ForkBranchOutput = (
+            String,
+            Result<(serde_json::Value, u64, Option<HandoffTarget>), AgentError>,
+        );
+
+        let handles: Vec<tokio::task::JoinHandle<ForkBranchOutput>> = targets
+            .iter()
+            .map(|agent_name| {
+                let agent_name = agent_name.clone();
+                let input = input.to_string();
+                let registry = registry.clone();
+                let memory_box = memory_box.clone();
+
+                tokio::spawn(async move {
+                    let profile = match registry.get(&agent_name) {
+                        Some(p) => p.clone(),
+                        None => {
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
+                                message: format!("Agent '{}' not found in registry", agent_name),
+                                skippable: false,
+                            };
+                            return (agent_name, Err(err));
+                        }
+                    };
+
+                    let resolved = match lattice_core::resolve(&profile.agent.model) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
+                                message: format!("Resolve failed: {}", e),
+                                skippable: profile.agent.skippable,
+                            };
+                            return (agent_name, Err(err));
+                        }
+                    };
+
+                    let mut runner = build_runner(&profile, resolved, memory_box.clone());
+
+                    let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
+
+                    let start = Instant::now();
+                    match runner.run(&input, max_turns) {
+                        Ok(output) => {
+                            let duration_ms = start.elapsed().as_millis() as u64;
+                            let next = if profile.handoff.handoff_rules.is_empty() {
+                                profile.handoff.fallback.clone()
+                            } else {
+                                eval_rules(&profile.handoff.handoff_rules, &output)
+                            };
+                            (agent_name, Ok((output, duration_ms, next)))
+                        }
+                        Err(e) => {
+                            let err = AgentError {
+                                agent_name: agent_name.clone(),
+                                message: e.to_string(),
+                                skippable: profile.agent.skippable,
+                            };
+                            (agent_name, Err(err))
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let mut fork_results = Vec::new();
+        for handle in handles {
+            let result = handle.await;
+            let (agent_name, result) = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    let agent_name = "fork-async-task-error".to_string();
+                    let err = AgentError {
+                        agent_name: agent_name.clone(),
+                        message: format!("fork async task panicked: {:?}", e),
+                        skippable: false,
+                    };
+                    (agent_name, Err(err))
+                }
+            };
+            match result {
+                Ok((output, duration_ms, next)) => {
+                    fork_results.push(AgentResult {
+                        agent_name,
+                        output,
+                        next,
+                        duration_ms,
+                    });
+                }
+                Err(err) => {
+                    if err.skippable {
+                        skipped.push(err.agent_name.clone());
+                        errors.push(err);
+                    } else {
+                        errors.push(err);
+                        return fork_results;
+                    }
+                }
+            }
+        }
+
+        fork_results
+    }
+
     /// Merge fork branch outputs into a single JSON: {branch_name: output}
     fn merge_fork_outputs(&self, fork_results: &[AgentResult]) -> serde_json::Value {
         let mut merged = serde_json::Map::new();
@@ -451,11 +774,7 @@ impl Pipeline {
                 tags: profile.agent.tags.clone(),
                 created_at: ms.to_string(),
             };
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                tokio::task::block_in_place(|| handle.block_on(mem.save_entry(entry)));
-            } else {
-                MEMORY_RT.block_on(mem.save_entry(entry));
-            }
+            mem.save_entry(entry);
         }
     }
 
@@ -844,5 +1163,18 @@ target = "fork:missing-a,missing-b"
         let merged = pipeline.merge_fork_outputs(&fork_results);
         assert_eq!(merged["security"]["issues"][0], "sql-injection");
         assert_eq!(merged["performance"]["score"], 85);
+    }
+
+    #[tokio::test]
+    async fn test_run_async_error_handling() {
+        let registry = test_registry();
+        let mut pipeline = Pipeline::new("test", registry, None, None);
+        let result = pipeline.run_async("code-review", "test input").await;
+        // Without API keys, resolve() should fail, producing errors
+        assert!(
+            !result.errors.is_empty(),
+            "Expected errors from failed resolution"
+        );
+        assert!(!result.completed, "Expected pipeline to not complete");
     }
 }

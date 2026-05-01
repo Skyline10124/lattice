@@ -18,6 +18,7 @@ pub struct HarnessAgentDispatcher {
 }
 
 impl AgentDispatcher for HarnessAgentDispatcher {
+    #[allow(deprecated)]
     fn dispatch(&self, agent_name: &str, input: &str) -> String {
         let profile = match self.registry.get(agent_name) {
             Some(p) => p.clone(),

@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Whether a resolved model has usable credentials.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialStatus {
+    /// The provider requires credentials but none were found.
+    #[default]
+    Missing,
+    /// An API key or token was found and is available.
+    Present,
+    /// The provider does not require credentials (e.g. Ollama running locally).
+    NotRequired,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ApiProtocol {
     #[serde(rename = "chat_completions")]
@@ -85,6 +98,8 @@ pub struct ResolvedModel {
     pub context_length: u32,
     #[serde(default)]
     pub provider_specific: HashMap<String, String>,
+    #[serde(default)]
+    pub credential_status: CredentialStatus,
 }
 
 impl std::fmt::Debug for ResolvedModel {
@@ -98,7 +113,15 @@ impl std::fmt::Debug for ResolvedModel {
             .field("api_model_id", &self.api_model_id)
             .field("context_length", &self.context_length)
             .field("provider_specific", &self.provider_specific)
+            .field("credential_status", &self.credential_status)
             .finish()
+    }
+}
+
+impl ResolvedModel {
+    /// Return a pseudo-unique identifier for this resolved model.
+    pub fn model_id(&self) -> String {
+        format!("{}@{}", self.canonical_id, self.provider)
     }
 }
 
@@ -114,22 +137,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolved_model_debug_masks_api_key() {
+    fn test_debug_hides_api_key() {
         let model = ResolvedModel {
             canonical_id: "test-model".to_string(),
             provider: "test-provider".to_string(),
-            api_key: Some("sk-real-key-12345".to_string()),
-            base_url: "https://api.example.com".to_string(),
+            api_key: Some("secret-123".to_string()),
+            base_url: "https://test.api.com".to_string(),
             api_protocol: ApiProtocol::OpenAiChat,
             api_model_id: "test-model-id".to_string(),
             context_length: 4096,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Present,
         };
         let debug_str = format!("{:?}", model);
         assert!(
-            !debug_str.contains("sk-real-key-12345"),
-            "Debug should not contain real api_key"
+            !debug_str.contains("secret-123"),
+            "Debug output should not contain the actual API key"
         );
-        assert!(debug_str.contains("***"), "Debug should mask api_key");
+        assert!(
+            debug_str.contains("***"),
+            "Debug output should mask the API key with ***"
+        );
     }
 }

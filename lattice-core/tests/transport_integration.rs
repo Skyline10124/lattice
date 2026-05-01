@@ -5,7 +5,7 @@
 //!
 //! All tests use mock JSON data — no network calls.
 
-use lattice_core::catalog::{ApiProtocol, ResolvedModel};
+use lattice_core::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
 use lattice_core::provider::ChatRequest;
 use lattice_core::streaming::StreamEvent;
 use lattice_core::transport::anthropic::AnthropicTransport;
@@ -32,6 +32,7 @@ fn make_resolved(provider: &str, api_protocol: ApiProtocol, base_url: &str) -> R
         api_model_id: "test-model".to_string(),
         context_length: 131072,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     }
 }
 
@@ -1194,6 +1195,7 @@ mod dispatcher {
                 api_model_id: "claude-3-opus".into(),
                 context_length: 200000,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Missing,
             },
         };
 
@@ -1247,6 +1249,7 @@ mod dispatcher {
                 api_model_id: "gemini-2.5-flash".into(),
                 context_length: 1048576,
                 provider_specific: HashMap::new(),
+                credential_status: CredentialStatus::Missing,
             },
         };
 

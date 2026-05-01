@@ -14,7 +14,7 @@
 //! | T8   | saturating_pow in retry          | `saturating_pow`            |
 //! | T9   | engine "mock" provider           | `engine_mock_provider`      |
 
-use lattice_core::catalog::{ApiProtocol, ResolvedModel};
+use lattice_core::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
 use lattice_core::errors::{ErrorClassifier, LatticeError};
 use lattice_core::retry::RetryPolicy;
 use lattice_core::router::{self, ModelRouter};
@@ -239,6 +239,7 @@ fn regress_deprecated_consolidation_provider_compile() {
         api_model_id: "test".into(),
         context_length: 4096,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Missing,
     };
     let request = ChatRequest::new(vec![], vec![], resolved);
     assert_eq!(request.model, "test");
@@ -268,6 +269,7 @@ fn regress_provider_config_resolved_model_roundtrip() {
         api_model_id: "claude-sonnet-4-6".into(),
         context_length: 200000,
         provider_specific: HashMap::from([("region".into(), "us-east".into())]),
+        credential_status: CredentialStatus::Present,
     };
 
     // All fields accessible
@@ -319,6 +321,7 @@ fn regress_transport_type_api_protocol_works() {
         api_model_id: "gpt-4o".into(),
         context_length: 128000,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Missing,
     };
     let json = serde_json::to_string(&resolved).expect("serialize");
     let deserialized: ResolvedModel = serde_json::from_str(&json).expect("deserialize");
@@ -358,6 +361,7 @@ fn regress_transport_type_all_variants_serialize() {
             api_model_id: "test".into(),
             context_length: 4096,
             provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Missing,
         };
         let json = serde_json::to_string(&model).expect("serialize model");
         let deserialized: ResolvedModel = serde_json::from_str(&json).expect("deserialize model");
@@ -462,6 +466,7 @@ fn regress_debug_api_key_masked() {
         api_model_id: "claude-sonnet-4-6".into(),
         context_length: 200000,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     };
 
     let debug_str = format!("{:?}", model);
@@ -497,6 +502,7 @@ fn regress_debug_api_key_none() {
         api_model_id: "gpt-4o".into(),
         context_length: 128000,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Missing,
     };
 
     let debug_str = format!("{:?}", model);

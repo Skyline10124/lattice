@@ -8,7 +8,9 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::HashMap;
 
-use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
+use lattice_core::catalog::{
+    ApiProtocol, CatalogProviderEntry, CredentialStatus, ModelCatalogEntry, ResolvedModel,
+};
 use lattice_core::router::ModelRouter;
 use lattice_core::streaming::TokenUsage;
 use lattice_core::streaming::{AnthropicSseParser, OpenAiSseParser, SseParser, StreamEvent};
@@ -56,6 +58,7 @@ fn make_resolved_model(id: &str) -> ResolvedModel {
         api_model_id: id.to_string(),
         context_length: 128_000,
         provider_specific: HashMap::new(),
+        credential_status: CredentialStatus::Present,
     }
 }
 
