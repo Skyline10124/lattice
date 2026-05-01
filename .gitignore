@@ -8,3 +8,4 @@ Cargo.lock
 .worktrees/
 .env
 .lattice/
+.claude/
