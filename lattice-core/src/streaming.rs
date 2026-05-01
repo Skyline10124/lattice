@@ -472,7 +472,10 @@ impl SseParser for GeminiSseParser {
                         // Function call parts — emit Start + Delta together
                         if let Some(fc) = part.get("functionCall") {
                             let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let args: Value = fc.get("args").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                            let args: Value = fc
+                                .get("args")
+                                .cloned()
+                                .unwrap_or(Value::Object(serde_json::Map::new()));
                             let arguments = serde_json::to_string(&args).unwrap_or_default();
                             let counter = self.tc_counter;
                             let id = format!("tc_{name}_{counter}");
@@ -507,9 +510,18 @@ impl SseParser for GeminiSseParser {
                     };
 
                     let usage = root.get("usageMetadata").map(|u| TokenUsage {
-                        prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        prompt_tokens: u
+                            .get("promptTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        completion_tokens: u
+                            .get("candidatesTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        total_tokens: u
+                            .get("totalTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
                     });
 
                     events.push(StreamEvent::Done {
@@ -526,9 +538,18 @@ impl SseParser for GeminiSseParser {
                 events.push(StreamEvent::Done {
                     finish_reason: "stop".to_string(),
                     usage: Some(TokenUsage {
-                        prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        prompt_tokens: u
+                            .get("promptTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        completion_tokens: u
+                            .get("candidatesTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        total_tokens: u
+                            .get("totalTokenCount")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
                     }),
                 });
             }
@@ -1422,7 +1443,8 @@ mod tests {
     #[test]
     fn test_gemini_text_chunk() {
         let mut parser = GeminiSseParser::new();
-        let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world"}],"role":"model"}}]}"#;
+        let chunk =
+            r#"{"candidates":[{"content":{"parts":[{"text":"Hello world"}],"role":"model"}}]}"#;
         let events = parser.parse_chunk("", chunk).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -1488,9 +1510,15 @@ mod tests {
                 id: "tc_search_0".into()
             }
         );
-        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        let done = events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::Done { .. }));
         assert!(done.is_some());
-        if let StreamEvent::Done { finish_reason, usage } = done.unwrap() {
+        if let StreamEvent::Done {
+            finish_reason,
+            usage,
+        } = done.unwrap()
+        {
             assert_eq!(finish_reason, "tool_calls");
             let u = usage.as_ref().unwrap();
             assert_eq!(u.prompt_tokens, 10);
@@ -1504,7 +1532,9 @@ mod tests {
         let mut parser = GeminiSseParser::new();
         let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"Done"}],"role":"model"},"finishReason":"MAX_TOKENS"}]}"#;
         let events = parser.parse_chunk("", chunk).unwrap();
-        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        let done = events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::Done { .. }));
         assert!(done.is_some());
         if let StreamEvent::Done { finish_reason, .. } = done.unwrap() {
             assert_eq!(finish_reason, "length");
@@ -1516,9 +1546,15 @@ mod tests {
         let mut parser = GeminiSseParser::new();
         let chunk = r#"{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}"#;
         let events = parser.parse_chunk("", chunk).unwrap();
-        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        let done = events
+            .iter()
+            .find(|e| matches!(e, StreamEvent::Done { .. }));
         assert!(done.is_some());
-        if let StreamEvent::Done { finish_reason, usage } = done.unwrap() {
+        if let StreamEvent::Done {
+            finish_reason,
+            usage,
+        } = done.unwrap()
+        {
             assert_eq!(finish_reason, "stop");
             let u = usage.as_ref().unwrap();
             assert_eq!(u.total_tokens, 8);
