@@ -107,8 +107,7 @@ No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
 
 ## Related documents
 
-- [Design vision and ideas](lattice-core/docs/ideas.md)
-- [Architecture overview](lattice-core/docs/architecture.md)
-- [Code review report (historical)](lattice-core/docs/code-review-report.md)
-- [Current implementation review](lattice-core/docs/current-implementation-review.md)
+- [Design vision and ideas](docs/design/ideas.md)
+- [Code review report](docs/review/code-review-2026-05-01.md)
+- [Debug guide](docs/debug/guide.md)
 - [Development guide](CLAUDE.md)
