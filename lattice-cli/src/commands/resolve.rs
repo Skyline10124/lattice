@@ -51,3 +51,67 @@ pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Save and restore env vars for test isolation.
+    /// Uses a global mutex to prevent race conditions with parallel tests.
+    fn with_env_var(key: &str, value: &str, f: impl FnOnce()) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[test]
+    fn test_resolve_gpt4o_with_key() {
+        with_env_var("OPENAI_API_KEY", "sk-test-cli", || {
+            let result = run("gpt-4o", None, false, false);
+            assert!(result.is_ok(), "resolve gpt-4o with key should succeed");
+        });
+    }
+
+    #[test]
+    fn test_resolve_sonnet_with_key() {
+        with_env_var("ANTHROPIC_API_KEY", "sk-test-cli", || {
+            let result = run("sonnet", None, false, false);
+            assert!(result.is_ok(), "resolve sonnet with key should succeed");
+        });
+    }
+
+    #[test]
+    fn test_resolve_json_output_with_key() {
+        with_env_var("OPENAI_API_KEY", "sk-test-json", || {
+            let result = run("gpt-4o", None, false, true);
+            assert!(result.is_ok(), "resolve json output should succeed");
+        });
+    }
+
+    #[test]
+    fn test_resolve_trace_output() {
+        with_env_var("ANTHROPIC_API_KEY", "sk-test-trace", || {
+            let result = run("sonnet", None, true, false);
+            assert!(result.is_ok(), "resolve with trace should succeed");
+        });
+    }
+
+    #[test]
+    fn test_resolve_provider_override() {
+        with_env_var("ANTHROPIC_API_KEY", "sk-test-ovr", || {
+            let result = run("claude-sonnet-4-6", Some("anthropic"), false, false);
+            assert!(
+                result.is_ok(),
+                "resolve with provider override should succeed"
+            );
+        });
+    }
+}

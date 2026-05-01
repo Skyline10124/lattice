@@ -84,3 +84,6 @@ mod regression_wave4_5;
 
 #[path = "e2e/regression_wave1.rs"]
 mod regression_wave1;
+
+#[path = "e2e/chat_mock.rs"]
+mod chat_mock;

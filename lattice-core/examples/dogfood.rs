@@ -40,9 +40,7 @@ fn main() {
 
     let input = serde_json::json!({ "diff": code });
     println!("DEBUG: creating PluginRunner...");
-    let mut runner = PluginRunner::new(
-        &plugin, &behavior, &mut agent, &config, None, None, None, None,
-    );
+    let mut runner = PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
     println!("DEBUG: calling runner.run...");
     let result = runner.run(&input);

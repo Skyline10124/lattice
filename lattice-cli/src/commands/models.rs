@@ -25,3 +25,23 @@ pub fn run(auth_only: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_models_list_ok() {
+        // list_models() only reads the catalog — no credentials needed.
+        let result = run(false);
+        assert!(result.is_ok(), "models list should not error");
+    }
+
+    #[test]
+    fn test_models_auth_only_ok() {
+        // Even without credentials, auth_only should not error
+        // (the router returns an empty list when no env vars are set).
+        let result = run(true);
+        assert!(result.is_ok(), "models --auth should not error");
+    }
+}
