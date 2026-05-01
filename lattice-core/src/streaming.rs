@@ -363,6 +363,181 @@ impl SseParser for AnthropicSseParser {
     }
 }
 
+/// Parser for the Gemini `streamGenerateContent` SSE format.
+///
+/// Gemini SSE events use unnamed `data:` lines (no `event:` field).
+/// Each `data:` payload is a JSON `GenerateContentResponse` chunk containing
+/// candidates with content parts (text, functionCall, etc).
+///
+/// ## State
+///
+/// Tracks tool call IDs per functionCall index because Gemini streaming
+/// emits complete functionCall objects in one chunk (not split across deltas
+/// like OpenAI). We emit `ToolCallStart` + `ToolCallDelta` together, then
+/// `ToolCallEnd` when the stream finishes.
+///
+/// ## Mapping
+///
+/// | Gemini chunk content          | StreamEvent(s)                               |
+/// |-------------------------------|----------------------------------------------|
+/// | `parts[].text`                | `Token` / `Reasoning` (if `thought: true`)  |
+/// | `parts[].functionCall`        | `ToolCallStart` + `ToolCallDelta`            |
+/// | `finishReason` present        | `ToolCallEnd` (for tracked IDs) + `Done`    |
+/// | `usageMetadata` present       | `Done` (embedded)                            |
+pub struct GeminiSseParser {
+    tool_call_ids: IndexMap<usize, String>,
+    tc_counter: usize,
+}
+
+impl GeminiSseParser {
+    pub fn new() -> Self {
+        Self {
+            tool_call_ids: IndexMap::new(),
+            tc_counter: 0,
+        }
+    }
+
+    fn map_finish_reason(reason: &str) -> String {
+        match reason.to_uppercase().as_str() {
+            "STOP" => "stop".to_string(),
+            "MAX_TOKENS" => "length".to_string(),
+            "SAFETY" | "RECITATION" => "content_filter".to_string(),
+            "OTHER" => "unknown".to_string(),
+            _ => "unknown".to_string(),
+        }
+    }
+}
+
+impl Default for GeminiSseParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SseParser for GeminiSseParser {
+    fn parse_chunk(
+        &mut self,
+        _event_type: &str,
+        data: &str,
+    ) -> Result<Vec<StreamEvent>, Box<dyn std::error::Error>> {
+        let trimmed = data.trim();
+        if trimmed == "[DONE]" || trimmed.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let root: Value = serde_json::from_str(trimmed)?;
+
+        if let Some(error) = root.get("error") {
+            let msg = error["message"]
+                .as_str()
+                .unwrap_or("Unknown Gemini streaming error")
+                .to_string();
+            return Ok(vec![StreamEvent::Error { message: msg }]);
+        }
+
+        let mut events = Vec::new();
+
+        if let Some(cands) = root.get("candidates").and_then(|c| c.as_array()) {
+            if let Some(cand) = cands.first() {
+                let parts = cand
+                    .get("content")
+                    .and_then(|c| c.get("parts"))
+                    .and_then(|p| p.as_array());
+
+                let mut has_tool_calls = false;
+
+                if let Some(parts_arr) = parts {
+                    for part in parts_arr {
+                        // Thinking/reasoning parts
+                        if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    events.push(StreamEvent::Reasoning {
+                                        content: text.to_string(),
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Text parts
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                            if !text.is_empty() {
+                                events.push(StreamEvent::Token {
+                                    content: text.to_string(),
+                                });
+                            }
+                        }
+
+                        // Function call parts — emit Start + Delta together
+                        if let Some(fc) = part.get("functionCall") {
+                            let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let args: Value = fc.get("args").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+                            let arguments = serde_json::to_string(&args).unwrap_or_default();
+                            let counter = self.tc_counter;
+                            let id = format!("tc_{name}_{counter}");
+                            self.tool_call_ids.insert(self.tc_counter, id.clone());
+                            self.tc_counter += 1;
+
+                            events.push(StreamEvent::ToolCallStart {
+                                id: id.clone(),
+                                name: name.to_string(),
+                            });
+                            events.push(StreamEvent::ToolCallDelta {
+                                id,
+                                arguments_delta: arguments,
+                            });
+                            has_tool_calls = true;
+                        }
+                    }
+                }
+
+                // Finish reason
+                if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
+                    let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
+                    // Emit ToolCallEnd for all tracked tool calls
+                    for (_, id) in self.tool_call_ids.drain(..) {
+                        events.push(StreamEvent::ToolCallEnd { id });
+                    }
+
+                    let mapped = if had_tool_calls {
+                        "tool_calls".to_string()
+                    } else {
+                        Self::map_finish_reason(reason)
+                    };
+
+                    let usage = root.get("usageMetadata").map(|u| TokenUsage {
+                        prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    });
+
+                    events.push(StreamEvent::Done {
+                        finish_reason: mapped,
+                        usage,
+                    });
+                }
+            }
+        }
+
+        // Usage can arrive without finishReason (intermediate usage chunk)
+        if !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })) {
+            if let Some(u) = root.get("usageMetadata") {
+                events.push(StreamEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: Some(TokenUsage {
+                        prompt_tokens: u.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        completion_tokens: u.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                        total_tokens: u.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                    }),
+                });
+            }
+        }
+
+        Ok(events)
+    }
+}
+
 /// A raw SSE event produced by [`parse_raw_sse`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawSseEvent {
@@ -1212,5 +1387,141 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let back: StreamEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(event, back);
+    }
+
+    // ── GeminiSseParser tests ──
+
+    #[test]
+    fn test_gemini_done_sentinel() {
+        let mut parser = GeminiSseParser::new();
+        let events = parser.parse_chunk("", "[DONE]").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_gemini_empty_data() {
+        let mut parser = GeminiSseParser::new();
+        let events = parser.parse_chunk("", "").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_gemini_error_chunk() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"error":{"message":"API key invalid","code":401}}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::Error {
+                message: "API key invalid".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_gemini_text_chunk() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"Hello world"}],"role":"model"}}]}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::Token {
+                content: "Hello world".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_gemini_thinking_chunk() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"I should check...","thought":true}],"role":"model"}}]}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            StreamEvent::Reasoning {
+                content: "I should check...".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_gemini_function_call_chunk() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Tokyo"}}}],"role":"model"}}]}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0],
+            StreamEvent::ToolCallStart {
+                id: "tc_get_weather_0".into(),
+                name: "get_weather".into()
+            }
+        );
+        assert_eq!(
+            events[1],
+            StreamEvent::ToolCallDelta {
+                id: "tc_get_weather_0".into(),
+                arguments_delta: r#"{"city":"Tokyo"}"#.into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_gemini_finish_with_tool_calls() {
+        let mut parser = GeminiSseParser::new();
+        // First chunk: function call
+        let chunk1 = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"rust"}}}],"role":"model"}}]}"#;
+        parser.parse_chunk("", chunk1).unwrap();
+
+        // Second chunk: finish reason
+        let chunk2 = r#"{"candidates":[{"content":{"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}"#;
+        let events = parser.parse_chunk("", chunk2).unwrap();
+
+        // Should emit ToolCallEnd + Done
+        assert!(events.len() >= 2);
+        assert_eq!(
+            events[0],
+            StreamEvent::ToolCallEnd {
+                id: "tc_search_0".into()
+            }
+        );
+        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        assert!(done.is_some());
+        if let StreamEvent::Done { finish_reason, usage } = done.unwrap() {
+            assert_eq!(finish_reason, "tool_calls");
+            let u = usage.as_ref().unwrap();
+            assert_eq!(u.prompt_tokens, 10);
+            assert_eq!(u.completion_tokens, 20);
+            assert_eq!(u.total_tokens, 30);
+        }
+    }
+
+    #[test]
+    fn test_gemini_finish_reason_mapping() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"candidates":[{"content":{"parts":[{"text":"Done"}],"role":"model"},"finishReason":"MAX_TOKENS"}]}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        assert!(done.is_some());
+        if let StreamEvent::Done { finish_reason, .. } = done.unwrap() {
+            assert_eq!(finish_reason, "length");
+        }
+    }
+
+    #[test]
+    fn test_gemini_usage_only_chunk() {
+        let mut parser = GeminiSseParser::new();
+        let chunk = r#"{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}}"#;
+        let events = parser.parse_chunk("", chunk).unwrap();
+        let done = events.iter().find(|e| matches!(e, StreamEvent::Done { .. }));
+        assert!(done.is_some());
+        if let StreamEvent::Done { finish_reason, usage } = done.unwrap() {
+            assert_eq!(finish_reason, "stop");
+            let u = usage.as_ref().unwrap();
+            assert_eq!(u.total_tokens, 8);
+        }
     }
 }

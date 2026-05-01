@@ -179,9 +179,7 @@ pub async fn chat(
             send_streaming_request(transport, client, resolved, &body, &[]).await
         }
 
-        // Gemini uses a non-streaming request path despite `request.stream = true`.
-        // The response is collected in full and converted to a stream of StreamEvents.
-        // True SSE streaming for Gemini requires a GeminiSseParser (not yet implemented).
+        // Gemini streaming uses SSE via `streamGenerateContent?alt=sse`.
         ApiProtocol::GeminiGenerateContent => {
             let transport = DISPATCHER
                 .dispatch(&ApiProtocol::GeminiGenerateContent)
@@ -196,7 +194,7 @@ pub async fn chat(
                         message: e.to_string(),
                     })?;
 
-            crate::transport::gemini::send_gemini_nonstreaming_request(
+            crate::transport::gemini::send_gemini_streaming_request(
                 transport, client, resolved, &body,
             )
             .await

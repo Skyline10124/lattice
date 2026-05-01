@@ -412,6 +412,68 @@ impl GeminiTransport {
 }
 
 // ---------------------------------------------------------------------------
+// send_gemini_streaming_request — SSE streaming Gemini REST API call
+// ---------------------------------------------------------------------------
+
+/// POST the normalized request body to the Gemini `:streamGenerateContent?alt=sse`
+/// endpoint, parse the SSE stream into [`StreamEvent`]s.
+///
+/// Uses the Gemini-specific SSE URL pattern:
+/// `{base_url}/models/{model}:streamGenerateContent?alt=sse`
+pub async fn send_gemini_streaming_request(
+    transport: &dyn crate::transport::Transport,
+    client: &reqwest::Client,
+    resolved: &crate::catalog::ResolvedModel,
+    body: &serde_json::Value,
+) -> Result<
+    std::pin::Pin<Box<dyn futures::Stream<Item = crate::streaming::StreamEvent> + Send>>,
+    crate::LatticeError,
+> {
+    use crate::LatticeError;
+
+    let base_url = resolved.base_url.trim_end_matches('/');
+    let model = &resolved.api_model_id;
+    let url = format!(
+        "{}/models/{}:streamGenerateContent?alt=sse",
+        base_url,
+        urlencoding::encode(model)
+    );
+
+    let mut req = client.post(&url).json(body);
+
+    if let Some(ref api_key) = resolved.api_key {
+        req = transport.apply_auth_to_request(req, api_key.as_str());
+    }
+
+    for (key, value) in &resolved.provider_specific {
+        if let Some(header_name) = key.strip_prefix("header:") {
+            req = req.header(header_name, value);
+        }
+    }
+
+    let response = req.send().await.map_err(|e| LatticeError::Network {
+        message: format!("HTTP request failed: {}", e),
+        status: e.status().map(|s| s.as_u16()),
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(crate::errors::ErrorClassifier::classify(
+            status.as_u16(),
+            &body_text,
+            &resolved.provider,
+        ));
+    }
+
+    let stream = crate::streaming::sse_from_bytes_stream(
+        response.bytes_stream(),
+        transport.create_sse_parser(),
+    );
+    Ok(Box::pin(stream))
+}
+
+// ---------------------------------------------------------------------------
 // send_gemini_nonstreaming_request — non-streaming Gemini REST API call
 // ---------------------------------------------------------------------------
 
@@ -506,6 +568,10 @@ impl Transport for GeminiTransport {
 
     fn api_mode(&self) -> &str {
         "gemini"
+    }
+
+    fn create_sse_parser(&self) -> Box<dyn crate::streaming::SseParser> {
+        Box::new(crate::streaming::GeminiSseParser::new())
     }
 
     fn normalize_request(&self, request: &ChatRequest) -> Result<Value, TransportError> {
