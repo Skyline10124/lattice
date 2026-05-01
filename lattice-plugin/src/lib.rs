@@ -2,7 +2,7 @@ use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::TokenUsage;
 use lattice_core::types::ToolDefinition;
 use lattice_memory::{EntryKind, Memory, MemoryEntry};
-use lattice_token_pool::TokenPool;
+
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -63,8 +63,6 @@ pub trait Behavior: Send + Sync {
 pub enum Action {
     /// Done — return the output.
     Done,
-    /// Hand off to another plugin by name.
-    Handoff(String),
     /// Retry the LLM call (with error feedback).
     Retry,
 }
@@ -199,9 +197,7 @@ pub struct PluginRunner<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> {
     hooks: Option<&'a dyn PluginHooks>,
     retry_policy: Option<&'a RetryPolicy>,
     memory: Option<Box<dyn Memory>>,
-    /// Reserved for future budget enforcement.
-    #[allow(dead_code)]
-    token_pool: Option<&'a dyn TokenPool>,
+
     _phantom: PhantomData<(P::Input, P::Output)>,
 }
 
@@ -217,7 +213,6 @@ pub struct RunResult {
 }
 
 impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B, A> {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         plugin: &'a P,
         behavior: &'a B,
@@ -226,7 +221,6 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
         hooks: Option<&'a dyn PluginHooks>,
         retry_policy: Option<&'a RetryPolicy>,
         memory: Option<Box<dyn Memory>>,
-        token_pool: Option<&'a dyn TokenPool>,
     ) -> Self {
         Self {
             plugin,
@@ -236,7 +230,6 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
             hooks,
             retry_policy,
             memory,
-            token_pool,
             _phantom: PhantomData,
         }
     }
@@ -313,7 +306,7 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                                 hooks.on_complete(&result);
                             }
                             if let Some(ref mut memory) = self.memory {
-                                futures::executor::block_on(memory.save_entry(MemoryEntry {
+                                memory.save_entry(MemoryEntry {
                                     id: format!("{}-user-{}", self.plugin.name(), attempt),
                                     kind: EntryKind::SessionLog,
                                     session_id: self.plugin.name().to_string(),
@@ -321,8 +314,8 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                                     content: prompt.clone(),
                                     tags: vec![],
                                     created_at: timestamp(),
-                                }));
-                                futures::executor::block_on(memory.save_entry(MemoryEntry {
+                                });
+                                memory.save_entry(MemoryEntry {
                                     id: format!("{}-assistant-{}", self.plugin.name(), attempt),
                                     kind: EntryKind::SessionLog,
                                     session_id: self.plugin.name().to_string(),
@@ -330,29 +323,11 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
                                     content: json,
                                     tags: vec![],
                                     created_at: timestamp(),
-                                }));
+                                });
                             }
                             return Ok(result);
                         }
-                        Action::Handoff(target) => {
-                            let json = serde_json::to_string(&output)
-                                .map_err(|e| PluginError::Other(e.to_string()))?;
-                            if json.len() > self.config.max_output_bytes {
-                                return Err(PluginError::OutputTooLarge(
-                                    json.len(),
-                                    self.config.max_output_bytes,
-                                ));
-                            }
-                            let result = RunResult {
-                                output: json,
-                                turns: attempt + 1,
-                                final_action: Action::Handoff(target),
-                            };
-                            if let Some(hooks) = self.hooks {
-                                hooks.on_complete(&result);
-                            }
-                            return Ok(result);
-                        }
+
                         Action::Retry => {
                             attempt += 1;
                             if let Some(policy) = self.retry_policy {
@@ -446,7 +421,7 @@ pub enum PluginError {
 // ---------------------------------------------------------------------------
 
 /// Try to extract a confidence score from the LLM's raw response.
-/// Falls back to 1.0 if not found (assumes single-pass outputs are confident).
+/// Falls back to 0.0 if not found (parse failure = low confidence).
 fn extract_confidence(raw: &str) -> f64 {
     // Look for "confidence": 0.85 or similar JSON field
     for line in raw.lines() {
@@ -461,7 +436,7 @@ fn extract_confidence(raw: &str) -> f64 {
             }
         }
     }
-    1.0 // default: trust the output
+    0.0 // default: low confidence on parse failure
 }
 
 // ---------------------------------------------------------------------------
@@ -595,7 +570,7 @@ mod tests {
     #[test]
     fn test_extract_confidence() {
         assert!((extract_confidence("{\"confidence\":0.85}") - 0.85).abs() < 0.01);
-        assert!((extract_confidence("no confidence field") - 1.0).abs() < 0.01);
+        assert!((extract_confidence("no confidence field") - 0.0).abs() < 0.01);
     }
 
     #[test]
@@ -691,7 +666,6 @@ mod tests {
             Some(&hooks),
             None,
             None,
-            None,
         );
 
         let input = serde_json::json!({"diff": "+unsafe code"});
@@ -735,9 +709,8 @@ mod tests {
             max_turns: 2,
             ..Default::default()
         };
-        let mut runner = PluginRunner::new(
-            &plugin, &behavior, &mut agent, &config, None, None, None, None,
-        );
+        let mut runner =
+            PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
         let input = serde_json::json!({});
         let err = runner.run(&input).unwrap_err();
@@ -776,9 +749,8 @@ mod tests {
             max_output_bytes: 50,
             ..Default::default()
         };
-        let mut runner = PluginRunner::new(
-            &plugin, &behavior, &mut agent, &config, None, None, None, None,
-        );
+        let mut runner =
+            PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
         let input = serde_json::json!({});
         let err = runner.run(&input).unwrap_err();
@@ -804,7 +776,6 @@ mod tests {
             None,
             None,
             Some(memory),
-            None,
         );
 
         let input = serde_json::json!({"diff": "test"});
