@@ -49,18 +49,14 @@ static RE_DOTS: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(\d+)\.(\d+)").unwrap());
 
 /// Normalize a model ID string:
-/// - Strip OpenRouter vendor prefixes (e.g. "anthropic/claude-sonnet-4.6" → "claude-sonnet-4.6")
+/// - Strip all provider routing prefixes (e.g. "openrouter/anthropic/claude-sonnet-4.6" → "claude-sonnet-4.6")
 /// - Strip Bedrock inference profile prefixes (e.g. "us.anthropic.claude-sonnet-4-6-v1:0" → "claude-sonnet-4-6")
 /// - Strip Bedrock version suffixes (-v1:0, -v1)
 /// - Normalize Claude dots to hyphens (claude-sonnet-4.6 → claude-sonnet-4-6)
 pub fn normalize_model_id(model_id: &str) -> String {
     let mid = model_id.to_lowercase();
 
-    let mid = if let Some((_prefix, rest)) = mid.split_once('/') {
-        rest.to_string()
-    } else {
-        mid
-    };
+    let mid = mid.rsplit_once('/').map(|(_, model)| model.to_string()).unwrap_or(mid);
 
     let mid = mid.trim_start_matches("us.anthropic.");
     let mid = mid.trim_start_matches("us.amazon.");
@@ -160,7 +156,7 @@ impl ModelRouter {
                 if pe.provider_id == override_provider {
                     let api_key = self.resolve_credentials(pe);
                     let credential_status = Self::credential_status_from_key(&api_key, pe);
-                    return Ok(ResolvedModel {
+                    let model = ResolvedModel {
                         canonical_id: canonical_id.clone(),
                         provider: pe.provider_id.clone(),
                         api_key,
@@ -170,7 +166,9 @@ impl ModelRouter {
                         context_length: entry.context_length,
                         provider_specific: pe.provider_specific.clone(),
                         credential_status,
-                    });
+                    };
+                    validate_base_url(&model.base_url)?;
+                    return Ok(model);
                 }
             }
             return Err(LatticeError::ModelNotFound {
@@ -190,7 +188,7 @@ impl ModelRouter {
         for pe in &sorted_providers {
             if pe.priority != current_priority {
                 if let Some(cpe) = best_credentialless.take() {
-                    return Ok(ResolvedModel {
+                    let model = ResolvedModel {
                         canonical_id: canonical_id.clone(),
                         provider: cpe.provider_id.clone(),
                         api_key: None,
@@ -200,7 +198,9 @@ impl ModelRouter {
                         context_length: entry.context_length,
                         provider_specific: cpe.provider_specific.clone(),
                         credential_status: CredentialStatus::NotRequired,
-                    });
+                    };
+                    validate_base_url(&model.base_url)?;
+                    return Ok(model);
                 }
                 current_priority = pe.priority;
             }
@@ -214,7 +214,7 @@ impl ModelRouter {
 
             let api_key = self.resolve_credentials(pe);
             if api_key.is_some() {
-                return Ok(ResolvedModel {
+                let model = ResolvedModel {
                     canonical_id: canonical_id.clone(),
                     provider: pe.provider_id.clone(),
                     api_key,
@@ -224,12 +224,14 @@ impl ModelRouter {
                     context_length: entry.context_length,
                     provider_specific: pe.provider_specific.clone(),
                     credential_status: CredentialStatus::Present,
-                });
+                };
+                validate_base_url(&model.base_url)?;
+                return Ok(model);
             }
         }
 
         if let Some(cpe) = best_credentialless.take() {
-            return Ok(ResolvedModel {
+            let model = ResolvedModel {
                 canonical_id: canonical_id.clone(),
                 provider: cpe.provider_id.clone(),
                 api_key: None,
@@ -239,7 +241,9 @@ impl ModelRouter {
                 context_length: entry.context_length,
                 provider_specific: cpe.provider_specific.clone(),
                 credential_status: CredentialStatus::NotRequired,
-            });
+            };
+            validate_base_url(&model.base_url)?;
+            return Ok(model);
         }
 
         if sorted_providers.is_empty() {
@@ -266,7 +270,7 @@ impl ModelRouter {
             };
             return Err(LatticeError::Config { message: hint });
         }
-        Ok(ResolvedModel {
+        let model = ResolvedModel {
             canonical_id: canonical_id.clone(),
             provider: best.provider_id.clone(),
             api_key: None,
@@ -276,7 +280,9 @@ impl ModelRouter {
             context_length: entry.context_length,
             provider_specific: best.provider_specific.clone(),
             credential_status: CredentialStatus::NotRequired,
-        })
+        };
+        validate_base_url(&model.base_url)?;
+        Ok(model)
     }
 
     /// Determine the credential status from an api_key and provider entry.
@@ -463,17 +469,19 @@ impl ModelRouter {
                 let api_key = self.resolve_credentials(&temp_entry);
                 let credential_status = Self::credential_status_from_key(&api_key, &temp_entry);
 
-                return Ok(ResolvedModel {
+                let model = ResolvedModel {
                     canonical_id: model_lower.clone(),
                     provider: provider_lower,
                     api_key,
                     base_url: defaults.base_url.clone(),
                     api_protocol: defaults.api_protocol.clone(),
                     api_model_id: model_lower,
-                    context_length: 131072,
+                    context_length: 0, // Unknown: permissive models have no catalog data
                     provider_specific: HashMap::new(),
                     credential_status,
-                });
+                };
+                validate_base_url(&model.base_url)?;
+                return Ok(model);
             }
         }
 
@@ -483,7 +491,19 @@ impl ModelRouter {
     }
 
     /// Register a custom model at runtime.
+    ///
+    /// Validates each provider's base_url and logs a warning on failure,
+    /// but does not block registration.
     pub fn register_model(&mut self, entry: ModelCatalogEntry) {
+        for pe in &entry.providers {
+            let base_url = self.resolve_base_url(&pe.provider_id, &pe.base_url);
+            if let Err(e) = validate_base_url(&base_url) {
+                eprintln!(
+                    "Warning: invalid base_url for provider '{}' in model '{}': {}",
+                    pe.provider_id, entry.canonical_id, e
+                );
+            }
+        }
         self.custom_models.insert(entry.canonical_id.clone(), entry);
     }
 

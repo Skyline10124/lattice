@@ -58,12 +58,19 @@ impl TokenEstimator {
         match Catalog::get() {
             Ok(catalog) => {
                 if let Some(entry) = catalog.get_model(model_id) {
-                    entry.context_length == 0 || estimated < entry.context_length
+                    // Reserve a 5% safety margin from the context window.
+                    // Providers reject requests at the exact limit.
+                    let safe_limit = if entry.context_length > 100 {
+                        entry.context_length - (entry.context_length / 20)
+                    } else {
+                        entry.context_length  // Small contexts: exact limit
+                    };
+                    entry.context_length == 0 || estimated < safe_limit
                 } else {
-                    estimated < 131072
+                    estimated < 124416
                 }
             }
-            Err(_) => estimated < 131072,
+            Err(_) => estimated < 124416,
         }
     }
 }

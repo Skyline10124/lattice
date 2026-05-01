@@ -488,12 +488,13 @@ fn permissive_returns_none_api_key_without_env_var() {
 
 #[test]
 fn permissive_uses_default_context_length() {
-    // CHARACTERIZATION: resolve_permissive() always sets context_length to 131072.
+    // CHARACTERIZATION: resolve_permissive() sets context_length to 0
+    // because permissive models have no catalog data.
     let router = ModelRouter::new();
     let resolved = router
         .resolve_permissive("anthropic/my-custom-model")
         .unwrap();
-    assert_eq!(resolved.context_length, 131072);
+    assert_eq!(resolved.context_length, 0);
 }
 
 #[test]
@@ -627,13 +628,13 @@ fn normalize_empty_string() {
 }
 
 #[test]
-fn normalize_double_slash_takes_after_first() {
-    // CHARACTERIZATION: "openrouter/anthropic/claude" splits on first '/'
-    // and takes the rest, giving "anthropic/claude"
+fn normalize_double_slash_strips_all_prefixes() {
+    // CHARACTERIZATION: "openrouter/anthropic/claude" uses rsplit_once('/')
+    // to strip ALL provider prefixes, giving "claude"
     let result = normalize_model_id("openrouter/anthropic/claude");
     assert!(!result.contains("openrouter"));
-    // After split_once('/'), rest = "anthropic/claude"
-    assert_eq!(result, "anthropic/claude");
+    // After rsplit_once('/'), model = "claude"
+    assert_eq!(result, "claude");
 }
 
 #[test]

@@ -384,7 +384,7 @@ fn regress_lazylock_normalize_model_id_correctness() {
     let cases: Vec<(&str, &str)> = vec![
         (
             "openrouter/anthropic/claude-sonnet-4-6",
-            "anthropic/claude-sonnet-4-6",
+            "claude-sonnet-4-6",
         ),
         ("anthropic/claude-opus-4-7", "claude-opus-4-7"),
         // Cloud provider prefix stripping
