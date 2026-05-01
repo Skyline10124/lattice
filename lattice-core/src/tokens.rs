@@ -63,7 +63,7 @@ impl TokenEstimator {
                     let safe_limit = if entry.context_length > 100 {
                         entry.context_length - (entry.context_length / 20)
                     } else {
-                        entry.context_length  // Small contexts: exact limit
+                        entry.context_length // Small contexts: exact limit
                     };
                     entry.context_length == 0 || estimated < safe_limit
                 } else {

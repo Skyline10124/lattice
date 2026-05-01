@@ -433,14 +433,12 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
     }
 
     // Handle trailing event (no trailing blank line)
-    if !current_event.is_empty() || !current_data.is_empty() {
-        if events.len() < MAX_SSE_EVENTS {
-            events.push(RawSseEvent {
-                event: current_event,
-                data: current_data,
-                id: current_id,
-            });
-        }
+    if (!current_event.is_empty() || !current_data.is_empty()) && events.len() < MAX_SSE_EVENTS {
+        events.push(RawSseEvent {
+            event: current_event,
+            data: current_data,
+            id: current_id,
+        });
     }
 
     events

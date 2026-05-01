@@ -152,7 +152,10 @@ fn errors_classify_502_provider_unavailable() {
     match err {
         LatticeError::ProviderUnavailable { provider, reason } => {
             assert_eq!(provider, "anthropic");
-            assert_eq!(reason, "Bad Gateway", "errors:: preserves original body casing for reason");
+            assert_eq!(
+                reason, "Bad Gateway",
+                "errors:: preserves original body casing for reason"
+            );
         }
         _ => panic!("Expected ProviderUnavailable, got {err:?}"),
     }

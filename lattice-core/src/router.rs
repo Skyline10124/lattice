@@ -56,7 +56,10 @@ static RE_DOTS: std::sync::LazyLock<regex::Regex> =
 pub fn normalize_model_id(model_id: &str) -> String {
     let mid = model_id.to_lowercase();
 
-    let mid = mid.rsplit_once('/').map(|(_, model)| model.to_string()).unwrap_or(mid);
+    let mid = mid
+        .rsplit_once('/')
+        .map(|(_, model)| model.to_string())
+        .unwrap_or(mid);
 
     let mid = mid.trim_start_matches("us.anthropic.");
     let mid = mid.trim_start_matches("us.amazon.");
