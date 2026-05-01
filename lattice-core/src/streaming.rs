@@ -16,6 +16,13 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Maximum number of SSE events to parse from a single input.
+const MAX_SSE_EVENTS: usize = 10000;
+/// Maximum size (bytes) of a single SSE data field.
+const MAX_SSE_DATA_SIZE: usize = 1_000_000;
+/// Maximum size (bytes) of the SSE buffer before forcing a parse attempt.
+const MAX_SSE_BUFFER_SIZE: usize = 10_000_000;
+
 /// Token usage statistics returned by the provider in the final stream chunk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TokenUsage {
@@ -388,6 +395,12 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
         if line.trim().is_empty() {
             // Blank line → end of current event
             if !current_event.is_empty() || !current_data.is_empty() {
+                if events.len() >= MAX_SSE_EVENTS {
+                    tracing::warn!(
+                        "SSE event count limit ({MAX_SSE_EVENTS}) reached, dropping remaining events"
+                    );
+                    break;
+                }
                 events.push(RawSseEvent {
                     event: std::mem::take(&mut current_event),
                     data: std::mem::take(&mut current_data),
@@ -400,10 +413,19 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
         } else if let Some(value) = line.strip_prefix("event:") {
             current_event = value.trim().to_string();
         } else if let Some(value) = line.strip_prefix("data:") {
+            let trimmed = value.trim();
+            if current_data.len().saturating_add(trimmed.len()) > MAX_SSE_DATA_SIZE {
+                tracing::warn!(
+                    "SSE data field size limit ({MAX_SSE_DATA_SIZE}) exceeded, clearing current event data"
+                );
+                current_event.clear();
+                current_data.clear();
+                continue;
+            }
             if !current_data.is_empty() {
                 current_data.push('\n');
             }
-            current_data.push_str(value.trim());
+            current_data.push_str(trimmed);
         } else if let Some(value) = line.strip_prefix("id:") {
             current_id = Some(value.trim().to_string());
         }
@@ -412,11 +434,13 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
 
     // Handle trailing event (no trailing blank line)
     if !current_event.is_empty() || !current_data.is_empty() {
-        events.push(RawSseEvent {
-            event: current_event,
-            data: current_data,
-            id: current_id,
-        });
+        if events.len() < MAX_SSE_EVENTS {
+            events.push(RawSseEvent {
+                event: current_event,
+                data: current_data,
+                id: current_id,
+            });
+        }
     }
 
     events
@@ -447,19 +471,59 @@ pub fn sse_from_bytes_stream(
         // Normalize CRLF to LF so SSE framing works across all servers
         buf.push_str(&text.replace("\r\n", "\n"));
 
+        // If the buffer exceeds the size limit, force-parse what we have
+        // to prevent unbounded memory growth.
+        if buf.len() > MAX_SSE_BUFFER_SIZE {
+            tracing::warn!(
+                "SSE buffer size limit ({MAX_SSE_BUFFER_SIZE}) exceeded, force-parsing buffer"
+            );
+        }
+
         // Parse complete SSE events (delimited by blank lines)
         let mut events = Vec::new();
-        while let Some(pos) = buf.find("\n\n") {
-            let raw = buf[..pos].to_string();
-            buf = buf[pos + 2..].to_string();
 
-            for raw_event in parse_raw_sse(&raw) {
+        // Also force-parse when buffer exceeds the limit (no blank-line delimiter found)
+        let force_parse = buf.len() > MAX_SSE_BUFFER_SIZE && buf.find("\n\n").is_none();
+
+        if force_parse {
+            for raw_event in parse_raw_sse(&buf) {
                 match parser.parse_chunk(&raw_event.event, &raw_event.data) {
                     Ok(evts) => events.extend(evts),
                     Err(e) => events.push(StreamEvent::Error {
                         message: format!("SSE parse error: {e}"),
                     }),
                 }
+            }
+            events.push(StreamEvent::Error {
+                message: "SSE buffer overflow: force-parsed without proper event delimiter".into(),
+            });
+            buf.clear();
+        } else {
+            while let Some(pos) = buf.find("\n\n") {
+                let raw = buf[..pos].to_string();
+                buf = buf[pos + 2..].to_string();
+
+                for raw_event in parse_raw_sse(&raw) {
+                    match parser.parse_chunk(&raw_event.event, &raw_event.data) {
+                        Ok(evts) => events.extend(evts),
+                        Err(e) => events.push(StreamEvent::Error {
+                            message: format!("SSE parse error: {e}"),
+                        }),
+                    }
+                }
+            }
+
+            // If buffer still exceeds the limit after parsing delimited events,
+            // trim it to prevent unbounded growth.
+            if buf.len() > MAX_SSE_BUFFER_SIZE {
+                tracing::warn!(
+                    "SSE buffer still oversized after delimited parse, clearing residual {} bytes",
+                    buf.len()
+                );
+                events.push(StreamEvent::Error {
+                    message: "SSE buffer overflow: residual data discarded".into(),
+                });
+                buf.clear();
             }
         }
 
