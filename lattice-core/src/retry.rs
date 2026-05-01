@@ -21,11 +21,14 @@ impl RetryPolicy {
     pub fn jittered_backoff(&self, attempt: u32) -> Duration {
         let base = self.base_delay * 2u32.saturating_pow(attempt);
         let capped = std::cmp::min(base, self.max_delay);
-        let jitter = rand::random::<f64>() * capped.as_secs_f64() * 0.5;
-        std::cmp::min(
-            Duration::from_secs_f64(capped.as_secs_f64() + jitter),
-            self.max_delay,
-        )
+        // Centered jitter: random +/- 50% of capped value.
+        // When capped == max_delay, jitter subtracts up to 50%,
+        // so result varies between 50%-100% of max_delay.
+        // Collision avoidance works even when base >= max_delay.
+        let jitter_range = capped.as_secs_f64() * 0.5;
+        let jittered = capped.as_secs_f64() + (rand::random::<f64>() - 0.5) * jitter_range;
+        let jittered = if jittered < 0.0 { 0.0 } else { jittered };
+        std::cmp::min(Duration::from_secs_f64(jittered), self.max_delay)
     }
 }
 
