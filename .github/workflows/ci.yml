@@ -72,7 +72,7 @@ jobs:
         run: |
           pip install maturin
           maturin build --release
-          pip install target/wheels/*.whl
+          pip install ../target/wheels/*.whl
 
       - name: Smoke test import
         run: python -c "import lattice_core; print('lattice_core imported successfully')"
