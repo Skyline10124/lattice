@@ -1,4 +1,4 @@
-# Artemis 当前实现状态审查
+# LATTICE 当前实现状态审查
 
 **日期**：2026-04-29（第三轮更新）
 **范围**：Rust workspace 静态扫描 + 文档对齐审查
@@ -111,7 +111,7 @@ Python binding 当前只暴露 `resolve_model` / `list_models` / `list_authentic
 
 建议：
 - SSE stream 前检查 HTTP status/body。
-- stream 错误转 typed `ArtemisError`。
+- stream 错误转 typed `LatticeError`。
 - `chat_complete()` 在 retryable stream error 时允许 agent retry。
 
 #### P1-N4 补充：`Stream ended` 场景
@@ -268,4 +268,4 @@ Phase 1-2 的核心收敛已完成。本轮新增的 20 个修复项覆盖了：
 
 一句话总结：
 
-> Artemis 核心 Rust 推理路径 runtime correctness 已基本闭环（Phase 2 完成）。下一步应修 workspace 配置让 CI 能跑通，然后推进 P1-4（streaming error 分类）和 P0-1（Python chat_complete 暴露）。Agent 生产化和 Gemini 主链路是 Phase 3+ 的内容。
+> LATTICE 核心 Rust 推理路径 runtime correctness 已基本闭环（Phase 2 完成）。下一步应修 workspace 配置让 CI 能跑通，然后推进 P1-4（streaming error 分类）和 P0-1（Python chat_complete 暴露）。Agent 生产化和 Gemini 主链路是 Phase 3+ 的内容。

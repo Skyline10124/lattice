@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
+use colored::Colorize;
 use lattice_agent::{Agent, LoopEvent};
 use lattice_core::router::ModelRouter;
 use lattice_core::types::ToolDefinition;
-use colored::Colorize;
 use serde::Deserialize;
 use std::io::Write;
 use std::time::Instant;

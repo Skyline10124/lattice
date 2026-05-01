@@ -1,5 +1,5 @@
 use lattice_core::catalog::ApiProtocol;
-use lattice_core::errors::ArtemisError;
+use lattice_core::errors::LatticeError;
 use lattice_core::router::ModelRouter;
 use lattice_core::types::{Message, Role};
 use std::env;
@@ -121,7 +121,7 @@ fn test_unknown_model_no_provider_prefix_fails() {
     );
 
     match result.err().unwrap() {
-        ArtemisError::ModelNotFound { model } => {
+        LatticeError::ModelNotFound { model } => {
             assert_eq!(model, "totally-unknown-model");
         }
         other => panic!("Expected ModelNotFound, got {:?}", other),
@@ -138,7 +138,7 @@ fn test_unknown_provider_prefix_fails() {
     assert!(result.is_err(), "unknown provider prefix should fail");
 
     match result.err().unwrap() {
-        ArtemisError::ModelNotFound { .. } => {}
+        LatticeError::ModelNotFound { .. } => {}
         other => panic!("Expected ModelNotFound, got {:?}", other),
     }
     restore_all(&saved);

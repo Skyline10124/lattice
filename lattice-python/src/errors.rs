@@ -1,18 +1,18 @@
-use lattice_core::errors::ArtemisError as CoreError;
+use lattice_core::errors::LatticeError as CoreError;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 
-create_exception!(lattice_core, ArtemisError, PyException);
-create_exception!(lattice_core, RateLimitError, ArtemisError);
-create_exception!(lattice_core, AuthenticationError, ArtemisError);
-create_exception!(lattice_core, ModelNotFoundError, ArtemisError);
-create_exception!(lattice_core, ProviderUnavailableError, ArtemisError);
-create_exception!(lattice_core, ContextWindowExceededError, ArtemisError);
-create_exception!(lattice_core, ToolExecutionError, ArtemisError);
-create_exception!(lattice_core, StreamingError, ArtemisError);
-create_exception!(lattice_core, ConfigError, ArtemisError);
-create_exception!(lattice_core, NetworkError, ArtemisError);
+create_exception!(lattice_core, LatticeError, PyException);
+create_exception!(lattice_core, RateLimitError, LatticeError);
+create_exception!(lattice_core, AuthenticationError, LatticeError);
+create_exception!(lattice_core, ModelNotFoundError, LatticeError);
+create_exception!(lattice_core, ProviderUnavailableError, LatticeError);
+create_exception!(lattice_core, ContextWindowExceededError, LatticeError);
+create_exception!(lattice_core, ToolExecutionError, LatticeError);
+create_exception!(lattice_core, StreamingError, LatticeError);
+create_exception!(lattice_core, ConfigError, LatticeError);
+create_exception!(lattice_core, NetworkError, LatticeError);
 
 /// Convert an lattice-core `LatticeError` into a Python `PyErr`.
 ///
@@ -88,5 +88,5 @@ pub fn convert_core_error(err: CoreError) -> PyErr {
             e
         }
     })
-    .expect("GIL should be held when converting ArtemisError in extension module")
+    .expect("GIL should be held when converting LatticeError in extension module")
 }

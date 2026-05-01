@@ -1,9 +1,9 @@
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use lattice_agent::{
     default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent, ToolExecutor,
 };
 use lattice_core::types::{Role, ToolCall};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::event::Event;

@@ -1,4 +1,4 @@
-# Artemis Status — 2026-04-30
+# LATTICE Status — 2026-04-30
 
 ## What works (tested end-to-end)
 - resolve("any-model") → automatic provider + credential routing

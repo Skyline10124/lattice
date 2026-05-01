@@ -13,9 +13,6 @@ jobs:
   test:
     name: Test & Lint
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: artemis-core
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +27,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            artemis-core/target
+            target
           key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
@@ -48,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: artemis-core
+        working-directory: lattice-python
     strategy:
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
@@ -69,7 +66,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            artemis-core/target
+            lattice-python/target
           key: cargo-python-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-python-${{ runner.os }}-
 
@@ -80,4 +77,4 @@ jobs:
         run: maturin develop
 
       - name: Smoke test import
-        run: python -c "import artemis_core; print('artemis_core imported successfully')"
+        run: python -c "import lattice_core; print('lattice_core imported successfully')"

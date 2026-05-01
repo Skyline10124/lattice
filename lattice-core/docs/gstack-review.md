@@ -1,4 +1,4 @@
-# Gstack Code Review — Artemis
+# Gstack Code Review — LATTICE
 
 **Date**: 2026-04-30
 **Reviewer**: gstack /review
@@ -185,10 +185,10 @@ Every call to `denormalize_response` or `denormalize_stream_chunk` generates a n
 
 **File**: `lattice-core/src/lib.rs:148-151`
 
-When `eventsource()` fails (network error, 401, 429), the error is wrapped as a generic `ArtemisError::Network` without classification:
+When `eventsource()` fails (network error, 401, 429), the error is wrapped as a generic `LatticeError::Network` without classification:
 
 ```rust
-let event_source = req.eventsource().map_err(|e| ArtemisError::Network {
+let event_source = req.eventsource().map_err(|e| LatticeError::Network {
     message: format!("Failed to create event source: {}", e),
     status: None,
 })?;

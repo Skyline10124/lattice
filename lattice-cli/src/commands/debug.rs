@@ -1,7 +1,7 @@
 use anyhow::Result;
+use colored::Colorize;
 use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
 use lattice_core::router::ModelRouter;
-use colored::Colorize;
 use std::time::Instant;
 
 pub async fn run(

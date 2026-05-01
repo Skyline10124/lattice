@@ -1,9 +1,9 @@
 # 错误处理
 
-## ArtemisError
+## LatticeError
 
 ```rust
-pub enum ArtemisError {
+pub enum LatticeError {
     RateLimit { retry_after: Option<f64>, provider: String },
     Authentication { provider: String },
     ModelNotFound { model: String },

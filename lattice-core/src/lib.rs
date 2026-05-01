@@ -11,7 +11,7 @@ pub mod types;
 
 // Re-export key types for convenience
 pub use catalog::ResolvedModel;
-pub use errors::ArtemisError;
+pub use errors::LatticeError;
 pub use logging::{init_debug_logging, init_logging};
 pub use streaming::StreamEvent;
 pub use types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
@@ -24,7 +24,7 @@ use router::ModelRouter;
 /// For custom model registrations, use [`ModelRouter`] directly.
 ///
 /// Credentials are resolved from environment variables.
-pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError> {
+pub fn resolve(model: &str) -> Result<ResolvedModel, LatticeError> {
     ModelRouter::new().resolve(model, None)
 }
 
@@ -61,7 +61,7 @@ pub async fn chat(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, ArtemisError> {
+) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, LatticeError> {
     // Auto-configure DeepSeek thinking mode based on model name.
     let (thinking, reasoning_effort) = match resolved.api_model_id.as_str() {
         "deepseek-v4-pro" | "deepseek-reasoner" | "deepseek/deepseek-v4-pro" => (
@@ -90,14 +90,14 @@ pub async fn chat(
         ApiProtocol::OpenAiChat => {
             let transport = &DISPATCHER
                 .dispatch(&ApiProtocol::OpenAiChat)
-                .ok_or_else(|| ArtemisError::Config {
+                .ok_or_else(|| LatticeError::Config {
                     message: "OpenAiChat transport not registered".into(),
                 })?;
 
             let mut body =
                 transport
                     .normalize_request(&request)
-                    .map_err(|e| ArtemisError::Streaming {
+                    .map_err(|e| LatticeError::Streaming {
                         message: e.to_string(),
                     })?;
             body["stream"] = serde_json::Value::Bool(true);
@@ -134,7 +134,7 @@ pub async fn chat(
                 }
             }
 
-            let response = req.send().await.map_err(|e| ArtemisError::Network {
+            let response = req.send().await.map_err(|e| LatticeError::Network {
                 message: format!("HTTP request failed: {}", e),
                 status: e.status().map(|s| s.as_u16()),
             })?;
@@ -142,7 +142,7 @@ pub async fn chat(
             let status = response.status();
             if !status.is_success() {
                 let body_text = response.text().await.unwrap_or_default();
-                return Err(ArtemisError::ProviderUnavailable {
+                return Err(LatticeError::ProviderUnavailable {
                     provider: resolved.provider.clone(),
                     reason: format!("HTTP {}: {}", status.as_u16(), body_text),
                 });
@@ -158,14 +158,14 @@ pub async fn chat(
         ApiProtocol::AnthropicMessages => {
             let transport = &DISPATCHER
                 .dispatch(&ApiProtocol::AnthropicMessages)
-                .ok_or_else(|| ArtemisError::Config {
+                .ok_or_else(|| LatticeError::Config {
                     message: "AnthropicMessages transport not registered".into(),
                 })?;
 
             let mut body =
                 transport
                     .normalize_request(&request)
-                    .map_err(|e| ArtemisError::Streaming {
+                    .map_err(|e| LatticeError::Streaming {
                         message: e.to_string(),
                     })?;
             body["stream"] = serde_json::Value::Bool(true);
@@ -194,7 +194,7 @@ pub async fn chat(
                 }
             }
 
-            let response = req.send().await.map_err(|e| ArtemisError::Network {
+            let response = req.send().await.map_err(|e| LatticeError::Network {
                 message: format!("HTTP request failed: {}", e),
                 status: e.status().map(|s| s.as_u16()),
             })?;
@@ -202,7 +202,7 @@ pub async fn chat(
             let status = response.status();
             if !status.is_success() {
                 let body_text = response.text().await.unwrap_or_default();
-                return Err(ArtemisError::ProviderUnavailable {
+                return Err(LatticeError::ProviderUnavailable {
                     provider: resolved.provider.clone(),
                     reason: format!("HTTP {}: {}", status.as_u16(), body_text),
                 });
@@ -215,7 +215,7 @@ pub async fn chat(
             Ok(Box::pin(stream))
         }
 
-        _ => Err(ArtemisError::Config {
+        _ => Err(LatticeError::Config {
             message: format!(
                 "Streaming not yet supported for protocol {:?}",
                 resolved.api_protocol
@@ -241,7 +241,7 @@ pub async fn chat_complete(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<ChatResponse, ArtemisError> {
+) -> Result<ChatResponse, LatticeError> {
     let mut stream = chat(resolved, messages, tools).await?;
 
     let mut content = String::new();
@@ -302,7 +302,7 @@ pub async fn chat_complete(
                     }
                     // Empty stream ended: the provider accepted the request but
                     // sent nothing useful. Classify as transient.
-                    return Err(ArtemisError::ProviderUnavailable {
+                    return Err(LatticeError::ProviderUnavailable {
                         provider: resolved.provider.clone(),
                         reason: m,
                     });
@@ -322,13 +322,13 @@ pub async fn chat_complete(
                     || m.contains("timeout")
                     || m.contains("reset")
                 {
-                    return Err(ArtemisError::ProviderUnavailable {
+                    return Err(LatticeError::ProviderUnavailable {
                         provider: resolved.provider.clone(),
                         reason: m,
                     });
                 }
 
-                return Err(ArtemisError::Streaming { message: m });
+                return Err(LatticeError::Streaming { message: m });
             }
         }
     }

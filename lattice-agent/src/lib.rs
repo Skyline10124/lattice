@@ -464,7 +464,7 @@ impl Agent {
         &self,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
-        lattice_core::ArtemisError,
+        lattice_core::LatticeError,
     > {
         use lattice_core::errors::ErrorClassifier;
         let mut attempt = 0u32;
@@ -497,7 +497,7 @@ impl Agent {
         &self,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
-        lattice_core::ArtemisError,
+        lattice_core::LatticeError,
     > {
         use lattice_core::errors::ErrorClassifier;
         let mut attempt = 0u32;

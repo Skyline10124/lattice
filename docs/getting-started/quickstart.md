@@ -31,7 +31,7 @@ cd lattice-python && maturin develop
 
 ```python
 import lattice_core
-engine = lattice_core.ArtemisEngine()
+engine = lattice_core.LatticeEngine()
 resolved = engine.resolve_model("sonnet")
 # Python 目前只支持 resolve，chat 走 Rust
 ```

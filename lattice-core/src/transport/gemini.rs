@@ -1,6 +1,6 @@
 //! Gemini transport — message normalizer for Google's `generateContent` API format.
 //!
-//! Converts between Artemis internal types ([`ChatRequest`], [`ChatResponse`])
+//! Converts between LATTICE internal types ([`ChatRequest`], [`ChatResponse`])
 //! and the Gemini-native JSON schema used by `models/{model}:generateContent`.
 //!
 //! Key differences from OpenAI's Chat Completions format:

@@ -15,7 +15,7 @@ use credentials::CredentialStore;
 
 #[derive(Parser)]
 #[command(name = "lattice")]
-#[command(about = "󰚩 Artemis — model-centric LLM engine")]
+#[command(about = "󰚩 LATTICE — model-centric LLM engine")]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]

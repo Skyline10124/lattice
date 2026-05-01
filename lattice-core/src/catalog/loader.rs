@@ -1,5 +1,5 @@
 use super::types::*;
-use crate::errors::ArtemisError;
+use crate::errors::LatticeError;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -9,7 +9,7 @@ pub struct Catalog {
     provider_defaults: HashMap<String, ProviderDefaults>,
 }
 
-static CATALOG: OnceLock<Result<Catalog, ArtemisError>> = OnceLock::new();
+static CATALOG: OnceLock<Result<Catalog, LatticeError>> = OnceLock::new();
 
 impl Catalog {
     /// Returns the global catalog, loading and deserializing on first access.
@@ -17,13 +17,13 @@ impl Catalog {
     /// The catalog is embedded at compile time via `include_str!("data.json")`.
     /// A deserialization failure indicates a corrupt binary and returns a
     /// `ConfigError` instead of panicking.
-    pub fn get() -> Result<&'static Catalog, ArtemisError> {
+    pub fn get() -> Result<&'static Catalog, LatticeError> {
         CATALOG
             .get_or_init(|| {
                 let data = include_str!("data.json");
                 serde_json::from_str(data)
                     .map(Catalog::from_data)
-                    .map_err(|e| ArtemisError::Config {
+                    .map_err(|e| LatticeError::Config {
                         message: format!("Failed to deserialize catalog data.json: {e}"),
                     })
             })

@@ -30,7 +30,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     // --- Chat messages ---
     let chat_block = Block::default()
-        .title(" Artemis ")
+        .title(" LATTICE ")
         .borders(Borders::ALL)
         .border_style(theme.border_style());
     let inner_chat = chat_block.inner(chat_area);

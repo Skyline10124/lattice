@@ -22,6 +22,6 @@
 | `transport/` | Transport trait、TransportDispatcher、ChatCompletions/Anthropic/Gemini。`NormalizedResponse` 历史上定义于此，已作为 dead code 移除 |
 | `streaming.rs` | SseParser trait、OpenAiSseParser、AnthropicSseParser、StreamEvent |
 | `retry.rs` | RetryPolicy（指数退避 + jitter） |
-| `errors.rs` | ArtemisError 枚举、ErrorClassifier |
+| `errors.rs` | LatticeError 枚举、ErrorClassifier |
 | `tokens.rs` | TokenEstimator（tiktoken + char/4 估算） |
 | `types.rs` | Role、Message、ToolDefinition、ToolCall、FunctionCall |

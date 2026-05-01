@@ -1,8 +1,8 @@
 use anyhow::Result;
+use colored::Colorize;
 use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
 use lattice_core::router::ModelRouter;
 use lattice_harness::{AgentRegistry, Pipeline};
-use colored::Colorize;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -4,7 +4,7 @@
 
 **Goal:** Split monolithic `lattice-core` into five crates: core (resolve + chat), agent (AgentLoop + conversation), memory (persistent memory trait), token-pool (shared budget trait), python (PyO3 bindings).
 
-**Architecture:** Cargo workspace at repo root with five member crates. lattice-core keeps 10 modules and exposes `resolve()` + `chat()` + `chat_complete()`. lattice-agent depends on core + memory + token-pool. lattice-python depends on all lower crates. All crates share `lattice_core::ArtemisError`.
+**Architecture:** Cargo workspace at repo root with five member crates. lattice-core keeps 10 modules and exposes `resolve()` + `chat()` + `chat_complete()`. lattice-agent depends on core + memory + token-pool. lattice-python depends on all lower crates. All crates share `lattice_core::LatticeError`.
 
 **Tech Stack:** Rust 2021 edition, Cargo workspace, PyO3 (python crate only)
 
@@ -327,17 +327,17 @@ pub mod types;
 
 mod mock; // internal, for tests
 
-use errors::ArtemisError;
+use errors::LatticeError;
 use futures::Stream;
 
-pub fn resolve(model: &str) -> Result<catalog::ResolvedModel, ArtemisError> {
+pub fn resolve(model: &str) -> Result<catalog::ResolvedModel, LatticeError> {
     router::ModelRouter::new().resolve(model, None)
 }
 
 pub async fn chat(
     resolved: &catalog::ResolvedModel,
     messages: &[types::Message],
-) -> Result<impl Stream<Item = streaming::StreamEvent>, ArtemisError> {
+) -> Result<impl Stream<Item = streaming::StreamEvent>, LatticeError> {
     // Stub for now — delegates to provider in Task 6
     todo!("wire up chat() through dispatcher")
 }
@@ -345,7 +345,7 @@ pub async fn chat(
 pub fn chat_complete(
     resolved: &catalog::ResolvedModel,
     messages: &[types::Message],
-) -> Result<provider::ChatResponse, ArtemisError> {
+) -> Result<provider::ChatResponse, LatticeError> {
     // Stub for now
     todo!("wire up chat_complete() through dispatcher")
 }
@@ -362,7 +362,7 @@ rm lattice-core/src/streaming_bridge.rs
 rm lattice-core/src/engine.rs
 ```
 
-Edit `lattice-core/src/errors.rs`: remove the `pub mod py_exc` block and the `From<ArtemisError> for PyErr` impl. These use `pyo3::create_exception!` and `Python::try_attach` — PyO3 types that won't exist in core after the split. Keep only the Rust `ArtemisError` enum, `Display` impl, `Error` impl, and `ErrorClassifier`. The PyO3 conversion moves to `lattice-python/src/errors.rs` in Task 7.
+Edit `lattice-core/src/errors.rs`: remove the `pub mod py_exc` block and the `From<LatticeError> for PyErr` impl. These use `pyo3::create_exception!` and `Python::try_attach` — PyO3 types that won't exist in core after the split. Keep only the Rust `LatticeError` enum, `Display` impl, `Error` impl, and `ErrorClassifier`. The PyO3 conversion moves to `lattice-python/src/errors.rs` in Task 7.
 
 - [ ] **Step 4: Remove non-core test files (they'll be recreated in agent crate)**
 
@@ -405,7 +405,7 @@ git commit -m "refactor: strip lattice-core to core modules (resolve + chat stub
 
 ```rust
 // /home/astrin/LATTICE/lattice-core/src/lib.rs — resolve() function
-pub fn resolve(model: &str) -> Result<catalog::ResolvedModel, ArtemisError> {
+pub fn resolve(model: &str) -> Result<catalog::ResolvedModel, LatticeError> {
     router::ModelRouter::new().resolve(model, None)
 }
 ```
@@ -474,11 +474,11 @@ use futures::stream::StreamExt;
 pub async fn chat(
     resolved: &catalog::ResolvedModel,
     messages: &[types::Message],
-) -> Result<Pin<Box<dyn Stream<Item = streaming::StreamEvent> + Send>>, ArtemisError> {
+) -> Result<Pin<Box<dyn Stream<Item = streaming::StreamEvent> + Send>>, LatticeError> {
     let request = ChatRequest::new(messages.to_vec(), vec![], resolved.clone());
     let dispatcher = transport::TransportDispatcher::new();
     let transport = dispatcher.dispatch_for_resolved(resolved)
-        .ok_or_else(|| ArtemisError::Config {
+        .ok_or_else(|| LatticeError::Config {
             message: format!("no transport for protocol {:?}", resolved.api_protocol),
         })?;
     transport.chat_stream(request).await
@@ -549,7 +549,7 @@ git show HEAD~3:lattice-core/src/agent_loop.rs > lattice-agent/src/loop_.rs
 ```rust
 // lattice-agent/src/loop_.rs
 use lattice_core::catalog::ResolvedModel;
-use lattice_core::errors::{ArtemisError, ErrorClassifier};
+use lattice_core::errors::{LatticeError, ErrorClassifier};
 use lattice_core::provider::{ChatRequest, Provider};
 use lattice_core::retry::RetryPolicy;
 use lattice_core::tokens::TokenEstimator;
@@ -724,11 +724,11 @@ fn lattice_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "0.1.0")?;
 
     // ── Register exception hierarchy ──
-    m.add("ArtemisError", m.py().get_type::<lattice_core::errors::py_exc::ArtemisError>())?;
+    m.add("LatticeError", m.py().get_type::<lattice_core::errors::py_exc::LatticeError>())?;
     // ... (copy from old lib.rs, adapting imports)
 
     // ── Register types ──
-    m.add_class::<engine::ArtemisEngine>()?;
+    m.add_class::<engine::LatticeEngine>()?;
     m.add_class::<engine::Event>()?;
     m.add_class::<engine::ToolCallInfo>()?;
     m.add_class::<engine::PyResolvedModel>()?;
@@ -740,7 +740,7 @@ fn lattice_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 Wait — this won't work because the error types were defined with `create_exception!` macro in the old `errors.rs` which needs PyO3. After the split, `lattice-core` (no PyO3) won't have exception classes.
 
-**Fix**: The exception classes must be defined in `lattice-python/src/errors.rs` instead. The Rust `ArtemisError` enum stays in core. The PyO3 exception wrappers move to the python crate.
+**Fix**: The exception classes must be defined in `lattice-python/src/errors.rs` instead. The Rust `LatticeError` enum stays in core. The PyO3 exception wrappers move to the python crate.
 
 - [ ] **Step 4: Create errors.rs in lattice-python**
 
@@ -749,18 +749,18 @@ Wait — this won't work because the error types were defined with `create_excep
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use lattice_core::errors::ArtemisError as CoreError;
+use lattice_core::errors::LatticeError as CoreError;
 
-create_exception!(lattice_core, ArtemisError, PyException);
-create_exception!(lattice_core, RateLimitError, ArtemisError);
-create_exception!(lattice_core, AuthenticationError, ArtemisError);
-create_exception!(lattice_core, ModelNotFoundError, ArtemisError);
-create_exception!(lattice_core, ProviderUnavailableError, ArtemisError);
-create_exception!(lattice_core, ContextWindowExceededError, ArtemisError);
-create_exception!(lattice_core, ToolExecutionError, ArtemisError);
-create_exception!(lattice_core, StreamingError, ArtemisError);
-create_exception!(lattice_core, ConfigError, ArtemisError);
-create_exception!(lattice_core, NetworkError, ArtemisError);
+create_exception!(lattice_core, LatticeError, PyException);
+create_exception!(lattice_core, RateLimitError, LatticeError);
+create_exception!(lattice_core, AuthenticationError, LatticeError);
+create_exception!(lattice_core, ModelNotFoundError, LatticeError);
+create_exception!(lattice_core, ProviderUnavailableError, LatticeError);
+create_exception!(lattice_core, ContextWindowExceededError, LatticeError);
+create_exception!(lattice_core, ToolExecutionError, LatticeError);
+create_exception!(lattice_core, StreamingError, LatticeError);
+create_exception!(lattice_core, ConfigError, LatticeError);
+create_exception!(lattice_core, NetworkError, LatticeError);
 
 impl From<CoreError> for PyErr {
     fn from(err: CoreError) -> PyErr {
@@ -774,7 +774,7 @@ impl From<CoreError> for PyErr {
 }
 ```
 
-The existing `From<ArtemisError> for PyErr` implementation in `lattice-core/src/errors.rs` must be removed (it depends on PyO3). Move the entire conversion block to `lattice-python/src/errors.rs`.
+The existing `From<LatticeError> for PyErr` implementation in `lattice-core/src/errors.rs` must be removed (it depends on PyO3). Move the entire conversion block to `lattice-python/src/errors.rs`.
 
 - [ ] **Step 5: Move streaming_bridge.rs**
 
@@ -790,13 +790,13 @@ use pyo3::prelude::*;
 use lattice_core::catalog::ResolvedModel;
 
 #[pyclass]
-pub struct ArtemisEngine {
+pub struct LatticeEngine {
     router: lattice_core::router::ModelRouter,
     // ... minimal state
 }
 
 #[pymethods]
-impl ArtemisEngine {
+impl LatticeEngine {
     #[new]
     pub fn new() -> Self {
         Self {
@@ -917,4 +917,4 @@ After all tasks complete, verify:
 - [ ] `cargo clippy --no-default-features -- -D warnings` clean
 - [ ] `cargo fmt --check` clean
 - [ ] Artifact sizes: `ls -lh target/debug/liblattice_core.rlib` (should be smaller, no PyO3)
-- [ ] Python smoke test: `maturin develop -m lattice-python/Cargo.toml && python -c "import lattice_core; e = lattice_core.ArtemisEngine(); print(e.resolve_model('sonnet'))"`
+- [ ] Python smoke test: `maturin develop -m lattice-python/Cargo.toml && python -c "import lattice_core; e = lattice_core.LatticeEngine(); print(e.resolve_model('sonnet'))"`

@@ -7,12 +7,12 @@ use crate::errors::convert_core_error;
 
 /// Python-facing model resolver.
 #[pyclass]
-pub struct ArtemisEngine {
+pub struct LatticeEngine {
     router: Mutex<ModelRouter>,
 }
 
 #[pymethods]
-impl ArtemisEngine {
+impl LatticeEngine {
     #[new]
     pub fn new() -> Self {
         Self {

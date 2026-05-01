@@ -1,13 +1,13 @@
 use anyhow::Result;
+use colored::Colorize;
 use lattice_core::catalog::Catalog;
 use lattice_core::router::ModelRouter;
-use colored::Colorize;
 
 use crate::config::Config;
 use crate::credentials::CredentialStore;
 
 pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
-    println!("{} Artemis v0.1.0\n", "\u{F06A9}".dimmed());
+    println!("{} LATTICE v0.1.0\n", "\u{F06A9}".dimmed());
 
     // Credentials
     println!("{}", "Credentials:".bold());

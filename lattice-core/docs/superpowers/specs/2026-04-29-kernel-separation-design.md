@@ -36,19 +36,19 @@ messages, send them and stream back the response.
 
 ```rust
 /// Resolve a model name (or alias) to connection details.
-pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError>;
+pub fn resolve(model: &str) -> Result<ResolvedModel, LatticeError>;
 
 /// Send messages to the resolved model, returning a stream of events.
 pub fn chat(
     resolved: &ResolvedModel,
     messages: &[Message],
-) -> Result<impl Stream<Item = StreamEvent>, ArtemisError>;
+) -> Result<impl Stream<Item = StreamEvent>, LatticeError>;
 
 /// Non-streaming convenience: collect all events into a ChatResponse.
 pub fn chat_complete(
     resolved: &ResolvedModel,
     messages: &[Message],
-) -> Result<ChatResponse, ArtemisError>;
+) -> Result<ChatResponse, LatticeError>;
 ```
 
 ### Internal modules (not re-exported unless needed by other crates)
@@ -63,7 +63,7 @@ pub fn chat_complete(
 | `streaming` | SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`), `StreamEvent` |
 | `retry` | `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI, char/4 estimate for others |
-| `errors` | `ArtemisError` enum, `ErrorClassifier` |
+| `errors` | `LatticeError` enum, `ErrorClassifier` |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
 ### Runtime
@@ -233,7 +233,7 @@ exception conversion, and `StreamIterator` for streaming.
 | `agent_loop.rs` | `lattice-agent/src/loop_.rs` |
 | `tool_boundary.rs` | `lattice-agent/src/tool_boundary.rs` |
 | `streaming_bridge.rs` | `lattice-python/src/streaming_bridge.rs` |
-| `engine.rs` | Split three ways: 1) `ArtemisEngine` PyClass + `Event`/`ToolCallInfo`/`PyResolvedModel` PyO3 types → `lattice-python/src/engine.rs`; 2) `run_once()`/`run_conversation()`/`submit_tool_result[s]()` → `lattice-agent/src/run.rs` (merged into `Agent::send`/`submit_tools`); 3) `resolve_model()`/`list_models()`/`register_model()` already handled by `router.rs` in core — nothing to move |
+| `engine.rs` | Split three ways: 1) `LatticeEngine` PyClass + `Event`/`ToolCallInfo`/`PyResolvedModel` PyO3 types → `lattice-python/src/engine.rs`; 2) `run_once()`/`run_conversation()`/`submit_tool_result[s]()` → `lattice-agent/src/run.rs` (merged into `Agent::send`/`submit_tools`); 3) `resolve_model()`/`list_models()`/`register_model()` already handled by `router.rs` in core — nothing to move |
 | `mock.rs` | `lattice-agent/` (only used by agent tests; not needed in core) |
 | Everything else | Stays in `lattice-core` |
 
@@ -246,7 +246,7 @@ exception conversion, and `StreamIterator` for streaming.
 
 ## Errors & Testing
 
-- All crates use `lattice_core::ArtemisError` as the error type. No new error enums.
+- All crates use `lattice_core::LatticeError` as the error type. No new error enums.
 - Core tests (`cargo test --no-default-features`) stay in core. Agent tests stay in agent.
 - Regression tests (714) are split across crates based on what they test.
 - Characterisation tests for TransportDispatcher, AgentLoop, credential resolution, and error classification are moved with their respective modules.

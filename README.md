@@ -124,7 +124,7 @@ cd lattice-python && maturin develop
 ```python
 import lattice_core
 
-engine = lattice_core.ArtemisEngine()
+engine = lattice_core.LatticeEngine()
 engine.resolve_model("sonnet")
 # -> PyResolvedModel(provider="anthropic", api_model_id="claude-sonnet-4-6", ...)
 
@@ -134,7 +134,7 @@ engine.list_authenticated_models()
 
 ## Current status
 
-Artemis is in **alpha / dogfooding** stage. What works:
+LATTICE is in **alpha / dogfooding** stage. What works:
 
 - **Model resolution**: 98 models, 37 aliases, 27 provider defaults (23 with base_url)
 - **Rust inference**: `resolve()` + `chat()` for OpenAI and Anthropic protocols via unified Transport
@@ -159,7 +159,7 @@ LATTICE/                 Git root (Cargo workspace)
 │   │   ├── streaming/   SSE parsers (OpenAI format, Anthropic format)
 │   │   ├── retry.rs     Error classification, jittered exponential backoff
 │   │   ├── tokens.rs    tiktoken integration + token estimation
-│   │   ├── errors.rs    ArtemisError enum
+│   │   ├── errors.rs    LatticeError enum
 │   │   └── types.rs     Role, Message, ToolDefinition, ToolCall, FunctionCall
 │   └── tests/e2e/       End-to-end + regression tests
 ├── lattice-agent/       Agent struct, conversation state, tool boundary
@@ -197,7 +197,7 @@ LATTICE/                 Git root (Cargo workspace)
 
 ### `.env` file
 
-Artemis CLI loads a `.env` file from the working directory on startup (via `dotenvy`). This lets you set provider credentials without polluting your shell profile.
+The LATTICE CLI loads a `.env` file from the working directory on startup (via `dotenvy`). This lets you set provider credentials without polluting your shell profile.
 
 1. Copy the template: `cp .env.example .env`
 2. Fill in your API keys

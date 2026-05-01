@@ -1,6 +1,6 @@
 use anyhow::Result;
-use lattice_core::router::ModelRouter;
 use colored::Colorize;
+use lattice_core::router::ModelRouter;
 use std::collections::HashSet;
 
 pub fn run(auth_only: bool) -> Result<()> {

@@ -363,9 +363,8 @@ pub struct RawSseEvent {
 
 /// Parse raw SSE text into a sequence of [`RawSseEvent`]s.
 ///
-/// This is a **synchronous** fallback for environments where the
-/// `reqwest-eventsource` / `eventsource-stream` async machinery is not
-/// available (e.g. tests, file-based processing).
+/// This is a **synchronous** fallback for environments where async streaming
+/// is not available (e.g. tests, file-based processing).
 ///
 /// # SSE wire format
 ///
@@ -424,7 +423,7 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
 
 /// Parse a stream of byte chunks (from a raw HTTP response body) into SSE events.
 ///
-/// This bypasses `reqwest_eventsource` and works with any SSE endpoint.
+/// Parse a stream of byte chunks (from a raw HTTP response body) into SSE events.
 pub fn sse_from_bytes_stream(
     body: impl futures::Stream<Item = Result<impl AsRef<[u8]>, impl std::fmt::Display>> + Send + 'static,
     parser: Box<dyn SseParser>,

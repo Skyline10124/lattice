@@ -15,7 +15,7 @@
 //! | T9   | engine "mock" provider           | `engine_mock_provider`      |
 
 use lattice_core::catalog::{ApiProtocol, ResolvedModel};
-use lattice_core::errors::{ArtemisError, ErrorClassifier};
+use lattice_core::errors::{ErrorClassifier, LatticeError};
 use lattice_core::retry::RetryPolicy;
 use lattice_core::router::{self, ModelRouter};
 use std::collections::HashMap;
@@ -104,7 +104,7 @@ fn regress_error_classifier_unified_classify() {
         "openai",
     );
     match err {
-        ArtemisError::RateLimit {
+        LatticeError::RateLimit {
             retry_after,
             provider,
         } => {
@@ -116,7 +116,7 @@ fn regress_error_classifier_unified_classify() {
 
     let err = ErrorClassifier::classify(401, "", "anthropic");
     match err {
-        ArtemisError::Authentication { provider } => {
+        LatticeError::Authentication { provider } => {
             assert_eq!(provider, "anthropic");
         }
         other => panic!("expected Authentication, got {:?}", other),
@@ -124,7 +124,7 @@ fn regress_error_classifier_unified_classify() {
 
     let err = ErrorClassifier::classify(404, r#"{"error": {"model": "bogus-gpt"}}"#, "openai");
     match err {
-        ArtemisError::ModelNotFound { model } => {
+        LatticeError::ModelNotFound { model } => {
             assert_eq!(model, "bogus-gpt");
         }
         other => panic!("expected ModelNotFound, got {:?}", other),
@@ -132,7 +132,7 @@ fn regress_error_classifier_unified_classify() {
 
     let err = ErrorClassifier::classify(500, "internal error", "gemini");
     match err {
-        ArtemisError::ProviderUnavailable { provider, .. } => {
+        LatticeError::ProviderUnavailable { provider, .. } => {
             assert_eq!(provider, "gemini");
         }
         other => panic!("expected ProviderUnavailable, got {:?}", other),
@@ -140,13 +140,13 @@ fn regress_error_classifier_unified_classify() {
 
     let err = ErrorClassifier::classify(400, "context_length_exceeded: max 8192", "openai");
     match err {
-        ArtemisError::ContextWindowExceeded { .. } => {}
+        LatticeError::ContextWindowExceeded { .. } => {}
         other => panic!("expected ContextWindowExceeded, got {:?}", other),
     }
 
     let err = ErrorClassifier::classify(418, "I'm a teapot", "openai");
     match err {
-        ArtemisError::Network { message, status } => {
+        LatticeError::Network { message, status } => {
             assert!(message.contains("teapot"));
             assert_eq!(status, Some(418));
         }
@@ -159,14 +159,14 @@ fn regress_error_classifier_unified_classify() {
 #[test]
 fn regress_error_classifier_is_retryable() {
     assert!(
-        ErrorClassifier::is_retryable(&ArtemisError::RateLimit {
+        ErrorClassifier::is_retryable(&LatticeError::RateLimit {
             retry_after: None,
             provider: "test".into(),
         }),
         "RateLimit should be retryable"
     );
     assert!(
-        ErrorClassifier::is_retryable(&ArtemisError::ProviderUnavailable {
+        ErrorClassifier::is_retryable(&LatticeError::ProviderUnavailable {
             provider: "test".into(),
             reason: "test".into(),
         }),
@@ -174,26 +174,26 @@ fn regress_error_classifier_is_retryable() {
     );
 
     assert!(
-        !ErrorClassifier::is_retryable(&ArtemisError::Authentication {
+        !ErrorClassifier::is_retryable(&LatticeError::Authentication {
             provider: "test".into(),
         }),
         "Authentication should NOT be retryable"
     );
     assert!(
-        !ErrorClassifier::is_retryable(&ArtemisError::ModelNotFound {
+        !ErrorClassifier::is_retryable(&LatticeError::ModelNotFound {
             model: "test".into(),
         }),
         "ModelNotFound should NOT be retryable"
     );
     assert!(
-        !ErrorClassifier::is_retryable(&ArtemisError::ContextWindowExceeded {
+        !ErrorClassifier::is_retryable(&LatticeError::ContextWindowExceeded {
             tokens: 100,
             limit: 50,
         }),
         "ContextWindowExceeded should NOT be retryable"
     );
     assert!(
-        !ErrorClassifier::is_retryable(&ArtemisError::Network {
+        !ErrorClassifier::is_retryable(&LatticeError::Network {
             message: "test".into(),
             status: Some(502),
         }),
@@ -206,7 +206,7 @@ fn regress_error_classifier_is_retryable() {
 fn regress_error_classifier_status_zero_network() {
     let err = ErrorClassifier::classify(0, "", "test");
     match err {
-        ArtemisError::Network { status, .. } => {
+        LatticeError::Network { status, .. } => {
             assert_eq!(
                 status,
                 Some(0),
@@ -729,7 +729,7 @@ fn regress_engine_mock_provider_auth_error_typed() {
     // Error classification should still work — classify an actual 401
     let err = ErrorClassifier::classify(401, r#"{"error": "invalid api key"}"#, &resolved.provider);
     assert!(
-        matches!(err, ArtemisError::Authentication { .. }),
+        matches!(err, LatticeError::Authentication { .. }),
         "401 should classify as Authentication, got {:?}",
         err
     );

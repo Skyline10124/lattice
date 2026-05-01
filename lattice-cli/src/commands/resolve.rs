@@ -1,6 +1,6 @@
 use anyhow::Result;
-use lattice_core::router::ModelRouter;
 use colored::Colorize;
+use lattice_core::router::ModelRouter;
 
 pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool) -> Result<()> {
     let router = ModelRouter::new();

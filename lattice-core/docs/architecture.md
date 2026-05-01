@@ -1,8 +1,8 @@
-# Artemis Core Architecture
+# LATTICE Core Architecture
 
 ## Overview
 
-Artemis is a model-centric LLM engine split across a 5-crate Cargo workspace. The user specifies a model, and the engine resolves which provider serves it, picks the best credential, formats the request for the right API protocol, and handles streaming and retries. There is no `set_provider()` call. Provider selection is automatic.
+LATTICE is a model-centric LLM engine split across a 5-crate Cargo workspace. The user specifies a model, and the engine resolves which provider serves it, picks the best credential, formats the request for the right API protocol, and handles streaming and retries. There is no `set_provider()` call. Provider selection is automatic.
 
 ## Workspace Structure
 
@@ -83,7 +83,7 @@ When a user calls `resolve("sonnet")`:
 | `streaming` | SSE parsers (OpenAI, Anthropic), `SseStream`, `StreamEvent` enum |
 | `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI models, rough char/4 estimation for others |
-| `errors` | `ArtemisError` Rust enum |
+| `errors` | `LatticeError` Rust enum |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
 ### Other crates
@@ -93,7 +93,7 @@ When a user calls `resolve("sonnet")`:
 | `lattice-agent` | `Agent` struct: conversation state, tool call boundary, retry |
 | `lattice-memory` | `Memory` trait + `InMemoryMemory` default |
 | `lattice-token-pool` | `TokenPool` trait + `UnlimitedPool` default |
-| `lattice-python` | PyO3 bindings: `ArtemisEngine` PyClass (resolver + model listing), Python exception hierarchy |
+| `lattice-python` | PyO3 bindings: `LatticeEngine` PyClass (resolver + model listing), Python exception hierarchy |
 
 ## Key Types and Relationships
 
@@ -133,21 +133,21 @@ ApiProtocol (enum)
 
 ```rust
 // Model resolution: alias -> ResolvedModel
-pub fn resolve(model_name: &str) -> Result<ResolvedModel, ArtemisError>;
+pub fn resolve(model_name: &str) -> Result<ResolvedModel, LatticeError>;
 
 // Streaming chat: returns Stream of StreamEvent
 pub fn chat(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<impl Stream<Item = StreamEvent>, ArtemisError>;
+) -> Result<impl Stream<Item = StreamEvent>, LatticeError>;
 
 // Non-streaming chat: accumulates stream into ChatResponse
 pub async fn chat_complete(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<ChatResponse, ArtemisError>;
+) -> Result<ChatResponse, LatticeError>;
 ```
 
 Currently supported protocols: `OpenAiChat` and `AnthropicMessages`. Gemini, Bedrock, and Codex are defined in the catalog but not yet wired into the main chat path.

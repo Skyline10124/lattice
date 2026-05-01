@@ -1,4 +1,4 @@
-# Artemis Project Status
+# LATTICE Project Status
 
 **Updated**: 2026-04-30
 **Focus**: Runtime hang fix for Agent.send_message()

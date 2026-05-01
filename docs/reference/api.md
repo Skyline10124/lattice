@@ -4,21 +4,21 @@
 
 ```rust
 /// 解析模型名到连接详情
-pub fn resolve(model: &str) -> Result<ResolvedModel, ArtemisError>;
+pub fn resolve(model: &str) -> Result<ResolvedModel, LatticeError>;
 
 /// 流式推理
 pub async fn chat(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<impl Stream<Item = StreamEvent>, ArtemisError>;
+) -> Result<impl Stream<Item = StreamEvent>, LatticeError>;
 
 /// 非流式推理（内部调 chat + 收集）
 pub async fn chat_complete(
     resolved: &ResolvedModel,
     messages: &[Message],
     tools: &[ToolDefinition],
-) -> Result<ChatResponse, ArtemisError>;
+) -> Result<ChatResponse, LatticeError>;
 ```
 
 ### StreamEvent
@@ -58,7 +58,7 @@ impl Agent {
     pub fn with_sandbox(self, config: SandboxConfig) -> Self;
 
     /// 自动 tool loop：反复调用 LLM，自动执行工具，直到 LLM 不再请求工具或达到上限
-    pub async fn run(&mut self, content: &str) -> Result<RunResult, ArtemisError>;
+    pub async fn run(&mut self, content: &str) -> Result<RunResult, LatticeError>;
 
     /// 单次发送消息（手动 tool loop）
     pub fn send(&mut self, content: &str) -> Vec<LoopEvent>;
@@ -136,7 +136,7 @@ impl AgentDispatcher for HarnessAgentDispatcher { ... }
 ## lattice-python
 
 ```python
-class ArtemisEngine:
+class LatticeEngine:
     def resolve_model(self, model: str) -> PyResolvedModel
     def list_models(self) -> list[str]
     def list_authenticated_models(self) -> list[str]

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-**Artemis** is a model-centric LLM engine split into nine Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
+**LATTICE** is a model-centric LLM engine split into nine Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
 
 **Crate architecture** (one-way deps):
 
@@ -83,7 +83,7 @@ User Code (Python / Rust / CLI)
 | `lattice-plugin` | Plugin trait (placeholder — not yet functional) |
 | `lattice-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
 | `lattice-tui` | Terminal UI (ratatui-based — early stage) |
-| `lattice-python` | PyO3 bindings: `ArtemisEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
+| `lattice-python` | PyO3 bindings: `LatticeEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
 
 ### lattice-core module map
 
@@ -97,7 +97,7 @@ User Code (Python / Rust / CLI)
 | `streaming` | SSE parsers (OpenAI, Anthropic) via `sse_from_bytes_stream`, `StreamEvent` |
 | `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI models, char/4 estimation for others |
-| `errors` | `ArtemisError` enum (pure Rust, no PyO3), `ErrorClassifier` |
+| `errors` | `LatticeError` enum (pure Rust, no PyO3), `ErrorClassifier` |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
 ### lattice-harness module map
@@ -162,11 +162,11 @@ lattice-agent: Agent.send() → yields ToolCallRequired → caller executes tool
 
 ### Error taxonomy
 
-`ArtemisError` Rust enum in `lattice-core`. PyO3 exception hierarchy in `lattice-python/errors.rs`:
+`LatticeError` Rust enum in `lattice-core`. PyO3 exception hierarchy in `lattice-python/errors.rs`:
 
 ```
 Exception
-  └─ ArtemisError
+  └─ LatticeError
        ├─ RateLimitError (.retry_after, .provider)
        ├─ AuthenticationError (.provider)
        ├─ ModelNotFoundError (.model)

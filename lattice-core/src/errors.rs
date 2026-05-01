@@ -1,14 +1,14 @@
 //! Error taxonomy for lattice-core.
 //!
-//! Defines a Rust `ArtemisError` enum. Provides:
+//! Defines a Rust `LatticeError` enum. Provides:
 //!
-//! - `ArtemisError` enum: Rust-native error type with typed fields
-//! - `ErrorClassifier`: HTTP status code → `ArtemisError` classification
+//! - `LatticeError` enum: Rust-native error type with typed fields
+//! - `ErrorClassifier`: HTTP status code → `LatticeError` classification
 //!
 //! # Error variants
 //!
 //! ```text
-//! ArtemisError
+//! LatticeError
 //!   ├─ RateLimit          (.retry_after, .provider)
 //!   ├─ Authentication     (.provider)
 //!   ├─ ModelNotFound      (.model)
@@ -28,7 +28,7 @@ use thiserror::Error;
 ///
 /// Each variant carries structured fields describing the error.
 #[derive(Error, Debug, Clone)]
-pub enum ArtemisError {
+pub enum LatticeError {
     /// Provider rate-limited the request.
     #[error("Rate limit exceeded for provider '{provider}'")]
     RateLimit {
@@ -105,9 +105,9 @@ pub enum ArtemisError {
 
 // ── Error classifier ───────────────────────────────────────────────────
 
-/// Classifies HTTP error responses into typed `ArtemisError` variants.
+/// Classifies HTTP error responses into typed `LatticeError` variants.
 ///
-/// Classifies HTTP error responses into typed `ArtemisError` variants
+/// Classifies HTTP error responses into typed `LatticeError` variants
 /// based on status codes. Body-text pattern matching (context overflow
 /// signals, billing vs rate-limit disambiguation) is delegated to the
 /// Python side for now — the Rust classifier handles the deterministic
@@ -116,10 +116,10 @@ pub struct ErrorClassifier;
 
 impl ErrorClassifier {
     /// Returns `true` if the error is retryable (rate limit or provider unavailable).
-    pub fn is_retryable(error: &ArtemisError) -> bool {
+    pub fn is_retryable(error: &LatticeError) -> bool {
         matches!(
             error,
-            ArtemisError::RateLimit { .. } | ArtemisError::ProviderUnavailable { .. }
+            LatticeError::RateLimit { .. } | LatticeError::ProviderUnavailable { .. }
         )
     }
 
@@ -128,21 +128,21 @@ impl ErrorClassifier {
     /// * `status_code` — HTTP status (0 if no response was received).
     /// * `response_body` — Raw response body text, used for pattern matching.
     /// * `provider` — Provider name (e.g. `"openai"`, `"anthropic"`).
-    pub fn classify(status_code: u16, response_body: &str, provider: &str) -> ArtemisError {
+    pub fn classify(status_code: u16, response_body: &str, provider: &str) -> LatticeError {
         let body_lower = response_body.to_lowercase();
 
         match status_code {
             // 429: Rate limit
             429 => {
                 let retry_after = extract_retry_after(response_body);
-                ArtemisError::RateLimit {
+                LatticeError::RateLimit {
                     retry_after,
                     provider: provider.to_string(),
                 }
             }
 
             // 401/403: Authentication
-            401 | 403 => ArtemisError::Authentication {
+            401 | 403 => LatticeError::Authentication {
                 provider: provider.to_string(),
             },
 
@@ -150,11 +150,11 @@ impl ErrorClassifier {
             404 => {
                 let model =
                     extract_model_from_body(response_body).unwrap_or_else(|| "unknown".to_string());
-                ArtemisError::ModelNotFound { model }
+                LatticeError::ModelNotFound { model }
             }
 
             // 408/500/502/503/504: Provider unavailable
-            408 | 500 | 502 | 503 | 504 => ArtemisError::ProviderUnavailable {
+            408 | 500 | 502 | 503 | 504 => LatticeError::ProviderUnavailable {
                 provider: provider.to_string(),
                 reason: truncate_body(&body_lower),
             },
@@ -164,26 +164,26 @@ impl ErrorClassifier {
                 if status_code == 400 {
                     if body_lower.contains("context_length_exceeded") {
                         let (tokens, limit) = extract_context_window_tokens(response_body);
-                        ArtemisError::ContextWindowExceeded { tokens, limit }
+                        LatticeError::ContextWindowExceeded { tokens, limit }
                     } else if body_lower.contains("overloaded_error") {
-                        ArtemisError::ProviderUnavailable {
+                        LatticeError::ProviderUnavailable {
                             provider: provider.to_string(),
                             reason: truncate_body(response_body),
                         }
                     } else if body_lower.contains("rate_limit_error") {
                         let retry_after = extract_retry_after(response_body);
-                        ArtemisError::RateLimit {
+                        LatticeError::RateLimit {
                             retry_after,
                             provider: provider.to_string(),
                         }
                     } else {
-                        ArtemisError::Network {
+                        LatticeError::Network {
                             message: truncate_body(response_body),
                             status: Some(status_code),
                         }
                     }
                 } else {
-                    ArtemisError::Network {
+                    LatticeError::Network {
                         message: truncate_body(response_body),
                         status: Some(status_code),
                     }
@@ -322,7 +322,7 @@ mod tests {
             "openai",
         );
         match err {
-            ArtemisError::RateLimit {
+            LatticeError::RateLimit {
                 retry_after,
                 provider,
             } => {
@@ -337,7 +337,7 @@ mod tests {
     fn test_classify_rate_limit_no_retry_after() {
         let err = ErrorClassifier::classify(429, "too many requests", "anthropic");
         match err {
-            ArtemisError::RateLimit {
+            LatticeError::RateLimit {
                 retry_after,
                 provider,
             } => {
@@ -352,7 +352,7 @@ mod tests {
     fn test_classify_authentication_401() {
         let err = ErrorClassifier::classify(401, "unauthorized", "anthropic");
         assert!(
-            matches!(err, ArtemisError::Authentication { .. }),
+            matches!(err, LatticeError::Authentication { .. }),
             "Expected Authentication, got {err:?}"
         );
     }
@@ -361,7 +361,7 @@ mod tests {
     fn test_classify_authentication_403() {
         let err = ErrorClassifier::classify(403, "forbidden", "google");
         assert!(
-            matches!(err, ArtemisError::Authentication { .. }),
+            matches!(err, LatticeError::Authentication { .. }),
             "Expected Authentication, got {err:?}"
         );
     }
@@ -374,7 +374,7 @@ mod tests {
             "openai",
         );
         match err {
-            ArtemisError::ModelNotFound { model } => {
+            LatticeError::ModelNotFound { model } => {
                 assert_eq!(model, "gpt-5");
             }
             _ => panic!("Expected ModelNotFound, got {err:?}"),
@@ -385,7 +385,7 @@ mod tests {
     fn test_classify_model_not_found_no_model_field() {
         let err = ErrorClassifier::classify(404, "not found", "openai");
         match err {
-            ArtemisError::ModelNotFound { model } => {
+            LatticeError::ModelNotFound { model } => {
                 assert_eq!(model, "unknown");
             }
             _ => panic!("Expected ModelNotFound, got {err:?}"),
@@ -396,7 +396,7 @@ mod tests {
     fn test_classify_provider_unavailable_500() {
         let err = ErrorClassifier::classify(500, "internal error", "openai");
         assert!(
-            matches!(err, ArtemisError::ProviderUnavailable { .. }),
+            matches!(err, LatticeError::ProviderUnavailable { .. }),
             "Expected ProviderUnavailable, got {err:?}"
         );
     }
@@ -405,7 +405,7 @@ mod tests {
     fn test_classify_provider_unavailable_503() {
         let err = ErrorClassifier::classify(503, "service overloaded", "anthropic");
         assert!(
-            matches!(err, ArtemisError::ProviderUnavailable { .. }),
+            matches!(err, LatticeError::ProviderUnavailable { .. }),
             "Expected ProviderUnavailable, got {err:?}"
         );
     }
@@ -418,7 +418,7 @@ mod tests {
             "openai",
         );
         assert!(
-            matches!(err, ArtemisError::ContextWindowExceeded { .. }),
+            matches!(err, LatticeError::ContextWindowExceeded { .. }),
             "Expected ContextWindowExceeded, got {err:?}"
         );
     }
@@ -427,7 +427,7 @@ mod tests {
     fn test_classify_network_error_unknown_status() {
         let err = ErrorClassifier::classify(0, "connection refused", "openai");
         match err {
-            ArtemisError::Network { message, status } => {
+            LatticeError::Network { message, status } => {
                 assert_eq!(status, Some(0));
                 assert!(message.contains("connection refused"));
             }
@@ -439,7 +439,7 @@ mod tests {
     fn test_classify_network_error_418() {
         let err = ErrorClassifier::classify(418, "I'm a teapot", "openai");
         match err {
-            ArtemisError::Network { status, .. } => {
+            LatticeError::Network { status, .. } => {
                 assert_eq!(status, Some(418));
             }
             _ => panic!("Expected Network, got {err:?}"),
@@ -450,7 +450,7 @@ mod tests {
     fn test_classify_400_no_context_overflow() {
         let err = ErrorClassifier::classify(400, "bad request", "openai");
         assert!(
-            matches!(err, ArtemisError::Network { .. }),
+            matches!(err, LatticeError::Network { .. }),
             "Expected Network, got {err:?}"
         );
     }
@@ -463,7 +463,7 @@ mod tests {
             "anthropic",
         );
         assert!(
-            matches!(err, ArtemisError::ProviderUnavailable { .. }),
+            matches!(err, LatticeError::ProviderUnavailable { .. }),
             "Expected ProviderUnavailable, got {err:?}"
         );
     }
@@ -476,7 +476,7 @@ mod tests {
             "anthropic",
         );
         assert!(
-            matches!(err, ArtemisError::RateLimit { .. }),
+            matches!(err, LatticeError::RateLimit { .. }),
             "Expected RateLimit, got {err:?}"
         );
     }
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_display_rate_limit() {
-        let err = ArtemisError::RateLimit {
+        let err = LatticeError::RateLimit {
             retry_after: Some(30.0),
             provider: "openai".into(),
         };
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_display_authentication() {
-        let err = ArtemisError::Authentication {
+        let err = LatticeError::Authentication {
             provider: "anthropic".into(),
         };
         let s = format!("{err}");
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_display_model_not_found() {
-        let err = ArtemisError::ModelNotFound {
+        let err = LatticeError::ModelNotFound {
             model: "gpt-5".into(),
         };
         let s = format!("{err}");
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_display_context_window_exceeded() {
-        let err = ArtemisError::ContextWindowExceeded {
+        let err = LatticeError::ContextWindowExceeded {
             tokens: 100_000,
             limit: 128_000,
         };
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_display_provider_unavailable() {
-        let err = ArtemisError::ProviderUnavailable {
+        let err = LatticeError::ProviderUnavailable {
             provider: "openai".into(),
             reason: "down for maintenance".into(),
         };
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_display_tool_execution() {
-        let err = ArtemisError::ToolExecution {
+        let err = LatticeError::ToolExecution {
             tool: "read_file".into(),
             message: "permission denied".into(),
         };
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_display_streaming() {
-        let err = ArtemisError::Streaming {
+        let err = LatticeError::Streaming {
             message: "connection lost".into(),
         };
         let s = format!("{err}");
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_display_config() {
-        let err = ArtemisError::Config {
+        let err = LatticeError::Config {
             message: "missing api key".into(),
         };
         let s = format!("{err}");
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_display_network() {
-        let err = ArtemisError::Network {
+        let err = LatticeError::Network {
             message: "timeout".into(),
             status: Some(504),
         };

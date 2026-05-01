@@ -8,7 +8,7 @@ fn lattice_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", "0.1.0")?;
 
     // Register exception hierarchy
-    m.add("ArtemisError", m.py().get_type::<errors::ArtemisError>())?;
+    m.add("LatticeError", m.py().get_type::<errors::LatticeError>())?;
     m.add(
         "RateLimitError",
         m.py().get_type::<errors::RateLimitError>(),
@@ -41,7 +41,7 @@ fn lattice_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("NetworkError", m.py().get_type::<errors::NetworkError>())?;
 
     // Register engine types
-    m.add_class::<engine::ArtemisEngine>()?;
+    m.add_class::<engine::LatticeEngine>()?;
     m.add_class::<engine::PyResolvedModel>()?;
 
     Ok(())

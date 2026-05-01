@@ -1,5 +1,5 @@
 use crate::catalog::{Catalog, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
-use crate::errors::ArtemisError;
+use crate::errors::LatticeError;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -126,7 +126,7 @@ impl ModelRouter {
         &self,
         model_name: &str,
         provider_override: Option<&str>,
-    ) -> Result<ResolvedModel, ArtemisError> {
+    ) -> Result<ResolvedModel, LatticeError> {
         let normalized = normalize_model_id(model_name);
 
         let canonical_id = match self.resolve_alias(&normalized) {
@@ -169,7 +169,7 @@ impl ModelRouter {
                     });
                 }
             }
-            return Err(ArtemisError::ModelNotFound {
+            return Err(LatticeError::ModelNotFound {
                 model: format!(
                     "provider '{}' not found for model '{}'",
                     override_provider, canonical_id
@@ -251,7 +251,7 @@ impl ModelRouter {
                     keys.join(", ")
                 )
             };
-            return Err(ArtemisError::Config { message: hint });
+            return Err(LatticeError::Config { message: hint });
         }
         Ok(ResolvedModel {
             canonical_id: canonical_id.clone(),
@@ -416,7 +416,7 @@ impl ModelRouter {
     ///
     /// Tries "provider/model" split, looks up provider defaults,
     /// and constructs a ResolvedModel from the defaults.
-    pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, ArtemisError> {
+    pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, LatticeError> {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
             let provider_lower = provider_part.to_lowercase();
             let model_lower = model_part.to_lowercase();
@@ -446,7 +446,7 @@ impl ModelRouter {
             }
         }
 
-        Err(ArtemisError::ModelNotFound {
+        Err(LatticeError::ModelNotFound {
             model: model_name.to_string(),
         })
     }
@@ -535,12 +535,12 @@ impl ModelRouter {
 /// - Empty URLs are allowed (backward compatibility)
 /// - Non-empty URLs must contain `://` with a non-empty host
 /// - HTTP is only allowed for localhost/127.0.0.1/::1
-pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
+pub fn validate_base_url(url: &str) -> Result<(), LatticeError> {
     if url.is_empty() {
         return Ok(());
     }
 
-    let proto_end = url.find("://").ok_or_else(|| ArtemisError::Config {
+    let proto_end = url.find("://").ok_or_else(|| LatticeError::Config {
         message: format!(
             "Invalid base_url '{}': URL must contain a scheme separator (://)",
             url
@@ -552,13 +552,13 @@ pub fn validate_base_url(url: &str) -> Result<(), ArtemisError> {
     let host_port = after_proto.split('/').next().unwrap_or("");
     let host = host_port.split(':').next().unwrap_or("");
     if host.is_empty() {
-        return Err(ArtemisError::Config {
+        return Err(LatticeError::Config {
             message: format!("Invalid base_url '{}': URL has scheme but no host", url),
         });
     }
 
     if scheme == "http" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
-        return Err(ArtemisError::Config {
+        return Err(LatticeError::Config {
             message: format!(
                 "Insecure base_url '{}': HTTP is only allowed for localhost. Use HTTPS.",
                 url

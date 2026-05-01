@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::env;
 
 use lattice_core::catalog::{ApiProtocol, ResolvedModel};
-use lattice_core::errors::ArtemisError;
 use lattice_core::errors::ErrorClassifier;
+use lattice_core::errors::LatticeError;
 use lattice_core::provider::ChatRequest;
 use lattice_core::router::{self, ModelRouter};
 use lattice_core::streaming::{AnthropicSseParser, OpenAiSseParser, SseParser, StreamEvent};
@@ -118,7 +118,7 @@ fn error_body_truncated_for_provider_unavailable() {
     let err = ErrorClassifier::classify(500, &large_body, "test-provider");
 
     match err {
-        ArtemisError::ProviderUnavailable { reason, .. } => {
+        LatticeError::ProviderUnavailable { reason, .. } => {
             // Reason should be truncated (the body is lowered too).
             assert!(
                 reason.len() < 10_000,
@@ -142,7 +142,7 @@ fn error_body_truncated_for_network_error() {
     let err = ErrorClassifier::classify(418, &large_body, "test-provider");
 
     match err {
-        ArtemisError::Network { message, status } => {
+        LatticeError::Network { message, status } => {
             assert_eq!(status, Some(418));
             assert!(
                 message.len() < 9_000,
@@ -164,7 +164,7 @@ fn error_body_not_truncated_for_small_body() {
     let err = ErrorClassifier::classify(500, small_body, "test-provider");
 
     match err {
-        ArtemisError::ProviderUnavailable { reason, .. } => {
+        LatticeError::ProviderUnavailable { reason, .. } => {
             assert_eq!(reason, small_body.to_lowercase());
             assert!(
                 !reason.ends_with("... (truncated)"),
@@ -351,7 +351,7 @@ fn error_classify_404_extracts_model_from_body() {
         "openai",
     );
     match err {
-        ArtemisError::ModelNotFound { model } => {
+        LatticeError::ModelNotFound { model } => {
             assert_eq!(model, "gpt-4");
         }
         _ => panic!("expected ModelNotFound, got {err:?}"),
@@ -362,7 +362,7 @@ fn error_classify_404_extracts_model_from_body() {
 fn error_classify_404_no_model_in_body_falls_back() {
     let err = ErrorClassifier::classify(404, r#"{"error":"not found"}"#, "test");
     match err {
-        ArtemisError::ModelNotFound { model } => {
+        LatticeError::ModelNotFound { model } => {
             assert_eq!(model, "unknown", "should fall back to 'unknown'");
         }
         _ => panic!("expected ModelNotFound, got {err:?}"),
@@ -377,7 +377,7 @@ fn error_classify_429_extracts_retry_after_numeric() {
         "provider",
     );
     match err {
-        ArtemisError::RateLimit { retry_after, .. } => {
+        LatticeError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(45.0));
         }
         _ => panic!("expected RateLimit, got {err:?}"),
@@ -388,7 +388,7 @@ fn error_classify_429_extracts_retry_after_numeric() {
 fn error_classify_429_extracts_retry_after_float() {
     let err = ErrorClassifier::classify(429, r#"{"retry_after":3.5}"#, "provider");
     match err {
-        ArtemisError::RateLimit { retry_after, .. } => {
+        LatticeError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(3.5));
         }
         _ => panic!("expected RateLimit, got {err:?}"),
@@ -399,7 +399,7 @@ fn error_classify_429_extracts_retry_after_float() {
 fn error_classify_429_extracts_retry_after_hyphenated_key() {
     let err = ErrorClassifier::classify(429, r#"{"retry-after":20}"#, "provider");
     match err {
-        ArtemisError::RateLimit { retry_after, .. } => {
+        LatticeError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(20.0));
         }
         _ => panic!("expected RateLimit, got {err:?}"),
@@ -410,7 +410,7 @@ fn error_classify_429_extracts_retry_after_hyphenated_key() {
 fn error_classify_429_no_retry_after_returns_none() {
     let err = ErrorClassifier::classify(429, r#"{"error":"rate limited"}"#, "provider");
     match err {
-        ArtemisError::RateLimit { retry_after, .. } => {
+        LatticeError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, None);
         }
         _ => panic!("expected RateLimit, got {err:?}"),
@@ -422,7 +422,7 @@ fn error_classify_429_retry_after_from_non_json_body() {
     // Body is not JSON, but the extractor still scans for `retry_after:` pattern
     let err = ErrorClassifier::classify(429, "retry_after: 25 seconds", "provider");
     match err {
-        ArtemisError::RateLimit { retry_after, .. } => {
+        LatticeError::RateLimit { retry_after, .. } => {
             assert_eq!(retry_after, Some(25.0));
         }
         _ => panic!("expected RateLimit, got {err:?}"),
@@ -436,43 +436,43 @@ fn error_classify_429_retry_after_from_non_json_body() {
 #[test]
 fn error_classify_status_401_authentication() {
     let err = ErrorClassifier::classify(401, "Unauthorized", "provider");
-    assert!(matches!(err, ArtemisError::Authentication { .. }));
+    assert!(matches!(err, LatticeError::Authentication { .. }));
 }
 
 #[test]
 fn error_classify_status_403_authentication() {
     let err = ErrorClassifier::classify(403, "Forbidden", "provider");
-    assert!(matches!(err, ArtemisError::Authentication { .. }));
+    assert!(matches!(err, LatticeError::Authentication { .. }));
 }
 
 #[test]
 fn error_classify_status_404_model_not_found() {
     let err = ErrorClassifier::classify(404, r#"{"model":"unknown-model"}"#, "provider");
-    assert!(matches!(err, ArtemisError::ModelNotFound { .. }));
+    assert!(matches!(err, LatticeError::ModelNotFound { .. }));
 }
 
 #[test]
 fn error_classify_status_429_rate_limit() {
     let err = ErrorClassifier::classify(429, "{}", "provider");
-    assert!(matches!(err, ArtemisError::RateLimit { .. }));
+    assert!(matches!(err, LatticeError::RateLimit { .. }));
 }
 
 #[test]
 fn error_classify_status_500_provider_unavailable() {
     let err = ErrorClassifier::classify(500, "internal error", "provider");
-    assert!(matches!(err, ArtemisError::ProviderUnavailable { .. }));
+    assert!(matches!(err, LatticeError::ProviderUnavailable { .. }));
 }
 
 #[test]
 fn error_classify_status_502_provider_unavailable() {
     let err = ErrorClassifier::classify(502, "bad gateway", "provider");
-    assert!(matches!(err, ArtemisError::ProviderUnavailable { .. }));
+    assert!(matches!(err, LatticeError::ProviderUnavailable { .. }));
 }
 
 #[test]
 fn error_classify_status_503_provider_unavailable() {
     let err = ErrorClassifier::classify(503, "service unavailable", "provider");
-    assert!(matches!(err, ArtemisError::ProviderUnavailable { .. }));
+    assert!(matches!(err, LatticeError::ProviderUnavailable { .. }));
 }
 
 #[test]
@@ -483,7 +483,7 @@ fn error_classify_status_400_context_window_exceeded() {
         "provider",
     );
     assert!(
-        matches!(err, ArtemisError::ContextWindowExceeded { .. }),
+        matches!(err, LatticeError::ContextWindowExceeded { .. }),
         "400 with context_length_exceeded body should be ContextWindowExceeded"
     );
 }
@@ -494,7 +494,7 @@ fn error_classify_status_400_without_context_overflow_is_network() {
     assert!(
         matches!(
             err,
-            ArtemisError::Network {
+            LatticeError::Network {
                 status: Some(400),
                 ..
             }
@@ -508,7 +508,7 @@ fn error_classify_status_408_is_retryable() {
     // FIXED (M4): 408 is now classified as ProviderUnavailable (retryable).
     let err = ErrorClassifier::classify(408, "Request Timeout", "provider");
     match err {
-        ArtemisError::ProviderUnavailable { provider, .. } => {
+        LatticeError::ProviderUnavailable { provider, .. } => {
             assert_eq!(provider, "provider");
         }
         _ => panic!("expected ProviderUnavailable for 408, got {err:?}"),
@@ -521,7 +521,7 @@ fn error_classify_status_0_is_network() {
     assert!(
         matches!(
             err,
-            ArtemisError::Network {
+            LatticeError::Network {
                 status: Some(0),
                 ..
             }
@@ -536,7 +536,7 @@ fn error_classify_unhandled_status_is_network() {
     assert!(
         matches!(
             err,
-            ArtemisError::Network {
+            LatticeError::Network {
                 status: Some(418),
                 ..
             }
@@ -547,7 +547,7 @@ fn error_classify_unhandled_status_is_network() {
 
 #[test]
 fn error_classify_is_retryable_rate_limit() {
-    let err = ArtemisError::RateLimit {
+    let err = LatticeError::RateLimit {
         retry_after: None,
         provider: "test".into(),
     };
@@ -559,7 +559,7 @@ fn error_classify_is_retryable_rate_limit() {
 
 #[test]
 fn error_classify_is_retryable_provider_unavailable() {
-    let err = ArtemisError::ProviderUnavailable {
+    let err = LatticeError::ProviderUnavailable {
         provider: "test".into(),
         reason: "overloaded".into(),
     };
@@ -572,26 +572,26 @@ fn error_classify_is_retryable_provider_unavailable() {
 #[test]
 fn error_classify_is_not_retryable_for_other_errors() {
     assert!(!ErrorClassifier::is_retryable(
-        &ArtemisError::Authentication {
+        &LatticeError::Authentication {
             provider: "test".into()
         }
     ));
     assert!(!ErrorClassifier::is_retryable(
-        &ArtemisError::ModelNotFound {
+        &LatticeError::ModelNotFound {
             model: "test".into()
         }
     ));
     assert!(!ErrorClassifier::is_retryable(
-        &ArtemisError::ContextWindowExceeded {
+        &LatticeError::ContextWindowExceeded {
             tokens: 1000,
             limit: 1000
         }
     ));
-    assert!(!ErrorClassifier::is_retryable(&ArtemisError::Network {
+    assert!(!ErrorClassifier::is_retryable(&LatticeError::Network {
         message: "timeout".into(),
         status: Some(504)
     }));
-    assert!(!ErrorClassifier::is_retryable(&ArtemisError::Config {
+    assert!(!ErrorClassifier::is_retryable(&LatticeError::Config {
         message: "missing key".into()
     }));
 }
