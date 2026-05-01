@@ -96,6 +96,20 @@ impl AgentState {
     }
 
     /// Add tokens to the cumulative usage counter.
+    /// Pop the last assistant message from the conversation state.
+    /// Used when retrying after a mid-stream error — run_chat() already pushed
+    /// an assistant message, and we need to undo that before retrying.
+    pub fn pop_last_assistant_message(&mut self) {
+        let is_assistant = self
+            .messages
+            .last()
+            .map(|m| matches!(m.role, Role::Assistant))
+            .unwrap_or(false);
+        if is_assistant {
+            self.messages.pop();
+        }
+    }
+
     pub fn add_token_usage(&mut self, tokens: u64) {
         self.token_usage += tokens;
     }
@@ -169,6 +183,7 @@ mod tests {
             api_model_id: "test".into(),
             context_length,
             provider_specific: HashMap::new(),
+            credential_status: lattice_core::CredentialStatus::Missing,
         }
     }
 
