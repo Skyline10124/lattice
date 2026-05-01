@@ -499,7 +499,7 @@ pub fn sse_from_bytes_stream(
         } else {
             while let Some(pos) = buf.find("\n\n") {
                 let raw = buf[..pos].to_string();
-                buf = buf[pos + 2..].to_string();
+                buf.drain(..pos + 2);
 
                 for raw_event in parse_raw_sse(&raw) {
                     match parser.parse_chunk(&raw_event.event, &raw_event.data) {
