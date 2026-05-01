@@ -1,7 +1,7 @@
+use lattice_agent::memory::{EntryKind, Memory, MemoryEntry};
 use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::TokenUsage;
 use lattice_core::types::ToolDefinition;
-use lattice_memory::{EntryKind, Memory, MemoryEntry};
 
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::SystemTime;
@@ -364,23 +364,10 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
 }
 
 // ---------------------------------------------------------------------------
-// Agent abstraction
+// Agent abstraction — re-exported from lattice-agent
 // ---------------------------------------------------------------------------
 
-/// Minimal interface for an LLM-calling agent.
-pub trait PluginAgent {
-    /// Send a user message and return the assistant's text response.
-    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
-
-    /// Set the system prompt. Called once per plugin run before the first send().
-    fn set_system_prompt(&mut self, _prompt: &str) {}
-
-    /// Returns the agent's cumulative token usage so far.
-    /// Defaults to 0 for agents that do not track tokens.
-    fn token_usage(&self) -> u64 {
-        0
-    }
-}
+pub use lattice_agent::PluginAgent;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -759,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_plugin_runner_memory_save() {
-        use lattice_memory::InMemoryMemory;
+        use lattice_agent::memory::InMemoryMemory;
 
         let plugin = CodeReviewPlugin::new();
         let behavior = YoloBehavior;

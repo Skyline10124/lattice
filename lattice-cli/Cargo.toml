@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 lattice-core = { path = "../lattice-core" }
 lattice-agent = { path = "../lattice-agent" }
-lattice-memory = { path = "../lattice-memory" }
 lattice-harness = { path = "../lattice-harness" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
