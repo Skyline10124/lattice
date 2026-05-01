@@ -236,7 +236,10 @@ mod dispatch_routing {
 
         assert_eq!(transport.api_mode(), "anthropic");
         assert_eq!(transport.base_url(), "https://api.anthropic.com");
-        assert!(transport.extra_headers().is_empty());
+        assert_eq!(
+            transport.extra_headers().get("anthropic-version"),
+            Some(&"2023-06-01".to_string())
+        );
     }
 
     /// CHARACTERIZATION: ApiProtocol::GeminiGenerateContent → GeminiTransport

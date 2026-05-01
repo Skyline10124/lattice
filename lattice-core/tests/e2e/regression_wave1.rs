@@ -580,8 +580,8 @@ fn regress_saturating_pow_attempt_zero() {
 
     let result = policy.jittered_backoff(0);
     assert!(
-        result >= Duration::from_secs(5),
-        "attempt=0 should be >= base_delay"
+        result >= Duration::from_secs(2),
+        "attempt=0 centered jitter may reduce up to 50%, so minimum is ~2.5s for base=5s"
     );
 }
 
