@@ -32,11 +32,16 @@ impl Catalog {
     }
 
     fn from_data(data: CatalogData) -> Self {
-        let models: HashMap<String, ModelCatalogEntry> = data
-            .models
-            .into_iter()
-            .map(|m| (m.canonical_id.clone(), m))
-            .collect();
+        let mut models: HashMap<String, ModelCatalogEntry> = HashMap::new();
+        for m in data.models {
+            if models.contains_key(&m.canonical_id) {
+                tracing::warn!(
+                    "catalog: duplicate canonical_id '{}', later entry overwrites earlier",
+                    m.canonical_id
+                );
+            }
+            models.insert(m.canonical_id.clone(), m);
+        }
         Catalog {
             models,
             aliases: data.aliases,

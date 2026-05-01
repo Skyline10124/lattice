@@ -7,10 +7,14 @@ impl TokenEstimator {
     fn is_openai_model(model_id: &str) -> bool {
         let lower = model_id.to_lowercase();
         lower.starts_with("gpt-")
-            || lower.starts_with("o1")
-            || lower.starts_with("o3")
-            || lower.starts_with("o4")
-            || lower.contains("gpt-4o")
+            || lower.starts_with("gpt-4o")
+            || lower.starts_with("gpt-5")
+            || lower == "o1"
+            || lower.starts_with("o1-")
+            || lower == "o3"
+            || lower.starts_with("o3-")
+            || lower == "o4"
+            || lower.starts_with("o4-")
     }
 
     fn tiktoken_count(text: &str, model_id: &str) -> Option<u32> {
@@ -19,9 +23,12 @@ impl TokenEstimator {
             if lower.starts_with("gpt-5")
                 || lower.starts_with("gpt-4o")
                 || lower.starts_with("gpt-4.1")
-                || lower.starts_with("o1")
-                || lower.starts_with("o3")
-                || lower.starts_with("o4")
+                || lower == "o1"
+                || lower.starts_with("o1-")
+                || lower == "o3"
+                || lower.starts_with("o3-")
+                || lower == "o4"
+                || lower.starts_with("o4-")
             {
                 Some(tiktoken_rs::o200k_base_singleton())
             } else {
