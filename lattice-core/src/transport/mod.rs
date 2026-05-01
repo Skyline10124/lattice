@@ -261,11 +261,11 @@ pub trait Transport: Send + Sync {
 
     // ── Body-building helpers (used by normalize_request) ────────────────
 
-    /// Apply the temperature field to a request body, guarding against NaN
-    /// and Infinity values that some APIs reject.
+    /// Apply the temperature field to a request body, guarding against NaN,
+    /// Infinity, and values that exceed JSON number precision.
     ///
-    /// Default: if `temp` is NaN/Infinity, print a warning and omit the
-    /// field; otherwise set `body["temperature"]` to the numeric value.
+    /// Default: if `temp` is NaN/Infinity or `from_f64` fails, print a
+    /// warning and omit the field; otherwise set `body["temperature"]`.
     fn apply_temperature(&self, body: &mut Value, temp: Option<f64>) {
         if let Some(temp) = temp {
             if temp.is_nan() || temp.is_infinite() {
@@ -273,10 +273,12 @@ pub trait Transport: Send + Sync {
                     "temperature value {} is NaN or infinite, omitting temperature field",
                     temp
                 );
+            } else if let Some(num) = serde_json::Number::from_f64(temp) {
+                body["temperature"] = Value::Number(num);
             } else {
-                body["temperature"] = Value::Number(
-                    serde_json::Number::from_f64(temp)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
+                tracing::warn!(
+                    "temperature value {} exceeds JSON number precision, omitting temperature field",
+                    temp
                 );
             }
         }
@@ -284,11 +286,9 @@ pub trait Transport: Send + Sync {
 
     /// Set the `stream` flag on a request body.
     ///
-    /// Default: `body["stream"] = true` when `stream` is true.
+    /// Default: always writes `body["stream"]` explicitly, even when `false`.
     fn set_stream_flag(&self, body: &mut Value, stream: bool) {
-        if stream {
-            body["stream"] = Value::Bool(true);
-        }
+        body["stream"] = Value::Bool(stream);
     }
 }
 
