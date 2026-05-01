@@ -517,8 +517,23 @@ impl Transport for GeminiTransport {
         }
 
         let mut generation_config = json!({});
+        // CORE-M17: Guard against NaN / Infinity temperature values which are
+        // not valid JSON numbers and would cause serialization failures or
+        // API rejection.
         if let Some(temp) = request.temperature {
-            generation_config["temperature"] = json!(temp);
+            if temp.is_nan() || temp.is_infinite() {
+                tracing::warn!(
+                    "temperature value {} is NaN or infinite, omitting temperature field",
+                    temp
+                );
+            } else if let Some(num) = serde_json::Number::from_f64(temp) {
+                generation_config["temperature"] = Value::Number(num);
+            } else {
+                tracing::warn!(
+                    "temperature value {} exceeds JSON number precision, omitting temperature field",
+                    temp
+                );
+            }
         }
         if let Some(max_tokens) = request.max_tokens {
             generation_config["maxOutputTokens"] = json!(max_tokens);
