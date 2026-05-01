@@ -43,9 +43,6 @@ jobs:
   python-bindings:
     name: Python Bindings Smoke Test
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: lattice-python
     strategy:
       matrix:
         python-version: ["3.12", "3.13", "3.14"]
@@ -70,11 +67,12 @@ jobs:
           key: cargo-python-${{ runner.os }}-py${{ matrix.python-version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: cargo-python-${{ runner.os }}-
 
-      - name: Install maturin
-        run: pip install maturin
-
-      - name: Build Python bindings
-        run: maturin develop
+      - name: Build and install Python bindings
+        working-directory: lattice-python
+        run: |
+          pip install maturin
+          maturin build --release
+          pip install target/wheels/*.whl
 
       - name: Smoke test import
         run: python -c "import lattice_core; print('lattice_core imported successfully')"
