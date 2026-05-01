@@ -1,4 +1,6 @@
-use crate::catalog::{Catalog, CatalogProviderEntry, ModelCatalogEntry, ResolvedModel};
+use crate::catalog::{
+    Catalog, CatalogProviderEntry, CredentialStatus, ModelCatalogEntry, ResolvedModel,
+};
 use crate::errors::LatticeError;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -157,6 +159,7 @@ impl ModelRouter {
             for pe in &entry.providers {
                 if pe.provider_id == override_provider {
                     let api_key = self.resolve_credentials(pe);
+                    let credential_status = Self::credential_status_from_key(&api_key, pe);
                     return Ok(ResolvedModel {
                         canonical_id: canonical_id.clone(),
                         provider: pe.provider_id.clone(),
@@ -166,6 +169,7 @@ impl ModelRouter {
                         api_model_id: pe.api_model_id.clone(),
                         context_length: entry.context_length,
                         provider_specific: pe.provider_specific.clone(),
+                        credential_status,
                     });
                 }
             }
@@ -195,6 +199,7 @@ impl ModelRouter {
                         api_model_id: cpe.api_model_id.clone(),
                         context_length: entry.context_length,
                         provider_specific: cpe.provider_specific.clone(),
+                        credential_status: CredentialStatus::NotRequired,
                     });
                 }
                 current_priority = pe.priority;
@@ -218,6 +223,7 @@ impl ModelRouter {
                     api_model_id: pe.api_model_id.clone(),
                     context_length: entry.context_length,
                     provider_specific: pe.provider_specific.clone(),
+                    credential_status: CredentialStatus::Present,
                 });
             }
         }
@@ -232,6 +238,13 @@ impl ModelRouter {
                 api_model_id: cpe.api_model_id.clone(),
                 context_length: entry.context_length,
                 provider_specific: cpe.provider_specific.clone(),
+                credential_status: CredentialStatus::NotRequired,
+            });
+        }
+
+        if sorted_providers.is_empty() {
+            return Err(LatticeError::Config {
+                message: format!("no providers available for model '{}'", canonical_id),
             });
         }
 
@@ -262,7 +275,22 @@ impl ModelRouter {
             api_model_id: best.api_model_id.clone(),
             context_length: entry.context_length,
             provider_specific: best.provider_specific.clone(),
+            credential_status: CredentialStatus::NotRequired,
         })
+    }
+
+    /// Determine the credential status from an api_key and provider entry.
+    fn credential_status_from_key(
+        api_key: &Option<String>,
+        entry: &CatalogProviderEntry,
+    ) -> CredentialStatus {
+        if api_key.is_some() {
+            CredentialStatus::Present
+        } else if Self::is_credentialless(entry) {
+            CredentialStatus::NotRequired
+        } else {
+            CredentialStatus::Missing
+        }
     }
 
     /// Check whether a provider entry requires no credentials at all.
@@ -423,7 +451,7 @@ impl ModelRouter {
             let model_lower = model_part.to_lowercase();
             let defaults = self.catalog.get_provider_defaults(&provider_lower);
             if let Some(defaults) = defaults {
-                let api_key = self.resolve_credentials(&CatalogProviderEntry {
+                let temp_entry = CatalogProviderEntry {
                     provider_id: provider_lower.clone(),
                     api_model_id: model_lower.clone(),
                     priority: 1,
@@ -431,7 +459,9 @@ impl ModelRouter {
                     base_url: Some(defaults.base_url.clone()),
                     api_protocol: defaults.api_protocol.clone(),
                     provider_specific: HashMap::new(),
-                });
+                };
+                let api_key = self.resolve_credentials(&temp_entry);
+                let credential_status = Self::credential_status_from_key(&api_key, &temp_entry);
 
                 return Ok(ResolvedModel {
                     canonical_id: model_lower.clone(),
@@ -442,6 +472,7 @@ impl ModelRouter {
                     api_model_id: model_lower,
                     context_length: 131072,
                     provider_specific: HashMap::new(),
+                    credential_status,
                 });
             }
         }
@@ -926,5 +957,29 @@ mod tests {
             !ModelRouter::is_credentialless(&entry),
             "Unknown provider should not be treated as credentialless"
         );
+    }
+
+    #[test]
+    fn test_resolve_model_with_no_providers_returns_config_error() {
+        let mut router = ModelRouter::new();
+        let custom = ModelCatalogEntry {
+            canonical_id: "no-providers-model".to_string(),
+            context_length: 4096,
+            providers: vec![],
+            aliases: vec![],
+        };
+        router.register_model(custom);
+
+        let result = router.resolve("no-providers-model", None);
+        match result {
+            Err(LatticeError::Config { message }) => {
+                assert!(
+                    message.contains("no-providers-model"),
+                    "Error should mention the model name, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Err(LatticeError::Config), got: {:?}", other),
+        }
     }
 }

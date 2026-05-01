@@ -202,6 +202,7 @@ const ANTHROPIC_STOP_REASON_MAP: &[(&str, &str)] = &[
     ("tool_use", "tool_calls"),
     ("max_tokens", "length"),
     ("stop_sequence", "stop"),
+    ("error", "error"),
 ];
 
 fn map_stop_reason(reason: &str) -> String {
@@ -209,7 +210,7 @@ fn map_stop_reason(reason: &str) -> String {
         .iter()
         .find(|(k, _)| *k == reason)
         .map(|(_, v)| v.to_string())
-        .unwrap_or_else(|| "stop".to_string())
+        .unwrap_or_else(|| reason.to_string())
 }
 
 /// Parser for the Anthropic message-streaming SSE format.

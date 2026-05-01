@@ -1,5 +1,6 @@
 pub mod sandbox;
 pub mod state;
+pub mod tool_definitions;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -34,6 +35,9 @@ pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
 }
 
+/// Max retries for mid-stream errors in Agent::run() and run_async().
+const MAX_STREAM_RETRIES: u32 = 2;
+
 /// Dispatches a sub-agent by name with the given input.
 /// This is how `agent_call:security-audit` becomes a tool call:
 /// the tool executor detects the `agent_call:` prefix, extracts the agent
@@ -45,7 +49,8 @@ pub trait AgentDispatcher: Send + Sync {
 
 // Re-export shared default tools and sandbox for convenience.
 pub use sandbox::SandboxConfig;
-pub use tools::{default_tool_definitions, DefaultToolExecutor};
+pub use tool_definitions::default_tool_definitions;
+pub use tools::DefaultToolExecutor;
 
 #[allow(dead_code)]
 pub struct Agent {
@@ -83,11 +88,17 @@ impl Agent {
         self
     }
 
+    #[deprecated(
+        note = "not yet connected to Agent's send/send_message flow - reserved for future use"
+    )]
     pub fn with_memory(mut self, memory: Box<dyn lattice_memory::Memory>) -> Self {
         self.memory = Some(memory);
         self
     }
 
+    #[deprecated(
+        note = "not yet connected to Agent's send/send_message flow - reserved for future use"
+    )]
     pub fn with_token_pool(mut self, pool: Box<dyn lattice_token_pool::TokenPool>) -> Self {
         self.token_pool = Some(pool);
         self
@@ -137,7 +148,6 @@ impl Agent {
     pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         let mut all_events = Vec::new();
-        const MAX_STREAM_RETRIES: u32 = 2;
 
         for _ in 0..max_turns {
             // Trim old messages to stay within the model's context window.
@@ -152,13 +162,16 @@ impl Agent {
             let mut events = self.run_chat();
 
             // Retry on mid-stream errors (up to MAX_STREAM_RETRIES).
+            // Only retries when ALL events are errors (no partial progress).
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
-                let has_only_errors = events.iter().all(|e| matches!(e, LoopEvent::Error { .. }));
                 let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
-                if !has_error || !has_only_errors {
+                if !has_error {
                     break;
                 }
+                // Pop the assistant message run_chat already pushed so retry
+                // doesn't duplicate it.
+                self.state.pop_last_assistant_message();
                 retry_count += 1;
                 events = self.run_chat();
             }
@@ -194,7 +207,13 @@ impl Agent {
         // --- Auto-save memory entry ---
         if let Some(ref memory) = self.memory {
             let prompt_summary = if content.len() > 200 {
-                format!("{}...", &content[..200])
+                // Find safe UTF-8 boundary to avoid panicking in the middle of a
+                // multi-byte character.
+                let mut end = 200;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &content[..end])
             } else {
                 content.to_string()
             };
@@ -216,7 +235,7 @@ impl Agent {
                 tags: vec![],
                 created_at: format!("{now_secs}"),
             };
-            SHARED_RUNTIME.block_on(memory.save_entry(entry));
+            memory.save_entry(entry);
         }
 
         all_events
@@ -235,7 +254,20 @@ impl Agent {
             };
             self.state.trim_messages(context_len, 15);
 
-            let events = self.run_chat_async().await;
+            let mut events = self.run_chat_async().await;
+
+            // Retry on mid-stream errors (up to MAX_STREAM_RETRIES).
+            // Only retries when ALL events are errors (no partial progress).
+            let mut retry_count = 0u32;
+            while retry_count < MAX_STREAM_RETRIES {
+                let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
+                if !has_error {
+                    break;
+                }
+                self.state.pop_last_assistant_message();
+                retry_count += 1;
+                events = self.run_chat_async().await;
+            }
 
             let mut tool_calls = Vec::new();
             for event in &events {
