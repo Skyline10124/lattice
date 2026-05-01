@@ -39,6 +39,49 @@ pub struct NormalizedMessages {
 pub use chat_completions::TransportError;
 
 // ---------------------------------------------------------------------------
+// Utility: convert a non-streaming ChatResponse into a sequence of StreamEvents
+// ---------------------------------------------------------------------------
+
+/// Convert a complete [`ChatResponse`] into a sequence of [`StreamEvent`]s
+/// suitable for wrapping as a non-streaming stream.
+///
+/// Produces: Token (if content exists), ToolCallStart/ToolCallDelta (if tool
+/// calls exist), and a final Done event with finish_reason and usage.
+pub fn chat_response_to_stream(
+    response: crate::provider::ChatResponse,
+) -> Vec<crate::streaming::StreamEvent> {
+    let mut events = Vec::new();
+
+    if let Some(ref content) = response.content {
+        if !content.is_empty() {
+            events.push(crate::streaming::StreamEvent::Token {
+                content: content.clone(),
+            });
+        }
+    }
+
+    if let Some(ref tool_calls) = response.tool_calls {
+        for tc in tool_calls {
+            events.push(crate::streaming::StreamEvent::ToolCallStart {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+            });
+            events.push(crate::streaming::StreamEvent::ToolCallDelta {
+                id: tc.id.clone(),
+                arguments_delta: tc.function.arguments.clone(),
+            });
+        }
+    }
+
+    events.push(crate::streaming::StreamEvent::Done {
+        finish_reason: response.finish_reason,
+        usage: response.usage,
+    });
+
+    events
+}
+
+// ---------------------------------------------------------------------------
 // TransportBase — shared base_url + extra_headers for all transports
 // ---------------------------------------------------------------------------
 
@@ -191,6 +234,18 @@ pub trait Transport: Send + Sync {
     /// Default: `"Bearer {api_key}"` (OpenAI-compatible).
     fn auth_header_value(&self, api_key: &str) -> String {
         format!("Bearer {}", api_key)
+    }
+
+    /// Apply authentication to a reqwest request builder.
+    ///
+    /// Default: sets `Authorization: Bearer <key>` header.
+    /// Gemini overrides this to set `x-goog-api-key` instead.
+    fn apply_auth_to_request(
+        &self,
+        req: reqwest::RequestBuilder,
+        api_key: &str,
+    ) -> reqwest::RequestBuilder {
+        req.header(self.auth_header_name(), self.auth_header_value(api_key))
     }
 
     /// Create an SSE parser for this transport's streaming format.
