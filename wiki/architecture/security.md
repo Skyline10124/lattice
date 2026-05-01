@@ -17,7 +17,7 @@
 
 - 工具结果默认 1MB 上限，可配置
 - write_file 路径校验（计划中）
-- 17 个内置工具：read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call
+- 7 个内置工具：read_file, grep, write_file, list_directory, bash, patch, web_search
 
 ## Sandbox 安全
 

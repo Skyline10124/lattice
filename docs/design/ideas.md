@@ -240,11 +240,10 @@ CLI：        无 AI 的纯代码工具
 - [x] H2: 对话历史维护（Agent state）
 - [x] H3: tool result 重入机制（submit_tools）
 - [x] Agent::run() 自动 tool loop
-- [x] 17 个内置工具（read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call）
+- [x] 7 个内置工具（read_file, grep, write_file, list_directory, bash, patch, web_search）
 - [x] Context trimming（AgentState::trim_messages）
 - [x] Sandbox 安全（SandboxConfig）
 - [x] 异步 Memory trait + SqliteMemory (FTS5) + EntryKind + 自动保存
-- [x] AgentDispatcher trait + agent_call:name 工具
 - [x] lattice-harness: AgentProfile (TOML), AgentRegistry, AgentRunner, Pipeline, Python handoff
 - [x] lattice-plugin: Plugin trait, Behavior trait, PluginRunner, PluginHooks, CodeReviewPlugin
 - [x] lattice-cli: run/print/resolve/models 子命令

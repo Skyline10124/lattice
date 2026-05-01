@@ -70,11 +70,6 @@ pub trait ToolExecutor {
     fn execute(&self, name: &str, args: &str) -> Result<String, ToolError>;
 }
 
-/// Agent 间派发 trait（agent_call 工具）
-pub trait AgentDispatcher {
-    fn dispatch(&self, name: &str, prompt: &str) -> Result<String, AgentError>;
-}
-
 pub struct SandboxConfig {
     pub allowed_paths: Vec<String>,
     pub allowed_commands: Vec<String>,
@@ -90,9 +85,9 @@ pub enum LoopEvent {
 }
 ```
 
-### 17 个内置工具
+### 7 个内置工具
 
-read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call
+read_file, grep, write_file, list_directory, bash, patch, web_search
 
 ### Context Trimming
 
@@ -128,9 +123,7 @@ pub struct Pipeline {
     pub async fn run(&mut self, input: &str) -> Result<String>;
 }
 
-/// agent_call:name 工具的 harness 层派发器
-pub struct HarnessAgentDispatcher;
-impl AgentDispatcher for HarnessAgentDispatcher { ... }
+}
 ```
 
 ## lattice-python

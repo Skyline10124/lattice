@@ -110,7 +110,7 @@ User Code (Python / Rust / CLI)
 | `events` | `PipelineEvent` + `EventBus`: broadcast channel for pipeline status events |
 | `watcher` | File watcher for agent directory changes, triggers registry reload |
 | `ws` | WebSocket endpoint for live pipeline events (feature-gated behind `axum`) |
-| `dispatch` | Pipeline dispatch: resolve agent model, create AgentRunner |
+| `memory` | `SharedMemory` trait + `SqliteMemory` (FTS5), re-exports agent memory types |
 
 ### Model resolution flow
 
@@ -159,6 +159,8 @@ Rust and Python split tool execution across crates:
 lattice-agent: Agent.send() → yields ToolCallRequired → caller executes tools
                Agent.submit_tools(results) → resumes conversation
 ```
+
+Default tool set (7 tools): read_file, grep, write_file, list_directory, bash, patch, web_search.
 
 ### Error taxonomy
 
