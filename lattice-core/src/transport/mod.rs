@@ -213,8 +213,8 @@ pub trait Transport: Send + Sync {
     fn apply_temperature(&self, body: &mut Value, temp: Option<f64>) {
         if let Some(temp) = temp {
             if temp.is_nan() || temp.is_infinite() {
-                eprintln!(
-                    "WARNING: temperature value {} is NaN or infinite, omitting temperature field",
+                tracing::warn!(
+                    "temperature value {} is NaN or infinite, omitting temperature field",
                     temp
                 );
             } else {

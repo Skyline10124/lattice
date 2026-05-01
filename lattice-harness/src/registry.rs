@@ -34,8 +34,8 @@ impl AgentRegistry {
                             registry.agents.insert(name, profile);
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Warning: failed to load agent at {}: {}",
+                            tracing::warn!(
+                                "failed to load agent at {}: {}",
                                 agent_toml.display(),
                                 e
                             );

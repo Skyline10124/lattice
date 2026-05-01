@@ -123,9 +123,18 @@ impl AgentProfile {
     }
 
     /// Resolve the effective system prompt (file content or inline).
+    /// Only allows relative paths — absolute paths and paths containing `..` are rejected.
     pub fn system_prompt(&self) -> String {
         if let Some(ref file) = self.system.file {
             let path = Path::new(file);
+            // Reject absolute paths and path traversal
+            if path.is_absolute() || file.contains("..") {
+                tracing::warn!(
+                    "system.file '{}' rejected: must be a relative path without '..'",
+                    file
+                );
+                return self.system.prompt.clone();
+            }
             if path.exists() {
                 return std::fs::read_to_string(path)
                     .unwrap_or_else(|_| self.system.prompt.clone());
@@ -292,5 +301,53 @@ mod tests {
             ))
         );
         assert!(profile.handoff.handoff_rules[1].default);
+    }
+
+    #[test]
+    fn test_system_prompt_rejects_absolute_path() {
+        let profile = AgentProfile {
+            agent: AgentConfig {
+                name: "test".into(),
+                model: "sonnet".into(),
+                description: String::new(),
+                skippable: false,
+                tags: vec![],
+            },
+            system: SystemConfig {
+                prompt: "inline prompt".into(),
+                file: Some("/etc/passwd".into()),
+            },
+            tools: ToolsConfig::default(),
+            behavior: BehaviorConfig::default(),
+            handoff: HandoffConfig::default(),
+            bus: BusConfigProfile::default(),
+            memory: MemoryConfigProfile::default(),
+        };
+        // Absolute path is rejected, falls back to inline prompt
+        assert_eq!(profile.system_prompt(), "inline prompt");
+    }
+
+    #[test]
+    fn test_system_prompt_rejects_path_traversal() {
+        let profile = AgentProfile {
+            agent: AgentConfig {
+                name: "test".into(),
+                model: "sonnet".into(),
+                description: String::new(),
+                skippable: false,
+                tags: vec![],
+            },
+            system: SystemConfig {
+                prompt: "inline prompt".into(),
+                file: Some("../secret.txt".into()),
+            },
+            tools: ToolsConfig::default(),
+            behavior: BehaviorConfig::default(),
+            handoff: HandoffConfig::default(),
+            bus: BusConfigProfile::default(),
+            memory: MemoryConfigProfile::default(),
+        };
+        // Path containing ".." is rejected, falls back to inline prompt
+        assert_eq!(profile.system_prompt(), "inline prompt");
     }
 }

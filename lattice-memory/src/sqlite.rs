@@ -14,7 +14,13 @@ pub struct SqliteMemory {
 
 impl SqliteMemory {
     /// Open (or create) a memory database at the given path.
+    /// Creates parent directories if they don't exist.
     pub fn open(path: &str) -> rusqlite::Result<Self> {
+        if path != ":memory:" {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "
@@ -39,16 +45,26 @@ impl SqliteMemory {
         })
     }
 
+    fn escape_like(query: &str) -> String {
+        query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    }
+
     /// Fallback LIKE-based recall when FTS5 MATCH fails.
     fn recall_like(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::error!("SqliteMemory: poisoned lock in recall_like: {:?}", e);
+                return vec![];
+            }
         };
-        let pattern = format!("%{}%", query);
+        let pattern = format!("%{}%", Self::escape_like(query));
         let sql = "SELECT id, kind, session_id, summary, content, tags, created_at
                    FROM memory
-                   WHERE summary LIKE ?1 OR content LIKE ?1
+                   WHERE summary LIKE ?1 ESCAPE '\\' OR content LIKE ?1 ESCAPE '\\'
                    LIMIT ?2";
         let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
@@ -96,9 +112,21 @@ impl Memory for SqliteMemory {
     async fn save_entry(&self, entry: MemoryEntry) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                tracing::error!(
+                    "SqliteMemory: poisoned lock in save_entry, data may be lost: {:?}",
+                    e
+                );
+                return;
+            }
         };
         let tags_json = serde_json::to_string(&entry.tags).unwrap_or_else(|_| "[]".to_string());
+        // Delete old FTS row before REPLACE to prevent stale index entries
+        conn.execute(
+            "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
+            params![entry.id],
+        )
+        .ok();
         conn.execute(
             "INSERT OR REPLACE INTO memory (id, kind, session_id, summary, content, tags, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -125,9 +153,13 @@ impl Memory for SqliteMemory {
     async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::error!("SqliteMemory: poisoned lock in recall_like: {:?}", e);
+                return vec![];
+            }
         };
-        // Try FTS5 MATCH first
+        // Try FTS5 MATCH first (wrap query in double-quotes for phrase matching)
+        let fts_query = format!("\"{}\"", query.replace('"', ""));
         let sql = "SELECT m.id, m.kind, m.session_id, m.summary, m.content, m.tags, m.created_at
                    FROM memory m
                    WHERE m.rowid IN (
@@ -135,7 +167,7 @@ impl Memory for SqliteMemory {
                    )
                    LIMIT ?2";
         if let Ok(mut stmt) = conn.prepare(sql) {
-            if let Ok(rows) = stmt.query_map(params![query, limit as i64], Self::row_to_entry) {
+            if let Ok(rows) = stmt.query_map(params![fts_query, limit as i64], Self::row_to_entry) {
                 let results: Vec<_> = rows.filter_map(|r| r.ok()).collect();
                 if !results.is_empty() {
                     return results;
@@ -150,7 +182,10 @@ impl Memory for SqliteMemory {
     async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::error!("SqliteMemory: poisoned lock in recall_like: {:?}", e);
+                return vec![];
+            }
         };
         let kind_str = match kind {
             EntryKind::SessionLog => "session_log",
@@ -194,6 +229,12 @@ impl SharedMemory for SqliteMemory {
         };
         let tags_json = serde_json::to_string(&entry.tags).unwrap_or_else(|_| "[]".to_string());
         let partition_str = Self::partition_str(&partition);
+        // Delete old FTS row before REPLACE to prevent stale index entries
+        conn.execute(
+            "DELETE FROM memory_fts WHERE rowid = (SELECT rowid FROM memory WHERE id = ?1)",
+            params![entry.id],
+        )
+        .ok();
         conn.execute(
             "INSERT OR REPLACE INTO memory (id, kind, session_id, summary, content, tags, created_at, partition)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -237,9 +278,9 @@ impl SharedMemory for SqliteMemory {
         };
         let partition_str = Self::partition_str(&partition);
         let sql = "SELECT id, kind, session_id, summary, content, tags, created_at
-                   FROM memory WHERE partition = ?1 AND (summary LIKE ?2 OR content LIKE ?2)
+                   FROM memory WHERE partition = ?1 AND (summary LIKE ?2 ESCAPE '\\' OR content LIKE ?2 ESCAPE '\\')
                    LIMIT ?3";
-        let pattern = format!("%{}%", query);
+        let pattern = format!("%{}%", Self::escape_like(query));
         let mut stmt = conn
             .prepare(sql)
             .map_err(|e| MemoryError::StorageError(e.to_string()))?;

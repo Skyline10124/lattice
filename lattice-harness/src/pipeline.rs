@@ -388,10 +388,18 @@ impl Pipeline {
             .collect();
 
         let mut fork_results = Vec::new();
-        for (i, handle) in handles.into_iter().enumerate() {
+        for handle in handles {
             let (agent_name, result) = match handle.join() {
                 Ok(v) => v,
-                Err(_) => panic!("Fork branch thread {} panicked", i),
+                Err(e) => {
+                    let agent_name = "fork-thread-error".to_string();
+                    let err = AgentError {
+                        agent_name: agent_name.clone(),
+                        message: format!("fork branch thread panicked: {:?}", e),
+                        skippable: false,
+                    };
+                    (agent_name, Err(err))
+                }
             };
             match result {
                 Ok((output, duration_ms, next)) => {
@@ -429,12 +437,9 @@ impl Pipeline {
     /// Save a session log entry to shared memory.
     fn save_memory_entry(&self, profile: &AgentProfile, output: &serde_json::Value) {
         if let Some(ref mem) = self.shared_memory {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let ms = lattice_memory::now_ms();
             let entry = lattice_memory::MemoryEntry {
-                id: format!("{}-{}", profile.agent.name, now_secs),
+                id: format!("{}-{}", profile.agent.name, ms),
                 kind: lattice_memory::EntryKind::SessionLog,
                 session_id: profile.agent.name.clone(),
                 summary: format!(
@@ -444,7 +449,7 @@ impl Pipeline {
                 ),
                 content: output.to_string(),
                 tags: profile.agent.tags.clone(),
-                created_at: now_secs.to_string(),
+                created_at: ms.to_string(),
             };
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 tokio::task::block_in_place(|| handle.block_on(mem.save_entry(entry)));

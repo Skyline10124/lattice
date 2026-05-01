@@ -5,10 +5,11 @@ use lattice_bus::{
     AgentBusConfig, AgentDescriptor, AgentId, Bus, BusError, BusEvent, BusHandler, BusRequest,
     BusResponse,
 };
-use lattice_memory::{Memory, PartitionAccess, SharedMemory, SharedPartition};
+use lattice_memory::{Memory, MemoryEntry, PartitionAccess, SharedMemory, SharedPartition};
 use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
+use crate::runner::MEMORY_RT;
 
 /// Convert profile [bus] section into AgentBusConfig.
 fn bus_config_from_profile(bus: &BusConfigProfile) -> AgentBusConfig {
@@ -33,8 +34,6 @@ fn partition_access_from_profile(memory: &MemoryConfigProfile) -> PartitionAcces
         .collect();
     PartitionAccess::new(read, write)
 }
-use crate::runner::MEMORY_RT;
-
 /// A Bus-aware micro-agent. Registers on the Bus, processes RPC requests
 /// via lattice-core inference, and deregisters on exit.
 pub struct MicroAgent {
@@ -108,7 +107,7 @@ impl MicroAgent {
         let id = reg.id;
 
         let resolved = lattice_core::resolve(&self.profile.agent.model)
-            .map_err(|e| BusError::Serialize(e.to_string()))?;
+            .map_err(|e| BusError::Resolve(e.to_string()))?;
 
         let mut agent = Agent::new(resolved);
         if let Some(ref mem) = self.memory {
@@ -136,18 +135,15 @@ impl MicroAgent {
                 let name = name.clone();
                 Box::pin(async move {
                     if let Some(ref m) = mem {
-                        let now_secs = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        m.save_entry(lattice_memory::MemoryEntry {
-                            id: format!("{}-event-{}", name, now_secs),
+                        let ms = lattice_memory::now_ms();
+                        m.save_entry(MemoryEntry {
+                            id: format!("{}-event-{}", name, ms),
                             kind: lattice_memory::EntryKind::SessionLog,
                             session_id: name.clone(),
                             summary: format!("Event on {}", event.topic),
                             content: event.payload.to_string(),
                             tags: vec![event.topic.clone()],
-                            created_at: now_secs.to_string(),
+                            created_at: ms.to_string(),
                         })
                         .await;
                     }
@@ -187,7 +183,7 @@ async fn micro_agent_loop(
 
     while let Some(req) = request_rx.recv().await {
         let input = extract_input(&req.payload);
-        let enriched = enrich_input(&input, &ctx.memory);
+        let enriched = enrich_input(&input, &ctx.memory).await;
 
         let events = agent.run_async(&enriched, max_turns).await;
 
@@ -206,46 +202,39 @@ async fn micro_agent_loop(
 
         // Save to private memory
         if let Some(ref mem) = ctx.memory {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let entry = lattice_memory::MemoryEntry {
-                id: format!("{}-{}", agent_name, now_secs),
+            let ms = lattice_memory::now_ms();
+            let entry = MemoryEntry {
+                id: format!("{}-{}", agent_name, ms),
                 kind: lattice_memory::EntryKind::SessionLog,
                 session_id: agent_name.clone(),
                 summary: format!("{}: {} chars output", agent_name, content.len()),
                 content: content.clone(),
                 tags: ctx.profile.agent.tags.clone(),
-                created_at: now_secs.to_string(),
+                created_at: ms.to_string(),
             };
             mem.save_entry(entry).await;
         }
 
-        // Save to shared memory partition (if configured and access allows)
+        // Save to shared memory partitions (write to each configured partition)
         if let Some(ref smem) = ctx.shared_memory {
-            if !ctx.partition_access.write.is_empty() {
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let partition = SharedPartition::Named(agent_name.clone());
-                let entry = lattice_memory::MemoryEntry {
-                    id: format!("{}-shared-{}", agent_name, now_secs),
+            for write_partition in &ctx.partition_access.write {
+                let ms = lattice_memory::now_ms();
+                let entry = MemoryEntry {
+                    id: format!("{}-shared-{}", agent_name, ms),
                     kind: lattice_memory::EntryKind::SessionLog,
                     session_id: agent_name.clone(),
                     summary: format!("{}: shared output", agent_name),
                     content: content.clone(),
                     tags: ctx.profile.agent.tags.clone(),
-                    created_at: now_secs.to_string(),
+                    created_at: ms.to_string(),
                 };
                 if let Err(e) = smem
-                    .save_shared(entry, partition, &ctx.partition_access)
+                    .save_shared(entry, write_partition.clone(), &ctx.partition_access)
                     .await
                 {
                     warn!(
-                        "MicroAgent '{}': shared memory write failed: {:?}",
-                        agent_name, e
+                        "MicroAgent '{}': shared memory write to {:?} failed: {:?}",
+                        agent_name, write_partition, e
                     );
                 }
             }
@@ -266,8 +255,7 @@ async fn micro_agent_loop(
         }
     }
 
-    info!("MicroAgent '{}' loop ended, deregistering", agent_name);
-    ctx.bus.deregister(&AgentId::new(&agent_name)).await.ok();
+    info!("MicroAgent '{}' loop ended", agent_name);
 }
 
 /// Extract input string from BusRequest payload.
@@ -285,11 +273,10 @@ fn extract_input(payload: &serde_json::Value) -> String {
     }
 }
 
-/// Enrich input with memory recall context (same logic as AgentRunner).
-fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
+/// Enrich input with memory recall context (async — called from tokio task).
+async fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
     if let Some(ref mem) = memory {
-        // Use block_on since enrich_input is called in sync context before run_async
-        let recall = MEMORY_RT.block_on(mem.recall(input, 5));
+        let recall = mem.recall(input, 5).await;
         if !recall.is_empty() {
             let context: String = recall
                 .iter()
@@ -344,4 +331,119 @@ fn parse_output(content: &str) -> serde_json::Value {
     };
 
     serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({"content": content}))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_agent::LoopEvent;
+
+    // --- extract_input tests ---
+
+    #[test]
+    fn test_extract_input_string_payload() {
+        let payload = serde_json::json!("hello world");
+        assert_eq!(extract_input(&payload), "hello world");
+    }
+
+    #[test]
+    fn test_extract_input_object_with_input_key() {
+        let payload = serde_json::json!({"input": "do something", "extra": 42});
+        assert_eq!(extract_input(&payload), "\"do something\"");
+    }
+
+    #[test]
+    fn test_extract_input_object_without_input_key() {
+        let payload = serde_json::json!({"task": "review", "priority": "high"});
+        // Falls back to payload.to_string() which is the full JSON representation
+        assert_eq!(extract_input(&payload), payload.to_string());
+    }
+
+    #[test]
+    fn test_extract_input_null_payload() {
+        let payload = serde_json::json!(null);
+        assert_eq!(extract_input(&payload), "null");
+    }
+
+    #[test]
+    fn test_extract_input_number_payload() {
+        let payload = serde_json::json!(42);
+        assert_eq!(extract_input(&payload), "42");
+    }
+
+    // --- parse_output tests ---
+
+    #[test]
+    fn test_parse_output_valid_json() {
+        let content = "{\"result\": \"ok\", \"score\": 0.9}";
+        let parsed = parse_output(content);
+        assert_eq!(parsed["result"], "ok");
+        assert_eq!(parsed["score"], 0.9);
+    }
+
+    #[test]
+    fn test_parse_output_markdown_fenced_json() {
+        let content = "```json\n{\"result\": \"ok\"}\n```";
+        let parsed = parse_output(content);
+        assert_eq!(parsed["result"], "ok");
+    }
+
+    #[test]
+    fn test_parse_output_non_json_fallback() {
+        let content = "This is just plain text, not JSON.";
+        let parsed = parse_output(content);
+        // Non-JSON falls back to {"content": original_string}
+        assert_eq!(parsed["content"], content);
+    }
+
+    #[test]
+    fn test_parse_output_empty_string() {
+        let content = "";
+        let parsed = parse_output(content);
+        // Empty string is not valid JSON → falls back to {"content": ""}
+        assert_eq!(parsed["content"], "");
+    }
+
+    // --- extract_content tests ---
+
+    #[test]
+    fn test_extract_content_empty_events() {
+        let events: Vec<LoopEvent> = vec![];
+        assert_eq!(extract_content(&events), "");
+    }
+
+    #[test]
+    fn test_extract_content_token_events_mixed() {
+        let events = vec![
+            LoopEvent::Token {
+                text: "Hello".into(),
+            },
+            LoopEvent::Reasoning {
+                text: "thinking...".into(),
+            },
+            LoopEvent::Token {
+                text: " world".into(),
+            },
+            LoopEvent::Done { usage: None },
+        ];
+        assert_eq!(extract_content(&events), "Hello world");
+    }
+
+    #[test]
+    fn test_extract_content_no_tokens() {
+        let events = vec![
+            LoopEvent::Reasoning {
+                text: "deep thought".into(),
+            },
+            LoopEvent::Done { usage: None },
+            LoopEvent::Error {
+                message: "oops".into(),
+            },
+        ];
+        assert_eq!(extract_content(&events), "");
+    }
 }

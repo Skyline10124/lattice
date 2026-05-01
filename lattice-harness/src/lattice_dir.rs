@@ -59,7 +59,14 @@ impl BusToml {
             timeout_rpc: Duration::from_secs(self.timeout_rpc_secs),
             delivery_policy: match self.delivery_policy.as_str() {
                 "at_least_once" => lattice_bus::DeliveryPolicy::AtLeastOnce,
-                _ => lattice_bus::DeliveryPolicy::AtMostOnce,
+                "at_most_once" => lattice_bus::DeliveryPolicy::AtMostOnce,
+                other => {
+                    tracing::warn!(
+                        "Unknown delivery_policy '{}', falling back to at_most_once",
+                        other
+                    );
+                    lattice_bus::DeliveryPolicy::AtMostOnce
+                }
             },
             subscriber_buffer: self.subscriber_buffer,
             max_concurrent_calls: self.max_concurrent_calls,
@@ -243,6 +250,44 @@ mod tests {
         assert_eq!(
             ld.shared_db_path(),
             lattice.join("memory").join("shared.db")
+        );
+    }
+
+    #[test]
+    fn test_bus_toml_load_invalid_syntax() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("bus.toml"), "this is not valid toml {{{").unwrap();
+        let result = BusToml::load(&tmp.path().join("bus.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bus_toml_to_bus_config_at_least_once() {
+        let config = BusToml {
+            timeout_rpc_secs: 30,
+            delivery_policy: "at_least_once".into(),
+            subscriber_buffer: 1024,
+            max_concurrent_calls: 1,
+        };
+        let bus_config = config.to_bus_config();
+        assert_eq!(
+            bus_config.delivery_policy,
+            lattice_bus::DeliveryPolicy::AtLeastOnce
+        );
+    }
+
+    #[test]
+    fn test_bus_toml_to_bus_config_unknown_policy() {
+        let config = BusToml {
+            timeout_rpc_secs: 30,
+            delivery_policy: "invalid_policy".into(),
+            subscriber_buffer: 1024,
+            max_concurrent_calls: 1,
+        };
+        let bus_config = config.to_bus_config();
+        assert_eq!(
+            bus_config.delivery_policy,
+            lattice_bus::DeliveryPolicy::AtMostOnce
         );
     }
 }

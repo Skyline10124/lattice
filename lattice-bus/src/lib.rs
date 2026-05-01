@@ -42,7 +42,10 @@ impl std::fmt::Display for AgentId {
 pub enum BusError {
     #[error("agent not found: {0}")]
     AgentNotFound(AgentId),
+    #[error("agent already registered: {0}")]
+    AlreadyRegistered(AgentId),
     #[error("agent crashed: {0}")]
+    #[deprecated(note = "Not produced by any code path — remove or implement emission")]
     AgentCrashed(AgentId),
     #[error("RPC timeout after {0:?}")]
     Timeout(Duration),
@@ -50,6 +53,8 @@ pub enum BusError {
     ChannelClosed,
     #[error("serialization error: {0}")]
     Serialize(String),
+    #[error("model resolution error: {0}")]
+    Resolve(String),
     #[error("unauthorized: agent {0} not in caller's rpc whitelist")]
     Unauthorized(AgentId),
 }
@@ -147,6 +152,7 @@ pub trait Bus: Send + Sync {
     async fn deregister(&self, id: &AgentId) -> Result<(), BusError>;
 
     async fn subscribe(&self, topic: &str, handler: BusHandlerFn) -> Result<(), BusError>;
+    async fn unsubscribe(&self, topic: &str) -> Result<(), BusError>;
     async fn publish(&self, topic: &str, event: BusEvent) -> Result<(), BusError>;
 
     async fn call(
@@ -264,12 +270,16 @@ impl InMemoryBus {
 impl Bus for InMemoryBus {
     async fn register(&self, agent: AgentDescriptor) -> Result<Registration, BusError> {
         let id = agent.id.clone();
+        let mut agents = self.agents.write().await;
+        if agents.contains_key(&id) {
+            return Err(BusError::AlreadyRegistered(id));
+        }
         let (request_tx, request_rx) = mpsc::channel(self.config.max_concurrent_calls);
         let entry = AgentEntry {
             descriptor: agent,
             request_tx,
         };
-        self.agents.write().await.insert(id.clone(), entry);
+        agents.insert(id.clone(), entry);
         Ok(Registration { id, request_rx })
     }
 
@@ -301,12 +311,19 @@ impl Bus for InMemoryBus {
         Ok(())
     }
 
+    async fn unsubscribe(&self, topic: &str) -> Result<(), BusError> {
+        self.subscriptions.write().await.remove(topic);
+        Ok(())
+    }
+
     async fn publish(&self, topic: &str, event: BusEvent) -> Result<(), BusError> {
         if let Some(handlers) = self.subscriptions.read().await.get(topic) {
             for handler in handlers {
                 let h = handler.clone();
                 let evt = event.clone();
                 tokio::spawn(async move {
+                    // Handler errors are intentionally swallowed — bus must not
+                    // crash on bad handlers. Upgrade to tracing when available.
                     h(evt).await.ok();
                 });
             }
@@ -331,29 +348,29 @@ impl Bus for InMemoryBus {
         request: serde_json::Value,
         timeout: Duration,
     ) -> Result<BusResponse, BusError> {
-        let agents = self.agents.read().await;
+        // Authorization check + clone sender under read lock, then release.
+        let request_tx = {
+            let agents = self.agents.read().await;
+            let caller_e = agents
+                .get(caller)
+                .ok_or(BusError::AgentNotFound(caller.clone()))?;
+            if !caller_e.descriptor.bus_config.rpc.contains(target) {
+                return Err(BusError::Unauthorized(target.clone()));
+            }
+            let target_e = agents
+                .get(target)
+                .ok_or(BusError::AgentNotFound(target.clone()))?;
+            target_e.request_tx.clone()
+        };
 
-        let caller_e = agents
-            .get(caller)
-            .ok_or(BusError::AgentNotFound(caller.clone()))?;
-        if !caller_e.descriptor.bus_config.rpc.contains(target) {
-            return Err(BusError::Unauthorized(target.clone()));
-        }
-
-        let target_e = agents
-            .get(target)
-            .ok_or(BusError::AgentNotFound(target.clone()))?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        target_e
-            .request_tx
+        request_tx
             .send(BusRequest {
                 payload: request,
                 reply_to: reply_tx,
             })
             .await
             .map_err(|_| BusError::ChannelClosed)?;
-
-        drop(agents);
 
         match tokio::time::timeout(timeout, reply_rx).await {
             Ok(Ok(resp)) => resp,
@@ -734,5 +751,22 @@ mod tests {
         let items = received.lock().await;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0], "macro-sender");
+    }
+
+    #[tokio::test]
+    async fn test_register_duplicate_rejected() {
+        let bus = InMemoryBus::with_defaults();
+        let desc = AgentDescriptor {
+            id: AgentId::new("dup-agent"),
+            name: "Dup".into(),
+            capabilities: vec![],
+            bus_config: AgentBusConfig::default(),
+        };
+        bus.register(desc.clone()).await.unwrap();
+        match bus.register(desc).await {
+            Err(BusError::AlreadyRegistered(id)) => assert_eq!(id, AgentId::new("dup-agent")),
+            Err(other) => panic!("expected AlreadyRegistered, got {:?}", other),
+            Ok(_) => panic!("expected error for duplicate registration"),
+        }
     }
 }

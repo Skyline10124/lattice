@@ -1,6 +1,15 @@
 use async_trait::async_trait;
-use std::sync::LazyLock;
+use std::sync::Arc;
 use std::sync::Mutex;
+
+/// Current time as milliseconds since UNIX epoch.
+/// Used for MemoryEntry IDs and created_at timestamps.
+pub fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
 
 // ---------------------------------------------------------------------------
 // MemoryEntry — a single unit of stored information
@@ -88,6 +97,9 @@ pub enum SharedPartition {
 }
 
 /// Agent's read/write access to shared partitions.
+/// Advisory-only: the caller self-declares access. In single-process deployments
+/// this is sufficient (agents share the same binary). For multi-process/multi-team
+/// deployments, enforce partitions at the bus/harness layer using agent identity.
 #[derive(Debug, Clone, Default)]
 pub struct PartitionAccess {
     pub read: Vec<SharedPartition>,
@@ -146,11 +158,15 @@ pub trait SharedMemory: Send + Sync {
 // InMemoryMemory — HashMap-based, not persisted. Default implementation.
 // ---------------------------------------------------------------------------
 
-pub struct InMemoryMemory;
+pub struct InMemoryMemory {
+    store: Arc<Mutex<Vec<MemoryEntry>>>,
+}
 
 impl InMemoryMemory {
     pub fn new() -> Self {
-        Self
+        Self {
+            store: Arc::new(Mutex::new(Vec::new())),
+        }
     }
 }
 
@@ -163,16 +179,13 @@ impl Default for InMemoryMemory {
 #[async_trait]
 impl Memory for InMemoryMemory {
     async fn save_entry(&self, entry: MemoryEntry) {
-        // InMemoryMemory is not Sync (it uses RefCell internally).
-        // Using a static LazyLock<Mutex<…>> for cross-thread safety.
-        // For now, just delegate to a global store.
-        GLOBAL_STORE.lock().unwrap().entries.push(entry);
+        self.store.lock().unwrap().push(entry);
     }
 
     async fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
-        let store = GLOBAL_STORE.lock().unwrap();
-        store
-            .entries
+        self.store
+            .lock()
+            .unwrap()
             .iter()
             .filter(|e| e.summary.contains(query) || e.content.contains(query))
             .take(limit)
@@ -181,9 +194,9 @@ impl Memory for InMemoryMemory {
     }
 
     async fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
-        let store = GLOBAL_STORE.lock().unwrap();
-        store
-            .entries
+        self.store
+            .lock()
+            .unwrap()
             .iter()
             .filter(|e| {
                 matches!(
@@ -202,14 +215,13 @@ impl Memory for InMemoryMemory {
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String> {
         vec![]
     }
-}
 
-struct GlobalStore {
-    entries: Vec<MemoryEntry>,
+    fn clone_box(&self) -> Box<dyn Memory> {
+        Box::new(InMemoryMemory {
+            store: self.store.clone(),
+        })
+    }
 }
-
-static GLOBAL_STORE: LazyLock<Mutex<GlobalStore>> =
-    LazyLock::new(|| Mutex::new(GlobalStore { entries: vec![] }));
 
 pub mod reflect;
 pub mod sqlite;
@@ -274,5 +286,43 @@ mod tests {
         let decisions = futures::executor::block_on(mem.entries_by_kind(&EntryKind::Decision, 10));
         assert!(decisions.iter().any(|e| e.id == "kind-decision"));
         assert!(!decisions.iter().any(|e| e.id == "kind-fact"));
+    }
+
+    // --- PartitionAccess::can_read / can_write tests ---
+
+    #[test]
+    fn test_can_read_named_in_list() {
+        let access = PartitionAccess::new(vec![SharedPartition::Named("results".into())], vec![]);
+        assert!(access.can_read(&SharedPartition::Named("results".into())));
+    }
+
+    #[test]
+    fn test_can_read_named_not_in_list() {
+        let access = PartitionAccess::new(vec![SharedPartition::Named("results".into())], vec![]);
+        assert!(!access.can_read(&SharedPartition::Named("other".into())));
+    }
+
+    #[test]
+    fn test_can_read_shared_all() {
+        let access = PartitionAccess::new(vec![SharedPartition::All], vec![]);
+        assert!(access.can_read(&SharedPartition::Named("anything".into())));
+    }
+
+    #[test]
+    fn test_can_write_named_in_list() {
+        let access = PartitionAccess::new(vec![], vec![SharedPartition::Named("results".into())]);
+        assert!(access.can_write(&SharedPartition::Named("results".into())));
+    }
+
+    #[test]
+    fn test_can_write_empty_list() {
+        let access = PartitionAccess::new(vec![], vec![]);
+        assert!(!access.can_write(&SharedPartition::Named("results".into())));
+    }
+
+    #[test]
+    fn test_can_read_empty_list() {
+        let access = PartitionAccess::new(vec![], vec![]);
+        assert!(!access.can_read(&SharedPartition::Named("results".into())));
     }
 }
