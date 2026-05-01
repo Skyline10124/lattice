@@ -7,26 +7,19 @@
 use lattice_core::types::ToolCall;
 
 use crate::sandbox::SandboxConfig;
-use crate::{AgentDispatcher, ToolExecutor};
+use crate::ToolExecutor;
 
 /// Executes tools using the local filesystem and shell.
 ///
-/// Supports: read_file, grep, write_file, list_directory, run_test,
-/// run_clippy, bash, patch, run_command, list_processes, web_search,
-/// web_fetch, browser_navigate, browser_screenshot, browser_console,
-/// execute_code, agent_call. The `project_root` is used by `write_file`
-/// and `patch` to restrict writes to project source directories.
-///
-/// `agent_call` requires an `AgentDispatcher` to be configured via
-/// `with_agent_dispatcher()`. Without one, `agent_call` returns an
-/// error message.
+/// Supports: read_file, grep, write_file, list_directory, bash, patch,
+/// web_search. The `project_root` is used by `write_file` and `patch`
+/// to restrict writes to project source directories.
 ///
 /// All tool operations are gated by the `sandbox` configuration
 /// (path validation, sensitive-file blocking, command allowlisting,
 /// URL scheme restrictions, and size/timeout limits).
 pub struct DefaultToolExecutor {
     pub project_root: String,
-    pub agent_dispatcher: Option<Box<dyn AgentDispatcher>>,
     pub sandbox: SandboxConfig,
 }
 
@@ -34,16 +27,8 @@ impl DefaultToolExecutor {
     pub fn new(project_root: &str) -> Self {
         Self {
             project_root: project_root.to_string(),
-            agent_dispatcher: None,
             sandbox: SandboxConfig::default(),
         }
-    }
-
-    /// Attach an agent dispatcher so that `agent_call:name` tool calls
-    /// can launch sub-agents and return their output.
-    pub fn with_agent_dispatcher(mut self, d: Box<dyn AgentDispatcher>) -> Self {
-        self.agent_dispatcher = Some(d);
-        self
     }
 
     /// Override the sandbox config (replaces the default).
@@ -55,39 +40,6 @@ impl DefaultToolExecutor {
 
 impl ToolExecutor for DefaultToolExecutor {
     fn execute(&self, call: &ToolCall) -> String {
-        // Handle agent_call:name format (e.g., agent_call:security-audit)
-        if let Some(agent_name) = call.function.name.strip_prefix("agent_call:") {
-            let args: serde_json::Value =
-                serde_json::from_str(&call.function.arguments).unwrap_or_default();
-            let input = args
-                .get("input")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&call.function.arguments);
-            return match &self.agent_dispatcher {
-                Some(d) => d.dispatch(agent_name, input),
-                None => format!(
-                    "Error: agent_call '{}' is not available — no agent dispatcher configured",
-                    agent_name
-                ),
-            };
-        }
-
-        // Handle explicit agent_call tool with name + input arguments
-        if call.function.name == "agent_call" {
-            let args: serde_json::Value =
-                serde_json::from_str(&call.function.arguments).unwrap_or_default();
-            let agent_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let input = args.get("input").and_then(|v| v.as_str()).unwrap_or("");
-            if agent_name.is_empty() {
-                return "Error: agent_call requires a 'name' argument".to_string();
-            }
-            return match &self.agent_dispatcher {
-                Some(d) => d.dispatch(agent_name, input),
-                None => "Error: agent_call is not available — no agent dispatcher configured"
-                    .to_string(),
-            };
-        }
-
         let args: serde_json::Value =
             serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
 
@@ -135,7 +87,6 @@ impl ToolExecutor for DefaultToolExecutor {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
-                // Sandbox: validate path + size
                 if let Err(e) = self.sandbox.check_write(path) {
                     return e;
                 }
@@ -147,9 +98,7 @@ impl ToolExecutor for DefaultToolExecutor {
                     );
                 }
                 match std::fs::write(&abs, content) {
-                    Ok(_) => {
-                        format!("Wrote {} bytes to {}", content.len(), path)
-                    }
+                    Ok(_) => format!("Wrote {} bytes to {}", content.len(), path),
                     Err(e) => format!("Error writing {}: {}", path, e),
                 }
             }
@@ -178,43 +127,6 @@ impl ToolExecutor for DefaultToolExecutor {
                     Err(e) => format!("Error: {}", e),
                 }
             }
-            "run_test" => {
-                let test_name = args.get("test_name").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_command("cargo test") {
-                    return e;
-                }
-                let mut cmd = std::process::Command::new("cargo");
-                cmd.arg("test").args(["--color", "never"]);
-                if !test_name.is_empty() {
-                    cmd.arg("--").arg(test_name);
-                }
-                match cmd.output() {
-                    Ok(o) => {
-                        let out = String::from_utf8_lossy(&o.stdout);
-                        let lines: Vec<&str> = out.lines().collect();
-                        let last = lines.len().saturating_sub(50);
-                        lines[last..].join("\n")
-                    }
-                    Err(e) => format!("Error running test: {}", e),
-                }
-            }
-            "run_clippy" => {
-                if let Err(e) = self.sandbox.check_command("cargo clippy") {
-                    return e;
-                }
-                let output = std::process::Command::new("cargo")
-                    .args(["clippy", "--color", "never"])
-                    .output();
-                match output {
-                    Ok(o) => {
-                        let out = String::from_utf8_lossy(&o.stdout);
-                        let lines: Vec<&str> = out.lines().collect();
-                        let last = lines.len().saturating_sub(30);
-                        lines[last..].join("\n")
-                    }
-                    Err(e) => format!("Error running clippy: {}", e),
-                }
-            }
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 if let Err(e) = self.sandbox.check_command(cmd) {
@@ -233,7 +145,6 @@ impl ToolExecutor for DefaultToolExecutor {
                     Err(e) => format!("Error: {}", e),
                 }
             }
-            // --- New tool implementations ---
             "patch" => {
                 let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
                 let search = args.get("search").and_then(|v| v.as_str()).unwrap_or("");
@@ -248,12 +159,14 @@ impl ToolExecutor for DefaultToolExecutor {
                         if count == 0 {
                             format!("Error: search text not found in {}", path)
                         } else if count > 1 {
-                            format!("Error: search text found {} times in {}. Use a more specific search.", count, path)
+                            format!(
+                                "Error: search text found {} times in {}. Use a more specific search.",
+                                count, path
+                            )
                         } else {
                             let new_content = content.replace(search, insert);
                             match std::fs::write(&abs, &new_content) {
                                 Ok(_) => {
-                                    // Show diff
                                     let diff_lines: Vec<String> = new_content
                                         .lines()
                                         .zip(content.lines())
@@ -274,49 +187,6 @@ impl ToolExecutor for DefaultToolExecutor {
                     Err(e) => format!("Error reading {}: {}", path, e),
                 }
             }
-            "run_command" => {
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_command(cmd) {
-                    return e;
-                }
-                let timeout_secs = args
-                    .get("timeout_secs")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(30);
-                let output = std::process::Command::new("timeout")
-                    .arg(timeout_secs.to_string())
-                    .arg("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output();
-                match output {
-                    Ok(o) => {
-                        let mut result = String::from_utf8_lossy(&o.stdout).to_string();
-                        if !o.stderr.is_empty() {
-                            if !result.is_empty() {
-                                result.push('\n');
-                            }
-                            result.push_str(&String::from_utf8_lossy(&o.stderr));
-                        }
-                        let lines: Vec<&str> = result.lines().collect();
-                        let last = lines.len().saturating_sub(200);
-                        lines[last..].join("\n")
-                    }
-                    Err(e) => format!("Error running command: {}", e),
-                }
-            }
-            "list_processes" => {
-                if let Err(e) = self.sandbox.check_command("ps aux") {
-                    return e;
-                }
-                let output = std::process::Command::new("sh")
-                    .args(["-c", "ps aux | head -30"])
-                    .output();
-                match output {
-                    Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-                    Err(e) => format!("Error listing processes: {}", e),
-                }
-            }
             "web_search" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 if let Err(e) = self.sandbox.check_url(url) {
@@ -327,170 +197,6 @@ impl ToolExecutor for DefaultToolExecutor {
                         .text()
                         .unwrap_or_else(|e| format!("Error reading response body: {}", e)),
                     Err(e) => format!("Error fetching URL: {}", e),
-                }
-            }
-            "web_fetch" => {
-                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_url(url) {
-                    return e;
-                }
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .unwrap();
-                match client.get(url).send() {
-                    Ok(response) => {
-                        let body = response
-                            .text()
-                            .unwrap_or_else(|e| format!("Error reading response body: {}", e));
-                        body.chars().take(5000).collect()
-                    }
-                    Err(e) => format!("Error fetching URL: {}", e),
-                }
-            }
-            "browser_navigate" => {
-                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_url(url) {
-                    return e;
-                }
-                let output = std::process::Command::new("xdg-open").arg(url).output();
-                match output {
-                    Ok(o) => {
-                        if o.status.success() {
-                            format!("Opened {} in browser", url)
-                        } else {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            format!("Failed to open {}: {}", url, stderr)
-                        }
-                    }
-                    Err(e) => format!(
-                        "Error opening browser: {}. Try opening manually: {}",
-                        e, url
-                    ),
-                }
-            }
-            "browser_screenshot" => {
-                let filename = args
-                    .get("filename")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("screenshot.png");
-                if let Err(e) = self.sandbox.check_write(filename) {
-                    return e;
-                }
-                // Try import (ImageMagick) first
-                let result = std::process::Command::new("import")
-                    .args(["-window", "root", filename])
-                    .output();
-                match result {
-                    Ok(o) if o.status.success() => {
-                        format!("Screenshot saved to {}", filename)
-                    }
-                    _ => {
-                        // Fall back to scrot
-                        let result2 = std::process::Command::new("scrot").arg(filename).output();
-                        match result2 {
-                            Ok(o2) if o2.status.success() => {
-                                format!("Screenshot saved to {}", filename)
-                            }
-                            _ => {
-                                "No screenshot tool available (tried import and scrot). Install ImageMagick or scrot.".to_string()
-                            }
-                        }
-                    }
-                }
-            }
-            "browser_console" => "not available in CLI mode".to_string(),
-            "execute_code" => {
-                let code = args.get("code").and_then(|v| v.as_str()).unwrap_or("");
-                let language = args.get("language").and_then(|v| v.as_str()).unwrap_or("");
-
-                let (ext, interpreter, interpreter_args): (&str, &str, &[&str]) = match language {
-                    "py" => ("py", "python3", &[]),
-                    "js" => ("js", "node", &[]),
-                    "sh" => ("sh", "sh", &[]),
-                    "ts" => ("ts", "npx", &["tsx"]),
-                    "rs" => ("rs", "rustc", &[]),
-                    _ => {
-                        return format!(
-                            "Unsupported language: {}. Allowed: py, js, rs, sh, ts",
-                            language
-                        )
-                    }
-                };
-
-                let tmp_dir =
-                    std::env::temp_dir().join(format!("lattice_code_{}", std::process::id()));
-                let _ = std::fs::create_dir_all(&tmp_dir);
-
-                // Rust: compile then run
-                if language == "rs" {
-                    let src_file = tmp_dir.join("code.rs");
-                    let bin_file = tmp_dir.join("code");
-                    if let Err(e) = std::fs::write(&src_file, code) {
-                        return format!("Error writing temp file: {}", e);
-                    }
-                    let compile = std::process::Command::new("rustc")
-                        .arg(&src_file)
-                        .arg("-o")
-                        .arg(&bin_file)
-                        .output();
-                    match compile {
-                        Ok(o) if !o.status.success() => {
-                            return format!(
-                                "Compilation failed:\n{}",
-                                String::from_utf8_lossy(&o.stderr)
-                            );
-                        }
-                        Err(e) => return format!("Error running rustc: {}", e),
-                        _ => {}
-                    }
-                    let run = std::process::Command::new("timeout")
-                        .arg("10")
-                        .arg(&bin_file)
-                        .output();
-                    match run {
-                        Ok(o) => {
-                            let mut result = String::from_utf8_lossy(&o.stdout).to_string();
-                            if !o.stderr.is_empty() {
-                                if !result.is_empty() {
-                                    result.push('\n');
-                                }
-                                result.push_str(&String::from_utf8_lossy(&o.stderr));
-                            }
-                            let lines: Vec<&str> = result.lines().collect();
-                            let last = lines.len().saturating_sub(100);
-                            lines[last..].join("\n")
-                        }
-                        Err(e) => format!("Error running code: {}", e),
-                    }
-                } else {
-                    let file_path = tmp_dir.join(format!("code.{}", ext));
-                    if let Err(e) = std::fs::write(&file_path, code) {
-                        return format!("Error writing temp file: {}", e);
-                    }
-                    let mut cmd = std::process::Command::new("timeout");
-                    cmd.arg("10");
-                    cmd.arg(interpreter);
-                    if !interpreter_args.is_empty() {
-                        cmd.args(interpreter_args);
-                    }
-                    cmd.arg(&file_path);
-                    let output = cmd.output();
-                    match output {
-                        Ok(o) => {
-                            let mut result = String::from_utf8_lossy(&o.stdout).to_string();
-                            if !o.stderr.is_empty() {
-                                if !result.is_empty() {
-                                    result.push('\n');
-                                }
-                                result.push_str(&String::from_utf8_lossy(&o.stderr));
-                            }
-                            let lines: Vec<&str> = result.lines().collect();
-                            let last = lines.len().saturating_sub(100);
-                            lines[last..].join("\n")
-                        }
-                        Err(e) => format!("Error running code: {}", e),
-                    }
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),

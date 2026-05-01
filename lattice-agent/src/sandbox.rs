@@ -27,8 +27,6 @@ impl Default for SandboxConfig {
             write_allowlist: vec![
                 "lattice-core/".into(),
                 "lattice-agent/".into(),
-                "lattice-memory/".into(),
-                "lattice-token-pool/".into(),
                 "lattice-python/".into(),
                 "lattice-plugin/".into(),
                 "lattice-harness/".into(),

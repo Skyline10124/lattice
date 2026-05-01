@@ -1,3 +1,4 @@
+pub mod memory;
 pub mod sandbox;
 pub mod state;
 pub mod tool_definitions;
@@ -30,7 +31,6 @@ static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 });
 
 /// Executes a tool call and returns the result string.
-/// The Agent calls this when the model requests a tool execution.
 pub trait ToolExecutor: Send + Sync {
     fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
 }
@@ -38,13 +38,14 @@ pub trait ToolExecutor: Send + Sync {
 /// Max retries for mid-stream errors in Agent::run() and run_async().
 const MAX_STREAM_RETRIES: u32 = 2;
 
-/// Dispatches a sub-agent by name with the given input.
-/// This is how `agent_call:security-audit` becomes a tool call:
-/// the tool executor detects the `agent_call:` prefix, extracts the agent
-/// name, and delegates to this dispatcher to run the agent and return output.
-pub trait AgentDispatcher: Send + Sync {
-    /// Run a named sub-agent with the given input. Returns the output text.
-    fn dispatch(&self, agent_name: &str, input: &str) -> String;
+/// Minimal interface for an LLM-calling agent.
+/// Used by PluginRunner to call any agent that implements send + system_prompt.
+pub trait PluginAgent {
+    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+    fn set_system_prompt(&mut self, _prompt: &str) {}
+    fn token_usage(&self) -> u64 {
+        0
+    }
 }
 
 // Re-export shared default tools and sandbox for convenience.
@@ -58,14 +59,12 @@ pub struct Agent {
     state: state::AgentState,
     tools: Vec<ToolDefinition>,
     retry: RetryPolicy,
-    memory: Option<Box<dyn lattice_memory::Memory>>,
-    token_pool: Option<Box<dyn lattice_token_pool::TokenPool>>,
+    memory: Option<Box<dyn memory::Memory>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
 }
 
 impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self {
-        // Force lazy init so first Agent creation pays the cost, not first send().
         LazyLock::force(&SHARED_RUNTIME);
         Self {
             resolved: resolved.clone(),
@@ -73,7 +72,6 @@ impl Agent {
             tools: vec![],
             retry: RetryPolicy::default(),
             memory: None,
-            token_pool: None,
             tool_executor: None,
         }
     }
@@ -88,19 +86,8 @@ impl Agent {
         self
     }
 
-    #[deprecated(
-        note = "not yet connected to Agent's send/send_message flow - reserved for future use"
-    )]
-    pub fn with_memory(mut self, memory: Box<dyn lattice_memory::Memory>) -> Self {
+    pub fn with_memory(mut self, memory: Box<dyn memory::Memory>) -> Self {
         self.memory = Some(memory);
-        self
-    }
-
-    #[deprecated(
-        note = "not yet connected to Agent's send/send_message flow - reserved for future use"
-    )]
-    pub fn with_token_pool(mut self, pool: Box<dyn lattice_token_pool::TokenPool>) -> Self {
-        self.token_pool = Some(pool);
         self
     }
 
@@ -109,28 +96,20 @@ impl Agent {
         self
     }
 
-    /// Return the cumulative token usage across all turns so far.
     pub fn token_usage(&self) -> u64 {
         self.state.token_usage
     }
 
-    /// Send a user message, returning streaming events.
-    /// Each event is either a Token, ToolCallRequired, Done, or Error.
     pub fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         self.run_chat()
     }
 
-    /// Async variant — use this from within a tokio runtime to avoid
-    /// the `block_in_place` + `block_on` nesting that can hang.
     pub async fn send_message_async(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         self.run_chat_async().await
     }
 
-    /// Submit tool call results, continue the conversation.
-    /// `max_size` optionally limits the byte size of each tool result
-    /// (default: 1 MB). Larger results are truncated with a note.
     pub fn submit_tools(
         &mut self,
         results: Vec<(String, String)>,
@@ -142,35 +121,26 @@ impl Agent {
         self.run_chat()
     }
 
-    /// Run a message through the Agent, handling tool calls automatically.
-    /// If a ToolExecutor is registered, tools are executed and results submitted
-    /// in a loop until the model produces a final answer or `max_turns` is reached.
     pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         let mut all_events = Vec::new();
 
         for _ in 0..max_turns {
-            // Trim old messages to stay within the model's context window.
-            // Some catalog entries have context_length=0; fall back to 128k.
             let context_len = if self.state.resolved.context_length > 0 {
                 self.state.resolved.context_length
             } else {
                 131072
             };
-            self.state.trim_messages(context_len, 15); // 15% safety margin
+            self.state.trim_messages(context_len, 15);
 
             let mut events = self.run_chat();
 
-            // Retry on mid-stream errors (up to MAX_STREAM_RETRIES).
-            // Only retries when ALL events are errors (no partial progress).
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
                 let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
                 if !has_error {
                     break;
                 }
-                // Pop the assistant message run_chat already pushed so retry
-                // doesn't duplicate it.
                 self.state.pop_last_assistant_message();
                 retry_count += 1;
                 events = self.run_chat();
@@ -190,8 +160,6 @@ impl Agent {
                 break;
             }
 
-            // If the model requested tools but no executor is registered,
-            // we can't make progress — stop to avoid burning tokens in a loop.
             if self.tool_executor.is_none() {
                 break;
             }
@@ -207,8 +175,6 @@ impl Agent {
         // --- Auto-save memory entry ---
         if let Some(ref memory) = self.memory {
             let prompt_summary = if content.len() > 200 {
-                // Find safe UTF-8 boundary to avoid panicking in the middle of a
-                // multi-byte character.
                 let mut end = 200;
                 while end > 0 && !content.is_char_boundary(end) {
                     end -= 1;
@@ -221,9 +187,9 @@ impl Agent {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let entry = lattice_memory::MemoryEntry {
+            let entry = crate::memory::MemoryEntry {
                 id: format!("{}-{}", now_secs, self.state.token_usage),
-                kind: lattice_memory::EntryKind::SessionLog,
+                kind: crate::memory::EntryKind::SessionLog,
                 session_id: self.state.resolved.canonical_id.clone(),
                 summary: format!(
                     "Model: {} | Provider: {} | Tokens: {}",
@@ -241,7 +207,6 @@ impl Agent {
         all_events
     }
 
-    /// Async variant of run — for use within a tokio runtime.
     pub async fn run_async(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         let mut all_events = Vec::new();
@@ -256,8 +221,6 @@ impl Agent {
 
             let mut events = self.run_chat_async().await;
 
-            // Retry on mid-stream errors (up to MAX_STREAM_RETRIES).
-            // Only retries when ALL events are errors (no partial progress).
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
                 let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
@@ -295,8 +258,6 @@ impl Agent {
         all_events
     }
 
-    /// Internal: call lattice_core::chat() with the current conversation state,
-    /// consume the stream, update state, and return LoopEvents.
     fn run_chat(&mut self) -> Vec<LoopEvent> {
         use futures::StreamExt;
 
@@ -344,9 +305,7 @@ impl Agent {
                             tc.arguments.push_str(&arguments_delta);
                         }
                     }
-                    StreamEvent::ToolCallEnd { .. } => {
-                        // Tool-call argument stream ends; already accumulated.
-                    }
+                    StreamEvent::ToolCallEnd { .. } => {}
                     StreamEvent::Done { usage, .. } => {
                         if let Some(ref u) = usage {
                             self.state.add_token_usage(u.total_tokens as u64);
@@ -373,7 +332,6 @@ impl Agent {
             }
         });
 
-        // Build assistant message and push to conversation state.
         let tool_calls = if tool_builders.is_empty() {
             None
         } else {
@@ -397,7 +355,6 @@ impl Agent {
         events
     }
 
-    /// Async variant of run_chat — no run_async wrapper.
     async fn run_chat_async(&mut self) -> Vec<LoopEvent> {
         use futures::StreamExt;
 
@@ -491,7 +448,6 @@ impl Agent {
         events
     }
 
-    /// Call chat() with retry logic. Retries only on retryable errors.
     fn chat_with_retry(
         &self,
     ) -> Result<
@@ -524,7 +480,6 @@ impl Agent {
         }
     }
 
-    /// Async variant of chat_with_retry — no run_async wrapper.
     async fn chat_with_retry_async(
         &self,
     ) -> Result<
@@ -556,7 +511,6 @@ pub enum LoopEvent {
     Token {
         text: String,
     },
-    /// A chunk of reasoning/thinking content (e.g., DeepSeek thinking chain).
     Reasoning {
         text: String,
     },
@@ -571,17 +525,12 @@ pub enum LoopEvent {
     },
 }
 
-/// Internal helper for accumulating tool call data during streaming.
 struct ToolCallAccum {
     name: String,
     arguments: String,
 }
 
-// ---------------------------------------------------------------------------
-// PluginAgent impl — bridges lattice-agent to lattice-plugin
-// ---------------------------------------------------------------------------
-
-impl lattice_plugin::PluginAgent for Agent {
+impl PluginAgent for Agent {
     fn set_system_prompt(&mut self, prompt: &str) {
         self.state.push_system_message(prompt);
     }

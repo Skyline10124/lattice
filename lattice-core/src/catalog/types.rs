@@ -196,18 +196,29 @@ mod tests {
     #[test]
     fn test_api_protocol_serde_rejects_typo() {
         let result: Result<ApiProtocol, _> = serde_json::from_str(r#""chat_compltions""#);
-        assert!(result.is_err(), "serde should reject typo 'chat_compltions'");
+        assert!(
+            result.is_err(),
+            "serde should reject typo 'chat_compltions'"
+        );
     }
 
     #[test]
     fn test_api_protocol_serde_accepts_short_alias() {
         let result: ApiProtocol = serde_json::from_str(r#""anthropic""#).unwrap();
-        assert_eq!(result, ApiProtocol::AnthropicMessages, "serde should accept 'anthropic' as alias");
+        assert_eq!(
+            result,
+            ApiProtocol::AnthropicMessages,
+            "serde should accept 'anthropic' as alias"
+        );
     }
 
     #[test]
     fn test_api_protocol_serde_custom_unknown() {
         let result: ApiProtocol = serde_json::from_str(r#""acp""#).unwrap();
-        assert_eq!(result, ApiProtocol::Custom("acp".to_string()), "serde should accept truly unknown strings as Custom");
+        assert_eq!(
+            result,
+            ApiProtocol::Custom("acp".to_string()),
+            "serde should accept truly unknown strings as Custom"
+        );
     }
 }
