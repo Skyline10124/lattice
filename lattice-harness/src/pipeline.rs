@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use lattice_agent::memory::Memory;
 use lattice_agent::Agent;
-use lattice_memory::Memory;
 
 use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
@@ -760,10 +760,10 @@ impl Pipeline {
     /// Save a session log entry to shared memory.
     fn save_memory_entry(&self, profile: &AgentProfile, output: &serde_json::Value) {
         if let Some(ref mem) = self.shared_memory {
-            let ms = lattice_memory::now_ms();
-            let entry = lattice_memory::MemoryEntry {
+            let ms = lattice_agent::memory::now_ms();
+            let entry = lattice_agent::memory::MemoryEntry {
                 id: format!("{}-{}", profile.agent.name, ms),
-                kind: lattice_memory::EntryKind::SessionLog,
+                kind: lattice_agent::memory::EntryKind::SessionLog,
                 session_id: profile.agent.name.clone(),
                 summary: format!(
                     "{}: {} chars output",

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::sync::LazyLock;
 
+use lattice_agent::memory::{EntryKind, Memory};
 use lattice_agent::Agent;
-use lattice_memory::{EntryKind, Memory};
 use tracing::warn;
 
 use crate::profile::AgentProfile;

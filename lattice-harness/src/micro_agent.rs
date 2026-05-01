@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
+use crate::memory::SharedMemory;
+use lattice_agent::memory::{Memory, MemoryEntry, PartitionAccess, SharedPartition};
 use lattice_agent::Agent;
 use lattice_bus::{
     AgentBusConfig, AgentDescriptor, AgentId, Bus, BusError, BusEvent, BusHandler, BusRequest,
     BusResponse,
 };
-use lattice_memory::{Memory, MemoryEntry, PartitionAccess, SharedMemory, SharedPartition};
 use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
@@ -136,10 +137,10 @@ impl MicroAgent {
                 let name = name.clone();
                 Box::pin(async move {
                     if let Some(ref m) = mem {
-                        let ms = lattice_memory::now_ms();
+                        let ms = lattice_agent::memory::now_ms();
                         m.save_entry(MemoryEntry {
                             id: format!("{}-event-{}", name, ms),
-                            kind: lattice_memory::EntryKind::SessionLog,
+                            kind: lattice_agent::memory::EntryKind::SessionLog,
                             session_id: name.clone(),
                             summary: format!("Event on {}", event.topic),
                             content: event.payload.to_string(),
@@ -202,10 +203,10 @@ async fn micro_agent_loop(
 
         // Save to private memory
         if let Some(ref mem) = ctx.memory {
-            let ms = lattice_memory::now_ms();
+            let ms = lattice_agent::memory::now_ms();
             let entry = MemoryEntry {
                 id: format!("{}-{}", agent_name, ms),
-                kind: lattice_memory::EntryKind::SessionLog,
+                kind: lattice_agent::memory::EntryKind::SessionLog,
                 session_id: agent_name.clone(),
                 summary: format!("{}: {} chars output", agent_name, content.len()),
                 content: content.clone(),
@@ -218,10 +219,10 @@ async fn micro_agent_loop(
         // Save to shared memory partitions (write to each configured partition)
         if let Some(ref smem) = ctx.shared_memory {
             for write_partition in &ctx.partition_access.write {
-                let ms = lattice_memory::now_ms();
+                let ms = lattice_agent::memory::now_ms();
                 let entry = MemoryEntry {
                     id: format!("{}-shared-{}", agent_name, ms),
-                    kind: lattice_memory::EntryKind::SessionLog,
+                    kind: lattice_agent::memory::EntryKind::SessionLog,
                     session_id: agent_name.clone(),
                     summary: format!("{}: shared output", agent_name),
                     content: content.clone(),
@@ -284,8 +285,8 @@ fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
                     format!(
                         "- {}: {} (session: {})",
                         match e.kind {
-                            lattice_memory::EntryKind::Fact => "Fact",
-                            lattice_memory::EntryKind::Decision => "Decision",
+                            lattice_agent::memory::EntryKind::Fact => "Fact",
+                            lattice_agent::memory::EntryKind::Decision => "Decision",
                             _ => "Log",
                         },
                         e.summary,

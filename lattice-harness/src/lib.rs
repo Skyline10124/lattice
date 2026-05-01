@@ -1,7 +1,7 @@
-pub mod dispatch;
 pub mod events;
 pub mod handoff_rule;
 pub mod lattice_dir;
+pub mod memory;
 pub mod micro_agent;
 pub mod pipeline;
 pub mod profile;
@@ -9,7 +9,6 @@ pub mod registry;
 pub mod runner;
 pub mod watcher;
 
-pub use dispatch::HarnessAgentDispatcher;
 pub use events::{EventBus, PipelineEvent};
 pub use handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};
 pub use lattice_dir::{BusToml, LatticeDir};
