@@ -99,18 +99,20 @@ impl Transport for AnthropicTransport {
                         let id = block
                             .get("id")
                             .and_then(|i| i.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .ok_or_else(|| TransportError::UnexpectedFormat(
+                                "tool_use block missing 'id' field".into()
+                            ))?;
                         let name = block
                             .get("name")
                             .and_then(|n| n.as_str())
-                            .unwrap_or("")
-                            .to_string();
+                            .ok_or_else(|| TransportError::UnexpectedFormat(
+                                "tool_use block missing 'name' field".into()
+                            ))?;
                         let input = block.get("input").cloned().unwrap_or(json!({}));
                         let arguments = serde_json::to_string(&input).unwrap_or_default();
                         tool_calls.push(ToolCall {
-                            id,
-                            function: FunctionCall { name, arguments },
+                            id: id.to_string(),
+                            function: FunctionCall { name: name.to_string(), arguments },
                         });
                     }
                     _ => {}

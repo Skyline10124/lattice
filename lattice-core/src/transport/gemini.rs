@@ -82,13 +82,14 @@ impl GeminiTransport {
     /// | MAX_TOKENS      | length            |
     /// | SAFETY          | content_filter    |
     /// | RECITATION      | content_filter    |
-    /// | OTHER           | stop              |
+    /// | OTHER           | unknown           |
     fn map_finish_reason(reason: &str) -> String {
         match reason.to_uppercase().as_str() {
             "STOP" => "stop".to_string(),
             "MAX_TOKENS" => "length".to_string(),
             "SAFETY" | "RECITATION" => "content_filter".to_string(),
-            _ => "stop".to_string(),
+            "OTHER" => "unknown".to_string(),
+            _ => "unknown".to_string(),
         }
     }
 
@@ -233,7 +234,8 @@ impl GeminiTransport {
         let mut text_pieces: Vec<String> = Vec::new();
         let mut tool_calls: Vec<crate::types::ToolCall> = Vec::new();
 
-        for (i, part) in content_parts.iter().enumerate() {
+        let mut tc_index = 0;
+        for part in content_parts.iter() {
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
                 continue;
             }
@@ -245,12 +247,13 @@ impl GeminiTransport {
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(crate::types::ToolCall {
-                    id: Self::generate_call_id(name, i),
+                    id: Self::generate_call_id(name, tc_index),
                     function: crate::types::FunctionCall {
                         name: name.to_string(),
                         arguments: args_str,
                     },
                 });
+                tc_index += 1;
             }
         }
 
@@ -325,6 +328,8 @@ impl GeminiTransport {
         };
 
         let mut results: Vec<StreamChunk> = Vec::new();
+        let mut has_tool_calls_in_chunk = false;
+        let mut tc_index = 0;
 
         for part in &content_parts {
             if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
@@ -346,19 +351,26 @@ impl GeminiTransport {
                 let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let args = fc.get("args").cloned().unwrap_or(json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                let idx = results.len();
+                let id = Self::generate_call_id(name, tc_index);
+                tc_index += 1;
                 results.push(StreamChunk::ToolCallDelta {
-                    index: idx,
-                    id: Self::generate_call_id(name, idx),
+                    index: tc_index - 1,
+                    id,
                     name: name.to_string(),
                     arguments: args_str,
                 });
+                has_tool_calls_in_chunk = true;
             }
         }
 
         if let Some(ref reason) = finish_reason_raw {
+            let mapped_reason = if has_tool_calls_in_chunk {
+                "tool_calls".to_string()
+            } else {
+                Self::map_finish_reason(reason)
+            };
             results.push(StreamChunk::Done {
-                finish_reason: Self::map_finish_reason(reason),
+                finish_reason: mapped_reason,
             });
         }
 
@@ -926,6 +938,38 @@ mod tests {
         assert!(has_usage);
     }
 
+    #[test]
+    fn test_denormalize_stream_chunk_tool_calls_finish_reason() {
+        // When a streaming chunk contains functionCall parts,
+        // finish_reason must be "tool_calls" even though Gemini sends "STOP".
+        let chunk = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 20,
+                "candidatesTokenCount": 8,
+                "totalTokenCount": 28
+            }
+        });
+
+        let transport = GeminiTransport::new();
+        let results = transport.denormalize_stream_chunk(&chunk);
+
+        // Should have ToolCallDelta + Done("tool_calls") + Usage
+        let done = results.iter().find_map(|r| match r {
+            StreamChunk::Done { finish_reason } => Some(finish_reason.clone()),
+            _ => None,
+        });
+        assert_eq!(done, Some("tool_calls".to_string()));
+    }
+
     // ── finish reason mapping ────────────────────────────────────────
 
     #[test]
@@ -940,8 +984,8 @@ mod tests {
             GeminiTransport::map_finish_reason("RECITATION"),
             "content_filter"
         );
-        assert_eq!(GeminiTransport::map_finish_reason("OTHER"), "stop");
-        assert_eq!(GeminiTransport::map_finish_reason("UNKNOWN"), "stop");
+        assert_eq!(GeminiTransport::map_finish_reason("OTHER"), "unknown");
+        assert_eq!(GeminiTransport::map_finish_reason("UNKNOWN"), "unknown");
         assert_eq!(GeminiTransport::map_finish_reason("stop"), "stop");
     }
 

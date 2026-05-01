@@ -14,18 +14,51 @@ pub enum CredentialStatus {
     NotRequired,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ApiProtocol {
-    #[serde(rename = "chat_completions")]
     OpenAiChat,
-    #[serde(rename = "anthropic_messages")]
     AnthropicMessages,
-    #[serde(rename = "gemini_generate_content")]
     GeminiGenerateContent,
-    #[serde(rename = "codex_responses")]
     CodexResponses,
-    #[serde(untagged)]
     Custom(String),
+}
+
+impl serde::Serialize for ApiProtocol {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ApiProtocol::OpenAiChat => s.serialize_str("chat_completions"),
+            ApiProtocol::AnthropicMessages => s.serialize_str("anthropic_messages"),
+            ApiProtocol::GeminiGenerateContent => s.serialize_str("gemini_generate_content"),
+            ApiProtocol::CodexResponses => s.serialize_str("codex_responses"),
+            ApiProtocol::Custom(inner) => s.serialize_str(inner),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ApiProtocol {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<ApiProtocol, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.as_str() {
+            "chat_completions" => Ok(ApiProtocol::OpenAiChat),
+            "anthropic_messages" | "anthropic" => Ok(ApiProtocol::AnthropicMessages),
+            "gemini_generate_content" | "gemini" => Ok(ApiProtocol::GeminiGenerateContent),
+            "codex_responses" | "codex" => Ok(ApiProtocol::CodexResponses),
+            other => {
+                let lower = other.to_lowercase();
+                if lower.starts_with("chat")
+                    || lower.starts_with("anthropic")
+                    || lower.starts_with("gemini")
+                    || lower.starts_with("codex")
+                {
+                    return Err(serde::de::Error::custom(format!(
+                        "unknown protocol '{}': did you mean one of chat_completions, anthropic_messages, gemini_generate_content, codex_responses?",
+                        other
+                    )));
+                }
+                Ok(ApiProtocol::Custom(other.to_string()))
+            }
+        }
+    }
 }
 
 impl std::str::FromStr for ApiProtocol {
@@ -158,5 +191,23 @@ mod tests {
             debug_str.contains("***"),
             "Debug output should mask the API key with ***"
         );
+    }
+
+    #[test]
+    fn test_api_protocol_serde_rejects_typo() {
+        let result: Result<ApiProtocol, _> = serde_json::from_str(r#""chat_compltions""#);
+        assert!(result.is_err(), "serde should reject typo 'chat_compltions'");
+    }
+
+    #[test]
+    fn test_api_protocol_serde_accepts_short_alias() {
+        let result: ApiProtocol = serde_json::from_str(r#""anthropic""#).unwrap();
+        assert_eq!(result, ApiProtocol::AnthropicMessages, "serde should accept 'anthropic' as alias");
+    }
+
+    #[test]
+    fn test_api_protocol_serde_custom_unknown() {
+        let result: ApiProtocol = serde_json::from_str(r#""acp""#).unwrap();
+        assert_eq!(result, ApiProtocol::Custom("acp".to_string()), "serde should accept truly unknown strings as Custom");
     }
 }

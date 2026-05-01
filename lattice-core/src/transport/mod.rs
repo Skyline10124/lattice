@@ -70,6 +70,9 @@ pub fn chat_response_to_stream(
                 id: tc.id.clone(),
                 arguments_delta: tc.function.arguments.clone(),
             });
+            events.push(crate::streaming::StreamEvent::ToolCallEnd {
+                id: tc.id.clone(),
+            });
         }
     }
 

@@ -191,22 +191,30 @@ impl Transport for ChatCompletionsTransport {
         &self,
         response: &serde_json::Value,
     ) -> Result<ChatResponse, TransportError> {
-        let content = response["choices"]
+        let choices = response["choices"]
             .as_array()
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice["message"]["content"].as_str())
+            .ok_or_else(|| TransportError::UnexpectedFormat(
+                "response missing 'choices' array".into()
+            ))?;
+
+        if choices.is_empty() {
+            return Err(TransportError::UnexpectedFormat(
+                "response 'choices' array is empty".into()
+            ));
+        }
+
+        let choice = &choices[0];
+
+        let content = choice["message"]["content"]
+            .as_str()
             .map(|s| s.to_string());
 
-        let reasoning_content = response["choices"]
-            .as_array()
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice["message"]["reasoning_content"].as_str())
+        let reasoning_content = choice["message"]["reasoning_content"]
+            .as_str()
             .map(|s| s.to_string());
 
-        let tool_calls = response["choices"]
+        let tool_calls = choice["message"]["tool_calls"]
             .as_array()
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice["message"]["tool_calls"].as_array())
             .map(|tcs| {
                 tcs.iter()
                     .filter_map(|tc| {
@@ -225,10 +233,15 @@ impl Transport for ChatCompletionsTransport {
             })
             .filter(|v| !v.is_empty());
 
-        let finish_reason = response["choices"]
-            .as_array()
-            .and_then(|choices| choices.first())
-            .and_then(|choice| choice["finish_reason"].as_str())
+        // Reject response with no meaningful content
+        if content.is_none() && tool_calls.is_none() {
+            return Err(TransportError::UnexpectedFormat(
+                "response has no content and no tool_calls".into()
+            ));
+        }
+
+        let finish_reason = choice["finish_reason"]
+            .as_str()
             .unwrap_or("stop")
             .to_string();
 
@@ -532,5 +545,24 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "user");
         assert_eq!(messages[0]["content"], "Hello!");
+    }
+
+    #[test]
+    fn test_denormalize_response_rejects_missing_choices() {
+        let transport = ChatCompletionsTransport::new();
+        let response = serde_json::json!({"model": "gpt-4o"});
+        let result = transport.denormalize_response(&response);
+        assert!(result.is_err(), "response without choices should return Err");
+    }
+
+    #[test]
+    fn test_denormalize_response_rejects_empty_content_no_tool_calls() {
+        let transport = ChatCompletionsTransport::new();
+        let response = serde_json::json!({
+            "choices": [{"message": {"content": null}, "finish_reason": "stop"}],
+            "model": "gpt-4o"
+        });
+        let result = transport.denormalize_response(&response);
+        assert!(result.is_err(), "response with no content and no tool_calls should return Err");
     }
 }
