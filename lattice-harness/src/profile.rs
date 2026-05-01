@@ -225,10 +225,16 @@ mod tests {
         shared_write = ["security-findings"]
         "#;
         let profile: AgentProfile = toml::from_str(toml_str).unwrap();
-        assert_eq!(profile.bus.subscribe, vec!["code-changes", "review-requests"]);
+        assert_eq!(
+            profile.bus.subscribe,
+            vec!["code-changes", "review-requests"]
+        );
         assert_eq!(profile.bus.publish, vec!["security-findings"]);
         assert_eq!(profile.bus.rpc, vec!["refactorer"]);
-        assert_eq!(profile.memory.shared_read, vec!["review-results", "refactor-plans"]);
+        assert_eq!(
+            profile.memory.shared_read,
+            vec!["review-results", "refactor-plans"]
+        );
         assert_eq!(profile.memory.shared_write, vec!["security-findings"]);
     }
 

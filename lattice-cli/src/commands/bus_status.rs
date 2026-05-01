@@ -70,10 +70,16 @@ pub fn run(json: bool, project_dir: Option<String>) -> Result<()> {
             println!("    RPC whitelist: {}", profile.bus.rpc.join(", "));
         }
         if !profile.memory.shared_read.is_empty() {
-            println!("    reads shared:  {}", profile.memory.shared_read.join(", "));
+            println!(
+                "    reads shared:  {}",
+                profile.memory.shared_read.join(", ")
+            );
         }
         if !profile.memory.shared_write.is_empty() {
-            println!("    writes shared: {}", profile.memory.shared_write.join(", "));
+            println!(
+                "    writes shared: {}",
+                profile.memory.shared_write.join(", ")
+            );
         }
     }
 
@@ -81,5 +87,7 @@ pub fn run(json: bool, project_dir: Option<String>) -> Result<()> {
 }
 
 fn project_dir_path(override_path: Option<String>) -> PathBuf {
-    override_path.map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    override_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }

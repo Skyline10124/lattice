@@ -1,4 +1,7 @@
-use crate::{ConversationTurn, EntryKind, Memory, MemoryEntry, MemoryError, SharedMemory, SharedPartition, PartitionAccess};
+use crate::{
+    ConversationTurn, EntryKind, Memory, MemoryEntry, MemoryError, PartitionAccess, SharedMemory,
+    SharedPartition,
+};
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
 use std::sync::Mutex;
@@ -237,9 +240,14 @@ impl SharedMemory for SqliteMemory {
                    FROM memory WHERE partition = ?1 AND (summary LIKE ?2 OR content LIKE ?2)
                    LIMIT ?3";
         let pattern = format!("%{}%", query);
-        let mut stmt = conn.prepare(sql).map_err(|e| MemoryError::StorageError(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| MemoryError::StorageError(e.to_string()))?;
         let rows = stmt
-            .query_map(params![partition_str, pattern, limit as i64], Self::row_to_entry)
+            .query_map(
+                params![partition_str, pattern, limit as i64],
+                Self::row_to_entry,
+            )
             .map_err(|e| MemoryError::StorageError(e.to_string()))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -404,10 +412,8 @@ mod tests {
     #[test]
     fn test_shared_partition_all_access() {
         let mem = SqliteMemory::open(":memory:").unwrap();
-        let super_access = PartitionAccess::new(
-            vec![SharedPartition::All],
-            vec![SharedPartition::All],
-        );
+        let super_access =
+            PartitionAccess::new(vec![SharedPartition::All], vec![SharedPartition::All]);
 
         futures::executor::block_on(mem.save_shared(
             MemoryEntry {

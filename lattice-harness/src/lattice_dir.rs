@@ -21,10 +21,18 @@ pub struct BusToml {
     pub max_concurrent_calls: usize,
 }
 
-fn default_timeout_rpc() -> u64 { 30 }
-fn default_delivery_policy() -> String { "at_most_once".into() }
-fn default_subscriber_buffer() -> usize { 1024 }
-fn default_max_concurrent_calls() -> usize { 1 }
+fn default_timeout_rpc() -> u64 {
+    30
+}
+fn default_delivery_policy() -> String {
+    "at_most_once".into()
+}
+fn default_subscriber_buffer() -> usize {
+    1024
+}
+fn default_max_concurrent_calls() -> usize {
+    1
+}
 
 impl Default for BusToml {
     fn default() -> Self {
@@ -180,7 +188,10 @@ mod tests {
         let config = BusToml::default();
         let bus_config = config.to_bus_config();
         assert_eq!(bus_config.timeout_rpc, Duration::from_secs(30));
-        assert_eq!(bus_config.delivery_policy, lattice_bus::DeliveryPolicy::AtMostOnce);
+        assert_eq!(
+            bus_config.delivery_policy,
+            lattice_bus::DeliveryPolicy::AtMostOnce
+        );
         assert_eq!(bus_config.subscriber_buffer, 1024);
     }
 
@@ -229,6 +240,9 @@ mod tests {
         let ld = LatticeDir::discover(tmp.path()).unwrap();
         assert_eq!(ld.bus_config.timeout_rpc_secs, 60);
         assert_eq!(ld.bus_config.max_concurrent_calls, 8);
-        assert_eq!(ld.shared_db_path(), lattice.join("memory").join("shared.db"));
+        assert_eq!(
+            ld.shared_db_path(),
+            lattice.join("memory").join("shared.db")
+        );
     }
 }

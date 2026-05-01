@@ -169,7 +169,10 @@ pub trait Bus: Send + Sync {
 // ---------------------------------------------------------------------------
 
 pub type BusHandlerFn = Arc<
-    dyn Fn(BusEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
+    dyn Fn(
+            BusEvent,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
         + Send
         + Sync,
 >;
@@ -181,7 +184,10 @@ impl BusHandler {
     /// Create a BusHandlerFn from an async function.
     /// Usage: `BusHandler::from_async(|event| async move { ... })`
     pub fn from_async(
-        f: impl Fn(BusEvent) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
+        f: impl Fn(
+                BusEvent,
+            )
+                -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
             + Send
             + Sync
             + 'static,
@@ -191,7 +197,9 @@ impl BusHandler {
 }
 
 pub fn bus_handler(
-    f: impl Fn(BusEvent)
+    f: impl Fn(
+            BusEvent,
+        )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), BusError>> + Send>>
         + Send
         + Sync
@@ -217,7 +225,9 @@ macro_rules! bus_handler {
 /// Real agents (harness) will replace this with LLM-backed processing.
 pub async fn echo_agent_loop(mut rx: mpsc::Receiver<BusRequest>) {
     while let Some(req) = rx.recv().await {
-        let resp = BusResponse { payload: req.payload.clone() };
+        let resp = BusResponse {
+            payload: req.payload.clone(),
+        };
         let _ = req.reply_to.send(Ok(resp));
     }
 }
@@ -255,7 +265,10 @@ impl Bus for InMemoryBus {
     async fn register(&self, agent: AgentDescriptor) -> Result<Registration, BusError> {
         let id = agent.id.clone();
         let (request_tx, request_rx) = mpsc::channel(self.config.max_concurrent_calls);
-        let entry = AgentEntry { descriptor: agent, request_tx };
+        let entry = AgentEntry {
+            descriptor: agent,
+            request_tx,
+        };
         self.agents.write().await.insert(id.clone(), entry);
         Ok(Registration { id, request_rx })
     }
@@ -293,7 +306,9 @@ impl Bus for InMemoryBus {
             for handler in handlers {
                 let h = handler.clone();
                 let evt = event.clone();
-                tokio::spawn(async move { h(evt).await.ok(); });
+                tokio::spawn(async move {
+                    h(evt).await.ok();
+                });
             }
         }
         Ok(())
@@ -305,7 +320,8 @@ impl Bus for InMemoryBus {
         target: &AgentId,
         request: serde_json::Value,
     ) -> Result<BusResponse, BusError> {
-        self.call_with_timeout(caller, target, request, self.config.timeout_rpc).await
+        self.call_with_timeout(caller, target, request, self.config.timeout_rpc)
+            .await
     }
 
     async fn call_with_timeout(
@@ -317,16 +333,23 @@ impl Bus for InMemoryBus {
     ) -> Result<BusResponse, BusError> {
         let agents = self.agents.read().await;
 
-        let caller_e = agents.get(caller).ok_or(BusError::AgentNotFound(caller.clone()))?;
+        let caller_e = agents
+            .get(caller)
+            .ok_or(BusError::AgentNotFound(caller.clone()))?;
         if !caller_e.descriptor.bus_config.rpc.contains(target) {
             return Err(BusError::Unauthorized(target.clone()));
         }
 
-        let target_e = agents.get(target).ok_or(BusError::AgentNotFound(target.clone()))?;
+        let target_e = agents
+            .get(target)
+            .ok_or(BusError::AgentNotFound(target.clone()))?;
         let (reply_tx, reply_rx) = oneshot::channel();
         target_e
             .request_tx
-            .send(BusRequest { payload: request, reply_to: reply_tx })
+            .send(BusRequest {
+                payload: request,
+                reply_to: reply_tx,
+            })
             .await
             .map_err(|_| BusError::ChannelClosed)?;
 
@@ -358,12 +381,16 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_discover() {
         let bus = InMemoryBus::with_defaults();
-        let id = register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("reviewer"),
-            name: "Code Reviewer".into(),
-            capabilities: vec!["code-review".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await;
+        let id = register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("reviewer"),
+                name: "Code Reviewer".into(),
+                capabilities: vec!["code-review".into()],
+                bus_config: AgentBusConfig::default(),
+            },
+        )
+        .await;
         assert_eq!(id, AgentId::new("reviewer"));
 
         let found = bus.discover("code-review").await;
@@ -380,12 +407,16 @@ mod tests {
     #[tokio::test]
     async fn test_deregister() {
         let bus = InMemoryBus::with_defaults();
-        let id = register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("temp"),
-            name: "Temp".into(),
-            capabilities: vec!["temp".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await;
+        let id = register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("temp"),
+                name: "Temp".into(),
+                capabilities: vec!["temp".into()],
+                bus_config: AgentBusConfig::default(),
+            },
+        )
+        .await;
         bus.deregister(&id).await.unwrap();
         assert!(bus.discover("temp").await.is_empty());
     }
@@ -401,28 +432,39 @@ mod tests {
     async fn test_rpc_call_success() {
         let bus = InMemoryBus::with_defaults();
 
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("reviewer"),
-            name: "Reviewer".into(),
-            capabilities: vec!["code-review".into()],
-            bus_config: AgentBusConfig {
-                rpc: vec![AgentId::new("refactorer")],
-                ..Default::default()
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("reviewer"),
+                name: "Reviewer".into(),
+                capabilities: vec!["code-review".into()],
+                bus_config: AgentBusConfig {
+                    rpc: vec![AgentId::new("refactorer")],
+                    ..Default::default()
+                },
             },
-        }).await;
+        )
+        .await;
 
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("refactorer"),
-            name: "Refactorer".into(),
-            capabilities: vec!["refactor".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await;
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("refactorer"),
+                name: "Refactorer".into(),
+                capabilities: vec!["refactor".into()],
+                bus_config: AgentBusConfig::default(),
+            },
+        )
+        .await;
 
-        let resp = bus.call(
-            &AgentId::new("reviewer"),
-            &AgentId::new("refactorer"),
-            serde_json::json!({"code": "fn main() {}"}),
-        ).await.unwrap();
+        let resp = bus
+            .call(
+                &AgentId::new("reviewer"),
+                &AgentId::new("refactorer"),
+                serde_json::json!({"code": "fn main() {}"}),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(resp.payload["code"], "fn main() {}");
     }
@@ -431,45 +473,75 @@ mod tests {
     async fn test_rpc_unauthorized() {
         let bus = InMemoryBus::with_defaults();
 
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("reviewer"),
-            name: "Reviewer".into(),
-            capabilities: vec!["code-review".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await;
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("reviewer"),
+                name: "Reviewer".into(),
+                capabilities: vec!["code-review".into()],
+                bus_config: AgentBusConfig::default(),
+            },
+        )
+        .await;
 
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("refactorer"),
-            name: "Refactorer".into(),
-            capabilities: vec!["refactor".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await;
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("refactorer"),
+                name: "Refactorer".into(),
+                capabilities: vec!["refactor".into()],
+                bus_config: AgentBusConfig::default(),
+            },
+        )
+        .await;
 
-        let r = bus.call(&AgentId::new("reviewer"), &AgentId::new("refactorer"), serde_json::json!({})).await;
+        let r = bus
+            .call(
+                &AgentId::new("reviewer"),
+                &AgentId::new("refactorer"),
+                serde_json::json!({}),
+            )
+            .await;
         assert!(matches!(r, Err(BusError::Unauthorized(_))));
     }
 
     #[tokio::test]
     async fn test_rpc_target_not_found() {
         let bus = InMemoryBus::with_defaults();
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("reviewer"),
-            name: "Reviewer".into(),
-            capabilities: vec!["code-review".into()],
-            bus_config: AgentBusConfig {
-                rpc: vec![AgentId::new("ghost")],
-                ..Default::default()
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("reviewer"),
+                name: "Reviewer".into(),
+                capabilities: vec!["code-review".into()],
+                bus_config: AgentBusConfig {
+                    rpc: vec![AgentId::new("ghost")],
+                    ..Default::default()
+                },
             },
-        }).await;
+        )
+        .await;
 
-        let r = bus.call(&AgentId::new("reviewer"), &AgentId::new("ghost"), serde_json::json!({})).await;
+        let r = bus
+            .call(
+                &AgentId::new("reviewer"),
+                &AgentId::new("ghost"),
+                serde_json::json!({}),
+            )
+            .await;
         assert!(matches!(r, Err(BusError::AgentNotFound(_))));
     }
 
     #[tokio::test]
     async fn test_rpc_caller_not_found() {
         let bus = InMemoryBus::with_defaults();
-        let r = bus.call(&AgentId::new("ghost"), &AgentId::new("refactorer"), serde_json::json!({})).await;
+        let r = bus
+            .call(
+                &AgentId::new("ghost"),
+                &AgentId::new("refactorer"),
+                serde_json::json!({}),
+            )
+            .await;
         assert!(matches!(r, Err(BusError::AgentNotFound(_))));
     }
 
@@ -480,33 +552,45 @@ mod tests {
             ..Default::default()
         });
 
-        register_echo(&bus, AgentDescriptor {
-            id: AgentId::new("caller"),
-            name: "Caller".into(),
-            capabilities: vec!["call".into()],
-            bus_config: AgentBusConfig {
-                rpc: vec![AgentId::new("slow")],
-                ..Default::default()
+        register_echo(
+            &bus,
+            AgentDescriptor {
+                id: AgentId::new("caller"),
+                name: "Caller".into(),
+                capabilities: vec!["call".into()],
+                bus_config: AgentBusConfig {
+                    rpc: vec![AgentId::new("slow")],
+                    ..Default::default()
+                },
             },
-        }).await;
+        )
+        .await;
 
         // Register slow agent that never responds.
-        let reg = bus.register(AgentDescriptor {
-            id: AgentId::new("slow"),
-            name: "Slow".into(),
-            capabilities: vec!["slow".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await.unwrap();
+        let reg = bus
+            .register(AgentDescriptor {
+                id: AgentId::new("slow"),
+                name: "Slow".into(),
+                capabilities: vec!["slow".into()],
+                bus_config: AgentBusConfig::default(),
+            })
+            .await
+            .unwrap();
         // Don't spawn echo loop — request_rx drops, channel closes.
         drop(reg.request_rx);
 
-        let r = bus.call_with_timeout(
-            &AgentId::new("caller"),
-            &AgentId::new("slow"),
-            serde_json::json!({}),
-            Duration::from_millis(50),
-        ).await;
-        assert!(matches!(r, Err(BusError::ChannelClosed | BusError::Timeout(_))));
+        let r = bus
+            .call_with_timeout(
+                &AgentId::new("caller"),
+                &AgentId::new("slow"),
+                serde_json::json!({}),
+                Duration::from_millis(50),
+            )
+            .await;
+        assert!(matches!(
+            r,
+            Err(BusError::ChannelClosed | BusError::Timeout(_))
+        ));
     }
 
     #[tokio::test]
@@ -515,16 +599,29 @@ mod tests {
         let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let rc = received.clone();
 
-        bus.subscribe("code-changes", bus_handler(move |event: BusEvent| {
-            let r = rc.clone();
-            Box::pin(async move { r.lock().await.push(event.payload); Ok(()) })
-        })).await.unwrap();
+        bus.subscribe(
+            "code-changes",
+            bus_handler(move |event: BusEvent| {
+                let r = rc.clone();
+                Box::pin(async move {
+                    r.lock().await.push(event.payload);
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
 
-        bus.publish("code-changes", BusEvent {
-            topic: "code-changes".into(),
-            source: AgentId::new("watcher"),
-            payload: serde_json::json!({"file": "main.rs"}),
-        }).await.unwrap();
+        bus.publish(
+            "code-changes",
+            BusEvent {
+                topic: "code-changes".into(),
+                source: AgentId::new("watcher"),
+                payload: serde_json::json!({"file": "main.rs"}),
+            },
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let items = received.lock().await;
@@ -535,11 +632,16 @@ mod tests {
     #[tokio::test]
     async fn test_pub_sub_no_subscribers() {
         let bus = InMemoryBus::with_defaults();
-        let r = bus.publish("orphan-topic", BusEvent {
-            topic: "orphan-topic".into(),
-            source: AgentId::new("sender"),
-            payload: serde_json::json!({}),
-        }).await;
+        let r = bus
+            .publish(
+                "orphan-topic",
+                BusEvent {
+                    topic: "orphan-topic".into(),
+                    source: AgentId::new("sender"),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await;
         assert!(r.is_ok());
     }
 
@@ -555,12 +657,15 @@ mod tests {
     #[tokio::test]
     async fn test_registration_yields_request_rx() {
         let bus = InMemoryBus::with_defaults();
-        let reg = bus.register(AgentDescriptor {
-            id: AgentId::new("agent-a"),
-            name: "A".into(),
-            capabilities: vec!["test".into()],
-            bus_config: AgentBusConfig::default(),
-        }).await.unwrap();
+        let reg = bus
+            .register(AgentDescriptor {
+                id: AgentId::new("agent-a"),
+                name: "A".into(),
+                capabilities: vec!["test".into()],
+                bus_config: AgentBusConfig::default(),
+            })
+            .await
+            .unwrap();
 
         assert_eq!(reg.id, AgentId::new("agent-a"));
         // request_rx is usable — caller can spawn their own agent loop.
@@ -575,15 +680,23 @@ mod tests {
 
         let handler = BusHandler::from_async(move |event: BusEvent| {
             let r = rc.clone();
-            Box::pin(async move { r.lock().await.push(event.topic); Ok(()) })
+            Box::pin(async move {
+                r.lock().await.push(event.topic);
+                Ok(())
+            })
         });
 
         bus.subscribe("test-topic", handler).await.unwrap();
-        bus.publish("test-topic", BusEvent {
-            topic: "test-topic".into(),
-            source: AgentId::new("sender"),
-            payload: serde_json::json!({}),
-        }).await.unwrap();
+        bus.publish(
+            "test-topic",
+            BusEvent {
+                topic: "test-topic".into(),
+                source: AgentId::new("sender"),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let items = received.lock().await;
@@ -599,15 +712,23 @@ mod tests {
 
         let handler = bus_handler!(move |event: BusEvent| {
             let r = rc.clone();
-            Box::pin(async move { r.lock().await.push(event.source.to_string()); Ok(()) })
+            Box::pin(async move {
+                r.lock().await.push(event.source.to_string());
+                Ok(())
+            })
         });
 
         bus.subscribe("macro-topic", handler).await.unwrap();
-        bus.publish("macro-topic", BusEvent {
-            topic: "macro-topic".into(),
-            source: AgentId::new("macro-sender"),
-            payload: serde_json::json!({}),
-        }).await.unwrap();
+        bus.publish(
+            "macro-topic",
+            BusEvent {
+                topic: "macro-topic".into(),
+                source: AgentId::new("macro-sender"),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         let items = received.lock().await;

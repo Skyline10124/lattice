@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use lattice_agent::Agent;
-use lattice_bus::{AgentDescriptor, AgentId, AgentBusConfig, Bus, BusEvent, BusHandler, BusRequest, BusResponse, BusError};
-use lattice_memory::{Memory, SharedMemory, SharedPartition, PartitionAccess};
+use lattice_bus::{
+    AgentBusConfig, AgentDescriptor, AgentId, Bus, BusError, BusEvent, BusHandler, BusRequest,
+    BusResponse,
+};
+use lattice_memory::{Memory, PartitionAccess, SharedMemory, SharedPartition};
 use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
@@ -79,7 +82,13 @@ impl MicroAgent {
         shared_memory: Option<Arc<dyn SharedMemory>>,
     ) -> Self {
         let partition_access = partition_access_from_profile(&profile.memory);
-        Self { profile, bus, memory, shared_memory, partition_access }
+        Self {
+            profile,
+            bus,
+            memory,
+            shared_memory,
+            partition_access,
+        }
     }
 
     /// Register on Bus, resolve model, create Agent, spawn agent loop.
@@ -139,7 +148,8 @@ impl MicroAgent {
                             content: event.payload.to_string(),
                             tags: vec![event.topic.clone()],
                             created_at: now_secs.to_string(),
-                        }).await;
+                        })
+                        .await;
                     }
                     Ok(())
                 })
@@ -184,9 +194,14 @@ async fn micro_agent_loop(
         let content = extract_content(&events);
         let output_json = parse_output(&content);
 
-        let resp = BusResponse { payload: output_json };
+        let resp = BusResponse {
+            payload: output_json,
+        };
         if req.reply_to.send(Ok(resp)).is_err() {
-            warn!("MicroAgent '{}': reply channel closed, caller timed out", agent_name);
+            warn!(
+                "MicroAgent '{}': reply channel closed, caller timed out",
+                agent_name
+            );
         }
 
         // Save to private memory
@@ -224,12 +239,18 @@ async fn micro_agent_loop(
                     tags: ctx.profile.agent.tags.clone(),
                     created_at: now_secs.to_string(),
                 };
-                if let Err(e) = smem.save_shared(entry, partition, &ctx.partition_access).await {
-                    warn!("MicroAgent '{}': shared memory write failed: {:?}", agent_name, e);
+                if let Err(e) = smem
+                    .save_shared(entry, partition, &ctx.partition_access)
+                    .await
+                {
+                    warn!(
+                        "MicroAgent '{}': shared memory write failed: {:?}",
+                        agent_name, e
+                    );
                 }
             }
         }
-    // Publish output to configured topics
+        // Publish output to configured topics
         for topic in &ctx.profile.bus.publish {
             let event = BusEvent {
                 topic: topic.clone(),
@@ -237,7 +258,10 @@ async fn micro_agent_loop(
                 payload: serde_json::json!({"output": content.clone()}),
             };
             if let Err(e) = ctx.bus.publish(topic, event).await {
-                warn!("MicroAgent '{}': publish to '{}' failed: {:?}", agent_name, topic, e);
+                warn!(
+                    "MicroAgent '{}': publish to '{}' failed: {:?}",
+                    agent_name, topic, e
+                );
             }
         }
     }
@@ -319,6 +343,5 @@ fn parse_output(content: &str) -> serde_json::Value {
         trimmed.to_string()
     };
 
-    serde_json::from_str(&json_str)
-        .unwrap_or_else(|_| serde_json::json!({"content": content}))
+    serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!({"content": content}))
 }

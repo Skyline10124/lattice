@@ -100,11 +100,15 @@ impl PartitionAccess {
     }
 
     fn can_read(&self, partition: &SharedPartition) -> bool {
-        self.read.iter().any(|p| *p == SharedPartition::All || p == partition)
+        self.read
+            .iter()
+            .any(|p| *p == SharedPartition::All || p == partition)
     }
 
     fn can_write(&self, partition: &SharedPartition) -> bool {
-        self.write.iter().any(|p| *p == SharedPartition::All || p == partition)
+        self.write
+            .iter()
+            .any(|p| *p == SharedPartition::All || p == partition)
     }
 }
 
