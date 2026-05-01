@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -94,13 +96,13 @@ pub trait SseParser: Send + Sync {
 /// field from subsequent delta chunks after the first one.
 #[derive(Default)]
 pub struct OpenAiSseParser {
-    tool_call_ids: HashMap<u32, String>,
+    tool_call_ids: IndexMap<u32, String>,
 }
 
 impl OpenAiSseParser {
     pub fn new() -> Self {
         Self {
-            tool_call_ids: HashMap::new(),
+            tool_call_ids: IndexMap::new(),
         }
     }
 }
@@ -179,7 +181,7 @@ impl SseParser for OpenAiSseParser {
 
                 if let Some(reason) = finish_reason {
                     if !reason.is_empty() {
-                        for id in self.tool_call_ids.drain().map(|(_, id)| id) {
+                        for id in self.tool_call_ids.drain(..).map(|(_, id)| id) {
                             events.push(StreamEvent::ToolCallEnd { id });
                         }
 
@@ -1141,16 +1143,19 @@ mod tests {
                 arguments_delta: "arg_b1".into()
             }
         );
-        // Ends can be in any order due to HashMap iteration
-        let ends: Vec<_> = all[4..6]
-            .iter()
-            .map(|e| match e {
-                StreamEvent::ToolCallEnd { id } => id.as_str(),
-                _ => panic!("expected ToolCallEnd"),
-            })
-            .collect();
-        assert!(ends.contains(&"call_a"));
-        assert!(ends.contains(&"call_b"));
+        // ToolCallEnd events preserve insertion order (IndexMap guarantees this)
+        assert_eq!(
+            all[4],
+            StreamEvent::ToolCallEnd {
+                id: "call_a".into()
+            }
+        );
+        assert_eq!(
+            all[5],
+            StreamEvent::ToolCallEnd {
+                id: "call_b".into()
+            }
+        );
         assert!(matches!(all[6], StreamEvent::Done { .. }));
     }
 
