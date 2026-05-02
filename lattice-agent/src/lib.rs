@@ -8,6 +8,7 @@ pub mod tools;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use async_trait::async_trait;
 use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::StreamEvent;
 use lattice_core::types::ToolDefinition;
@@ -32,8 +33,9 @@ static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 });
 
 /// Executes a tool call and returns the result string.
+#[async_trait]
 pub trait ToolExecutor: Send + Sync {
-    fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
+    async fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
 }
 
 /// Max retries for mid-stream errors in Agent::run() and run_async().
