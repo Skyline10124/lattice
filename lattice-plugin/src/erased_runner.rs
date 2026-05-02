@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use lattice_core::retry::RetryPolicy;
 
 use crate::erased::ErasedPlugin;
@@ -5,6 +7,13 @@ use crate::{
     extract_confidence, save_memory_entries, Action, PluginConfig, PluginError, PluginHooks,
     RunResult,
 };
+
+static AGENT_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("agent runtime")
+});
 
 /// Shared PluginRunner run loop used by both typed PluginRunner and
 /// type-erased ErasedPluginRunner.
@@ -35,8 +44,8 @@ pub fn run_plugin_loop(
 
         // L1 retry (chat_with_retry) handled inside Agent::run()
         // L2 retry (behavior loop) handled here
-        let raw = agent
-            .send_message_with_tools(&prompt)
+        let raw = AGENT_RT
+            .block_on(agent.send_message_with_tools(&prompt))
             .map_err(|e| PluginError::Other(e.to_string()))?;
 
         match plugin.parse_output_json(&raw) {
@@ -74,7 +83,7 @@ pub fn run_plugin_loop(
                     Action::Retry => {
                         attempt += 1;
                         if let Some(p) = retry_policy {
-                            std::thread::sleep(p.jittered_backoff(attempt));
+                            AGENT_RT.block_on(tokio::time::sleep(p.jittered_backoff(attempt)));
                         }
                     }
                 }
@@ -87,7 +96,7 @@ pub fn run_plugin_loop(
                     crate::ErrorAction::Retry => {
                         attempt += 1;
                         if let Some(p) = retry_policy {
-                            std::thread::sleep(p.jittered_backoff(attempt));
+                            AGENT_RT.block_on(tokio::time::sleep(p.jittered_backoff(attempt)));
                         }
                     }
                     crate::ErrorAction::Abort => return Err(e),

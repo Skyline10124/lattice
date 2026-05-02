@@ -46,15 +46,16 @@ const MAX_TOOL_TURNS: u32 = 10;
 
 /// Minimal interface for an LLM-calling agent.
 /// Used by PluginRunner to call any agent that implements send + system_prompt.
+#[async_trait(?Send)]
 pub trait PluginAgent {
-    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+    async fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
     /// Send a user message and automatically handle tool calls via Agent::run().
-    fn send_message_with_tools(
+    async fn send_message_with_tools(
         &mut self,
         message: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
         // Default: delegate to send() for backward compat with non-Agent impls
-        self.send(message)
+        self.send(message).await
     }
     fn set_system_prompt(&mut self, _prompt: &str) {}
     fn token_usage(&self) -> u64 {
@@ -558,12 +559,13 @@ struct ToolCallAccum {
     arguments: String,
 }
 
+#[async_trait(?Send)]
 impl PluginAgent for Agent {
     fn set_system_prompt(&mut self, prompt: &str) {
         self.state.push_system_message(prompt);
     }
 
-    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
+    async fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
         let events = self.send_message(message);
         let mut content = String::new();
         let mut has_error = false;
@@ -581,7 +583,7 @@ impl PluginAgent for Agent {
         }
     }
 
-    fn send_message_with_tools(
+    async fn send_message_with_tools(
         &mut self,
         message: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
