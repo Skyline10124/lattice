@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 use lattice_agent::memory::{EntryKind, Memory};
 use lattice_agent::Agent;
@@ -10,11 +9,6 @@ use crate::profile::AgentProfile;
 // ---------------------------------------------------------------------------
 // AgentRunner — wires AgentProfile + Agent
 // ---------------------------------------------------------------------------
-
-/// Shared tokio runtime for async Memory operations.
-pub(crate) static MEMORY_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new().expect("Failed to create memory tokio runtime")
-});
 
 /// Max retries for JSON schema validation failures.
 const MAX_SCHEMA_RETRIES: u32 = 2;
@@ -49,7 +43,7 @@ impl AgentRunner {
     ///
     /// Handoff routing is NOT done here — the caller (Pipeline) evaluates
     /// `handoff_rules` against the returned output to determine the next agent.
-    pub fn run(
+    pub async fn run(
         &mut self,
         input: &str,
         max_turns: u32,
@@ -74,7 +68,7 @@ impl AgentRunner {
         });
 
         let enriched_input = self.enrich_input(input);
-        let mut output = self.run_once(&enriched_input, max_turns)?;
+        let mut output = self.run_once(&enriched_input, max_turns).await?;
 
         // JSON Schema validation + retry loop
         if let Some((ref schema_json, ref validator)) = schema {
@@ -109,7 +103,7 @@ impl AgentRunner {
                     serde_json::to_string_pretty(schema_json).unwrap_or_default()
                 );
 
-                output = self.run_once(&correction_hint, max_turns)?;
+                output = self.run_once(&correction_hint, max_turns).await?;
             }
         }
 
@@ -148,12 +142,12 @@ impl AgentRunner {
     }
 
     /// Run the agent once and parse the output as JSON.
-    fn run_once(
+    async fn run_once(
         &mut self,
         input: &str,
         max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let events = self.agent.run(input, max_turns);
+        let events = self.agent.run(input, max_turns).await;
         let mut content = String::new();
         for event in &events {
             if let lattice_agent::LoopEvent::Token { text } = event {
