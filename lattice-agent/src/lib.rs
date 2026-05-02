@@ -131,12 +131,12 @@ impl Agent {
 
     pub fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
-        self.run_chat()
+        run_async(self.run_chat())
     }
 
     pub async fn send_message_async(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
-        self.run_chat_async().await
+        self.run_chat().await
     }
 
     pub fn submit_tools(
@@ -147,7 +147,7 @@ impl Agent {
         for (call_id, result) in &results {
             self.state.push_tool_result(call_id, result, max_size);
         }
-        self.run_chat()
+        run_async(self.run_chat())
     }
 
     pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
@@ -162,7 +162,7 @@ impl Agent {
             };
             self.state.trim_messages(context_len, 15);
 
-            let mut events = self.run_chat();
+            let mut events = run_async(self.run_chat());
 
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
@@ -172,7 +172,7 @@ impl Agent {
                 }
                 self.state.pop_last_assistant_message();
                 retry_count += 1;
-                events = self.run_chat();
+                events = run_async(self.run_chat());
             }
 
             let mut tool_calls = Vec::new();
@@ -248,7 +248,7 @@ impl Agent {
             };
             self.state.trim_messages(context_len, 15);
 
-            let mut events = self.run_chat_async().await;
+            let mut events = self.run_chat().await;
 
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
@@ -258,7 +258,7 @@ impl Agent {
                 }
                 self.state.pop_last_assistant_message();
                 retry_count += 1;
-                events = self.run_chat_async().await;
+                events = self.run_chat().await;
             }
 
             let mut tool_calls = Vec::new();
@@ -287,107 +287,10 @@ impl Agent {
         all_events
     }
 
-    fn run_chat(&mut self) -> Vec<LoopEvent> {
+    async fn run_chat(&mut self) -> Vec<LoopEvent> {
         use futures::StreamExt;
 
-        let stream_result = self.chat_with_retry();
-
-        let mut stream = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                return vec![LoopEvent::Error {
-                    message: e.to_string(),
-                }]
-            }
-        };
-
-        let mut events = Vec::new();
-        let mut content_buf = String::new();
-        let mut reasoning_buf = String::new();
-        let mut tool_builders: HashMap<String, ToolCallAccum> = HashMap::new();
-
-        run_async(async {
-            while let Some(event) = stream.next().await {
-                match event {
-                    StreamEvent::Token { content: c } => {
-                        content_buf.push_str(&c);
-                        events.push(LoopEvent::Token { text: c });
-                    }
-                    StreamEvent::Reasoning { content: r } => {
-                        reasoning_buf.push_str(&r);
-                        events.push(LoopEvent::Reasoning { text: r });
-                    }
-                    StreamEvent::ToolCallStart { id, name } => {
-                        tool_builders.insert(
-                            id,
-                            ToolCallAccum {
-                                name,
-                                arguments: String::new(),
-                            },
-                        );
-                    }
-                    StreamEvent::ToolCallDelta {
-                        id,
-                        arguments_delta,
-                    } => {
-                        if let Some(tc) = tool_builders.get_mut(&id) {
-                            tc.arguments.push_str(&arguments_delta);
-                        }
-                    }
-                    StreamEvent::ToolCallEnd { .. } => {}
-                    StreamEvent::Done { usage, .. } => {
-                        if let Some(ref u) = usage {
-                            self.state.add_token_usage(u.total_tokens as u64);
-                        }
-                        if !tool_builders.is_empty() {
-                            let calls: Vec<lattice_core::types::ToolCall> = tool_builders
-                                .iter()
-                                .map(|(id, tc)| lattice_core::types::ToolCall {
-                                    id: id.clone(),
-                                    function: lattice_core::types::FunctionCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
-                                })
-                                .collect();
-                            events.push(LoopEvent::ToolCallRequired { calls });
-                        }
-                        events.push(LoopEvent::Done { usage });
-                    }
-                    StreamEvent::Error { message } => {
-                        events.push(LoopEvent::Error { message });
-                    }
-                }
-            }
-        });
-
-        let tool_calls = if tool_builders.is_empty() {
-            None
-        } else {
-            Some(
-                tool_builders
-                    .into_iter()
-                    .map(|(id, tc)| lattice_core::types::ToolCall {
-                        id,
-                        function: lattice_core::types::FunctionCall {
-                            name: tc.name,
-                            arguments: tc.arguments,
-                        },
-                    })
-                    .collect(),
-            )
-        };
-
-        self.state
-            .push_assistant_message(&content_buf, &reasoning_buf, tool_calls);
-
-        events
-    }
-
-    async fn run_chat_async(&mut self) -> Vec<LoopEvent> {
-        use futures::StreamExt;
-
-        let mut stream = match self.chat_with_retry_async().await {
+        let mut stream = match self.chat_with_retry().await {
             Ok(s) => s,
             Err(e) => {
                 return vec![LoopEvent::Error {
@@ -477,39 +380,7 @@ impl Agent {
         events
     }
 
-    fn chat_with_retry(
-        &self,
-    ) -> Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
-        lattice_core::LatticeError,
-    > {
-        use lattice_core::errors::ErrorClassifier;
-        let mut attempt = 0u32;
-
-        loop {
-            let result = run_async(lattice_core::chat(
-                &self.state.resolved,
-                &self.state.messages,
-                &self.tools,
-            ));
-
-            match result {
-                Ok(stream) => return Ok(stream),
-                Err(ref e) => {
-                    if attempt >= self.retry.max_retries || !ErrorClassifier::is_retryable(e) {
-                        return Err(e.clone());
-                    }
-                    let delay = self.retry.jittered_backoff(attempt);
-                    run_async(async {
-                        tokio::time::sleep(delay).await;
-                    });
-                    attempt += 1;
-                }
-            }
-        }
-    }
-
-    async fn chat_with_retry_async(
+    async fn chat_with_retry(
         &self,
     ) -> Result<
         std::pin::Pin<Box<dyn futures::Stream<Item = StreamEvent> + Send>>,
