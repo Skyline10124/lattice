@@ -3,6 +3,7 @@ pub mod sandbox;
 pub mod state;
 pub mod tool_definitions;
 pub mod tools;
+pub mod tool_error;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
