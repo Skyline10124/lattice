@@ -4,9 +4,10 @@
 //! live in [`crate::tool_definitions`]. This module provides the execution
 //! layer that runs those tools when the model requests them.
 
-use lattice_core::types::ToolCall;
+use async_trait::async_trait;
 
 use crate::sandbox::SandboxConfig;
+use crate::tool_error::ToolError;
 use crate::ToolExecutor;
 
 /// Executes tools using the local filesystem and shell.
@@ -38,8 +39,9 @@ impl DefaultToolExecutor {
     }
 }
 
+#[async_trait]
 impl ToolExecutor for DefaultToolExecutor {
-    fn execute(&self, call: &ToolCall) -> String {
+    async fn execute(&self, call: &lattice_core::types::ToolCall) -> String {
         let args: serde_json::Value =
             serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
 
@@ -49,7 +51,7 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_read(path) {
                     return e;
                 }
-                match std::fs::metadata(path) {
+                match tokio::fs::metadata(path).await {
                     Ok(meta) if meta.len() > self.sandbox.max_read_size as u64 => {
                         return format!(
                             "Sandbox: file size {} exceeds max_read_size {}",
@@ -57,10 +59,24 @@ impl ToolExecutor for DefaultToolExecutor {
                             self.sandbox.max_read_size
                         );
                     }
-                    Err(e) => return format!("Error accessing {}: {}", path, e),
+                    Err(e) => {
+                        return ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    }
                     _ => {}
                 }
-                std::fs::read_to_string(path).unwrap_or_else(|e| format!("Error: {}", e))
+                tokio::fs::read_to_string(path)
+                    .await
+                    .unwrap_or_else(|e| {
+                        ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    })
             }
             "grep" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -91,15 +107,19 @@ impl ToolExecutor for DefaultToolExecutor {
                     return e;
                 }
                 if content.len() > self.sandbox.max_write_size {
-                    return format!(
-                        "Sandbox: content size {} exceeds max_write_size {}",
-                        content.len(),
-                        self.sandbox.max_write_size
-                    );
+                    return ToolError::SizeLimit {
+                        limit: self.sandbox.max_write_size,
+                        actual: content.len(),
+                    }
+                    .to_string();
                 }
-                match std::fs::write(&abs, content) {
+                match tokio::fs::write(&abs, content).await {
                     Ok(_) => format!("Wrote {} bytes to {}", content.len(), path),
-                    Err(e) => format!("Error writing {}: {}", path, e),
+                    Err(e) => ToolError::IoError {
+                        path: abs,
+                        error: e,
+                    }
+                    .to_string(),
                 }
             }
             "list_directory" => {
@@ -107,25 +127,41 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_read(path) {
                     return e;
                 }
-                match std::fs::read_dir(path) {
-                    Ok(entries) => {
-                        let mut files: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-                        files.sort_by_key(|e| e.file_name());
-                        files
-                            .iter()
-                            .map(|e| {
-                                let ty = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let mut entries = match tokio::fs::read_dir(path).await {
+                    Ok(dir) => dir,
+                    Err(e) => {
+                        return ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    }
+                };
+                let mut files = Vec::new();
+                loop {
+                    match entries.next_entry().await {
+                        Ok(Some(entry)) => {
+                            let ty =
+                                if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
                                     "DIR"
                                 } else {
                                     "FILE"
                                 };
-                                format!("{}  {}", ty, e.file_name().to_string_lossy())
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
+                            files.push(format!(
+                                "{}  {}",
+                                ty,
+                                entry.file_name().to_string_lossy()
+                            ));
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            // Log but continue on individual entry errors
+                            files.push(format!("Error reading entry: {}", e));
+                        }
                     }
-                    Err(e) => format!("Error: {}", e),
                 }
+                files.sort();
+                files.join("\n")
             }
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
