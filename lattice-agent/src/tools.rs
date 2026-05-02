@@ -4,6 +4,9 @@
 //! live in [`crate::tool_definitions`]. This module provides the execution
 //! layer that runs those tools when the model requests them.
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use async_trait::async_trait;
 
 use crate::sandbox::SandboxConfig;
@@ -86,19 +89,28 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_read(path) {
                     return e;
                 }
-                let output = std::process::Command::new("grep")
-                    .args(["-rn", pattern, path])
-                    .output();
-                match output {
-                    Ok(o) => {
-                        let mut result = String::from_utf8_lossy(&o.stdout).to_string();
-                        if !o.stderr.is_empty() {
-                            result
-                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
-                        }
-                        result
-                    }
-                    Err(e) => format!("Error: {}", e),
+
+                let re = match regex::Regex::new(pattern) {
+                    Ok(r) => r,
+                    Err(e) => return ToolError::RegexError(e.to_string()).to_string(),
+                };
+
+                let mut results = Vec::new();
+                let mut visited = HashSet::new();
+                grep_recursive(
+                    &re,
+                    Path::new(path),
+                    &mut results,
+                    &self.sandbox,
+                    0,
+                    &mut visited,
+                )
+                .await;
+
+                if results.is_empty() {
+                    "(no matches)".to_string()
+                } else {
+                    results.join("\n")
                 }
             }
             "write_file" => {
@@ -241,6 +253,88 @@ impl ToolExecutor for DefaultToolExecutor {
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),
+        }
+    }
+}
+
+const GREP_MAX_DEPTH: u32 = 32;
+
+/// Recursively search files under `path` for lines matching `pattern`.
+/// Respects sandbox limits: max_depth, max_read_size, check_read.
+/// Skips hidden dirs, binary files, and follows symlinks with cycle detection.
+async fn grep_recursive(
+    pattern: &regex::Regex,
+    path: &Path,
+    results: &mut Vec<String>,
+    sandbox: &crate::sandbox::SandboxConfig,
+    depth: u32,
+    visited: &mut HashSet<std::path::PathBuf>,
+) {
+    if depth > GREP_MAX_DEPTH {
+        return;
+    }
+
+    // Resolve symlinks to detect cycles
+    let canonical = match tokio::fs::canonicalize(path).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if !visited.insert(canonical) {
+        return; // symlink cycle
+    }
+
+    let path_str = path.to_string_lossy();
+    if sandbox.check_read(&path_str).is_err() {
+        return;
+    }
+
+    if path.is_file() {
+        // Skip files too large
+        if let Ok(meta) = tokio::fs::metadata(path).await {
+            if meta.len() > sandbox.max_read_size as u64 {
+                return;
+            }
+        }
+
+        match tokio::fs::read_to_string(path).await {
+            Ok(content) => {
+                // Skip binary files
+                if content.contains('\0') {
+                    return;
+                }
+                for (line_num, line) in content.lines().enumerate() {
+                    if pattern.is_match(line) {
+                        results.push(format!("{}:{}:{}", path_str, line_num + 1, line));
+                    }
+                }
+            }
+            Err(_) => {} // skip unreadable files
+        }
+    } else if path.is_dir() {
+        let mut entries = match tokio::fs::read_dir(path).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let mut children = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            // Skip hidden directories (but not . and ..)
+            if name_str.starts_with('.') && name_str != "." && name_str != ".." {
+                continue;
+            }
+            children.push(entry.path());
+        }
+        for child_path in children {
+            Box::pin(grep_recursive(
+                pattern,
+                &child_path,
+                results,
+                sandbox,
+                depth + 1,
+                visited,
+            ))
+            .await;
         }
     }
 }
