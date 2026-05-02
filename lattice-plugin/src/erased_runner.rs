@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use lattice_core::retry::RetryPolicy;
 
 use crate::erased::ErasedPlugin;
@@ -8,19 +6,12 @@ use crate::{
     RunResult,
 };
 
-static AGENT_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("agent runtime")
-});
-
 /// Shared PluginRunner run loop used by both typed PluginRunner and
 /// type-erased ErasedPluginRunner.
 ///
 /// Returns PluginError — this crate does NOT know about DAGError.
 #[allow(clippy::too_many_arguments)]
-pub fn run_plugin_loop(
+pub async fn run_plugin_loop(
     plugin: &dyn ErasedPlugin,
     behavior: &dyn crate::Behavior,
     agent: &mut dyn lattice_agent::PluginAgent,
@@ -44,8 +35,9 @@ pub fn run_plugin_loop(
 
         // L1 retry (chat_with_retry) handled inside Agent::run()
         // L2 retry (behavior loop) handled here
-        let raw = AGENT_RT
-            .block_on(agent.send_message_with_tools(&prompt))
+        let raw = agent
+            .send_message_with_tools(&prompt)
+            .await
             .map_err(|e| PluginError::Other(e.to_string()))?;
 
         match plugin.parse_output_json(&raw) {
@@ -83,7 +75,7 @@ pub fn run_plugin_loop(
                     Action::Retry => {
                         attempt += 1;
                         if let Some(p) = retry_policy {
-                            AGENT_RT.block_on(tokio::time::sleep(p.jittered_backoff(attempt)));
+                            tokio::time::sleep(p.jittered_backoff(attempt)).await;
                         }
                     }
                 }
@@ -96,7 +88,7 @@ pub fn run_plugin_loop(
                     crate::ErrorAction::Retry => {
                         attempt += 1;
                         if let Some(p) = retry_policy {
-                            AGENT_RT.block_on(tokio::time::sleep(p.jittered_backoff(attempt)));
+                            tokio::time::sleep(p.jittered_backoff(attempt)).await;
                         }
                     }
                     crate::ErrorAction::Abort => return Err(e),
@@ -144,7 +136,7 @@ impl<'a> ErasedPluginRunner<'a> {
         }
     }
 
-    pub fn run(&mut self, context: &serde_json::Value) -> Result<RunResult, PluginError> {
+    pub async fn run(&mut self, context: &serde_json::Value) -> Result<RunResult, PluginError> {
         run_plugin_loop(
             self.plugin,
             self.behavior,
@@ -155,5 +147,6 @@ impl<'a> ErasedPluginRunner<'a> {
             self.retry_policy,
             self.memory,
         )
+        .await
     }
 }

@@ -292,7 +292,7 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
     /// Backoff is applied between retries when a retry_policy is set.
     /// Output size is validated against config.max_output_bytes.
     /// If memory is set, the prompt and final output are saved.
-    pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
+    pub async fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
         let adapter = ErasedPluginAdapter(self.plugin);
         let context = serde_json::to_value(input).map_err(|e| PluginError::Other(e.to_string()))?;
         crate::erased_runner::run_plugin_loop(
@@ -305,6 +305,7 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
             self.retry_policy,
             self.memory.as_deref(),
         )
+        .await
     }
 }
 
@@ -531,8 +532,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_plugin_runner_hooks_lifecycle() {
+    #[tokio::test]
+    async fn test_plugin_runner_hooks_lifecycle() {
         let plugin = CodeReviewPlugin::new();
         let behavior = YoloBehavior;
         let mut agent = MockAgent {
@@ -555,7 +556,7 @@ mod tests {
             file_path: String::new(),
             context_rules: vec![],
         };
-        let result = runner.run(&input).unwrap();
+        let result = runner.run(&input).await.unwrap();
 
         assert_eq!(result.turns, 1);
         assert_eq!(result.final_action, Action::Done);
@@ -581,8 +582,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_plugin_runner_max_turns_exceeded() {
+    #[tokio::test]
+    async fn test_plugin_runner_max_turns_exceeded() {
         let plugin = CodeReviewPlugin::new();
         let behavior = StrictBehavior {
             confidence_threshold: 1.0, // never satisfied
@@ -603,12 +604,12 @@ mod tests {
             file_path: String::new(),
             context_rules: vec![],
         };
-        let err = runner.run(&input).unwrap_err();
+        let err = runner.run(&input).await.unwrap_err();
         assert!(matches!(err, PluginError::MaxTurnsExceeded(2)));
     }
 
-    #[test]
-    fn test_plugin_runner_output_too_large() {
+    #[tokio::test]
+    async fn test_plugin_runner_output_too_large() {
         // Create a plugin whose output exceeds the max_output_bytes limit.
         struct LargeOutputPlugin;
         impl Plugin for LargeOutputPlugin {
@@ -643,12 +644,12 @@ mod tests {
             PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
         let input = serde_json::json!({});
-        let err = runner.run(&input).unwrap_err();
+        let err = runner.run(&input).await.unwrap_err();
         assert!(matches!(err, PluginError::OutputTooLarge(_, 50)));
     }
 
-    #[test]
-    fn test_plugin_runner_memory_save() {
+    #[tokio::test]
+    async fn test_plugin_runner_memory_save() {
         use lattice_agent::memory::InMemoryMemory;
 
         let plugin = CodeReviewPlugin::new();
@@ -673,7 +674,7 @@ mod tests {
             file_path: String::new(),
             context_rules: vec![],
         };
-        let result = runner.run(&input).unwrap();
+        let result = runner.run(&input).await.unwrap();
         assert_eq!(result.final_action, Action::Done);
 
         // The memory was moved into the runner; we can't access it directly from

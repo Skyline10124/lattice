@@ -105,7 +105,7 @@ impl<'a> PluginDagRunner<'a> {
             .and_then(|e| e.rule.target.clone())
     }
 
-    pub fn run(
+    pub async fn run(
         &mut self,
         initial_input: &str,
         default_model: &str,
@@ -167,6 +167,7 @@ impl<'a> PluginDagRunner<'a> {
                 Some(&self.retry_policy),
                 self.shared_memory.as_deref().map(|m| m as &dyn Memory),
             )
+            .await
             .map_err(|e| DAGError::plugin_error(&current_name, e))?;
 
             let output_json: serde_json::Value = serde_json::from_str(&result.output)
