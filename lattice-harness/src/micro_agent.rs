@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use crate::memory::SharedMemory;
 use lattice_agent::memory::{Memory, MemoryEntry, PartitionAccess, SharedPartition};
@@ -10,7 +11,10 @@ use lattice_bus::{
 use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
-use crate::runner::MEMORY_RT;
+
+static BUS_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    tokio::runtime::Runtime::new().expect("micro_agent bus runtime")
+});
 
 /// Convert profile [bus] section into AgentBusConfig.
 fn bus_config_from_profile(bus: &BusConfigProfile) -> AgentBusConfig {
@@ -104,7 +108,7 @@ impl MicroAgent {
             bus_config,
         };
 
-        let reg = MEMORY_RT.block_on(self.bus.register(descriptor))?;
+        let reg = BUS_RT.block_on(self.bus.register(descriptor))?;
         let request_rx = reg.request_rx;
         let id = reg.id;
 
@@ -152,7 +156,7 @@ impl MicroAgent {
                 })
             });
             // Use MEMORY_RT since spawn() is called in sync context
-            MEMORY_RT.block_on(self.bus.subscribe(topic, handler))?;
+            BUS_RT.block_on(self.bus.subscribe(topic, handler))?;
         }
 
         let join_handle = tokio::spawn(async move {
