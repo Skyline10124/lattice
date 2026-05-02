@@ -1,7 +1,7 @@
 //! Integration tests for `Agent` with a mock HTTP server.
 //!
-//! Tests `send_message()`, `run()`, and `send_message_async()` against a
-//! simulated OpenAI-compatible endpoint. No real API keys needed.
+//! Tests `send_message()` and `run()` against a simulated OpenAI-compatible
+//! endpoint. No real API keys needed.
 
 use std::collections::HashMap;
 
@@ -134,7 +134,7 @@ fn make_sse_response(content_parts: &[&str]) -> String {
 
 // ---- tests -----------------------------------------------------------------
 
-/// Use `send_message` (sync) — the most common code path.
+/// Use `send_message` (async via rt.block_on).
 #[test]
 fn test_agent_send_message_basic() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -143,7 +143,7 @@ fn test_agent_send_message_basic() {
     let resolved = make_resolved(&format!("http://127.0.0.1:{port}"));
 
     let mut agent = Agent::new(resolved);
-    let events = agent.send_message("Hello");
+    let events = rt.block_on(agent.send_message("Hello"));
 
     let tokens: String = events
         .iter()
@@ -170,7 +170,7 @@ fn test_agent_run_basic() {
     let resolved = make_resolved(&format!("http://127.0.0.1:{port}"));
 
     let mut agent = Agent::new(resolved);
-    let events = agent.run("Test run", 3);
+    let events = rt.block_on(agent.run("Test run", 3));
 
     let tokens: String = events
         .iter()
@@ -203,7 +203,7 @@ fn test_agent_run_with_tool_call_no_executor() {
     let resolved = make_resolved(&format!("http://127.0.0.1:{port}"));
 
     let mut agent = Agent::new(resolved);
-    let events = agent.run("What's the weather?", 5);
+    let events = rt.block_on(agent.run("What's the weather?", 5));
 
     let has_tool_call = events
         .iter()
@@ -220,7 +220,7 @@ fn test_agent_run_with_tool_call_no_executor() {
     assert!(has_done, "Should eventually produce Done event");
 }
 
-/// Test `send_message_async` (the async variant).
+/// Test `send_message` (the async method).
 #[tokio::test]
 async fn test_agent_send_message_async_basic() {
     let sse_body = make_sse_response(&["Async hello"]);
@@ -228,7 +228,7 @@ async fn test_agent_send_message_async_basic() {
     let resolved = make_resolved(&format!("http://127.0.0.1:{port}"));
 
     let mut agent = Agent::new(resolved);
-    let events = agent.send_message_async("Hello").await;
+    let events = agent.send_message("Hello").await;
 
     let tokens: String = events
         .iter()

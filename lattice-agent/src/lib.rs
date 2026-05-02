@@ -6,31 +6,12 @@ pub mod tool_error;
 pub mod tools;
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::StreamEvent;
 use lattice_core::types::ToolDefinition;
 use lattice_core::ResolvedModel;
-use tokio::runtime::Handle;
-
-/// Run an async task, safely handling both runtime contexts.
-fn run_async<F, T>(f: F) -> T
-where
-    F: futures::Future<Output = T>,
-{
-    if let Ok(_handle) = Handle::try_current() {
-        tokio::task::block_in_place(|| SHARED_RUNTIME.block_on(f))
-    } else {
-        SHARED_RUNTIME.block_on(f)
-    }
-}
-
-/// Global tokio runtime shared by all Agent instances.
-static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new().expect("Failed to create shared tokio runtime")
-});
 
 /// Executes a tool call and returns the result string.
 #[async_trait]
@@ -38,7 +19,7 @@ pub trait ToolExecutor: Send + Sync {
     async fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
 }
 
-/// Max retries for mid-stream errors in Agent::run() and run_async().
+/// Max retries for mid-stream errors in Agent::run().
 const MAX_STREAM_RETRIES: u32 = 2;
 
 /// Tool loop max turns per Agent::run() call for send_message_with_tools.
@@ -80,7 +61,6 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self {
-        LazyLock::force(&SHARED_RUNTIME);
         Self {
             resolved: resolved.clone(),
             state: state::AgentState::new(resolved),
@@ -129,17 +109,12 @@ impl Agent {
         self.state.token_usage
     }
 
-    pub fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
-        self.state.push_user_message(content);
-        run_async(self.run_chat())
-    }
-
-    pub async fn send_message_async(&mut self, content: &str) -> Vec<LoopEvent> {
+    pub async fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         self.run_chat().await
     }
 
-    pub fn submit_tools(
+    pub async fn submit_tools(
         &mut self,
         results: Vec<(String, String)>,
         max_size: Option<usize>,
@@ -147,96 +122,10 @@ impl Agent {
         for (call_id, result) in &results {
             self.state.push_tool_result(call_id, result, max_size);
         }
-        run_async(self.run_chat())
+        self.run_chat().await
     }
 
-    pub fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
-        self.state.push_user_message(content);
-        let mut all_events = Vec::new();
-
-        for _ in 0..max_turns {
-            let context_len = if self.state.resolved.context_length > 0 {
-                self.state.resolved.context_length
-            } else {
-                131072
-            };
-            self.state.trim_messages(context_len, 15);
-
-            let mut events = run_async(self.run_chat());
-
-            let mut retry_count = 0u32;
-            while retry_count < MAX_STREAM_RETRIES {
-                let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
-                if !has_error {
-                    break;
-                }
-                self.state.pop_last_assistant_message();
-                retry_count += 1;
-                events = run_async(self.run_chat());
-            }
-
-            let mut tool_calls = Vec::new();
-
-            for event in &events {
-                if let LoopEvent::ToolCallRequired { calls } = event {
-                    tool_calls.extend(calls.clone());
-                }
-            }
-
-            all_events.extend(events);
-
-            if tool_calls.is_empty() {
-                break;
-            }
-
-            if self.tool_executor.is_none() {
-                break;
-            }
-
-            if let Some(ref executor) = self.tool_executor {
-                for call in &tool_calls {
-                    let result = run_async(executor.execute(call));
-                    self.state.push_tool_result(&call.id, &result, None);
-                }
-            }
-        }
-
-        // --- Auto-save memory entry ---
-        if let Some(ref memory) = self.memory {
-            let prompt_summary = if content.len() > 200 {
-                let mut end = 200;
-                while end > 0 && !content.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...", &content[..end])
-            } else {
-                content.to_string()
-            };
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let entry = crate::memory::MemoryEntry {
-                id: format!("{}-{}", now_secs, self.state.token_usage),
-                kind: crate::memory::EntryKind::SessionLog,
-                session_id: self.state.resolved.canonical_id.clone(),
-                summary: format!(
-                    "Model: {} | Provider: {} | Tokens: {}",
-                    self.state.resolved.api_model_id,
-                    self.state.resolved.provider,
-                    self.state.token_usage
-                ),
-                content: prompt_summary,
-                tags: vec![],
-                created_at: format!("{now_secs}"),
-            };
-            memory.save_entry(entry);
-        }
-
-        all_events
-    }
-
-    pub async fn run_async(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
+    pub async fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         let mut all_events = Vec::new();
 
@@ -437,7 +326,7 @@ impl PluginAgent for Agent {
     }
 
     async fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let events = self.send_message(message);
+        let events = self.send_message(message).await;
         let mut content = String::new();
         let mut has_error = false;
         for event in &events {
@@ -458,7 +347,7 @@ impl PluginAgent for Agent {
         &mut self,
         message: &str,
     ) -> Result<String, Box<dyn std::error::Error>> {
-        let events = self.run(message, MAX_TOOL_TURNS);
+        let events = self.run(message, MAX_TOOL_TURNS).await;
         let mut content = String::new();
         for event in &events {
             if let LoopEvent::Token { text } = event {
