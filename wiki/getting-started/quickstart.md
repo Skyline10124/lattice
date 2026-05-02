@@ -3,12 +3,9 @@
 ## 30 秒
 
 ```bash
-cd lattice-core && cargo build --release
-```
-
-```rust
-let resolved = lattice_core::resolve("sonnet")?;
-let response = lattice_core::chat_complete(&resolved, &messages, &[])?;
+cargo build --release
+./target/release/lattice run -m deepseek-v4-flash "1+1=?"
+# → 1+1=**2**
 ```
 
 ## 你需要
@@ -17,10 +14,43 @@ let response = lattice_core::chat_complete(&resolved, &messages, &[])?;
 - 至少一个 API key（环境变量）
 
 ```bash
-export DEEPSEEK_API_KEY="sk-xxx"
-export ANTHROPIC_API_KEY="sk-xxx"
-export OPENAI_API_KEY="sk-xxx"
+export DEEPSEEK_API_KEY="***"
+export ANTHROPIC_API_KEY="***"
+export OPENAI_API_KEY="***"
 # ... 或其他任一 provider
+```
+
+## 代码中使用
+
+```rust
+// 底层 API — 直接推理
+use lattice_core::{resolve, chat_complete, types::*};
+
+let resolved = resolve("sonnet")?;
+let messages = vec![Message::user("Hello!")];
+let response = chat_complete(&resolved, &messages, &[]).await?;
+println!("{}", response.content.unwrap_or_default());
+
+// Agent API — 带工具执行
+use lattice_agent::{Agent, DefaultToolExecutor};
+
+let resolved = resolve("sonnet")?;
+let mut agent = Agent::new(resolved)
+    .with_tools(default_tool_definitions())
+    .with_tool_executor(Box::new(DefaultToolExecutor::new(".")));
+let events = agent.run("读一下 Cargo.toml", 10).await;
+```
+
+> 所有 API 都是 async。从 `#[tokio::main]` 或任何 tokio runtime 上下文中调用。
+
+## Pipeline（插件 DAG）
+
+```bash
+# 创建 agent profile 并运行 pipeline
+lattice run --pipeline code-review "审查一下 src/main.rs"
+
+# 使用 plugin DAG 编排
+lattice run --pipeline plugin-test "分析一下代码"
 ```
 
 ## Python
@@ -35,8 +65,6 @@ engine = lattice_core.LatticeEngine()
 resolved = engine.resolve_model("sonnet")
 # Python 目前只支持 resolve，chat 走 Rust
 ```
-
-> **注意**: `Agent.send_message()` 目前需要 `#[tokio::main]`。同步代码请使用 `lattice_core::chat_complete()` 配合 `futures::executor::block_on()` 和 tokio runtime。
 
 ## 下一步
 

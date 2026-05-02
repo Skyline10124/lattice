@@ -19,7 +19,7 @@ Fix remaining issues from the second code review:
 
 Split the monolithic crate into a 5-crate workspace:
 
-```
+```text
 lattice-core        # Pure Rust: catalog, router, provider, transport, streaming, retry, tokens, errors
 lattice-agent       # Agent state, tool boundary, retry (separate crate)
 lattice-memory      # Memory trait + InMemoryMemory (shared trait crate)
@@ -38,10 +38,13 @@ lattice-python      # PyO3 bindings (resolver only, for now)
 
 **Result**: Clean separation. lattice-core is truly minimal -- just model routing + inference.
 
+> **Note**: `lattice-memory` and `lattice-token-pool` were later merged back into their dependents
+> (`lattice-agent` and `lattice-harness`) during Phase 3 for simplicity.
+
 ## Phase 3: Dogfooding + Agent runtime (complete)
 
 - [x] Agent runtime: `Agent::run()` with auto tool loop
-- [x] 17 built-in tools: read_file, grep, write_file, list_directory, run_test, run_clippy, bash, patch, run_command, list_processes, web_search, web_fetch, browser_navigate, browser_screenshot, browser_console, execute_code, agent_call
+- [x] 7 built-in tools: read_file, grep (pure Rust regex), write_file, list_directory, bash, patch, web_search
 - [x] Context trimming: `AgentState::trim_messages`
 - [x] Sandbox safety: `SandboxConfig` (paths, commands, domains)
 - [x] Async Memory trait + `SqliteMemory` (FTS5) with auto-save in `Agent::run()`
@@ -51,56 +54,78 @@ lattice-python      # PyO3 bindings (resolver only, for now)
 - [x] `lattice-plugin`: Plugin trait (Input/Output), Behavior trait (Strict/Yolo), PluginRunner, PluginHooks, CodeReviewPlugin
 - [x] `lattice-cli`: run/print/resolve/models subcommands
 - [x] `lattice-tui`: Ratatui TUI with Agent streaming
-- [x] Credential error on missing keys (P2-1)
+- [x] Credential error on missing keys
 
-**Result**: 9 crates, 17 tools, ~440+ tests. Dogfooding validated.
+**Result**: 8 crates, 7 tools, ~150+ tests. Dogfooding validated.
 
-## Phase 4: Typed plugin system (in progress)
+## Phase 4: Typed plugin system + DAG orchestration (complete)
 
 - [x] Plugin trait: `Input` / `Output` types
 - [x] `Behavior` trait: Strict / Yolo
 - [x] `PluginRunner`, `PluginHooks`, `PluginConfig`
 - [x] `CodeReviewPlugin` (built-in)
-- [ ] `to_prompt()` / `from_output()` trait formalization
-- [ ] Output validation + retry framework (parse error -> retry N times -> fallback)
-- [ ] Python glue layer: `importlib` loading, plugin registry, composition
-- [ ] Plugin distribution via `pip` (`pip install lattice-code-review-plugin`)
-- [ ] Handoff protocol: structured `{ target, payload, context_summary }`
-- [ ] Agent routing: code-controlled dispatch based on output type + confidence
-- [ ] Multi-agent composition: overlay merge of plugin sets
+- [x] `output_schema()` on Plugin trait
+- [x] `ErasedPlugin` trait + blanket impl for type-erased plugin storage
+- [x] `PluginBundle`, `PluginMeta`, `BehaviorMode`, `to_behavior()`
+- [x] `PluginRegistry`: register/get/list plugins with duplicate detection
+- [x] `ErasedPluginRunner` + shared `run_plugin_loop()`
+- [x] `PluginDagRunner`: intra-agent DAG orchestration with slot/edge routing
+- [x] `ToolRegistry` + `merge_tool_definitions()`
+- [x] `PluginsConfig` / `PluginSlotConfig` / `AgentEdgeConfig` TOML deserialization
+- [x] Pipeline branching: `[plugins]` in profile → PluginDagRunner, else AgentRunner
+- [x] 9 builtin plugins: CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase
+- [x] CLI integration: `--pipeline` auto-loads builtin plugins
+- [x] Integration tests for edge matching, error types, behavior roundtrip
 
 **Target**: compose vertical agents from plugins + route between them.
 
-> **Known limitation**: `Agent.send_message()` currently requires `#[tokio::main]` context. Sync usage hangs. See issue in `lattice-agent` `run_chat()`.
+## Phase 5: Async + Rust native refactoring (complete)
 
-## Phase 5: Nix paradigm
+Full asyncification and elimination of C-isms across the stack:
+
+- [x] `ToolExecutor` trait async via `#[async_trait]`
+- [x] All tools converted to tokio: `tokio::fs`, `tokio::process`, `reqwest::Client`
+- [x] grep replaced with pure Rust `regex` based recursive search (no more `Command::new("grep")`)
+- [x] `ToolError` enum (thiserror)
+- [x] `PluginAgent` trait async
+- [x] `Agent::run()` and `run_chat()` merged into single async fn
+- [x] `SHARED_RUNTIME` + `run_async()` bridge deleted
+- [x] `AgentRunner::run()` async, `MEMORY_RT` deleted
+- [x] `Pipeline::run()` async, sync `run_fork()` deleted (-511 lines)
+- [x] `run_plugin_loop` async, `std::thread::sleep` → `tokio::time::sleep`
+- [x] All callers cascaded (debug, print, tui, micro_agent)
+- [x] `SandboxConfig.read_allowlist` enforcement, `check_url` SSRF fixes
+- [x] `active-issues.md` updated with 22 deep scan findings
+
+**Result**: Fully async stack. Zero blocking calls. Pure Rust tool execution. No global runtime.
+
+## Phase 6: Nix paradigm (next)
 
 - [ ] `LATTICE.toml` + `LATTICE.lock` -- declarative config, reproducible builds
 - [ ] Content-addressed response cache: `sha256(prompt + model + params) -> response`
 - [ ] Derivation-style task model: `InferenceTask { inputs -> build -> output }`
 - [ ] Overlay pattern for catalog extension
-- [ ] Sandboxed tool execution
+- [ ] Sandboxed tool execution (CubeSandbox)
 
 **Target**: every inference is a derivation. Reproducible, cacheable, auditable.
 
 ## Current focus
 
-The project is in **alpha / dogfooding** stage. Phases 1-3 are complete. Current priorities:
+The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. Current priorities:
 
-1. **Phase 4 completion**: `to_prompt()`/`from_output()` formalization, Python glue layer, pip distribution
-2. **Handoff protocol**: agent-to-agent communication with structured payloads
-3. **Multi-agent composition**: overlay merge of plugin sets, Pipeline chaining
-
-After Phase 4, move to Phase 5 (Nix paradigm).
+1. **Phase 6 (Nix paradigm)**: declarative config, response caching, derivation model
+2. **Deep scan issues**: address DS-P0 and DS-P1 items from `docs/review/active-issues.md`
+3. **iOS embedding**: verify `aarch64-apple-ios` cross-compilation, finalize runtime handle injection
 
 ## Timeline
 
-```
+```text
 Phase 1  ██████████  (complete)
 Phase 2  ██████████  (complete)
 Phase 3  ██████████  (complete)
-Phase 4  ██████░░░░  (in progress)
-Phase 5  ░░░░░░░░░░
+Phase 4  ██████████  (complete)
+Phase 5  ██████████  (complete)
+Phase 6  ░░░░░░░░░░
 ```
 
 No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
@@ -109,5 +134,8 @@ No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
 
 - [Design vision and ideas](docs/design/ideas.md)
 - [Code review report](docs/review/code-review-2026-05-01.md)
+- [Active issues](docs/review/active-issues.md)
 - [Debug guide](docs/debug/guide.md)
 - [Development guide](CLAUDE.md)
+- [Facade API spec](docs/specs/2026-05-02-facade-api.md)
+- [Async + Rust native spec](docs/specs/2026-05-02-async-rust-native-refactor.md)

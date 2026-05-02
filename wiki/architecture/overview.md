@@ -6,19 +6,18 @@
 lattice-cli          命令行（run/print/resolve/models）
 lattice-tui          Ratatui TUI + Agent streaming
     ↓
-lattice-harness       AgentProfile, Pipeline, AgentRunner
+lattice-harness       Pipeline / AgentRunner / PluginDagRunner, TOML profile, handoff, ToolRegistry
 lattice-python        PyO3 绑定（pip: lattice-core）
     ↓
-lattice-agent         AgentLoop + 对话状态 + tool boundary + 17 tools
-    ↓
-lattice-memory        跨 session 记忆（trait, async, SqliteMemory FTS5）
-lattice-token-pool    共享 token 预算（trait）
-lattice-plugin        类型化插件系统（Plugin + Behavior trait）
+lattice-agent         Async Agent + tool execution（tokio）+ 7 tools + sandbox
+lattice-plugin        类型化插件系统（ErasedPlugin + PluginRegistry + 9 builtin plugins）
     ↓
 lattice-core          模型解析 + 推理（纯 Rust，无 PyO3）
 ```
 
 依赖单向：上层依赖下层，下层不知道上层存在。
+
+> `lattice-memory` 和 `lattice-token-pool` 已合并到 `lattice-agent` 和 `lattice-harness`，不再作为独立 crate。
 
 ## 核心流程
 
@@ -30,25 +29,34 @@ lattice-core          模型解析 + 推理（纯 Rust，无 PyO3）
          → 排序 priority，匹配 API key
          → 返回 ResolvedModel { provider, api_key, base_url, ... }
 
-用户 → chat(resolved, messages, tools)
+用户 → chat(resolved, messages, tools).await
          → TransportDispatcher 分发协议
          → ChatCompletionsTransport (OpenAI) 或 AnthropicTransport
          → normalize_request → POST → SSE stream
          → SseParser 解析 → StreamEvent (Token/ToolCall/Done/Reasoning)
+
+用户 → Agent::run("prompt", 10).await
+         → auto tool loop（LLM → ToolCall → execute → submit → continue）
+         → 7 tools: read_file, grep（regex）, write_file, list_directory, bash, patch, web_search
+
+用户 → Pipeline::run("start", "input").await
+         → agent profile → 有 [plugins] → PluginDagRunner（DAG 编排）
+                         → 无 [plugins] → AgentRunner（传统 agent 链式执行）
 ```
 
 ## 协议支持
 
-| 协议 | chat() 支持 | 说明 |
-|------|-----------|------|
+| 协议 | 支持 | 说明 |
+|------|------|------|
 | `OpenAiChat` | 完整 | OpenAI、DeepSeek、OpenCode Go、大多数 provider |
 | `AnthropicMessages` | 完整 | Anthropic、MiniMax Token Plan、OpenCode Zen |
-| `GeminiGenerateContent` | 仅 resolve | chat() 不支持，但 copilot/opencode 路径覆盖 Gemini 模型 |
+| `GeminiGenerateContent` | 完整 | Google Gemini |
 
 ## 关键设计决策
 
 - **模型为中心**：用户不需要知道 provider，只需知道模型名
 - **凭证来自环境变量**：无配置文件，无 keychain
+- **全 async**：从 core 到 CLI 全 async 链路，无 `block_on`，无全局 runtime
 - **Transport trait 统一**：所有协议同一接口
 - **PyO3 隔离在 python crate**：core 纯 Rust，可独立使用
 

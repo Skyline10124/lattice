@@ -4,19 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-**LATTICE** is a model-centric LLM engine split into nine Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
+**LATTICE** is a model-centric LLM engine split into eight Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
 
 **Crate architecture** (one-way deps):
 
 ```
 lattice-tui           Terminal UI (ratatui)
   → lattice-cli         CLI: resolve, run, print, validate, debug, models, doctor
-    → lattice-harness     Pipeline runner, TOML profiles, hot reload, WebSocket events
-      → lattice-agent       AgentLoop, conversation state, tool boundary
-        → lattice-memory     Memory trait + InMemoryMemory
-        → lattice-token-pool TokenPool trait + UnlimitedPool
-          → lattice-core       resolve() + chat() — model routing + inference
-      → lattice-plugin       Plugin trait (placeholder)
+    → lattice-harness     Pipeline / AgentRunner / PluginDagRunner, TOML profiles, handoff, events
+      → lattice-agent       Async Agent::run(), tool execution (tokio), conversation state
+        → lattice-core       resolve() + chat() — model routing + streaming inference
+      → lattice-plugin       ErasedPlugin, PluginRegistry, PluginDagRunner, 9 builtin plugins
   → lattice-python       PyO3 bindings (pip package: lattice-core)
 ```
 
@@ -65,10 +63,10 @@ cargo fmt --all
 
 ```
 User Code (Python / Rust / CLI)
-  → lattice_core::resolve("sonnet")      → ResolvedModel
-  → lattice_core::chat(resolved, msgs)   → impl Stream<Item = StreamEvent>
-  → lattice_agent::Agent::new(resolved)  → send(), submit_tools() [7 tools: read_file, grep, write_file, list_directory, bash, patch, web_search]
-  → lattice_harness::Pipeline::new()     → run() → multi-agent TOML pipeline (sequential + fork parallel)
+  → lattice_core::resolve("sonnet")           → ResolvedModel
+  → lattice_core::chat(resolved, msgs)         → impl Stream<Item = StreamEvent>
+  → lattice_agent::Agent::new(resolved)        → agent.run("prompt", 10).await (async, with tool loop)
+  → lattice_harness::Pipeline::new()           → pipeline.run("start", "input").await (async, plugin DAG or agent runner)
 ```
 
 ### Crate map
@@ -76,12 +74,13 @@ User Code (Python / Rust / CLI)
 | Crate | Purpose |
 |-------|---------|
 | `lattice-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
-| `lattice-agent` | `Agent` struct: multi-turn conversation, tool execution, token budget, provider fallback, async API + `Memory` trait + `InMemoryMemory` + `SharedMemory` types |
-| `lattice-harness` | `Pipeline`, `AgentRunner`, `SqliteMemory`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events |
-| `lattice-plugin` | Plugin trait (placeholder — not yet functional) |
+| `lattice-agent` | `Agent` struct: async multi-turn conversation, tool execution (tokio), token budget, provider fallback, `Memory` trait + `InMemoryMemory` + `SharedMemory` types |
+| `lattice-harness` | `Pipeline`, `AgentRunner`, `PluginDagRunner`, `SqliteMemory`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events, `ToolRegistry` |
+| `lattice-plugin` | `Plugin` trait, `ErasedPlugin`, `PluginRegistry`, 9 builtin plugins (CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase), `Behavior` (Strict/Yolo), `PluginRunner`/`ErasedPluginRunner` |
 | `lattice-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
 | `lattice-tui` | Terminal UI (ratatui-based — early stage) |
 | `lattice-python` | PyO3 bindings: `LatticeEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
+| `lattice-bus` | Pub/sub event bus for inter-agent communication |
 
 ### lattice-core module map
 
@@ -91,7 +90,6 @@ User Code (Python / Rust / CLI)
 | `router` | `ModelRouter`: normalize model IDs, resolve aliases, select provider, resolve credentials |
 | `provider` | `Provider` trait, `ChatRequest`/`ChatResponse`, shared HTTP client |
 | `transport/` | Unified Transport trait, protocol adapters (ChatCompletions, Anthropic, Gemini, OpenAICompat), dispatcher |
-| `transport/` | Unified `Transport` trait, `TransportDispatcher`, protocol adapters |
 | `streaming` | SSE parsers (OpenAI, Anthropic) via `sse_from_bytes_stream`, `StreamEvent`. Note: Gemini uses non-streaming path. |
 | `retry` | `ErrorClassifier`, `RetryPolicy` with jittered exponential backoff |
 | `tokens` | `TokenEstimator`: tiktoken for OpenAI models, char/4 estimation for others |
@@ -102,15 +100,28 @@ User Code (Python / Rust / CLI)
 
 | Module | Purpose |
 |--------|---------|
-| `pipeline` | `Pipeline`: multi-agent chain/fork execution, handoff rule evaluation, dry_run validation |
-| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry, shared `MEMORY_RT` |
-| `profile` | `AgentProfile` + `HandoffConfig`: TOML-deserialized agent configuration |
-| `handoff_rule` | `HandoffTarget` (Single/Fork), `HandoffRule`, `HandoffCondition`: TOML routing with AND/OR/default + `[any]` array matching + `fork:A,B` parallel syntax |
+| `pipeline` | `Pipeline`: multi-agent chain/fork execution, handoff rule evaluation, dry_run validation (async) |
+| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry |
+| `dag_runner` | `PluginDagRunner`: intra-agent DAG orchestration with slot/edge navigation |
+| `profile` | `AgentProfile` + `PluginsConfig`: TOML-deserialized agent configuration, plugin slots/edges |
+| `tools` | `ToolRegistry`, `ToolHandler`, `merge_tool_definitions()` |
+| `handoff_rule` | `HandoffTarget` (Single/Fork), `HandoffRule`, `HandoffCondition`: TOML routing with AND/OR/default |
 | `registry` | `AgentRegistry`: load agent profiles from directory, hot reload via `notify` |
 | `events` | `PipelineEvent` + `EventBus`: broadcast channel for pipeline status events |
 | `watcher` | File watcher for agent directory changes, triggers registry reload |
 | `ws` | WebSocket endpoint for live pipeline events (feature-gated behind `axum`) |
 | `memory` | `SharedMemory` trait + `SqliteMemory` (FTS5), re-exports agent memory types |
+
+### lattice-plugin module map
+
+| Module | Purpose |
+|--------|---------|
+| `erased` | `ErasedPlugin` trait + blanket impl over `Plugin` |
+| `bundle` | `PluginBundle`, `PluginMeta`, `BehaviorMode`, `to_behavior()` |
+| `registry` | `PluginRegistry`: register/get/list plugins by name |
+| `erased_runner` | `run_plugin_loop()` shared loop + `ErasedPluginRunner` struct |
+| `builtin/` | 9 builtin plugins: code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base |
+| `lib.rs` | `Plugin` trait, `Behavior` trait (Strict/Yolo), `PluginRunner`, `PluginHooks`, `PluginConfig` |
 
 ### Model resolution flow
 
@@ -147,20 +158,51 @@ Evaluation: rules checked in order, first match wins. Supports `condition` (sing
 
 Targets can be a single agent (`"refactor"`) or a fork (`"fork:security,performance"`). Fork runs multiple agents in parallel via `std::thread::spawn`, merges outputs as `{agent_name: output}` JSON, and feeds the merged result to the next agent in the chain. TOML syntax: `target = "fork:A,B"` → `HandoffTarget::Fork(["A","B"])`.
 
+### Plugin DAG orchestration
+
+Agent profiles can include a `[plugins]` section for intra-agent DAG execution:
+
+```toml
+[plugins]
+entry = "review"
+shared_tools = ["read_file", "grep"]
+
+[[plugins.slots]]
+name = "review"
+plugin = "CodeReview"
+max_turns = 3
+behavior = { mode = "strict", confidence_threshold = 0.7, max_retries = 3 }
+
+[[plugins.slots]]
+name = "refactor"
+plugin = "Refactor"
+max_turns = 5
+
+[[plugins.edges]]
+from = "review"
+rule = { condition = { field = "confidence", op = ">", value = "0.5" }, target = "refactor" }
+
+[[plugins.edges]]
+from = "review"
+rule = { default = true }
+```
+
+Each slot runs a plugin via `ErasedPluginRunner`. the DAG runner accumulates context across slots (`context["<slot_name>"] = output`). Edges use the same handoff rule engine for routing.
+
 ### JSON schema validation
 
 When `output_schema` is set in an agent profile, the runner validates LLM output against the schema (jsonschema crate). Invalid output triggers up to 2 retries with correction hints.
 
 ### Tool execution boundary
 
-Rust and Python split tool execution across crates:
+All tool execution is async via tokio:
 
 ```
-lattice-agent: Agent.send() → yields ToolCallRequired → caller executes tools
-               Agent.submit_tools(results) → resumes conversation
+lattice-agent: Agent::run().await → auto tool loop (LLM → ToolCall → execute → submit → continue)
+               DefaultToolExecutor: tokio::fs, tokio::process, regex (grep), reqwest::Client
 ```
 
-Default tool set (7 tools): read_file, grep, write_file, list_directory, bash, patch, web_search.
+Default tool set (7 tools): read_file, grep (pure Rust regex), write_file, list_directory, bash, patch, web_search.
 
 ### Error taxonomy
 
@@ -180,6 +222,13 @@ Exception
        └─ NetworkError (.message, .status)
 ```
 
+Additional error types in higher crates:
+```
+lattice-agent: ToolError (Execution, NotFound, InvalidArgs, McpUnreachable, Timeout)
+lattice-plugin: PluginError (Parse, Validation, MissingTool, ContextExceeded, MaxTurnsExceeded, OutputTooLarge, Escalated)
+lattice-harness: DAGError (SlotNotFound, PluginNotFound, MaxSlotTransitionsExceeded, ForkNotSupportedInDag, etc.)
+```
+
 Retryable errors: `RateLimit` and `ProviderUnavailable`. Default policy: 3 retries, 1s base delay, 60s max, jittered exponential backoff.
 
 ### Streaming pipeline
@@ -190,20 +239,11 @@ Two SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`) implement `SseParser` 
 
 `src/catalog/data.json` is the built-in model catalog (manually maintained).
 
-## Skill routing
+### Runtime model
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+LATTICE is fully async. There is no `SHARED_RUNTIME` or global `block_on` bridge:
 
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
+- **CLI path**: `#[tokio::main]` — the tokio runtime is created at main entry, all `.await` flows through it
+- **Pipeline path**: async — `Pipeline::run()` is `async fn`
+- **Embedded path**: callers inject their own `Handle` — LATTICE never creates a tokio Runtime internally
+- **Sync callers**: use `tokio::runtime::Runtime::block_on()` at the outermost boundary only
