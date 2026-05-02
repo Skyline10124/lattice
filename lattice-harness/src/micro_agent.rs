@@ -12,9 +12,8 @@ use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
 
-static BUS_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new().expect("micro_agent bus runtime")
-});
+static BUS_RT: LazyLock<tokio::runtime::Runtime> =
+    LazyLock::new(|| tokio::runtime::Runtime::new().expect("micro_agent bus runtime"));
 
 /// Convert profile [bus] section into AgentBusConfig.
 fn bus_config_from_profile(bus: &BusConfigProfile) -> AgentBusConfig {
@@ -155,7 +154,7 @@ impl MicroAgent {
                     Ok(())
                 })
             });
-            // Use MEMORY_RT since spawn() is called in sync context
+            // Use BUS_RT since spawn() is called in sync context
             BUS_RT.block_on(self.bus.subscribe(topic, handler))?;
         }
 

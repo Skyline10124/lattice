@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use lattice_agent::memory::Memory;
 use lattice_agent::Agent;
-use lattice_core::retry::RetryPolicy;
 
 use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
@@ -95,9 +94,8 @@ pub struct AgentError {
     pub skippable: bool,
 }
 
-static SYNC_RT: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new().expect("pipeline sync runtime")
-});
+static SYNC_RT: LazyLock<tokio::runtime::Runtime> =
+    LazyLock::new(|| tokio::runtime::Runtime::new().expect("pipeline sync runtime"));
 
 impl Pipeline {
     pub fn new(

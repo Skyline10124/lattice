@@ -6,6 +6,7 @@ use lattice_plugin::{
 use std::fs;
 
 fn main() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let resolved = resolve("deepseek-v4-flash").expect("resolve");
     let mut agent = Agent::new(resolved);
 
@@ -47,7 +48,7 @@ fn main() {
     let mut runner = PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
     println!("DEBUG: calling runner.run...");
-    let result = runner.run(&input);
+    let result = rt.block_on(runner.run(&input));
     println!("DEBUG: runner.run returned");
     match result {
         Ok(result) => println!("Turns: {}\n{}", result.turns, result.output),

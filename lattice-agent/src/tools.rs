@@ -73,15 +73,13 @@ impl ToolExecutor for DefaultToolExecutor {
                     }
                     _ => {}
                 }
-                tokio::fs::read_to_string(path)
-                    .await
-                    .unwrap_or_else(|e| {
-                        ToolError::IoError {
-                            path: path.to_string(),
-                            error: e,
-                        }
-                        .to_string()
-                    })
+                tokio::fs::read_to_string(path).await.unwrap_or_else(|e| {
+                    ToolError::IoError {
+                        path: path.to_string(),
+                        error: e,
+                    }
+                    .to_string()
+                })
             }
             "grep" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -155,17 +153,13 @@ impl ToolExecutor for DefaultToolExecutor {
                 loop {
                     match entries.next_entry().await {
                         Ok(Some(entry)) => {
-                            let ty =
-                                if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-                                    "DIR"
-                                } else {
-                                    "FILE"
-                                };
-                            files.push(format!(
-                                "{}  {}",
-                                ty,
-                                entry.file_name().to_string_lossy()
-                            ));
+                            let ty = if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
+                            {
+                                "DIR"
+                            } else {
+                                "FILE"
+                            };
+                            files.push(format!("{}  {}", ty, entry.file_name().to_string_lossy()));
                         }
                         Ok(None) => break,
                         Err(e) => {
@@ -190,7 +184,8 @@ impl ToolExecutor for DefaultToolExecutor {
                     Ok(o) => {
                         let mut result = String::from_utf8_lossy(&o.stdout).to_string();
                         if !o.stderr.is_empty() {
-                            result.push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
+                            result
+                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
                         result
                     }
@@ -232,11 +227,19 @@ impl ToolExecutor for DefaultToolExecutor {
                                         .collect();
                                     format!("Patched {}. Changes:\n{}", path, diff_lines.join("\n"))
                                 }
-                                Err(e) => ToolError::IoError { path: abs, error: e }.to_string(),
+                                Err(e) => ToolError::IoError {
+                                    path: abs,
+                                    error: e,
+                                }
+                                .to_string(),
                             }
                         }
                     }
-                    Err(e) => ToolError::IoError { path: abs, error: e }.to_string(),
+                    Err(e) => ToolError::IoError {
+                        path: abs,
+                        error: e,
+                    }
+                    .to_string(),
                 }
             }
             "web_search" => {
@@ -296,19 +299,16 @@ async fn grep_recursive(
             }
         }
 
-        match tokio::fs::read_to_string(path).await {
-            Ok(content) => {
-                // Skip binary files
-                if content.contains('\0') {
-                    return;
-                }
-                for (line_num, line) in content.lines().enumerate() {
-                    if pattern.is_match(line) {
-                        results.push(format!("{}:{}:{}", path_str, line_num + 1, line));
-                    }
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            // Skip binary files
+            if content.contains('\0') {
+                return;
+            }
+            for (line_num, line) in content.lines().enumerate() {
+                if pattern.is_match(line) {
+                    results.push(format!("{}:{}:{}", path_str, line_num + 1, line));
                 }
             }
-            Err(_) => {} // skip unreadable files
         }
     } else if path.is_dir() {
         let mut entries = match tokio::fs::read_dir(path).await {

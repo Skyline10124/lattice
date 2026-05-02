@@ -105,7 +105,7 @@ pub async fn run(
     for event in &events {
         match event {
             LoopEvent::Token { text } => {
-                content_buf.push_str(&text);
+                content_buf.push_str(text);
             }
             LoopEvent::Reasoning { .. } => {}
             LoopEvent::ToolCallRequired { calls } => {
