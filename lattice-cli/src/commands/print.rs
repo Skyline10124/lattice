@@ -38,8 +38,8 @@ pub async fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.send_message_async(prompt).await;
-    run_conversation(&mut agent, events, verbose, json)?;
+    let events = agent.send_message(prompt).await;
+    run_conversation(&mut agent, events, verbose, json).await?;
 
     let elapsed = start.elapsed().as_millis();
     if verbose && !json {
@@ -49,7 +49,7 @@ pub async fn run(
     Ok(())
 }
 
-fn run_conversation(
+async fn run_conversation(
     agent: &mut Agent,
     mut events: Vec<LoopEvent>,
     verbose: bool,
@@ -109,7 +109,7 @@ fn run_conversation(
             })
             .collect();
 
-        events = agent.submit_tools(results, None);
+        events = agent.submit_tools(results, None).await;
     }
 
     if !json {

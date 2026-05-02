@@ -225,7 +225,7 @@ impl App {
             let executor = DefaultToolExecutor::new(".");
 
             // --- Send message (async) ---
-            let mut events = agent.send_message_async(&text).await;
+            let mut events = agent.send_message(&text).await;
             let mut cumulative_tokens = 0u64;
 
             // --- Conversation loop (handles tool call rounds) ---
@@ -297,16 +297,14 @@ impl App {
                 });
 
                 // Execute tools
-                let results: Vec<(String, String)> = tool_calls
-                    .iter()
-                    .map(|call| {
-                        let result = executor.execute(call);
-                        (call.id.clone(), result)
-                    })
-                    .collect();
+                let mut results: Vec<(String, String)> = Vec::new();
+                for call in &tool_calls {
+                    let result = executor.execute(call).await;
+                    results.push((call.id.clone(), result));
+                }
 
                 // Submit results and get next round of events
-                events = agent.submit_tools(results, None);
+                events = agent.submit_tools(results, None).await;
             }
         });
 

@@ -190,7 +190,7 @@ async fn micro_agent_loop(
         let input = extract_input(&req.payload);
         let enriched = enrich_input(&input, &ctx.memory);
 
-        let events = agent.run_async(&enriched, max_turns).await;
+        let events = agent.run(&enriched, max_turns).await;
 
         let content = extract_content(&events);
         let output_json = parse_output(&content);

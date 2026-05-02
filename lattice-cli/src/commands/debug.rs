@@ -88,7 +88,7 @@ pub async fn run(
 
     tracing::info!(prompt_len = prompt_text.len(), "debug: agent.run start");
 
-    let events = agent.run(&prompt_text, 10);
+    let events = agent.run(&prompt_text, 10).await;
     let elapsed = start.elapsed();
 
     // Print execution summary
@@ -105,7 +105,7 @@ pub async fn run(
     for event in &events {
         match event {
             LoopEvent::Token { text } => {
-                content_buf.push_str(text);
+                content_buf.push_str(&text);
             }
             LoopEvent::Reasoning { .. } => {}
             LoopEvent::ToolCallRequired { calls } => {

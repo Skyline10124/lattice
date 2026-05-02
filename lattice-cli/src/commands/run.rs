@@ -38,7 +38,7 @@ pub async fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.run_async(&prompt, 10).await;
+    let events = agent.run(&prompt, 10).await;
     display_events(&agent, events, verbose, json)?;
 
     Ok(())
