@@ -1,6 +1,6 @@
 # Plugin DAG 编排系统设计规格
 
-- **Spec 版本**: 0.6.0
+- **Spec 版本**: 0.7.0
 - **日期**: 2026-05-02
 - **范围**: `lattice-plugin` + `lattice-harness` + `lattice-agent`（微改）
 
@@ -9,47 +9,143 @@
 ### 1.1 两套编排模型
 
 **Plugin DAG 是 intra-agent 执行引擎，Pipeline 是 inter-agent 编排器。**
+**PluginDagRunner 是 AgentRunner 的平级替代，不嵌入 AgentRunner。**
 
-### 1.2 跨 slot 数据流：累积上下文模型
+```
+Pipeline::run()
+  │
+  ├─ profile 无 [plugins] → build_runner() → AgentRunner::run()    (不变)
+  │
+  └─ profile 有 [plugins] → PluginDagRunner::run()                  (新增)
+       │
+       ├─ slot "review"  → ErasedPluginRunner (behavior 循环)
+       ├─ edge match     → slot "refactor"
+       └─ slot "refactor" → ErasedPluginRunner
+            └─ no edge   → 返回最终 output
+```
 
-每个 slot 的 output 写入累积 context。下游 slot 看到**所有上游 output + 初始 input**：
+### 1.2 累积上下文模型
 
 ```
 context = {"input": <initial_user_text>}
-
-slot "review" → 看到 context
-  → to_prompt_json(context)     // Plugin 从 context 提取需要的字段
-  → 产出 {"issues": [...], "confidence": 0.85}
-  → context["review"] = output  // 写入累积
-
-slot "refactor" → 看到 context = {
-    "input": "original user code...",
-    "review": {"issues": [...], "confidence": 0.85}
-  }
-  → to_prompt_json(context)     // 能看到原始 code + review 结果
-  → 产出 {"refactored_code": "...", "changes": [...]}
-  → context["refactor"] = output
+每个 slot 完成后: context["<slot_name>"] = output
+下游 slot 调用: plugin.to_prompt_json(&context)
 ```
-
-**为什么不用"上游 Output = 下游 Input"**：每个 Plugin 的 Input 类型不同。CodeReview 产出 `{issues, confidence}`，Refactor 期望 `{code, review_issues, instructions}`——结构完全不匹配。累积 context 让每个 Plugin 自行从完整上下文中提取所需字段。
-
-**Plugin 作者的责任**：编写 `to_prompt_json(context)` 时从 context 中提取需要的字段（`context["input"]` 是原始文本，`context["<slot_name>"]` 是各 slot 输出）。
 
 ### 1.3 跨 slot 对话状态
 
-每个 slot 开始时重建 `lattice_agent::Agent`。跨 slot 边界**硬重置**（设计决定，见 v0.5.0 1.2 节）。
+每 slot 重建 Agent。跨 slot 硬重置。v0.5.0 §1.2。
 
 ### 1.4 Fork 策略
 
-intra-agent DAG 不做 Fork。Pipeline 已有完整 Fork 支持。
+intra-agent DAG 不做 Fork。用 Pipeline Fork。
 
-## 2. 命名约定
+## 2. 错误类型与传播链
 
-| Spec 名称 | 实际 Rust 类型 | 说明 |
-|-----------|---------------|------|
-| `Agent` | `lattice_agent::Agent` | agent crate 的 Agent struct。Spec 中直接称 `Agent`，不称 `LlmAgent` |
-| `PluginAgent` | `lattice_agent::PluginAgent` | trait，Agent 实现它 |
-| `DagAgent` | 无 | Spec 不使用 DagAgent。编排逻辑在 `PluginDagRunner` |
+### 2.1 错误分层
+
+```
+lattice-core:     LatticeError  (resolve, chat, network, rate limit)
+lattice-plugin:   PluginError   (parse, validation, max_turns, escalated)
+lattice-harness:  DAGError      (slot not found, plugin not found, resolve, fork rejected)
+                  AgentError    (已有，Pipeline 用)
+```
+
+### 2.2 传播路径
+
+```
+run_plugin_loop()           → Result<RunResult, PluginError>
+    ↓ (PluginDagRunner::run 内部转换)
+PluginDagRunner::run()      → Result<serde_json::Value, DAGError>
+    ↓ (Pipeline::run 内部转换)
+Pipeline::run()             → PipelineRun { errors: Vec<AgentError> }
+```
+
+### 2.3 PluginError（现有，不变）
+
+```rust
+#[derive(Debug, Error)]
+pub enum PluginError {
+    #[error("Parse error: {0}")]
+    Parse(String),
+    #[error("Validation error: {0}")]
+    Validation(String),
+    #[error("Missing tool: {0}")]
+    MissingTool(String),
+    #[error("Context window exceeded: {0} tokens required")]
+    ContextExceeded(u32),
+    #[error("Max turns exceeded ({0})")]
+    MaxTurnsExceeded(u32),
+    #[error("Output too large: {0} bytes (max {1})")]
+    OutputTooLarge(usize, usize),
+    #[error("Escalated after {after_attempts} attempts: {original}")]
+    Escalated {
+        original: Box<PluginError>,
+        after_attempts: u32,
+    },
+    #[error("{0}")]
+    Other(String),
+}
+```
+
+### 2.4 DAGError（lattice-harness，新增）
+
+```rust
+#[derive(Debug, Error)]
+pub enum DAGError {
+    #[error("entry slot '{0}' not found in [plugins.slots]")]
+    EntrySlotNotFound(String),
+
+    #[error("slot '{0}' not found")]
+    SlotNotFound(String),
+
+    #[error("plugin '{0}' not registered")]
+    PluginNotFound(String),
+
+    #[error("model resolve failed: {0}")]
+    Resolve(#[from] lattice_core::LatticeError),
+
+    #[error("max slot transitions ({0}) exceeded — possible infinite DAG loop")]
+    MaxSlotTransitionsExceeded(u32),
+
+    #[error("plugin error in slot '{slot}': {source}")]
+    Plugin {
+        slot: String,
+        #[source]
+        source: PluginError,
+    },
+
+    #[error("output JSON parse failed: {0}")]
+    OutputParse(String),
+
+    #[error("fork not supported in intra-agent DAG — use Pipeline")]
+    ForkNotSupportedInDag,
+
+    #[error("missing tool registry")]
+    MissingToolRegistry,
+
+    #[error("missing plugin registry")]
+    MissingPluginRegistry,
+}
+
+// PluginDagRunner 内部使用
+impl DAGError {
+    fn plugin_error(slot: &str, err: PluginError) -> Self {
+        DAGError::Plugin { slot: slot.into(), source: err }
+    }
+}
+
+// Pipeline 错误转换
+impl From<DAGError> for AgentError {
+    fn from(e: DAGError) -> Self {
+        AgentError {
+            agent_name: "plugin-dag".into(),
+            message: e.to_string(),
+            skippable: false,
+        }
+    }
+}
+```
 
 ## 3. Plugin 层 (lattice-plugin)
 
@@ -66,11 +162,11 @@ pub trait Plugin: Send + Sync {
     fn parse_output(&self, raw: &str) -> Result<Self::Output, PluginError>;
     fn tools(&self) -> &[ToolDefinition] { &[] }
     fn preferred_model(&self) -> &str { "" }
-    fn output_schema(&self) -> Option<serde_json::Value> { None }  // [新增]
+    fn output_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```
 
-**confidence 隐式契约**：如果 Plugin 与 `StrictBehavior` 配合使用，LLM prompt 中必须要求输出 `"confidence"` 字段（0.0-1.0）。`extract_confidence` 在缺失时返回 0.0 → StrictBehavior 会无限 Retry 直到 max_turns 耗尽。如果不想输出 confidence，用 `YoloBehavior`。
+**confidence 隐式契约**：如果 Plugin 与 `StrictBehavior` 配合，LLM prompt 中必须要求输出 `"confidence"` 字段（0.0-1.0）。缺失 → 0.0 → StrictBehavior 永远 Retry 直到 max_turns。不需要 confidence 则用 `YoloBehavior`。
 
 ### 3.2 ErasedPlugin
 
@@ -86,53 +182,11 @@ pub trait ErasedPlugin: Send + Sync {
 }
 
 impl<T: Plugin> ErasedPlugin for T
-where
-    T::Input: DeserializeOwned,
-    T::Output: Serialize,
-{
-    fn to_prompt_json(&self, context: &serde_json::Value) -> Result<String, PluginError> {
-        let typed: T::Input = serde_json::from_value(context.clone())
-            .map_err(|e| PluginError::Parse(format!(
-                "{}: failed to deserialize input from context: {}", self.name(), e
-            )))?;
-        Ok(self.to_prompt(&typed))
-    }
-    // parse_output_json, name, system_prompt, tools, preferred_model, output_schema 同上
-}
+where T::Input: DeserializeOwned, T::Output: Serialize
+{ /* blanket impl — v0.6.0 §3.2 */ }
 ```
 
-**关键变更**：`to_prompt_json` 的参数名从 `input` 改为 `context`。接收的是累积 context（含 input + 所有上游 slot 输出），不是单一 slot 的输出。Plugin 的 `Input` 类型应设计为能从累积 context 中 deserialize 出所需字段（用 `#[serde(default)]` 处理缺失字段）。
-
-### 3.3 BehaviorMode（含转换）
-
-```rust
-pub enum BehaviorMode {
-    Strict { confidence_threshold: f64, max_retries: u32, escalate_to: Option<String> },
-    Yolo,
-}
-
-impl BehaviorMode {
-    pub fn to_behavior(&self) -> Box<dyn Behavior> { /* 已有 */ }
-}
-
-// ---- TOML 反序列化 → BehaviorMode 的转换 ----
-// BehaviorModeConfig 在 AgentProfile::load() 时转换为 BehaviorMode
-// PluginSlotConfig 直接存 BehaviorMode（不是 BehaviorModeConfig）
-
-pub fn resolve_behavior(
-    slot: &PluginSlotConfig,
-    default: &BehaviorMode,
-) -> Box<dyn Behavior> {
-    match &slot.behavior {
-        Some(bm) => bm.clone().to_behavior(),
-        None => default.clone().to_behavior(),
-    }
-}
-```
-
-**类型一致性**：`PluginSlotConfig.behavior: Option<BehaviorMode>`（不是 `BehaviorModeConfig`）。TOML 反序列化时 `BehaviorModeConfig` 通过 `try_from` 转换为 `BehaviorMode`。
-
-## 4. PluginBundle + PluginRegistry
+### 3.3 PluginBundle + PluginRegistry
 
 ```rust
 pub struct PluginBundle {
@@ -142,38 +196,39 @@ pub struct PluginBundle {
     pub default_tools: Vec<ToolDefinition>,
 }
 
+pub enum BehaviorMode {
+    Strict { confidence_threshold: f64, max_retries: u32, escalate_to: Option<String> },
+    Yolo,
+}
+
+impl BehaviorMode {
+    pub fn to_behavior(&self) -> Box<dyn Behavior> { /* StrictBehavior / YoloBehavior */ }
+}
+
 pub struct PluginRegistry {
     plugins: HashMap<String, PluginBundle>,
 }
 
 impl PluginRegistry {
-    /// 运行时只读查询
-    pub fn get(&self, name: &str) -> Option<&PluginBundle>;
-
     /// 启动时注册（需 &mut self）。
-    /// 构建期完成所有 register 后，包装进 Arc 供 AgentRunner 共享。
+    /// 完成所有 register 后包装进 Arc，运行时 Arc::get() 只读。
     pub fn register(&mut self, bundle: PluginBundle) -> Result<(), RegistryError>;
+    pub fn get(&self, name: &str) -> Option<&PluginBundle>;
 }
-
-// 使用模式：
-// let mut registry = PluginRegistry::new();
-// registry.register(code_review_bundle);
-// registry.register(refactor_bundle);
-// let registry = Arc::new(registry);  // 之后只读共享
 ```
 
-## 5. ErasedPluginRunner (lattice-plugin)
-
-### 5.1 共享 run loop
+### 3.4 ErasedPluginRunner（共享 run loop）
 
 ```rust
 // lattice-plugin/src/runner_core.rs
 
+/// 共享的 PluginRunner run loop。
+/// 返回 PluginError（不是 DAGError——本 crate 不感知 harness 错误类型）。
 pub(crate) fn run_plugin_loop(
     plugin: &dyn ErasedPlugin,
     behavior: &dyn Behavior,
     agent: &mut dyn PluginAgent,
-    context: &serde_json::Value,           // 累积上下文
+    context: &serde_json::Value,
     config: &PluginConfig,
     hooks: Option<&dyn PluginHooks>,
     retry_policy: Option<&RetryPolicy>,
@@ -191,6 +246,10 @@ pub(crate) fn run_plugin_loop(
             return Err(PluginError::MaxTurnsExceeded(config.max_turns));
         }
 
+        // send_message_with_tools: 内部调 Agent::run()（含 tool loop + 网络重试）
+        // 两层重试:
+        //   L1 (lattice-core): chat_with_retry — 网络/RateLimit, jittered backoff, 3 次
+        //   L2 (这里):         behavior.decide/on_error — 低置信度/解析失败, max_turns 次
         let raw = agent
             .send_message_with_tools(&prompt)
             .map_err(|e| PluginError::Other(e.to_string()))?;
@@ -211,9 +270,7 @@ pub(crate) fn run_plugin_loop(
                         }
                         let result = RunResult { output: json, turns: attempt + 1, final_action: Action::Done };
                         if let Some(h) = hooks { h.on_complete(&result); }
-                        if let Some(mem) = memory {
-                            save_memory_entries(mem, plugin.name(), &prompt, &result);
-                        }
+                        if let Some(mem) = memory { save_memory_entries(mem, plugin.name(), &prompt, &result); }
                         return Ok(result);
                     }
                     Action::Retry => {
@@ -231,7 +288,10 @@ pub(crate) fn run_plugin_loop(
                     }
                     ErrorAction::Abort => return Err(e),
                     ErrorAction::Escalate => {
-                        return Err(PluginError::Escalated { original: Box::new(e), after_attempts: attempt });
+                        return Err(PluginError::Escalated {
+                            original: Box::new(e),
+                            after_attempts: attempt,
+                        });
                     }
                 }
             }
@@ -240,19 +300,19 @@ pub(crate) fn run_plugin_loop(
 }
 ```
 
-### 5.2 PluginAgent 新增方法
+### 3.5 PluginAgent 新增方法
 
 ```rust
 pub trait PluginAgent {
     fn send(&mut self, message: &str) -> Result<String, Box<dyn Error>>;
     fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>>; // [新增]
-    fn set_system_prompt(&mut self, prompt: &str);  // trait: push 语义（追加）
+    fn set_system_prompt(&mut self, prompt: &str);  // trait: 追加语义
     fn token_usage(&self) -> u64;
 }
 
 impl PluginAgent for Agent {
     fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>> {
-        let events = self.run(message, 10);
+        let events = self.run(message, 10);  // Agent::run 含 tool loop + 网络重试
         let mut text = String::new();
         for event in &events {
             if let LoopEvent::Token { text: t } = event { text.push_str(t); }
@@ -262,38 +322,31 @@ impl PluginAgent for Agent {
 }
 ```
 
-### 5.3 Agent::set_system_prompt 的 inherent vs trait 方法
+### 3.6 Agent::set_system_prompt 方法解析
 
 ```rust
-// trait 方法（追加语义，现有行为不改）
-impl PluginAgent for Agent {
-    fn set_system_prompt(&mut self, prompt: &str) {
-        self.state.push_system_message(prompt);  // 追加
-    }
-}
-
-// inherent 方法（替换语义，新增）
+// inherent method（替换语义）—— PluginDagRunner 用 Agent 直接类型，优先调用此
 impl Agent {
-    /// 替换已有的 system message（非追加）。
-    /// 当通过 Agent 直接调用时（非 &mut dyn PluginAgent），此 inherent 方法优先。
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        let system_msg = Message { role: Role::System, content: prompt.to_string(), .. };
+        let msg = Message { role: Role::System, content: prompt.to_string(), .. };
         match self.state.messages.first() {
-            Some(msg) if msg.role == Role::System => self.state.messages[0] = system_msg,
-            _ => self.state.messages.insert(0, system_msg),
+            Some(m) if m.role == Role::System => self.state.messages[0] = msg,
+            _ => self.state.messages.insert(0, msg),
         }
     }
 }
 
-// 调用行为：
-// let mut a: Agent = ...;  a.set_system_prompt("x");  → inherent (替换) ✓
-// let mut a: &mut dyn PluginAgent = ...;  a.set_system_prompt("x");  → trait (追加)
-// PluginDagRunner 使用 Agent 直接类型 → 调用 inherent → 替换语义 ✓
+// trait method（追加语义）—— 通过 &mut dyn PluginAgent 调用时使用
+impl PluginAgent for Agent {
+    fn set_system_prompt(&mut self, prompt: &str) {
+        self.state.push_system_message(prompt);
+    }
+}
 ```
 
-## 6. AgentProfile 扩展 (lattice-harness)
+## 4. AgentProfile 扩展 (lattice-harness)
 
-### 6.1 TOML
+### 4.1 TOML
 
 ```toml
 [agent]
@@ -302,20 +355,18 @@ model = "sonnet"
 
 [plugins]
 entry = "review"
-shared_tools = ["bash", "read_file", "grep", "web_search"]
+shared_tools = ["bash", "read_file", "grep"]
 
 [[plugins.slots]]
 name = "review"
 plugin = "CodeReview"
 max_turns = 3
-tools = ["diff_parser"]                       # slot 专属工具（加入 shared）
 behavior = { mode = "strict", confidence_threshold = 0.7, max_retries = 3 }
 
 [[plugins.slots]]
 name = "refactor"
 plugin = "Refactor"
 max_turns = 5
-model_override = "sonnet"
 
 [[plugins.edges]]
 from = "review"
@@ -333,7 +384,7 @@ rule = { default = true }
 fallback = "deploy-check"
 ```
 
-### 6.2 Rust 类型
+### 4.2 Rust 类型
 
 ```rust
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -355,7 +406,7 @@ pub struct PluginSlotConfig {
     pub tools: Vec<String>,
     pub model_override: Option<String>,
     pub max_turns: Option<u32>,
-    pub behavior: Option<BehaviorMode>,  // BehaviorMode，不是 BehaviorModeConfig
+    pub behavior: Option<BehaviorMode>,  // 直接存 BehaviorMode
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -364,9 +415,9 @@ pub struct AgentEdgeConfig {
     pub rule: HandoffRule,
 }
 
-// TOML 反序列化的中间类型
+// TOML 加载中间类型
 #[derive(Debug, Clone, Deserialize)]
-struct BehaviorModeConfig {
+struct BehaviorModeToml {
     mode: String,
     #[serde(default)]
     confidence_threshold: Option<f64>,
@@ -376,76 +427,26 @@ struct BehaviorModeConfig {
     escalate_to: Option<String>,
 }
 
-impl TryFrom<BehaviorModeConfig> for BehaviorMode {
+impl TryFrom<BehaviorModeToml> for BehaviorMode {
     type Error = String;
-    fn try_from(c: BehaviorModeConfig) -> Result<Self, Self::Error> {
-        match c.mode.as_str() {
-            "yolo" => Ok(BehaviorMode::Yolo),
-            "strict" => Ok(BehaviorMode::Strict {
-                confidence_threshold: c.confidence_threshold.unwrap_or(0.7),
-                max_retries: c.max_retries.unwrap_or(3),
-                escalate_to: c.escalate_to,
-            }),
-            other => Err(format!("unknown behavior mode '{}'", other)),
-        }
-    }
+    fn try_from(c: BehaviorModeToml) -> Result<Self, Self::Error> { /* v0.6.0 §6.2 */ }
 }
 
-// PluginSlotConfig 的 TOML 反序列化手工实现
-// behavior 字段：先 deserialize 为 Option<BehaviorModeConfig>，再 try_into → Option<BehaviorMode>
-impl<'de> Deserialize<'de> for PluginSlotConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: Deserializer<'de> {
-        // 使用 RawSlotConfig 辅助结构，behavior 存 Option<BehaviorModeConfig>
-        // 然后转换为 PluginSlotConfig { behavior: raw.behavior.map(|c| c.try_into()).transpose()? }
-        ...
-    }
-}
+// PluginSlotConfig 自定义 Deserialize
+// behavior 字段：BehaviorModeToml → TryFrom → BehaviorMode → Option<BehaviorMode>
 ```
 
-**entry 校验**（`AgentProfile::load()` 时）：
-1. `entry` 指向已定义的 slot → 否则 `LoadError::EntrySlotNotFound`
-2. `edges` 的所有 `from` 指向已定义的 slot → warn
-3. 每个 node 存在可达的终止路径 → warn
+**entry 校验**（`AgentProfile::load()` 时）：entry 指向已定义 slot → 否则 `LoadError::EntrySlotNotFound`。
 
-## 7. PluginDagRunner (lattice-harness)
+## 5. PluginDagRunner (lattice-harness)
 
-### 7.1 常量
+### 5.1 常量 + 类型
 
 ```rust
-/// slot 最大切换次数。防止死循环。
+/// Slot 最大切换次数。不是 LLM 调用次数，是 slot → slot 转移次数。
+/// 与 PluginSlotConfig.max_turns（单 slot 内 LLM 调用上限）正交。
 const MAX_DAG_SLOT_TRANSITIONS: u32 = 50;
-```
 
-### 7.2 DAGError
-
-```rust
-#[derive(Debug, Error)]
-pub enum DAGError {
-    #[error("entry slot '{0}' not found")]
-    EntrySlotNotFound(String),
-    #[error("slot '{0}' not found")]
-    SlotNotFound(String),
-    #[error("plugin '{0}' not registered")]
-    PluginNotFound(String),
-    #[error("model resolve failed: {0}")]
-    Resolve(String),
-    #[error("max slot transitions ({0}) exceeded")]
-    MaxSlotTransitionsExceeded(u32),
-    #[error(transparent)]
-    Plugin(#[from] PluginError),
-    #[error("output parse failed: {0}")]
-    Parse(String),
-    #[error("fork not supported in intra-agent DAG")]
-    ForkNotSupportedInDag,
-    #[error("plugin '{plugin}' escalated after {after_attempts} attempts: {original}")]
-    Escalated { plugin: String, after_attempts: u32, original: String },
-}
-```
-
-### 7.3 run()
-
-```rust
 pub struct PluginDagRunner<'a> {
     config: &'a PluginsConfig,
     plugin_registry: &'a PluginRegistry,
@@ -453,7 +454,11 @@ pub struct PluginDagRunner<'a> {
     retry_policy: RetryPolicy,
     shared_memory: Option<Arc<dyn Memory>>,
 }
+```
 
+### 5.2 run()
+
+```rust
 impl PluginDagRunner<'_> {
     pub fn run(
         &mut self,
@@ -461,10 +466,12 @@ impl PluginDagRunner<'_> {
         default_model: &str,
     ) -> Result<serde_json::Value, DAGError> {
         // ── 累积上下文 ──
-        let mut context = serde_json::Map::new();
-        context.insert("input".into(), serde_json::Value::String(initial_input.to_string()));
-        let mut context = serde_json::Value::Object(context);
+        // 初始：context = {"input": "<user text>"}
+        // Plugin 的 to_prompt_json 接收整个 context。
+        // entry plugin 的 Input 应从 context["input"] 获取原始输入。
+        let mut context = serde_json::json!({"input": initial_input});
 
+        // entry 校验已在 AgentProfile::load() 完成
         let mut current_name = self.config.entry.clone();
         let mut transitions = 0u32;
 
@@ -482,15 +489,15 @@ impl PluginDagRunner<'_> {
 
             // ── 每个 slot 重建 Agent ──
             let model = slot.model_override.as_deref().unwrap_or(default_model);
-            let resolved = resolve(model).map_err(|e| DAGError::Resolve(e.to_string()))?;
+            let resolved = resolve(model)?;  // LatticeError → DAGError::Resolve
             let mut agent = Agent::new(resolved);
             agent.set_system_prompt(bundle.plugin.system_prompt());  // inherent: 替换
 
             let tools = merge_tool_definitions(
                 &self.tool_registry,
-                &self.config.shared_tools,   // plugins.shared_tools
-                &slot.tools,                  // slot.tools
-                bundle.plugin.tools(),        // plugin.tools()
+                &self.config.shared_tools,
+                &slot.tools,
+                bundle.plugin.tools(),
             );
             agent = agent.with_tools(tools);
 
@@ -508,33 +515,33 @@ impl PluginDagRunner<'_> {
                 bundle.plugin.as_ref(),
                 behavior.as_ref(),
                 &mut agent,
-                &context,                     // ★ 传入累积上下文
+                &context,
                 &plugin_config,
                 Some(&self.retry_policy),
                 self.shared_memory.as_deref(),
-            )?;
+            )
+            .map_err(|e| DAGError::plugin_error(&current_name, e))?;
 
             let output_json: serde_json::Value = serde_json::from_str(&result.output)
-                .map_err(|e| DAGError::Parse(e.to_string()))?;
+                .map_err(|e| DAGError::OutputParse(e.to_string()))?;
 
             // ── 写入累积上下文 ──
-            context[current_name.clone()] = output_json.clone();
+            context[current_name.as_str()] = output_json.clone();
 
             // ── 保存到 shared_memory ──
             if let Some(ref mem) = self.shared_memory {
-                let entry = MemoryEntry {
+                mem.save_entry(MemoryEntry {
                     id: format!("dag-{}-{}", current_name, transitions),
                     kind: EntryKind::SessionLog,
                     session_id: self.config.entry.clone(),
-                    summary: format!("{} slot output", current_name),
-                    content: result.output.clone(),
+                    summary: format!("{} output", current_name),
+                    content: result.output,
                     tags: vec![current_name.clone()],
                     created_at: now_ms().to_string(),
-                };
-                mem.save_entry(entry);
+                });
             }
 
-            // ── 找下一个 slot ──
+            // ── 找下一个 slot（edges 按 TOML 定义顺序求值，first match wins）──
             let next = self.find_edge(&current_name, &output_json);
 
             match next {
@@ -542,16 +549,14 @@ impl PluginDagRunner<'_> {
                     current_name = next_name;
                     transitions += 1;
                 }
-                Some(HandoffTarget::Fork(_)) => {
-                    return Err(DAGError::ForkNotSupportedInDag);
-                }
+                Some(HandoffTarget::Fork(_)) => return Err(DAGError::ForkNotSupportedInDag),
                 None => return Ok(output_json),
-                // ★ 最终输出是最后一个 slot 的 output。
-                // DAG 沿第一条匹配的 edge 走（HandoffRule eval 顺序），所以路径是确定性的。
             }
         }
     }
 
+    /// 沿 edges 的 TOML 定义顺序，找第一条 from == current && rule.eval(output) == true 的边。
+    /// 返回 rule.target。无匹配 → None（DAG 终点）。
     fn find_edge(&self, from: &str, output: &serde_json::Value) -> Option<HandoffTarget> {
         self.config.edges.iter()
             .filter(|e| e.from == from)
@@ -561,122 +566,172 @@ impl PluginDagRunner<'_> {
 }
 ```
 
-### 7.4 数据流示意
+### 5.3 初始 input → entry plugin Input 映射
 
-```
-context = {"input": "sort this Rust code: fn main() { ... }"}
+Entry plugin 通过 `to_prompt_json(&context)` 接收初始上下文。context 结构：
 
-slot "review" 看到 context →
-  CodeReview::to_prompt_json(context)
-    → serde_json::from_value::<ReviewInput>(context) → ReviewInput { code: "...", file_path: "", context_rules: "" }
-    → prompt = "Review this code: ..."
-    → parse_output → {"issues": [{...}], "confidence": 0.85}
-  context["review"] = {"issues": [{...}], "confidence": 0.85}
-
-slot "refactor" 看到 context = {
-    "input": "sort this Rust code: ...",
-    "review": {"issues": [...], "confidence": 0.85}
-  }
-  → Refactor::to_prompt_json(context)
-    → serde_json::from_value::<RefactorInput>(context) → RefactorInput {
-        code: context["input"].as_str(),                // 从 input 拿原始代码
-        review_issues: context["review"]["issues"],      // 从 review 拿审查结果
-        instructions: ""                                 // 可选字段，默认空
-      }
-    → prompt = "Refactor this code fixing: [...issues...]"
-    → parse_output → {"refactored_code": "...", "changes": [...]}
-  context["refactor"] = {...}
+```json
+{"input": "<用户原始文本>"}
 ```
 
-## 8. ToolRegistry (lattice-harness)
+Plugin Input 需有对应字段（`#[serde(default)]` 确保缺失不报错）：
 
 ```rust
-/// 合并三层工具定义。
-/// - shared: 从 ToolRegistry 解析 plugins.shared_tools
-/// - slot: 从 ToolRegistry 解析 slot.tools
-/// - plugin: plugin.tools() 返回
-/// 同名：plugin > slot > shared。tool 名不在 registry → warn + skip。
+// CodeReviewInput — entry plugin 示例
+#[derive(Deserialize)]
+struct CodeReviewInput {
+    #[serde(default)]
+    input: String,         // ← context["input"] → 用户原始文本（当 diff 用）
+    #[serde(default)]
+    file_path: String,
+    #[serde(default)]
+    context_rules: Vec<String>,
+}
+// context["input"] = "sort this Rust code..." → CodeReviewInput.input = "sort this..."
+// CodeReview::to_prompt(): self.input 作为 diff 传给 LLM
+```
+
+非 entry plugin 的 Input 可以同时引用 `context["input"]` 和 `context["<上游slot>"]`：
+
+```rust
+#[derive(Deserialize)]
+struct RefactorInput {
+    #[serde(default)]
+    code: String,                  // ← context["input"]
+    #[serde(default)]
+    review_issues: Vec<Issue>,    // ← context["review"]["issues"]
+    #[serde(default)]
+    instructions: String,
+}
+```
+
+## 6. ToolRegistry (lattice-harness)
+
+```rust
+pub struct ToolRegistry {
+    tools: HashMap<String, RegisteredTool>,
+}
+
 pub fn merge_tool_definitions(
     registry: &ToolRegistry,
     shared_tool_names: &[String],
     slot_tool_names: &[String],
     plugin_tools: &[ToolDefinition],
 ) -> Vec<ToolDefinition> {
-    let mut merged: IndexMap<String, ToolDefinition> = IndexMap::new();
-
-    for names in [shared_tool_names, slot_tool_names] {
-        for name in names {
-            match registry.get(name) {
-                Some(tool) => { merged.insert(name.clone(), tool.definition.clone()); }
-                None => warn!("tool '{}' not in ToolRegistry — skipping", name),
-            }
-        }
-    }
-
-    for td in plugin_tools {
-        merged.insert(td.function.name.clone(), td.clone());
-    }
-
-    merged.into_values().collect()
+    // 逐层合并。同名：plugin > slot > shared
+    // tool 名不在 registry → warn! + skip
+    // v0.6.0 §8
 }
 ```
 
-## 9. AgentRunner 集成
+## 7. Pipeline 集成
+
+**PluginDagRunner 是 AgentRunner 的平级替代，在 Pipeline 中分支**。
 
 ```rust
-impl AgentRunner {
-    // 新增字段
-    pub plugin_registry: Option<Arc<PluginRegistry>>,   // Arc: 只读共享
-    pub tool_registry: Option<Arc<ToolRegistry>>,
+impl Pipeline {
+    pub fn run(&mut self, start_agent: &str, input: &str) -> PipelineRun {
+        // ... 前面不变 ...
+        for _turn in 0..pipeline_max_agents {
+            let profile = self.registry.get(&current_agent)?;
 
-    pub fn run(&mut self, input: &str, max_turns: u32) -> Result<serde_json::Value, Box<dyn Error>> {
-        if let Some(ref plugins_config) = self.profile.plugins {
-            let registry = self.plugin_registry.as_ref().ok_or("plugin_registry not set")?;
-            let tools = self.tool_registry.as_ref().ok_or("tool_registry not set")?;
-            let mut dag = PluginDagRunner::new(plugins_config, registry, tools);
-            let output = dag.run(input, &self.profile.agent.model)?;
-            self.validate_with_schema(output, max_turns)
-        } else {
-            self.run_raw(input, max_turns)  // 不变
+            let resolved = match resolve(&profile.agent.model) {
+                Ok(r) => r,
+                Err(e) => { /* 现有错误处理 */ }
+            };
+
+            // ── 分支：Plugin DAG vs 原始 Agent ──
+            let output: serde_json::Value = if let Some(ref plugins_config) = profile.plugins {
+                let plugin_registry = self.plugin_registry.as_ref()
+                    .ok_or_else(|| AgentError { ... })?;
+                let tool_registry = self.tool_registry.as_ref()
+                    .ok_or_else(|| AgentError { ... })?;
+
+                let mut dag = PluginDagRunner::new(
+                    plugins_config,
+                    plugin_registry,
+                    tool_registry,
+                );
+                dag.run(&current_input, &profile.agent.model)
+                    .map_err(|e| AgentError::from(e))?
+            } else {
+                let mut runner = build_runner(&profile, resolved, self.shared_memory.clone());
+                runner.run(&current_input, agent_max_turns)
+                    .map_err(|e: Box<dyn Error>| AgentError { ... })?
+            };
+
+            // ── handoff 评估（两种模式共用）──
+            let next = eval_rules_or_fallback(&profile, &output);
+            // ... 后续不变 ...
         }
     }
 }
+
+// Pipeline 新增字段
+impl Pipeline {
+    pub plugin_registry: Option<Arc<PluginRegistry>>,
+    pub tool_registry: Option<Arc<ToolRegistry>>,
+}
 ```
 
-## 10. 内置插件
+**AgentRunner 不变**——Plugin 模式绕开 AgentRunner，直接从 Pipeline 调 PluginDagRunner。`build_runner()` 仅在非 plugin 模式调用。
 
-| 插件 | Input struct | 从 context 提取的关键字段 | 文件 |
-|------|-------------|--------------------------|------|
-| `CodeReview` | `CodeReviewInput` | `context["input"]` → code, `context["<prev>"]["diff"]` → diff | builtin/code_review.rs |
-| `Refactor` | `RefactorInput` | `context["input"]` → code, `context["review"]["issues"]` → issues | builtin/refactor.rs |
-| `TestGen` | `TestGenInput` | `context["input"]` → code, `context["refactor"]["refactored_code"]` → code | builtin/test_gen.rs |
-| `SecurityAudit` | `SecurityAuditInput` | `context["input"]` → code, context 中依赖列表 | builtin/security_audit.rs |
-| `DocGen` | `DocGenInput` | `context["refactor"]["refactored_code"]` → code | builtin/doc_gen.rs |
-| `PptxGen` | `PptxGenInput` | context 中 topic, outline | builtin/pptx_gen.rs |
-| `DeepResearch` | `DeepResearchInput` | context 中 query, sources | builtin/deep_research.rs |
-| `ImageGen` | `ImageGenInput` | context 中 prompt, style | builtin/image_gen.rs |
-| `KnowledgeBase` | `KnowledgeBaseInput` | context 中 query, sources | builtin/knowledge_base.rs |
+## 8. 初始化模式
 
-每个 Plugin 的 `Input` struct 所有字段标记 `#[serde(default)]`，确保从 context 反序列化时缺失字段不会导致 Parse error。
+```rust
+// 启动时
+let mut plugin_registry = PluginRegistry::new();
+plugin_registry.register(code_review_bundle)?;
+plugin_registry.register(refactor_bundle)?;
+// ... 注册所有插件 ...
 
-共享工具：`builtin/parse_utils.rs`。
+let plugin_registry = Arc::new(plugin_registry);  // 冻结，之后只读
 
-## 11. 集成测试场景
+let mut tool_registry = ToolRegistry::new();
+// 注册工具 ...
+
+let tool_registry = Arc::new(tool_registry);
+
+let pipeline = Pipeline::new("my-pipeline", agent_registry, shared_memory, event_bus)
+    .with_plugin_registry(plugin_registry)
+    .with_tool_registry(tool_registry);
+
+pipeline.run("code-reviewer", "sort this Rust code");
+```
+
+## 9. 内置插件
+
+| 插件 | Input struct（#[serde(default)] 所有字段） | 文件 |
+|------|------------------------------------------|------|
+| `CodeReview` | `{ input, file_path, context_rules }` | builtin/code_review.rs |
+| `Refactor` | `{ code, review_issues, instructions }` | builtin/refactor.rs |
+| `TestGen` | `{ code, focus_areas }` | builtin/test_gen.rs |
+| `SecurityAudit` | `{ code, dependencies, threat_model }` | builtin/security_audit.rs |
+| `DocGen` | `{ code, doc_type, audience }` | builtin/doc_gen.rs |
+| `PptxGen` | `{ topic, outline, template }` | builtin/pptx_gen.rs |
+| `DeepResearch` | `{ query, sources, depth }` | builtin/deep_research.rs |
+| `ImageGen` | `{ prompt, style, dimensions }` | builtin/image_gen.rs |
+| `KnowledgeBase` | `{ query, kb_sources }` | builtin/knowledge_base.rs |
+
+所有 Input struct 字段标记 `#[serde(default)]`。共用 `builtin/parse_utils.rs`。
+
+## 10. 集成测试
 
 ```rust
 #[test]
-fn test_dag_review_then_refactor_with_context_accumulation() {
-    let mut registry = PluginRegistry::new();
-    registry.register(/* CodeReview bundle */);
-    registry.register(/* Refactor bundle */);
-    let registry = Arc::new(registry);  // 之后只读
+fn test_dag_review_then_refactor_context_accumulation() {
+    let mut pr = PluginRegistry::new();
+    pr.register(/* CodeReview */);
+    pr.register(/* Refactor */);
+    let pr = Arc::new(pr);
+    let tr = Arc::new(ToolRegistry::new());
 
     let config = PluginsConfig {
         entry: "review".into(),
         shared_tools: vec![],
         slots: vec![
-            PluginSlotConfig { name: "review".into(), plugin: "CodeReview".into(), .. },
-            PluginSlotConfig { name: "refactor".into(), plugin: "Refactor".into(), .. },
+            PluginSlotConfig { name: "review".into(), plugin: "CodeReview".into(), max_turns: Some(3), .. },
+            PluginSlotConfig { name: "refactor".into(), plugin: "Refactor".into(), max_turns: Some(5), .. },
         ],
         edges: vec![
             AgentEdgeConfig { from: "review".into(), rule: HandoffRule { default: true, target: Some("refactor".into()), .. } },
@@ -684,61 +739,55 @@ fn test_dag_review_then_refactor_with_context_accumulation() {
         ],
     };
 
-    let tool_registry = ToolRegistry::new();
-    let mut dag = PluginDagRunner::new(&config, &registry, &tool_registry);
+    let mut dag = PluginDagRunner::new(&config, &pr, &tr);
     let result = dag.run("// broken code", "mock-model").unwrap();
-
-    // refactor 的 output 是最终输出（最后一个 slot）
     assert!(result.get("refactored_code").is_some());
 }
 
 #[test]
-fn test_entry_slot_not_found() { /* AgentProfile::load 报错 */ }
-
+fn test_entry_slot_not_found() { /* AgentProfile::load → Err */ }
 #[test]
-fn test_missing_tool_warned_not_error() { /* ToolRegistry 缺失 → warn + skip */ }
-
+fn test_missing_tool_warned() { /* tool 不在 registry → warn + skip，不 panic */ }
 #[test]
-fn test_behavior_mode_config_to_enum_conversion() {
-    // "strict" 含 escalate_to → Strict { confidence_threshold, max_retries, escalate_to }
-    // "yolo" → Yolo
-    // "unknown" → Err
-}
+fn test_fork_rejected_in_dag() { /* Fork Target → DAGError::ForkNotSupportedInDag */ }
+#[test]
+fn test_max_transitions_exceeded() { /* 循环 edge → DAGError::MaxSlotTransitionsExceeded */ }
 ```
 
-## 12. 实现顺序
+## 11. 实现顺序
 
 ```
-第1轮:  ErasedPlugin trait + blanket impl（to_prompt_json 参数名 context）
-第2轮:  PluginBundle + PluginMeta + BehaviorMode
-第3轮:  PluginRegistry（构建期注册 + Arc 只读共享）
-第4轮:  Agent::set_system_prompt() inherent + trait 语义文档
+第1轮:  ErasedPlugin trait + blanket impl
+第2轮:  PluginBundle + PluginMeta + BehaviorMode + to_behavior()
+第3轮:  PluginRegistry（构建期注册 + Arc 冻结）
+第4轮:  Agent::set_system_prompt() inherent（替换语义）
 第5轮:  PluginAgent::send_message_with_tools()
 第6轮:  PluginRunner 重构 → ErasedPluginRunner + 共享 run_plugin_loop()
-第7轮:  PluginsConfig + PluginSlotConfig + AgentEdgeConfig（手工 Deserialize，BehaviorMode 直接存）
-第8轮:  PluginDagRunner + DAGError + 累积上下文 + find_edge + shared_memory 保存
-第9轮:  AgentRunner 集成
-第10轮: ToolRegistry + merge_tool_definitions（shared + slot + plugin 合并）
-第11轮: parse_utils + 3 个内置插件（Input 全字段 #[serde(default)]）
-第12轮: 剩余 6 个内置插件
-第13轮: 集成测试
+          run_plugin_loop 返回 PluginError（不感知 DAGError）
+第7轮:  PluginsConfig + PluginSlotConfig + AgentEdgeConfig + BehaviorModeToml → TryFrom
+第8轮:  DAGError（完整 10 variant + From<LatticeError> + Into<AgentError>）
+第9轮:  PluginDagRunner + 累积上下文 + find_edge + shared_memory
+第10轮: Pipeline 集成（profile.plugins 分支，PluginDagRunner 平级）
+第11轮: ToolRegistry + merge_tool_definitions
+第12轮: parse_utils + 3 个内置插件（全部 Input 字段 #[serde(default)]）
+第13轮: 剩余 6 个内置插件
+第14轮: 集成测试
 ```
 
-## 13. 与现有代码的关系
+## 12. 与现有代码的关系
 
 ### 不动
 - `lattice-core`: 全部
-- `lattice-agent`: AgentState, Memory trait, 7 个内置工具, PluginAgent trait 的现有方法签名
-- `lattice-harness`: Pipeline, HandoffRule, HandoffTarget, HandoffCondition, eval_rules, AgentRegistry, EventBus, Watcher, WebSocket, dry_run
-- `lattice-plugin`: Behavior trait, StrictBehavior, YoloBehavior, PluginHooks, PluginConfig, RunResult, PluginError, Action, ErrorAction
+- `lattice-agent`: AgentState, Memory trait, 7 内置工具, PluginAgent trait 现有方法签名
+- `lattice-harness`: AgentRunner, AgentProfile（无 plugin 字段的加载逻辑）, HandoffRule, HandoffTarget, HandoffCondition, eval_rules, AgentRegistry, EventBus, Watcher, WebSocket, dry_run, handle_fallback
+- `lattice-plugin`: Behavior trait, StrictBehavior, YoloBehavior, PluginHooks, PluginConfig, RunResult, PluginError, Action, ErrorAction, extract_confidence（改为 pub(crate)）
 
 ### 修改
-- `lattice-plugin/src/lib.rs`: Plugin trait 加 `output_schema()`；`extract_confidence` → `pub(crate)`
-- `lattice-plugin/src/runner.rs`: 重构为共享 `run_plugin_loop()`
-- `lattice-agent/src/agent.rs`: 加 inherent `set_system_prompt()` 替换语义
+- `lattice-plugin/src/lib.rs`: Plugin trait 加 `output_schema()`；`extract_confidence` → `pub(crate)`；PluginRunner::run 重构为委托 run_plugin_loop
+- `lattice-agent/src/agent.rs`: 加 inherent `set_system_prompt()`
 - `lattice-agent/src/lib.rs`: PluginAgent trait 加 `send_message_with_tools()` + Agent impl
-- `lattice-harness/src/profile.rs`: 加 PluginsConfig 等类型 + BehaviorModeConfig → BehaviorMode TryFrom + PluginSlotConfig 自定义 Deserialize
-- `lattice-harness/src/runner.rs`: AgentRunner 加 plugin_registry/tool_registry 字段 + run() 分支
+- `lattice-harness/src/profile.rs`: AgentProfile 加 `plugins: Option<PluginsConfig>`；PluginsConfig / PluginSlotConfig / AgentEdgeConfig / BehaviorModeToml + TryFrom + 自定义 Deserialize
+- `lattice-harness/src/pipeline.rs`: Pipeline 加 plugin_registry/tool_registry 字段；run() 分支：plugin 模式 → PluginDagRunner，否则 → build_runner + AgentRunner
 - `lattice-harness/Cargo.toml`: 加 `lattice-plugin`
 
 ### 新增
@@ -747,10 +796,10 @@ fn test_behavior_mode_config_to_enum_conversion() {
 - `lattice-plugin/src/bundle.rs`
 - `lattice-plugin/src/erased_runner.rs`
 - `lattice-plugin/src/builtin/`（9 插件 + parse_utils）
-- `lattice-harness/src/dag_runner.rs`
+- `lattice-harness/src/dag_runner.rs`（PluginDagRunner + DAGError）
 - `lattice-harness/src/tools.rs`
 
-## 14. 不在此 spec
+## 13. 不在此 spec
 
 - Swarm 去中心化编排
 - Python 胶水层 + pip 分发
