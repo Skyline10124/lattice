@@ -33,7 +33,10 @@ impl DefaultToolExecutor {
         Self {
             project_root: project_root.to_string(),
             sandbox: SandboxConfig::default(),
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("reqwest client"),
         }
     }
 
@@ -277,29 +280,29 @@ async fn grep_recursive(
         return;
     }
 
-    // Resolve symlinks to detect cycles
-    let canonical = match tokio::fs::canonicalize(path).await {
+    // Resolve symlinks to detect cycles AND use canonical path for sandbox checks
+    let resolved = match tokio::fs::canonicalize(path).await {
         Ok(p) => p,
         Err(_) => return,
     };
-    if !visited.insert(canonical) {
+    if !visited.insert(resolved.clone()) {
         return; // symlink cycle
     }
 
-    let path_str = path.to_string_lossy();
+    let path_str = resolved.to_string_lossy();
     if sandbox.check_read(&path_str).is_err() {
         return;
     }
 
-    if path.is_file() {
+    if resolved.is_file() {
         // Skip files too large
-        if let Ok(meta) = tokio::fs::metadata(path).await {
+        if let Ok(meta) = tokio::fs::metadata(&resolved).await {
             if meta.len() > sandbox.max_read_size as u64 {
                 return;
             }
         }
 
-        if let Ok(content) = tokio::fs::read_to_string(path).await {
+        if let Ok(content) = tokio::fs::read_to_string(&resolved).await {
             // Skip binary files
             if content.contains('\0') {
                 return;
@@ -310,8 +313,8 @@ async fn grep_recursive(
                 }
             }
         }
-    } else if path.is_dir() {
-        let mut entries = match tokio::fs::read_dir(path).await {
+    } else if resolved.is_dir() {
+        let mut entries = match tokio::fs::read_dir(&resolved).await {
             Ok(d) => d,
             Err(_) => return,
         };

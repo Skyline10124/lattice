@@ -84,6 +84,19 @@ impl SandboxConfig {
         if path.contains("..") {
             return Err(format!("Sandbox: path '{}' contains '..'", path));
         }
+        // Enforce read allowlist
+        if !self.read_allowlist.is_empty() {
+            let allowed = self
+                .read_allowlist
+                .iter()
+                .any(|prefix| path.contains(prefix));
+            if !allowed {
+                return Err(format!(
+                    "Sandbox: read from '{}' is not in read allowlist: {:?}",
+                    path, self.read_allowlist
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -157,15 +170,22 @@ impl SandboxConfig {
         Ok(())
     }
 
-    /// Check if a URL scheme is safe (only http/https/localhost).
-    pub fn check_url(&self, url: &str) -> Result<(), String> {
-        if !url.starts_with("https://") && !url.starts_with("http://localhost") {
-            return Err(format!(
-                "Sandbox: URL scheme not allowed: {}. Only https:// and http://localhost are permitted.",
-                url
-            ));
+    /// Check if a URL scheme is safe (only https, http://localhost, http://127.0.0.1, http://[::1]).
+    pub fn check_url(&self, url_str: &str) -> Result<(), String> {
+        let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
+        let scheme = parsed.scheme();
+        let host = parsed.host_str().unwrap_or("");
+
+        if scheme == "https" {
+            return Ok(());
         }
-        Ok(())
+        if scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "[::1]") {
+            return Ok(());
+        }
+        Err(format!(
+            "Sandbox: URL not allowed: {}. Only https:// and http://localhost are permitted.",
+            url_str
+        ))
     }
 }
 
@@ -297,5 +317,72 @@ mod tests {
             .check_command("cargo test -p lattice-core my_test")
             .is_ok());
         assert!(s.check_command("ps aux --forest").is_ok());
+    }
+
+    #[test]
+    fn test_url_https_allowed() {
+        let s = default_sandbox();
+        assert!(s.check_url("https://example.com").is_ok());
+        assert!(s.check_url("https://api.github.com/repos/test").is_ok());
+    }
+
+    #[test]
+    fn test_url_http_localhost_allowed() {
+        let s = default_sandbox();
+        assert!(s.check_url("http://localhost:3000").is_ok());
+        assert!(s.check_url("http://localhost").is_ok());
+        assert!(s.check_url("http://127.0.0.1:8080").is_ok());
+        assert!(s.check_url("http://[::1]:8080").is_ok());
+    }
+
+    #[test]
+    fn test_url_localhost_prefix_wildcard_rejected() {
+        let s = default_sandbox();
+        assert!(
+            s.check_url("http://localhost.evil.com").is_err(),
+            "localhost.evil.com should be rejected (not localhost)"
+        );
+    }
+
+    #[test]
+    fn test_url_http_remote_rejected() {
+        let s = default_sandbox();
+        assert!(
+            s.check_url("http://example.com").is_err(),
+            "plain http://example.com should be rejected"
+        );
+        assert!(
+            s.check_url("http://evil.com/path").is_err(),
+            "plain http should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_url_invalid_rejected() {
+        let s = default_sandbox();
+        assert!(
+            s.check_url("not-a-url").is_err(),
+            "garbage input should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_check_read_allowlist_enforced() {
+        let mut s = default_sandbox();
+        s.read_allowlist = vec!["src/".into(), "lib.rs".into()];
+        assert!(s.check_read("src/main.rs").is_ok());
+        assert!(s.check_read("src/lib.rs").is_ok());
+        assert!(s.check_read("lib.rs").is_ok());
+        assert!(s.check_read("/etc/passwd").is_err());
+        assert!(s.check_read("secrets.json").is_err());
+    }
+
+    #[test]
+    fn test_check_read_allowlist_empty_allows_all() {
+        let s = default_sandbox();
+        // Default has empty read_allowlist, so anything non-sensitive should pass
+        assert!(s.check_read("src/main.rs").is_ok());
+        assert!(s.check_read("/etc/passwd").is_ok());
+        assert!(s.check_read("any/file.txt").is_ok());
     }
 }
