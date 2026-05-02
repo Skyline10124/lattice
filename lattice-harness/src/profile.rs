@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use lattice_plugin::bundle::BehaviorMode;
+
 // ---------------------------------------------------------------------------
 // AgentProfile — a TOML-backed micro-agent definition
 // ---------------------------------------------------------------------------
@@ -19,6 +21,9 @@ pub struct AgentProfile {
     pub bus: BusConfigProfile,
     #[serde(default)]
     pub memory: MemoryConfigProfile,
+    /// Computed — resolved from plugins_toml in load().
+    #[serde(skip)]
+    pub plugins: Option<PluginsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -106,6 +111,127 @@ pub struct HandoffConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin DAG config (intra-agent orchestration)
+// ---------------------------------------------------------------------------
+
+/// Optional plugin-based agent execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginsConfig {
+    pub entry: String,
+    #[serde(default)]
+    pub slots: Vec<PluginSlotConfig>,
+    #[serde(default)]
+    pub edges: Vec<AgentEdgeConfig>,
+    #[serde(default)]
+    pub shared_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSlotConfig {
+    pub name: String,
+    pub plugin: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    pub model_override: Option<String>,
+    pub max_turns: Option<u32>,
+    pub behavior: Option<BehaviorMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEdgeConfig {
+    pub from: String,
+    pub rule: crate::handoff_rule::HandoffRule,
+}
+
+// TOML intermediate — converts BehaviorModeToml → BehaviorMode
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BehaviorModeToml {
+    mode: String,
+    #[serde(default)]
+    confidence_threshold: Option<f64>,
+    #[serde(default)]
+    max_retries: Option<u32>,
+    #[serde(default)]
+    escalate_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginSlotConfigToml {
+    name: String,
+    plugin: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    model_override: Option<String>,
+    max_turns: Option<u32>,
+    behavior: Option<BehaviorModeToml>,
+}
+
+impl From<PluginSlotConfigToml> for PluginSlotConfig {
+    fn from(raw: PluginSlotConfigToml) -> Self {
+        Self {
+            name: raw.name,
+            plugin: raw.plugin,
+            tools: raw.tools,
+            model_override: raw.model_override,
+            max_turns: raw.max_turns,
+            behavior: raw.behavior.and_then(|b| match b.mode.as_str() {
+                "yolo" => Some(BehaviorMode::Yolo),
+                "strict" => Some(BehaviorMode::Strict {
+                    confidence_threshold: b.confidence_threshold.unwrap_or(0.7),
+                    max_retries: b.max_retries.unwrap_or(3),
+                    escalate_to: b.escalate_to,
+                }),
+                other => {
+                    tracing::warn!("unknown behavior mode '{}' in slot, ignoring", other);
+                    None
+                }
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PluginsConfigToml {
+    entry: String,
+    #[serde(default)]
+    slots: Vec<PluginSlotConfigToml>,
+    #[serde(default)]
+    edges: Vec<AgentEdgeConfig>,
+    #[serde(default)]
+    shared_tools: Vec<String>,
+}
+
+impl From<PluginsConfigToml> for PluginsConfig {
+    fn from(raw: PluginsConfigToml) -> Self {
+        Self {
+            entry: raw.entry,
+            slots: raw.slots.into_iter().map(Into::into).collect(),
+            edges: raw.edges,
+            shared_tools: raw.shared_tools,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AgentProfileRaw {
+    agent: AgentConfig,
+    system: SystemConfig,
+    #[serde(default)]
+    tools: ToolsConfig,
+    #[serde(default)]
+    behavior: BehaviorConfig,
+    #[serde(default)]
+    handoff: HandoffConfig,
+    #[serde(default, rename = "plugins")]
+    plugins_toml: Option<PluginsConfigToml>,
+    #[serde(default)]
+    bus: BusConfigProfile,
+    #[serde(default)]
+    memory: MemoryConfigProfile,
+}
+
+// ---------------------------------------------------------------------------
 // AgentProfile — loading
 // ---------------------------------------------------------------------------
 
@@ -113,7 +239,26 @@ impl AgentProfile {
     /// Load a profile from a TOML file.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let profile: Self = toml::from_str(&content)?;
+        let raw: AgentProfileRaw = toml::from_str(&content)?;
+        let mut profile = AgentProfile {
+            agent: raw.agent,
+            system: raw.system,
+            tools: raw.tools,
+            behavior: raw.behavior,
+            handoff: raw.handoff,
+            bus: raw.bus,
+            memory: raw.memory,
+            plugins: None,
+        };
+        if let Some(plugins_toml) = raw.plugins_toml {
+            let config: PluginsConfig = plugins_toml.into();
+            if !config.slots.iter().any(|s| s.name == config.entry) {
+                return Err(
+                    format!("entry slot '{}' not found in [plugins.slots]", config.entry).into(),
+                );
+            }
+            profile.plugins = Some(config);
+        }
         Ok(profile)
     }
 
@@ -322,6 +467,7 @@ mod tests {
             handoff: HandoffConfig::default(),
             bus: BusConfigProfile::default(),
             memory: MemoryConfigProfile::default(),
+            plugins: None,
         };
         // Absolute path is rejected, falls back to inline prompt
         assert_eq!(profile.system_prompt(), "inline prompt");
@@ -346,8 +492,43 @@ mod tests {
             handoff: HandoffConfig::default(),
             bus: BusConfigProfile::default(),
             memory: MemoryConfigProfile::default(),
+            plugins: None,
         };
         // Path containing ".." is rejected, falls back to inline prompt
         assert_eq!(profile.system_prompt(), "inline prompt");
+    }
+
+    #[test]
+    fn test_plugins_config_toml_deserialize() {
+        let toml_str = r#"
+entry = "review"
+
+[[slots]]
+name = "review"
+plugin = "CodeReview"
+max_turns = 3
+behavior = { mode = "strict", confidence_threshold = 0.8, max_retries = 2 }
+
+[[slots]]
+name = "refactor"
+plugin = "Refactor"
+
+[[edges]]
+from = "review"
+rule = { condition = { field = "confidence", op = ">", value = "0.5" }, target = "refactor" }
+
+[[edges]]
+from = "refactor"
+rule = { default = true }
+"#;
+        let config: PluginsConfigToml = toml::from_str(toml_str).unwrap();
+        let config: PluginsConfig = config.into();
+        assert_eq!(config.entry, "review");
+        assert_eq!(config.slots.len(), 2);
+        assert!(matches!(
+            config.slots[0].behavior,
+            Some(BehaviorMode::Strict { .. })
+        ));
+        assert_eq!(config.edges.len(), 2);
     }
 }
