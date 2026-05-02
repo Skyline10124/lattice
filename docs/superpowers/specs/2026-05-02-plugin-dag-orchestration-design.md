@@ -1,6 +1,6 @@
 # Plugin DAG 编排系统设计规格
 
-- **Spec 版本**: 0.7.0
+- **Spec 版本**: 0.8.0
 - **日期**: 2026-05-02
 - **范围**: `lattice-plugin` + `lattice-harness` + `lattice-agent`（微改）
 
@@ -232,7 +232,7 @@ pub(crate) fn run_plugin_loop(
     config: &PluginConfig,
     hooks: Option<&dyn PluginHooks>,
     retry_policy: Option<&RetryPolicy>,
-    memory: Option<&mut dyn Memory>,
+    memory: Option<&dyn Memory>,   // &dyn Memory: Memory::save_entry 只需 &self
 ) -> Result<RunResult, PluginError> {
     let prompt = plugin.to_prompt_json(context)?;
     let mut attempt = 0u32;
@@ -303,6 +303,10 @@ pub(crate) fn run_plugin_loop(
 ### 3.5 PluginAgent 新增方法
 
 ```rust
+/// Agent::run() 内部 tool loop 最大轮数。
+/// 与 PluginConfig.max_turns（behavior 重试次数）正交。
+const MAX_TOOL_TURNS: u32 = 10;
+
 pub trait PluginAgent {
     fn send(&mut self, message: &str) -> Result<String, Box<dyn Error>>;
     fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>>; // [新增]
@@ -312,7 +316,7 @@ pub trait PluginAgent {
 
 impl PluginAgent for Agent {
     fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>> {
-        let events = self.run(message, 10);  // Agent::run 含 tool loop + 网络重试
+        let events = self.run(message, MAX_TOOL_TURNS);  // Agent::run 含 tool loop + 网络重试
         let mut text = String::new();
         for event in &events {
             if let LoopEvent::Token { text: t } = event { text.push_str(t); }
@@ -428,9 +432,22 @@ struct BehaviorModeToml {
 }
 
 impl TryFrom<BehaviorModeToml> for BehaviorMode {
-    type Error = String;
-    fn try_from(c: BehaviorModeToml) -> Result<Self, Self::Error> { /* v0.6.0 §6.2 */ }
+    type Error = LoadError;  // 非 String——可在 profile load 时精确定位 slot
+    fn try_from(c: BehaviorModeToml) -> Result<Self, Self::Error> {
+        match c.mode.as_str() {
+            "yolo" => Ok(BehaviorMode::Yolo),
+            "strict" => Ok(BehaviorMode::Strict {
+                confidence_threshold: c.confidence_threshold.unwrap_or(0.7),
+                max_retries: c.max_retries.unwrap_or(3),
+                escalate_to: c.escalate_to,
+            }),
+            other => Err(LoadError::InvalidBehaviorMode(other.into())),
+        }
+    }
 }
+
+// LoadError 新增 variant:
+// InvalidBehaviorMode(String)
 
 // PluginSlotConfig 自定义 Deserialize
 // behavior 字段：BehaviorModeToml → TryFrom → BehaviorMode → Option<BehaviorMode>
@@ -511,14 +528,16 @@ impl PluginDagRunner<'_> {
                 ..Default::default()
             };
 
-            let result = ErasedPluginRunner::run_with(
+            // run_plugin_loop 是 lattice-plugin/src/runner_core.rs 的模块级函数
+            let result = run_plugin_loop(
                 bundle.plugin.as_ref(),
                 behavior.as_ref(),
                 &mut agent,
                 &context,
                 &plugin_config,
+                None,                         // hooks: 后续加
                 Some(&self.retry_policy),
-                self.shared_memory.as_deref(),
+                self.shared_memory.as_deref().map(|m| m as &dyn Memory),
             )
             .map_err(|e| DAGError::plugin_error(&current_name, e))?;
 
@@ -594,15 +613,19 @@ struct CodeReviewInput {
 非 entry plugin 的 Input 可以同时引用 `context["input"]` 和 `context["<上游slot>"]`：
 
 ```rust
+// serde 字段名对应 JSON 顶层 key。context["review"] 是嵌套对象，
+// 需整个捕获为 struct，不能平铺 context["review"]["issues"] 到 review_issues。
 #[derive(Deserialize)]
 struct RefactorInput {
     #[serde(default)]
     code: String,                  // ← context["input"]
     #[serde(default)]
-    review_issues: Vec<Issue>,    // ← context["review"]["issues"]
+    review: ReviewOutput,          // ← context["review"]，内部有 .issues 和 .confidence
     #[serde(default)]
     instructions: String,
 }
+// ReviewOutput { issues: Vec<Issue>, confidence: f64 }
+// 访问: input.review.issues, input.review.confidence
 ```
 
 ## 6. ToolRegistry (lattice-harness)
@@ -647,10 +670,13 @@ impl Pipeline {
                 let tool_registry = self.tool_registry.as_ref()
                     .ok_or_else(|| AgentError { ... })?;
 
+                let retry_policy = RetryPolicy::default();
                 let mut dag = PluginDagRunner::new(
                     plugins_config,
                     plugin_registry,
                     tool_registry,
+                    retry_policy,
+                    self.shared_memory.clone(),
                 );
                 dag.run(&current_input, &profile.agent.model)
                     .map_err(|e| AgentError::from(e))?
@@ -661,17 +687,20 @@ impl Pipeline {
             };
 
             // ── handoff 评估（两种模式共用）──
+            // [Pipeline 重构] 将现有内联逻辑提取为辅助函数：
+            // fn eval_rules_or_fallback(profile: &AgentProfile, output: &Value) -> Option<HandoffTarget> {
+            //     if profile.handoff.handoff_rules.is_empty() { profile.handoff.fallback.clone() }
+            //     else { eval_rules(&profile.handoff.handoff_rules, output) }
+            // }
             let next = eval_rules_or_fallback(&profile, &output);
             // ... 后续不变 ...
         }
     }
 }
 
-// Pipeline 新增字段
-impl Pipeline {
-    pub plugin_registry: Option<Arc<PluginRegistry>>,
-    pub tool_registry: Option<Arc<ToolRegistry>>,
-}
+// Pipeline struct 定义需新增以下字段（在 struct Pipeline { ... } 内声明，非 impl 块）：
+//   pub plugin_registry: Option<Arc<PluginRegistry>>,
+//   pub tool_registry: Option<Arc<ToolRegistry>>,
 ```
 
 **AgentRunner 不变**——Plugin 模式绕开 AgentRunner，直接从 Pipeline 调 PluginDagRunner。`build_runner()` 仅在非 plugin 模式调用。
@@ -704,7 +733,7 @@ pipeline.run("code-reviewer", "sort this Rust code");
 | 插件 | Input struct（#[serde(default)] 所有字段） | 文件 |
 |------|------------------------------------------|------|
 | `CodeReview` | `{ input, file_path, context_rules }` | builtin/code_review.rs |
-| `Refactor` | `{ code, review_issues, instructions }` | builtin/refactor.rs |
+| `Refactor` | `{ code, review: ReviewOutput, instructions }` | builtin/refactor.rs |
 | `TestGen` | `{ code, focus_areas }` | builtin/test_gen.rs |
 | `SecurityAudit` | `{ code, dependencies, threat_model }` | builtin/security_audit.rs |
 | `DocGen` | `{ code, doc_type, audience }` | builtin/doc_gen.rs |
@@ -739,7 +768,8 @@ fn test_dag_review_then_refactor_context_accumulation() {
         ],
     };
 
-    let mut dag = PluginDagRunner::new(&config, &pr, &tr);
+    let retry_policy = RetryPolicy::default();
+    let mut dag = PluginDagRunner::new(&config, &pr, &tr, retry_policy, None);
     let result = dag.run("// broken code", "mock-model").unwrap();
     assert!(result.get("refactored_code").is_some());
 }
