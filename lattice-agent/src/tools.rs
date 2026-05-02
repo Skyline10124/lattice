@@ -22,6 +22,7 @@ use crate::ToolExecutor;
 pub struct DefaultToolExecutor {
     pub project_root: String,
     pub sandbox: SandboxConfig,
+    pub http_client: reqwest::Client,
 }
 
 impl DefaultToolExecutor {
@@ -29,6 +30,7 @@ impl DefaultToolExecutor {
         Self {
             project_root: project_root.to_string(),
             sandbox: SandboxConfig::default(),
+            http_client: reqwest::Client::new(),
         }
     }
 
@@ -168,17 +170,19 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_command(cmd) {
                     return e;
                 }
-                let output = std::process::Command::new("sh").args(["-c", cmd]).output();
+                let output = tokio::process::Command::new("sh")
+                    .args(["-c", cmd])
+                    .output()
+                    .await;
                 match output {
                     Ok(o) => {
                         let mut result = String::from_utf8_lossy(&o.stdout).to_string();
                         if !o.stderr.is_empty() {
-                            result
-                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
+                            result.push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
                         result
                     }
-                    Err(e) => format!("Error: {}", e),
+                    Err(e) => ToolError::CommandError(e.to_string()).to_string(),
                 }
             }
             "patch" => {
@@ -189,7 +193,7 @@ impl ToolExecutor for DefaultToolExecutor {
                     return e;
                 }
                 let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
-                match std::fs::read_to_string(&abs) {
+                match tokio::fs::read_to_string(&abs).await {
                     Ok(content) => {
                         let count = content.matches(search).count();
                         if count == 0 {
@@ -201,7 +205,7 @@ impl ToolExecutor for DefaultToolExecutor {
                             )
                         } else {
                             let new_content = content.replace(search, insert);
-                            match std::fs::write(&abs, &new_content) {
+                            match tokio::fs::write(&abs, &new_content).await {
                                 Ok(_) => {
                                     let diff_lines: Vec<String> = new_content
                                         .lines()
@@ -216,11 +220,11 @@ impl ToolExecutor for DefaultToolExecutor {
                                         .collect();
                                     format!("Patched {}. Changes:\n{}", path, diff_lines.join("\n"))
                                 }
-                                Err(e) => format!("Error writing {}: {}", path, e),
+                                Err(e) => ToolError::IoError { path: abs, error: e }.to_string(),
                             }
                         }
                     }
-                    Err(e) => format!("Error reading {}: {}", path, e),
+                    Err(e) => ToolError::IoError { path: abs, error: e }.to_string(),
                 }
             }
             "web_search" => {
@@ -228,11 +232,12 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_url(url) {
                     return e;
                 }
-                match reqwest::blocking::get(url) {
+                match self.http_client.get(url).send().await {
                     Ok(response) => response
                         .text()
-                        .unwrap_or_else(|e| format!("Error reading response body: {}", e)),
-                    Err(e) => format!("Error fetching URL: {}", e),
+                        .await
+                        .unwrap_or_else(|e| ToolError::HttpError(e.to_string()).to_string()),
+                    Err(e) => ToolError::HttpError(e.to_string()).to_string(),
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),
