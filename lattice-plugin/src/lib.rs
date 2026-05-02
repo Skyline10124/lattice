@@ -7,6 +7,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::time::SystemTime;
 use thiserror::Error;
 
+pub mod erased;
+
 // ---------------------------------------------------------------------------
 // Plugin trait — LLM does inference, Behavior controls decisions
 // ---------------------------------------------------------------------------
@@ -41,6 +43,12 @@ pub trait Plugin: Send + Sync {
     /// Preferred model. Empty means "use the runner's default".
     fn preferred_model(&self) -> &str {
         ""
+    }
+
+    /// Optional JSON Schema describing the shape of the output.
+    /// Used for validation and documentation.
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        None
     }
 }
 
