@@ -524,8 +524,9 @@ mod tests {
         response: String,
     }
 
+    #[async_trait::async_trait(?Send)]
     impl PluginAgent for MockAgent {
-        fn send(&mut self, _message: &str) -> Result<String, Box<dyn std::error::Error>> {
+        async fn send(&mut self, _message: &str) -> Result<String, Box<dyn std::error::Error>> {
             Ok(self.response.clone())
         }
     }
