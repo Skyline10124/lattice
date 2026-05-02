@@ -96,11 +96,7 @@ impl<'a> PluginDagRunner<'a> {
     /// Traverse edges in TOML definition order.
     /// First edge where from == current AND rule.eval(output) == true wins.
     /// Returns the edge's rule.target. None = DAG endpoint (no matching edge).
-    pub(crate) fn find_edge(
-        &self,
-        from: &str,
-        output: &serde_json::Value,
-    ) -> Option<HandoffTarget> {
+    pub fn find_edge(&self, from: &str, output: &serde_json::Value) -> Option<HandoffTarget> {
         self.config
             .edges
             .iter()
