@@ -1,57 +1,86 @@
 # Plugin DAG 编排系统设计规格
 
-- **Spec 版本**: 0.3.0
+- **Spec 版本**: 0.4.0
 - **日期**: 2026-05-02
-- **范围**: `lattice-plugin` + `lattice-harness`（+ `lattice-agent` 微改）
+- **范围**: `lattice-plugin` + `lattice-harness` + `lattice-agent`（微改）
 
 ## 1. 核心设计决定
 
 ### 1.1 两套编排模型的关系
 
-**Plugin DAG 是 intra-agent 执行引擎，Pipeline 是 inter-agent 编排器。不并列，分层。**
+**Plugin DAG 是 intra-agent 执行引擎，Pipeline 是 inter-agent 编排器。**
 
 ```
 Pipeline (不变)
   │
   ├─ Agent A ("code-review")
-  │     └─ 内部: Plugin DAG (slots + edges)   ← 新增能力
-  │          review_slot → refactor_slot → summarize_slot
+  │     └─ 内部: Plugin DAG → PluginDagRunner → ErasedPluginRunner (per slot)
   │
   ├─ handoff eval_rules → Agent B ("deploy-check")
-  │     └─ 内部: 简单模式 (现有 system prompt)  ← 不变
+  │     └─ 内部: 简单模式 → AgentRunner.run_raw() (不变)
   │
   └─ handoff eval_rules → None (结束)
 ```
 
-- **Pipeline**: 不变。仍是唯一 inter-agent 编排入口。调度 AgentRegistry 中的 TOML agent，eval_rules 决定下一个 agent。
-- **Plugin DAG**: AgentProfile 的可选替代内部实现。当 TOML 中 `[plugins]` 段存在时，AgentRunner 走 Plugin DAG；否则走原始 system prompt 路径。
-- **AgentRegistry**: 不变。仍是 agent 的注册表（TOML 文件）。
-- **PluginRegistry**: 新增。插件能力注册表（Rust 代码）。AgentProfile 通过 `plugin = "CodeReview"` 引用。
+- **Pipeline**：唯一 inter-agent 编排入口。不变。
+- **PluginDagRunner**：新增的 intra-agent 执行器。当 AgentProfile 有 `[plugins]` 段时，AgentRunner 委托给它。
+- **ErasedPluginRunner**：PluginRunner 的类型擦除版。PluginDagRunner 每个 slot 用 ErasedPluginRunner 执行（而非重写循环）。
 
-### 1.2 为什么不用 Plugin DAG 替代 Pipeline
+### 1.2 PluginRunner 和 ErasedPluginRunner
 
-- Pipeline 已有完整 inter-agent 编排：handoff 规则评估、Fork 并行、错误处理、dry-run 验证、WebSocket 事件、热重载
-- Plugin DAG 解决的是另一个问题：agent 内部如何用类型化插件组织推理逻辑
-- 两层各司其职，不替代
+现有 `PluginRunner<P: Plugin, B: Behavior, A: PluginAgent>` 已有完整的 behavior 循环 + hooks + retry_policy + memory + output 校验。不复刻。
+
+新增 `ErasedPluginRunner` —— 相同的循环逻辑，但参数类型擦除：
+
+```rust
+// 现有：类型参数
+PluginRunner<'a, P: Plugin, B: Behavior, A: PluginAgent>
+
+// 新增：trait object（进 PluginRegistry 用）
+ErasedPluginRunner<'a> {
+    plugin: &'a dyn ErasedPlugin,
+    behavior: &'a dyn Behavior,
+    agent: &'a mut dyn PluginAgent,
+    config: &'a PluginConfig,
+    hooks: Option<&'a dyn PluginHooks>,
+    retry_policy: Option<&'a RetryPolicy>,
+    memory: Option<Box<dyn Memory>>,
+}
+```
+
+两者共享同一个 run loop 实现（宏或泛型辅助函数提取）。
+
+### 1.3 PluginAgent::send() 的局限
+
+`PluginAgent::send()` 只做一次 LLM 调用，不处理 tool call，且每次调用 `push_user_message`。重试用 `send()` 会累积 user message。
+
+**PluginRunner/ErasedPluginRunner 不改用 send()**。改用 `Agent::run()`（含 tool loop）：
+
+- `Agent::run(input, max_turns)` 内部：user message → chat → tool_call → submit_tools → chat → ... → final text
+- 重试策略：build prompt once → agent.run() → parse → behavior.decide。如果 Retry，用同一个 Agent 再 run()（messages 自然累积，LLM 看到"上次不够好，再试一次"的上下文）
+- Agent 重建时机：每个 slot 开始时重建（system prompt 干净，tools 精确）
+
+> **注**：当前 PluginRunner 使用 `agent.send()`。Spec 要求改为使用 `agent.run()` 或等价的 tool-loop 方法。如果 PluginAgent trait 未来加 `run_with_tools()` 则直接迁移；否则 PluginRunner 直接依赖 `Agent` 具体类型而非 `PluginAgent` trait。
 
 ## 2. 架构分层
 
 ```
 lattice-harness
-  Pipeline (不变)           ← inter-agent: AgentProfile → AgentRunner → eval_rules → next agent
-  AgentRunner (扩展)        ← 检测 [plugins] → 走 PluginDagRunner，否则走原始 Agent
-  PluginDagRunner (新增)    ← intra-agent: 按 slots+edges 执行 Plugin DAG
-  AgentProfile (扩展)       ← 加 [plugins] 段，可选
+  Pipeline              不变  inter-agent 编排
+  AgentRunner            扩展  检测 [plugins] → PluginDagRunner
+  PluginDagRunner        新增  intra-agent: 遍历 slots + edges
+  ErasedPluginRunner     新增  per-slot: behavior 循环 + hooks + backoff + memory
 
 lattice-plugin
-  Plugin trait (微扩)       ← 加 output_schema()
-  ErasedPlugin (新增)       ← 类型擦除，进 PluginRegistry
-  PluginRegistry (新增)     ← 插件注册表
-  PluginBundle (新增)       ← 插件可分发形态
-  builtin/ (新增)           ← 8 个内置插件
+  Plugin trait           微扩  加 output_schema()
+  ErasedPlugin           新增  类型擦除
+  PluginRegistry         新增  插件注册表
+  PluginBundle           新增  可分发形态
+  PluginRunner           重构  提取 run loop 逻辑供 ErasedPluginRunner 复用
+  builtin/               新增  9 个内置插件
 
 lattice-agent
-  LlmAgent (微改)           ← 加 set_system_prompt() 替换语义，加 with_tools() 已有
+  Agent                  微改  加 set_system_prompt() 替换语义
   其余不变
 
 lattice-core
@@ -74,22 +103,20 @@ pub trait Plugin: Send + Sync {
     fn tools(&self) -> &[ToolDefinition] { &[] }
     fn preferred_model(&self) -> &str { "" }
 
-    // [0.3.0 新增]
-    // 声明式 JSON Schema。AgentRunner 已有 schema validation（HandoffConfig.output_schema），
-    // 那层是执行性的。Plugin::output_schema() 是声明性的——描述这个插件产出什么形状的 JSON，
-    // 供下游 slot to_prompt 时参考，也供 AgentRunner 在没有 HandoffConfig.output_schema 时兜底。
+    // [新增] 声明式 JSON Schema，描述 Output 的形状。
+    // AgentRunner 在没有 HandoffConfig.output_schema 时用它兜底校验。
     fn output_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```
 
-**与 HandoffConfig.output_schema 的关系**：
-- `Plugin::output_schema()` — 声明性，"我产出这个形状"
-- `HandoffConfig.output_schema` — 执行性，"AgentRunner 用 jsonschema 校验 + 重试"
-- 如果 TOML 有 output_schema → AgentRunner 用它校验（不变）
-- 如果 TOML 无 output_schema 但 Plugin 有 → AgentRunner 用 Plugin 的兜底校验
-- 如果都没有 → 不校验（现有行为）
+**output_schema 两层关系**：
+- `Plugin::output_schema()` — 声明性，"我这个插件产出的 JSON 长这样"
+- `HandoffConfig.output_schema` — 执行性，"AgentRunner 用 jsonschema 校验 + 最多 2 次修正重试"
+- 如果 TOML 有 output_schema → 用它校验
+- 如果 TOML 无但 Plugin 有 → 用 Plugin 的兜底
+- 都没有 → 不校验
 
-### 3.2 ErasedPlugin（类型擦除）
+### 3.2 ErasedPlugin
 
 ```rust
 pub trait ErasedPlugin: Send + Sync {
@@ -110,40 +137,34 @@ where
     fn to_prompt_json(&self, input: &serde_json::Value) -> Result<String, PluginError> {
         let typed: T::Input = serde_json::from_value(input.clone())
             .map_err(|e| PluginError::Parse(format!(
-                "Failed to deserialize input for {}: {}", self.name(), e
+                "{}: failed to deserialize input: {}", self.name(), e
             )))?;
         Ok(self.to_prompt(&typed))
     }
 
     fn parse_output_json(&self, raw: &str) -> Result<serde_json::Value, PluginError> {
         let typed = self.parse_output(raw)?;
-        serde_json::to_value(typed)
-            .map_err(|e| PluginError::Parse(format!(
-                "Failed to serialize output for {}: {}", self.name(), e
-            )))
+        serde_json::to_value(typed).map_err(|e| PluginError::Parse(format!(
+            "{}: failed to serialize output: {}", self.name(), e
+        )))
     }
 
-    // name, system_prompt, tools, preferred_model, output_schema 直接委托
+    // 其余方法直接委托
 }
 ```
 
-**JSON 转换精度问题**：f64 ↔ serde_json::Number 可能因为 NaN/Infinity 失败。`parse_output()` 返回的 Output 应避免 NaN/Infinity。文档标注此约束。
+**JSON 转换注意**：`f64::NaN` / `Infinity` 会导致 `serde_json::to_value` 失败。Plugin 的 Output 不应包含这些值。
 
-### 3.3 Behavior
-
-**不变**。现有 `Behavior` trait 和 `StrictBehavior`/`YoloBehavior` 不动。
+### 3.3 Behavior（不变）
 
 ```rust
 pub trait Behavior: Send + Sync {
     fn decide(&self, confidence: f64) -> Action;
     fn on_error(&self, error: &PluginError, attempt: u32) -> ErrorAction;
 }
-
-pub enum Action { Done, Retry }
-pub enum ErrorAction { Retry, Abort, Escalate }
 ```
 
-### 3.4 PluginRegistry + PluginBundle
+### 3.4 PluginBundle + PluginRegistry
 
 ```rust
 pub struct PluginMeta {
@@ -164,18 +185,16 @@ pub enum BehaviorMode {
     Strict {
         confidence_threshold: f64,
         max_retries: u32,
-        escalate_to: Option<String>,  // 重试耗尽后 Escalate（不是 Abort）
+        escalate_to: Option<String>,
     },
     Yolo,
 }
 
 impl BehaviorMode {
-    /// 转换为 trait object，供 PluginRunner 使用
     pub fn to_behavior(&self) -> Box<dyn Behavior> {
         match self.clone() {
-            BehaviorMode::Strict { confidence_threshold, max_retries, escalate_to } => {
-                Box::new(StrictBehavior { confidence_threshold, max_retries, escalate_to })
-            }
+            BehaviorMode::Strict { confidence_threshold, max_retries, escalate_to } =>
+                Box::new(StrictBehavior { confidence_threshold, max_retries, escalate_to }),
             BehaviorMode::Yolo => Box::new(YoloBehavior),
         }
     }
@@ -193,12 +212,185 @@ impl PluginRegistry {
 }
 ```
 
-## 4. AgentProfile 扩展 (lattice-harness)
+## 4. ErasedPluginRunner (lattice-plugin)
 
-### 4.1 TOML 配置
+### 4.1 设计原则
+
+不复刻循环。提取现有 PluginRunner 的 run loop 为共享实现，`PluginRunner<P, B, A>` 和 `ErasedPluginRunner` 都调用它。
+
+### 4.2 共享 run loop
+
+```rust
+// lattice-plugin/src/runner_core.rs
+
+/// 共享的 PluginRunner run loop。
+/// - plugin: 提供 prompt + 解析输出
+/// - agent:  调用 LLM（含 tool loop）
+/// - behavior: 决定 Done/Retry/Escalate
+/// - hooks/retry_policy/memory/config: 可选增强
+///
+/// agent.send_message_then_collect() 发一次 user message + run_chat + tool loop → 收集文本。
+/// 重试时用同一个 agent（messages 累积，LLM 自然看到修正上下文）。
+/// 重试间应用 jittered backoff。
+pub(crate) fn run_plugin_loop(
+    plugin: &dyn ErasedPlugin,
+    behavior: &dyn Behavior,
+    agent: &mut dyn PluginAgent,
+    initial_prompt: &str,
+    config: &PluginConfig,
+    hooks: Option<&dyn PluginHooks>,
+    retry_policy: Option<&RetryPolicy>,
+    memory: Option<&mut dyn Memory>,
+) -> Result<RunResult, PluginError> {
+    let mut attempt = 0u32;
+
+    if let Some(h) = hooks {
+        h.on_start(plugin.name(), (initial_prompt.len() as u32).div_ceil(4));
+    }
+
+    loop {
+        if attempt >= config.max_turns {
+            return Err(PluginError::MaxTurnsExceeded(config.max_turns));
+        }
+
+        let raw = agent
+            .send_message_with_tools(&initial_prompt)  // ★ 需新增：含 tool loop 的 send
+            .map_err(|e| {
+                let pe = PluginError::Other(e.to_string());
+                // 让 behavior 判断是否可重试
+                pe
+            })?;
+
+        match plugin.parse_output_json(&raw) {
+            Ok(output) => {
+                let confidence = extract_confidence(&raw);
+                let action = behavior.decide(confidence);
+
+                if let Some(h) = hooks {
+                    h.on_turn(attempt, None, &action);
+                }
+
+                match action {
+                    Action::Done => {
+                        // output size 检查
+                        let json = serde_json::to_string(&output)
+                            .map_err(|e| PluginError::Other(e.to_string()))?;
+                        if json.len() > config.max_output_bytes {
+                            return Err(PluginError::OutputTooLarge(
+                                json.len(), config.max_output_bytes));
+                        }
+
+                        let result = RunResult { output: json, turns: attempt + 1, final_action: Action::Done };
+                        if let Some(h) = hooks { h.on_complete(&result); }
+                        if let Some(mem) = memory { save_to_memory(mem, plugin.name(), &initial_prompt, &result); }
+                        return Ok(result);
+                    }
+                    Action::Retry => {
+                        attempt += 1;
+                        if let Some(p) = retry_policy {
+                            std::thread::sleep(p.jittered_backoff(attempt));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(h) = hooks { h.on_error(attempt, &e); }
+                match behavior.on_error(&e, attempt) {
+                    ErrorAction::Retry => {
+                        attempt += 1;
+                        if let Some(p) = retry_policy {
+                            std::thread::sleep(p.jittered_backoff(attempt));
+                        }
+                    }
+                    ErrorAction::Abort => return Err(e),
+                    ErrorAction::Escalate => {
+                        return Err(PluginError::Escalated {
+                            original: Box::new(e),
+                            after_attempts: attempt,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+### 4.3 send_message_with_tools — PluginAgent 新增方法
+
+```rust
+pub trait PluginAgent {
+    /// 发送 user message → 内部 tool loop → 收集最终文本。
+    /// 与 send() 的区别：send() 只做一次 chat + 忽略 ToolCallRequired；
+    /// 本方法内部循环直到 LLM 不再请求 tool call 或达到 max_turns。
+    fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// 已有：单次 chat，不处理 tool call
+    fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+
+    // 已有
+    fn set_system_prompt(&mut self, prompt: &str);
+    fn token_usage(&self) -> u64;
+}
+
+// Agent 实现
+impl PluginAgent for Agent {
+    fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>> {
+        let events = self.run(message, 10);  // Agent::run 有完整 tool loop
+        let mut text = String::new();
+        for event in &events {
+            if let LoopEvent::Token { text: t } = event {
+                text.push_str(t);
+            }
+        }
+        Ok(text)
+    }
+}
+```
+
+### 4.4 类型参数版和类型擦除版
+
+```rust
+// 类型参数版（现有，重构为委托给 run_plugin_loop）
+impl<'a, P: Plugin, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B, A> {
+    pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
+        let prompt = self.plugin.to_prompt(input);
+        run_plugin_loop(
+            &ErasedPluginAdapter(self.plugin),  // P → ErasedPlugin 适配
+            self.behavior,
+            self.agent,
+            &prompt,
+            self.config,
+            self.hooks,
+            self.retry_policy,
+            self.memory.as_deref_mut(),
+        )
+    }
+}
+
+// 类型擦除版（新增，PluginDagRunner 用）
+impl<'a> ErasedPluginRunner<'a> {
+    pub fn run(&mut self, input: &serde_json::Value) -> Result<RunResult, PluginError> {
+        let prompt = self.plugin.to_prompt_json(input)?;
+        run_plugin_loop(
+            self.plugin,
+            self.behavior,
+            self.agent,
+            &prompt,
+            self.config,
+            self.hooks,
+            self.retry_policy,
+            self.memory.as_deref_mut(),
+        )
+    }
+}
+```
+
+## 5. AgentProfile 扩展 (lattice-harness)
+
+### 5.1 TOML
 
 ```toml
-# agent.toml — 插件模式
 [agent]
 name = "code-reviewer"
 model = "sonnet"
@@ -210,11 +402,11 @@ entry = "review"
 name = "review"
 plugin = "CodeReview"
 max_turns = 3
+behavior = { mode = "strict", confidence_threshold = 0.7, max_retries = 3 }
 
 [[plugins.slots]]
 name = "refactor"
 plugin = "Refactor"
-model_override = "sonnet"      # 可选：这个 slot 用不同模型
 max_turns = 5
 
 [[plugins.edges]]
@@ -223,29 +415,27 @@ rule = { condition = { field = "confidence", op = ">", value = "0.7" }, target =
 
 [[plugins.edges]]
 from = "review"
-rule = { default = true }      # confidence <= 0.7 → 结束（无 target）
+rule = { default = true }       # 无条件结束（target 省略）
 
 [[plugins.edges]]
 from = "refactor"
-rule = { default = true }      # refactor 完成 → 结束
+rule = { default = true }
 
-[handoff]                      # inter-agent handoff（不变）
+[handoff]                        # inter-agent（不变）
 fallback = "deploy-check"
 ```
 
-无 `[plugins]` 段的 agent.toml 走现有原始 system prompt 路径，完全向后兼容。
-
-### 4.2 Rust 类型
+### 5.2 Rust 类型
 
 ```rust
 // AgentProfile 扩展
 pub struct AgentProfile {
     pub agent: AgentConfig,
-    pub system: SystemConfig,              // 插件模式下可选（兜底 system prompt）
+    pub system: SystemConfig,
     pub tools: ToolsConfig,
     pub behavior: BehaviorConfig,
     pub handoff: HandoffConfig,
-    pub plugins: Option<PluginsConfig>,     // [0.3.0 新增]
+    pub plugins: Option<PluginsConfig>,   // [新增]
     pub bus: BusConfigProfile,
     pub memory: MemoryConfigProfile,
 }
@@ -258,236 +448,219 @@ pub struct PluginsConfig {
 
 pub struct PluginSlotConfig {
     pub name: String,
-    pub plugin: String,                    // PluginRegistry key
-    pub tools: Vec<String>,                // 工具名列表（ToolRegistry 解析）
+    pub plugin: String,                   // PluginRegistry key
+    pub tools: Vec<String>,
     pub model_override: Option<String>,
-    pub max_turns: Option<u32>,            // 默认 10
+    pub max_turns: Option<u32>,
     pub behavior: Option<BehaviorModeConfig>,
 }
 
 pub struct AgentEdgeConfig {
     pub from: String,
-    pub rule: HandoffRule,                 // 复用现有 HandoffRule，含 target
+    pub rule: HandoffRule,                // 复用：condition + all + any + default + target
 }
 
 pub struct BehaviorModeConfig {
-    pub mode: String,                      // "strict" | "yolo"
+    pub mode: String,                     // "strict" | "yolo"
     pub confidence_threshold: Option<f64>,
     pub max_retries: Option<u32>,
     pub escalate_to: Option<String>,
 }
 ```
 
-**entry 校验**：AgentProfile::load() 时检查 entry 指向的 slot 存在，否则返回加载错误（非运行时 panic）。
+**entry 校验**：`AgentProfile::load()` 时检查 entry 指向已定义的 slot，否则返回加载错误。
 
-## 5. PluginDagRunner (lattice-harness, 新增)
+## 6. PluginDagRunner (lattice-harness)
 
-### 5.1 职责
+### 6.1 职责
 
-AgentRunner 检测 `profile.plugins`：
-- `Some(plugins_config)` → 构造 `PluginDagRunner`，执行 Plugin DAG
-- `None` → 走现有原始 `llm_agent.run()` 路径
+顺序遍历 Plugin DAG。每个 slot 委托给 `ErasedPluginRunner`。
 
 ```rust
-// AgentRunner::run() 扩展
-pub fn run(&mut self, input: &str, max_turns: u32) -> Result<serde_json::Value, Box<dyn Error>> {
-    if let Some(ref plugins_config) = self.profile.plugins {
-        let mut dag = PluginDagRunner::new(
-            plugins_config,
-            &self.plugin_registry,   // AgentRunner 新增字段
-            &self.tool_registry,     // AgentRunner 新增字段
-            self.shared_memory.clone(),
-        );
-        let output = dag.run(input, &self.profile.agent.model)?;
-        // schema validation 不变（HandoffConfig.output_schema 或 Plugin::output_schema 兜底）
-        self.validate_output(output, max_turns)
-    } else {
-        // 现有路径，不变
-        self.run_raw(input, max_turns)
-    }
-}
-```
+const MAX_DAG_SLOT_TRANSITIONS: u32 = 50;
 
-### 5.2 PluginDagRunner 执行流程
-
-```rust
 pub struct PluginDagRunner<'a> {
     config: &'a PluginsConfig,
     plugin_registry: &'a PluginRegistry,
     tool_registry: &'a ToolRegistry,
+    retry_policy: RetryPolicy,
     shared_memory: Option<Arc<dyn Memory>>,
 }
 
 impl PluginDagRunner<'_> {
-    pub fn run(&mut self, initial_input: &str, default_model: &str) -> Result<serde_json::Value> {
-        let mut current_name = &self.config.entry;
-        // 初始 input 包装为 JSON: {"input": "..."}
+    pub fn run(
+        &mut self,
+        initial_input: &str,
+        default_model: &str,
+    ) -> Result<serde_json::Value, DAGError> {
+        let mut current_name = self.config.entry.clone();
+        // 初始 input 包装为 JSON
         let mut current_input = serde_json::json!({"input": initial_input});
-        let mut total_slot_transitions = 0u32;
+        let mut transitions = 0u32;
 
         loop {
-            if total_slot_transitions >= MAX_DAG_TURNS { return Err(...); }
+            if transitions >= MAX_DAG_SLOT_TRANSITIONS {
+                return Err(DAGError::MaxSlotTransitionsExceeded);
+            }
 
-            let slot = self.config.slots.iter().find(|s| s.name == *current_name)
-                .ok_or_else(|| DAGError::SlotNotFound(current_name.clone()))?;
-
+            let slot = self.find_slot(&current_name)?;
             let bundle = self.plugin_registry.get(&slot.plugin)
                 .ok_or_else(|| DAGError::PluginNotFound(slot.plugin.clone()))?;
 
             // ── 每个 slot 重建 LlmAgent ──
             let model = slot.model_override.as_deref().unwrap_or(default_model);
-            let resolved = resolve(model)?;
-            let mut llm = LlmAgent::new(resolved);
-
-            // 替换（非追加）system prompt
+            let resolved = resolve(model).map_err(|e| DAGError::Resolve(e.to_string()))?;
+            let mut llm = Agent::new(resolved);
             llm.set_system_prompt(bundle.plugin.system_prompt());
 
-            // 合并工具 + builder 模式注入
-            let tools = merge_tools(
+            let tool_defs = merge_tool_definitions(
                 &self.tool_registry,
                 &slot.tools,
                 bundle.plugin.tools(),
             );
-            llm = llm.with_tools(tools);
+            llm = llm.with_tools(tool_defs);
 
-            // ── PluginRunner 内循环 ──
+            // ── ErasedPluginRunner（复用 PluginRunner 的完整循环）──
             let behavior = slot.behavior.clone()
-                .unwrap_or(bundle.default_behavior.clone())
+                .and_then(|c| BehaviorModeConfig::to_behavior_mode(c))
+                .unwrap_or_else(|| bundle.default_behavior.clone())
                 .to_behavior();
-            let max_turns = slot.max_turns.unwrap_or(10);
 
-            let output_json = self.run_plugin_loop(
+            let plugin_config = PluginConfig {
+                max_turns: slot.max_turns.unwrap_or(10),
+                ..Default::default()
+            };
+
+            let mut runner = ErasedPluginRunner::new(
                 bundle.plugin.as_ref(),
                 behavior.as_ref(),
                 &mut llm,
-                &current_input,
-                max_turns,
-            )?;
+                &plugin_config,
+                None,                            // hooks: 后续加
+                Some(&self.retry_policy),
+                self.shared_memory.clone(),
+            );
+
+            let result = runner.run(&current_input)?;
+            let output_json: serde_json::Value = serde_json::from_str(&result.output)
+                .map_err(|e| DAGError::Parse(e.to_string()))?;
 
             // ── 找下一个 slot ──
-            let next = self.find_edge(current_name, &output_json)?;
+            let next_edge = self.config.edges.iter()
+                .find(|e| e.from == current_name && e.rule.eval(&output_json));
 
-            match next {
+            match next_edge.and_then(|e| e.rule.target.clone()) {
                 Some(HandoffTarget::Single(next_name)) => {
                     current_name = next_name;
-                    current_input = output_json;  // 上游 JSON output = 下游 JSON input
-                    total_slot_transitions += 1;
+                    current_input = output_json;  // 上游 JSON → 下游 JSON
+                    transitions += 1;
                 }
                 Some(HandoffTarget::Fork(_)) => {
-                    // Fork 不在 intra-agent DAG 层实现。
-                    // Pipeline 已有完整的 Fork 支持（std::thread::spawn + merge）。
-                    // 如需 intra-agent 并行，用多个 agent + Pipeline Fork。
+                    // intra-agent DAG 不支持 Fork。
+                    // Fork 是 inter-agent 概念，在 Pipeline 层做。
                     return Err(DAGError::ForkNotSupportedInDag);
                 }
-                None => return Ok(output_json),  // DAG 终点
-            }
-        }
-    }
-
-    /// PluginRunner 内循环：Behavior decide/on_error 驱动
-    fn run_plugin_loop(
-        &self,
-        plugin: &dyn ErasedPlugin,
-        behavior: &dyn Behavior,
-        llm: &mut LlmAgent,
-        input: &serde_json::Value,
-        max_turns: u32,
-    ) -> Result<serde_json::Value> {
-        let prompt = plugin.to_prompt_json(input)?;
-        let mut attempt = 0u32;
-
-        loop {
-            if attempt >= max_turns { return Err(DAGError::MaxSlotTurnsExceeded); }
-
-            // Agent::send() 内部已处理 tool loop — Plugin 不需要手动管理工具
-            let raw = llm.send(&prompt)
-                .map_err(|e| PluginError::Other(e.to_string()))?;
-
-            match plugin.parse_output_json(&raw) {
-                Ok(output) => {
-                    let confidence = extract_confidence(&raw);
-                    match behavior.decide(confidence) {
-                        Action::Done => return Ok(output),
-                        Action::Retry => {
-                            attempt += 1;
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
-                    match behavior.on_error(&e, attempt) {
-                        ErrorAction::Retry => { attempt += 1; continue; }
-                        ErrorAction::Abort => return Err(e.into()),
-                        ErrorAction::Escalate => {
-                            return Err(DAGError::Escalated {
-                                plugin: plugin.name().into(),
-                                after_attempts: attempt,
-                                original: e.to_string(),
-                            });
-                        }
-                    }
-                }
+                None => return Ok(output_json),
             }
         }
     }
 }
 ```
 
-### 5.3 input 传递语义
+### 6.2 input 传递语义
 
-**上游 JSON output 直接作为下游 JSON input**。不转字符串、不嵌入 prompt。
+上游 JSON output 直接作为下游 JSON input（`serde_json::Value`）。下游 plugin 通过 `ErasedPlugin::to_prompt_json(input)` 接收，内部 `serde_json::from_value` 转为类型化 Input。
 
 ```
-review slot 产出: {"issues": [...], "confidence": 0.9}
-       ↓ (serde_json::Value 直接传递)
-refactor slot: plugin.to_prompt_json({"issues": [...], "confidence": 0.9})
-       → 插件内部自己决定如何把 Input 字段映射到 prompt
+review → {"issues": [...], "confidence": 0.9}
+  ↓
+refactor → plugin.to_prompt_json({"issues": [...], "confidence": 0.9})
+  → serde_json::from_value::<RefactorInput>
+  → Refactor::to_prompt(&refactor_input)
 ```
 
-每个 Plugin 的 `to_prompt()` 接收完整的、类型化的 Input struct，由插件的 `to_prompt` 实现决定如何拼 prompt。上游产出物被 `serde_json::from_value` 转成下游的 `Input` 类型。如果转换失败 → `PluginError::Parse`。
+### 6.3 Fork 策略
 
-### 5.4 Fork 策略
+intra-agent DAG 不做 Fork。并行编排用 Pipeline Fork：
 
-**intra-agent DAG 不支持 Fork。Fork 是 inter-agent 概念，在 Pipeline 层做。**
-
-如需并行：把多个 slot 拆成独立 agent，用 Pipeline Fork。
-```
-# 不用 DAG 内 Fork：
-#   review → fork:security,perf → merge → summarize
-
-# 而是用 Pipeline：
+```toml
 [[handoff.rules]]
 condition = { field = "confidence", op = ">", value = "0.7" }
 target = "fork:security-agent,perf-agent"
 ```
 
-Pipeline 的 fork 实现不变。
-
-## 6. LlmAgent 微改 (lattice-agent)
-
-### 6.1 set_system_prompt 替换语义
+## 7. AgentRunner 集成 (lattice-harness)
 
 ```rust
-impl LlmAgent {
-    /// 替换已有的 system message（而非追加）。
-    /// 如果 messages 第一条是 system，替换它；否则插入到最前面。
+impl AgentRunner {
+    pub fn run(
+        &mut self,
+        input: &str,
+        max_turns: u32,
+    ) -> Result<serde_json::Value, Box<dyn Error>> {
+        if let Some(ref plugins_config) = self.profile.plugins {
+            // 新增路径：Plugin DAG
+            let mut dag = PluginDagRunner::new(
+                plugins_config,
+                self.plugin_registry.as_ref()
+                    .ok_or("plugin_registry not configured")?,
+                self.tool_registry.as_ref()
+                    .ok_or("tool_registry not configured")?,
+            );
+            let output = dag.run(input, &self.profile.agent.model)?;
+            // schema validation（复用现有逻辑）
+            self.validate_with_schema(output, max_turns)
+        } else {
+            // 现有路径：不变
+            self.run_raw(input, max_turns)
+        }
+    }
+}
+```
+
+## 8. LlmAgent 微改 (lattice-agent)
+
+### 8.1 set_system_prompt 替换语义
+
+```rust
+impl Agent {
+    /// 替换已有的 system message（非追加）。
     pub fn set_system_prompt(&mut self, prompt: &str) {
         let system_msg = Message {
             role: Role::System,
             content: prompt.to_string(),
             ..
         };
-        match self.state.messages.first_mut() {
-            Some(msg) if msg.role == Role::System => *msg = system_msg,
-            _ => self.state.messages.insert(0, system_msg),
+        match self.state.messages.first() {
+            Some(msg) if msg.role == Role::System => {
+                self.state.messages[0] = system_msg;
+            }
+            _ => {
+                self.state.messages.insert(0, system_msg);
+            }
         }
     }
 }
 ```
 
-`with_tools()` 已存在（builder 模式），不需要 `set_tools()`。
+### 8.2 PluginAgent::send_message_with_tools（新增）
 
-## 7. ToolRegistry (lattice-harness, 新增)
+```rust
+impl PluginAgent for Agent {
+    fn send_message_with_tools(&mut self, message: &str) -> Result<String, Box<dyn Error>> {
+        let events = self.run(message, 10);  // Agent::run 有完整 tool loop
+        let mut text = String::new();
+        for event in &events {
+            if let LoopEvent::Token { text: t } = event {
+                text.push_str(t);
+            }
+        }
+        Ok(text)
+    }
+}
+```
+
+## 9. ToolRegistry (lattice-harness)
 
 ```rust
 pub struct ToolRegistry {
@@ -506,43 +679,26 @@ pub enum ToolHandler {
 
 #[derive(Debug, Error)]
 pub enum ToolError {
-    #[error("Tool execution failed: {0}")]
+    #[error("execution failed: {0}")]
     Execution(String),
-    #[error("Tool not found: {0}")]
+    #[error("not found: {0}")]
     NotFound(String),
-    #[error("Invalid arguments: {0}")]
+    #[error("invalid args: {0}")]
     InvalidArgs(String),
-    #[error("MCP server '{server}' unreachable: {source}")]
+    #[error("MCP server '{server}': {source}")]
     McpUnreachable { server: String, source: String },
-    #[error("Timeout after {0}ms")]
+    #[error("timeout after {0}ms")]
     Timeout(u64),
 }
-
-impl ToolRegistry {
-    pub fn register(&mut self, name: &str, handler: ToolHandler, definition: ToolDefinition);
-    pub fn register_mcp(&mut self, server: &str, tool_name: &str);
-    pub fn get(&self, name: &str) -> Option<&RegisteredTool>;
-    pub fn dispatch(&self, tool_name: &str, args: serde_json::Value) -> Result<String, ToolError>;
-}
-
-/// 合并三层工具定义，Plugin 覆盖 slot，slot 覆盖 shared
-pub fn merge_tool_definitions(
-    shared: &[ToolDefinition],
-    slot: &[String],              // ToolRegistry key
-    plugin: &[ToolDefinition],
-    registry: &ToolRegistry,
-) -> Vec<ToolDefinition>;
 ```
 
-**与 Agent::send() 内部 tool loop 的关系**：`LlmAgent.send()` 内部已通过 `with_tools()` 持有工具列表并自动执行 tool loop。ToolRegistry 负责工具的执行体——Agent 在收到 tool_call 时通过 ToolRegistry.dispatch() 执行具体工具。目前 Agent 内部工具执行在 `lattice-agent` 内置。ToolRegistry 是 harness 层的工具执行抽象，后续可注入给 Agent。
+Agent 工具执行层集成 ToolRegistry 不在本 spec。本 spec 定义接口，集成延后。
 
-> 注：Agent 内部 tool 执行重构不在本 spec。本 spec 先定义 ToolRegistry 的数据结构和接口，Agent 集成放到第 6 轮。
+## 10. 内置插件
 
-## 8. 内置插件
-
-| 插件 | Input struct | Output struct | 文件 |
-|------|-------------|---------------|------|
-| `CodeReview` | `CodeReviewInput` | `CodeReviewOutput { issues, confidence }` | 已有，迁移到 builtin/ |
+| 插件 | Input | Output | 文件 |
+|------|-------|--------|------|
+| `CodeReview` | `CodeReviewInput` | `CodeReviewOutput { issues, confidence }` | builtin/code_review.rs |
 | `Refactor` | `RefactorInput` | `RefactorOutput { refactored_code, changes }` | builtin/refactor.rs |
 | `TestGen` | `TestGenInput` | `TestGenOutput { tests, coverage_estimate }` | builtin/test_gen.rs |
 | `SecurityAudit` | `SecurityAuditInput` | `SecurityAuditOutput { vulnerabilities, risk_score }` | builtin/security_audit.rs |
@@ -552,58 +708,59 @@ pub fn merge_tool_definitions(
 | `ImageGen` | `ImageGenInput` | `ImageGenOutput { image_url, alt_text, metadata }` | builtin/image_gen.rs |
 | `KnowledgeBase` | `KnowledgeBaseInput` | `KnowledgeBaseOutput { results, relevance_scores }` | builtin/knowledge_base.rs |
 
-每个插件独立文件：`builtin/<name>.rs`。共享的 parse 工具函数（markdown 清洗、JSON 提取）放在 `builtin/parse_utils.rs`。
+共享工具函数：`builtin/parse_utils.rs`（markdown 清洗、JSON 提取、confidence 提取）。
 
-## 9. 实现顺序
+## 11. 实现顺序
 
 ```
-第1轮:  ErasedPlugin trait + blanket impl (lattice-plugin)
-第2轮:  PluginBundle + PluginMeta + BehaviorMode + to_behavior() (lattice-plugin)
-第3轮:  PluginRegistry (lattice-plugin)
-第4轮:  Agent.set_system_prompt() 替换语义 (lattice-agent)
-第5轮:  PluginSlotConfig + AgentEdgeConfig + PluginsConfig (lattice-harness profile 扩展)
-第6轮:  ToolRegistry + ToolError + merge_tool_definitions (lattice-harness)
-第7轮:  PluginDagRunner::run() + run_plugin_loop() (lattice-harness)
-第8轮:  AgentRunner 集成：检测 [plugins] → PluginDagRunner，否则走原路径 (lattice-harness)
-第9轮:  AgentProfile::load() 扩展：解析 [plugins] 段 + entry 校验
-第10轮: 3 个内置插件 (Refactor, TestGen, SecurityAudit) + parse_utils
-第11轮: 剩余 5 个内置插件
-第12轮: 测试 + 集成 + 文档
+第1轮:  ErasedPlugin trait + blanket impl
+第2轮:  PluginBundle + PluginMeta + BehaviorMode + to_behavior()
+第3轮:  PluginRegistry
+第4轮:  Agent.set_system_prompt() 替换语义
+第5轮:  PluginAgent::send_message_with_tools() 新增方法
+第6轮:  重构 PluginRunner: 提取 run_plugin_loop() → 实现 ErasedPluginRunner
+第7轮:  PluginsConfig + PluginSlotConfig + AgentEdgeConfig（profile 扩展）
+第8轮:  PluginDagRunner（intra-agent 编排）
+第9轮:  AgentRunner 集成（检测 [plugins] → PluginDagRunner）
+第10轮: ToolRegistry + ToolError + merge_tool_definitions
+第11轮: parse_utils + 3 个内置插件（Refactor, TestGen, SecurityAudit）
+第12轮: 剩余 6 个内置插件
+第13轮: 测试 + 集成 + 文档
 ```
 
-## 10. 与现有代码的关系
+## 12. 与现有代码的关系
 
 ### 不动
 
 - `lattice-core`: 全部
-- `lattice-agent`: AgentState, PluginAgent trait, Memory trait, 工具执行（7 个内置工具）, Agent::send() tool loop
+- `lattice-agent`: AgentState, Memory trait, 7 个内置工具
 - `lattice-harness`: Pipeline, HandoffRule, HandoffTarget, HandoffCondition, eval_rules, AgentRegistry, EventBus, Watcher, WebSocket, dry_run
-- `lattice-plugin`: Plugin trait（仅加 output_schema 默认方法）, Behavior trait, StrictBehavior, YoloBehavior, PluginRunner, PluginHooks, PluginConfig, PluginError, CodeReviewPlugin（迁移到 builtin/）
-
-### 新增
-
-- `lattice-plugin/src/erased.rs`: ErasedPlugin + blanket impl
-- `lattice-plugin/src/registry.rs`: PluginRegistry
-- `lattice-plugin/src/bundle.rs`: PluginBundle, PluginMeta, BehaviorMode
-- `lattice-plugin/src/builtin/mod.rs` + 9 个插件文件 + `parse_utils.rs`
-- `lattice-harness/src/dag_runner.rs`: PluginDagRunner
-- `lattice-harness/src/tools.rs`: ToolRegistry, ToolError, merge_tool_definitions
+- `lattice-plugin`: Behavior trait, StrictBehavior, YoloBehavior, PluginHooks, PluginConfig, RunResult, PluginError, Action, ErrorAction
 
 ### 修改
 
-- `lattice-plugin/src/lib.rs`: `pub mod erased; pub mod registry; pub mod bundle; pub mod builtin;`
-- `lattice-plugin/Cargo.toml`: 无新依赖
-- `lattice-harness/src/profile.rs`: AgentProfile 加 `plugins: Option<PluginsConfig>`, PluginsConfig, PluginSlotConfig, AgentEdgeConfig, BehaviorModeConfig
-- `lattice-harness/src/runner.rs`: AgentRunner 加 `plugin_registry: Option<Arc<PluginRegistry>>`, `tool_registry: Option<Arc<ToolRegistry>>`；run() 检测 plugins 分支
-- `lattice-harness/src/lib.rs`: 加 `pub mod dag_runner; pub mod tools;`
+- `lattice-plugin/src/lib.rs`: Plugin trait 加 `output_schema()` 默认方法
+- `lattice-plugin/src/runner.rs`: 重构 — 提取 `run_plugin_loop()` 共享函数；`PluginRunner` 委托给它
+- `lattice-agent/src/agent.rs`: 加 `set_system_prompt()`
+- `lattice-agent/src/lib.rs`: PluginAgent trait 加 `send_message_with_tools()`
+- `lattice-harness/src/profile.rs`: AgentProfile 加 `plugins` 字段 + PluginsConfig 等类型
+- `lattice-harness/src/runner.rs`: AgentRunner 加 plugin_registry/tool_registry 字段 + run() 分支
 - `lattice-harness/Cargo.toml`: 加 `lattice-plugin`
-- `lattice-agent/src/agent.rs`: 加 `set_system_prompt()` 方法
 
-## 11. 不在此 spec
+### 新增
+
+- `lattice-plugin/src/erased.rs`: ErasedPlugin trait + blanket impl
+- `lattice-plugin/src/registry.rs`: PluginRegistry
+- `lattice-plugin/src/bundle.rs`: PluginBundle, PluginMeta, BehaviorMode
+- `lattice-plugin/src/erased_runner.rs`: ErasedPluginRunner
+- `lattice-plugin/src/builtin/`: 9 个插件 + parse_utils.rs + mod.rs
+- `lattice-harness/src/dag_runner.rs`: PluginDagRunner
+- `lattice-harness/src/tools.rs`: ToolRegistry, ToolError
+
+## 13. 不在此 spec
 
 - Swarm 去中心化编排
 - Python 胶水层 + pip 分发
 - 运行时动态加载 (.wasm / .so)
-- Pipeline 替代或重写（Pipeline 不变）
 - intra-agent Fork（用 Pipeline Fork 替代）
-- Agent 工具执行层重构（ToolRegistry 集成到 Agent 内部）
+- Agent 工具执行层重构（ToolRegistry 集成延后）
