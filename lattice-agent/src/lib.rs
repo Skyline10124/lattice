@@ -194,7 +194,7 @@ impl Agent {
 
             if let Some(ref executor) = self.tool_executor {
                 for call in &tool_calls {
-                    let result = executor.execute(call);
+                    let result = run_async(executor.execute(call));
                     self.state.push_tool_result(&call.id, &result, None);
                 }
             }
@@ -277,7 +277,7 @@ impl Agent {
             }
             if let Some(ref executor) = self.tool_executor {
                 for call in &tool_calls {
-                    let result = executor.execute(call);
+                    let result = executor.execute(call).await;
                     self.state.push_tool_result(&call.id, &result, None);
                 }
             }
