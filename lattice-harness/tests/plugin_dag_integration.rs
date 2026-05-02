@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use lattice_core::retry::RetryPolicy;
 use lattice_harness::dag_runner::PluginDagRunner;
 use lattice_harness::handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};

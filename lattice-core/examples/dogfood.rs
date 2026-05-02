@@ -38,7 +38,11 @@ fn main() {
         ..Default::default()
     };
 
-    let input = serde_json::json!({ "diff": code });
+    let input = lattice_plugin::builtin::code_review::CodeReviewInput {
+        input: code.to_string(),
+        file_path: String::new(),
+        context_rules: vec![],
+    };
     println!("DEBUG: creating PluginRunner...");
     let mut runner = PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 

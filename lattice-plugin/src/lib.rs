@@ -1,3 +1,4 @@
+#![allow(clippy::new_without_default)]
 use lattice_agent::memory::{EntryKind, Memory, MemoryEntry};
 use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::TokenUsage;
@@ -7,7 +8,17 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::time::SystemTime;
 use thiserror::Error;
 
+pub mod builtin;
+pub mod bundle;
 pub mod erased;
+pub mod erased_runner;
+pub mod registry;
+
+// Re-exports for backward compatibility
+pub use builtin::code_review::CodeReviewPlugin;
+pub(crate) use builtin::parse_utils::extract_confidence;
+
+use crate::erased::ErasedPlugin;
 
 // ---------------------------------------------------------------------------
 // Plugin trait — LLM does inference, Behavior controls decisions
@@ -194,6 +205,37 @@ impl Default for PluginConfig {
 // PluginRunner — ties Plugin + Behavior + Agent together
 // ---------------------------------------------------------------------------
 
+/// Wraps a typed Plugin reference as an ErasedPlugin for the shared run loop.
+struct ErasedPluginAdapter<'a, P: Plugin + ?Sized>(&'a P);
+
+impl<P: Plugin + ?Sized> ErasedPlugin for ErasedPluginAdapter<'_, P> {
+    fn name(&self) -> &str {
+        Plugin::name(self.0)
+    }
+    fn system_prompt(&self) -> &str {
+        Plugin::system_prompt(self.0)
+    }
+    fn to_prompt_json(&self, context: &serde_json::Value) -> Result<String, PluginError> {
+        let typed: P::Input = serde_json::from_value(context.clone())
+            .map_err(|e| PluginError::Parse(format!("{}: {}", self.name(), e)))?;
+        Ok(self.0.to_prompt(&typed))
+    }
+    fn parse_output_json(&self, raw: &str) -> Result<serde_json::Value, PluginError> {
+        let typed = self.0.parse_output(raw)?;
+        serde_json::to_value(typed)
+            .map_err(|e| PluginError::Parse(format!("{}: {}", self.name(), e)))
+    }
+    fn tools(&self) -> &[lattice_core::types::ToolDefinition] {
+        Plugin::tools(self.0)
+    }
+    fn preferred_model(&self) -> &str {
+        Plugin::preferred_model(self.0)
+    }
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        Plugin::output_schema(self.0)
+    }
+}
+
 use std::marker::PhantomData;
 
 /// Runs a Plugin with a given Behavior against an Agent.
@@ -251,123 +293,18 @@ impl<'a, P: Plugin + ?Sized, B: Behavior, A: PluginAgent> PluginRunner<'a, P, B,
     /// Output size is validated against config.max_output_bytes.
     /// If memory is set, the prompt and final output are saved.
     pub fn run(&mut self, input: &P::Input) -> Result<RunResult, PluginError> {
-        // Set the plugin's system prompt before the first LLM call.
-        self.agent.set_system_prompt(self.plugin.system_prompt());
-
-        let prompt = self.plugin.to_prompt(input);
-        let mut attempt = 0u32;
-
-        let est_input_tokens = (prompt.len() as u32).div_ceil(4);
-
-        if let Some(hooks) = self.hooks {
-            hooks.on_start(self.plugin.name(), est_input_tokens);
-        }
-
-        loop {
-            if attempt >= self.config.max_turns {
-                return Err(PluginError::MaxTurnsExceeded(self.config.max_turns));
-            }
-
-            let tokens_before = self.agent.token_usage();
-
-            let raw = self
-                .agent
-                .send(&prompt)
-                .map_err(|e| PluginError::Other(e.to_string()))?;
-
-            let tokens_after = self.agent.token_usage();
-            let token_delta = tokens_after.saturating_sub(tokens_before);
-
-            match self.plugin.parse_output(&raw) {
-                Ok(output) => {
-                    let confidence = extract_confidence(&raw);
-                    let action = self.behavior.decide(confidence);
-
-                    if let Some(hooks) = self.hooks {
-                        hooks.on_turn(
-                            attempt,
-                            Some(TokenUsage {
-                                prompt_tokens: 0,
-                                completion_tokens: token_delta as u32,
-                                total_tokens: token_delta as u32,
-                            }),
-                            &action,
-                        );
-                    }
-
-                    match action {
-                        Action::Done => {
-                            let json = serde_json::to_string(&output)
-                                .map_err(|e| PluginError::Other(e.to_string()))?;
-                            if json.len() > self.config.max_output_bytes {
-                                return Err(PluginError::OutputTooLarge(
-                                    json.len(),
-                                    self.config.max_output_bytes,
-                                ));
-                            }
-                            let result = RunResult {
-                                output: json.clone(),
-                                turns: attempt + 1,
-                                final_action: Action::Done,
-                            };
-                            if let Some(hooks) = self.hooks {
-                                hooks.on_complete(&result);
-                            }
-                            if let Some(ref mut memory) = self.memory {
-                                memory.save_entry(MemoryEntry {
-                                    id: format!("{}-user-{}", self.plugin.name(), attempt),
-                                    kind: EntryKind::SessionLog,
-                                    session_id: self.plugin.name().to_string(),
-                                    summary: format!("User message (attempt {})", attempt),
-                                    content: prompt.clone(),
-                                    tags: vec![],
-                                    created_at: timestamp(),
-                                });
-                                memory.save_entry(MemoryEntry {
-                                    id: format!("{}-assistant-{}", self.plugin.name(), attempt),
-                                    kind: EntryKind::SessionLog,
-                                    session_id: self.plugin.name().to_string(),
-                                    summary: format!("Assistant response (attempt {})", attempt),
-                                    content: json,
-                                    tags: vec![],
-                                    created_at: timestamp(),
-                                });
-                            }
-                            return Ok(result);
-                        }
-
-                        Action::Retry => {
-                            attempt += 1;
-                            if let Some(policy) = self.retry_policy {
-                                std::thread::sleep(policy.jittered_backoff(attempt));
-                            }
-                            continue;
-                        }
-                    }
-                }
-                Err(e) => {
-                    if let Some(hooks) = self.hooks {
-                        hooks.on_error(attempt, &e);
-                    }
-                    match self.behavior.on_error(&e, attempt) {
-                        ErrorAction::Retry => {
-                            attempt += 1;
-                            if let Some(policy) = self.retry_policy {
-                                std::thread::sleep(policy.jittered_backoff(attempt));
-                            }
-                            continue;
-                        }
-                        ErrorAction::Abort => return Err(e),
-                        ErrorAction::Escalate => {
-                            return Err(PluginError::Escalated {
-                                original: Box::new(e),
-                                after_attempts: attempt,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+        let adapter = ErasedPluginAdapter(self.plugin);
+        let context = serde_json::to_value(input).map_err(|e| PluginError::Other(e.to_string()))?;
+        crate::erased_runner::run_plugin_loop(
+            &adapter,
+            self.behavior,
+            self.agent,
+            &context,
+            self.config,
+            self.hooks,
+            self.retry_policy,
+            self.memory.as_deref(),
+        )
     }
 }
 
@@ -412,86 +349,8 @@ pub enum PluginError {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Try to extract a confidence score from the LLM's raw response.
-/// Falls back to 0.0 if not found (parse failure = low confidence).
-fn extract_confidence(raw: &str) -> f64 {
-    // Look for "confidence": 0.85 or similar JSON field
-    for line in raw.lines() {
-        if let Some((_, after)) = line.split_once("\"confidence\"") {
-            if let Some(colon) = after.find(':') {
-                let val = after[colon + 1..]
-                    .trim()
-                    .trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-');
-                if let Ok(f) = val.parse::<f64>() {
-                    return f.clamp(0.0, 1.0);
-                }
-            }
-        }
-    }
-    0.0 // default: low confidence on parse failure
-}
-
-// ---------------------------------------------------------------------------
-// Built-in: CodeReview plugin
-// ---------------------------------------------------------------------------
-
-pub struct CodeReviewPlugin;
-
-impl CodeReviewPlugin {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Default for CodeReviewPlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Plugin for CodeReviewPlugin {
-    type Input = serde_json::Value;
-    type Output = serde_json::Value;
-
-    fn name(&self) -> &str {
-        "code-review"
-    }
-
-    fn system_prompt(&self) -> &str {
-        "You are a senior code reviewer. Review the provided diff for correctness, \
-         security, and design issues. Return a JSON object with an 'issues' array. \
-         Each issue has: severity (critical/high/medium/low), file, line, description. \
-         Include a 'confidence' field (0.0-1.0) indicating how confident you are \
-         in this review. Return ONLY valid JSON."
-    }
-
-    fn to_prompt(&self, input: &Self::Input) -> String {
-        let diff = input.get("diff").and_then(|v| v.as_str()).unwrap_or("");
-        format!(
-            "Please review the following code for bugs, security issues, and design problems.\n\n\
-             Return a JSON object with an 'issues' array and a 'confidence' field (0.0-1.0).\n\
-             Each issue: severity (critical/high/medium/low), file, line, description.\n\n\
-             CODE TO REVIEW:\n{}",
-            diff
-        )
-    }
-
-    fn parse_output(&self, raw: &str) -> Result<serde_json::Value, PluginError> {
-        let trimmed = raw.trim();
-        let json_str = if let Some(start) = trimmed.find("```json") {
-            let after = &trimmed[start + 7..];
-            after.split("```").next().unwrap_or(trimmed)
-        } else if trimmed.starts_with('{') {
-            trimmed
-        } else {
-            return Err(PluginError::Parse("Response does not contain JSON".into()));
-        };
-        serde_json::from_str(json_str).map_err(|e| PluginError::Parse(e.to_string()))
-    }
-}
+// Helpers (moved to builtin/parse_utils.rs)
+// ------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -503,6 +362,33 @@ fn timestamp() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_micros().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+pub(crate) fn save_memory_entries(
+    memory: &dyn Memory,
+    plugin_name: &str,
+    prompt: &str,
+    result: &RunResult,
+) {
+    let ts = timestamp();
+    memory.save_entry(MemoryEntry {
+        id: format!("{}-user-{}", plugin_name, ts),
+        kind: EntryKind::SessionLog,
+        session_id: plugin_name.to_string(),
+        summary: format!("User prompt for {}", plugin_name),
+        content: prompt.to_string(),
+        tags: vec![],
+        created_at: ts.clone(),
+    });
+    memory.save_entry(MemoryEntry {
+        id: format!("{}-assistant-{}", plugin_name, ts),
+        kind: EntryKind::SessionLog,
+        session_id: plugin_name.to_string(),
+        summary: format!("Assistant response for {}", plugin_name),
+        content: result.output.clone(),
+        tags: vec![],
+        created_at: ts,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +437,7 @@ mod tests {
         let p = CodeReviewPlugin::new();
         let raw = r#"{"issues":[],"confidence":0.9}"#;
         let out = p.parse_output(raw).unwrap();
-        assert_eq!(out["confidence"].as_f64().unwrap(), 0.9);
+        assert_eq!(out.confidence, 0.9);
     }
 
     #[test]
@@ -559,7 +445,7 @@ mod tests {
         let p = CodeReviewPlugin::new();
         let raw = "```json\n{\"issues\":[],\"confidence\":0.8}\n```";
         let out = p.parse_output(raw).unwrap();
-        assert_eq!(out["confidence"].as_f64().unwrap(), 0.8);
+        assert_eq!(out.confidence, 0.8);
     }
 
     #[test]
@@ -663,7 +549,11 @@ mod tests {
             None,
         );
 
-        let input = serde_json::json!({"diff": "+unsafe code"});
+        let input = builtin::code_review::CodeReviewInput {
+            input: "+unsafe code".into(),
+            file_path: String::new(),
+            context_rules: vec![],
+        };
         let result = runner.run(&input).unwrap();
 
         assert_eq!(result.turns, 1);
@@ -707,7 +597,11 @@ mod tests {
         let mut runner =
             PluginRunner::new(&plugin, &behavior, &mut agent, &config, None, None, None);
 
-        let input = serde_json::json!({});
+        let input = builtin::code_review::CodeReviewInput {
+            input: String::new(),
+            file_path: String::new(),
+            context_rules: vec![],
+        };
         let err = runner.run(&input).unwrap_err();
         assert!(matches!(err, PluginError::MaxTurnsExceeded(2)));
     }
@@ -773,7 +667,11 @@ mod tests {
             Some(memory),
         );
 
-        let input = serde_json::json!({"diff": "test"});
+        let input = builtin::code_review::CodeReviewInput {
+            input: "test".into(),
+            file_path: String::new(),
+            context_rules: vec![],
+        };
         let result = runner.run(&input).unwrap();
         assert_eq!(result.final_action, Action::Done);
 
@@ -781,5 +679,70 @@ mod tests {
         // here after it's been consumed. The save happened during run().
         // For a proper test we'd need the memory to be accessible after the run,
         // but this validates that the save path compiles and runs without panic.
+    }
+
+    #[test]
+    fn test_behavior_mode_to_behavior() {
+        use crate::bundle::BehaviorMode;
+
+        let strict = BehaviorMode::Strict {
+            confidence_threshold: 0.8,
+            max_retries: 2,
+            escalate_to: Some("human".into()),
+        };
+        let behavior = strict.to_behavior();
+        assert!(matches!(behavior.decide(0.9), crate::Action::Done));
+        assert!(matches!(behavior.decide(0.5), crate::Action::Retry));
+        assert!(matches!(
+            behavior.on_error(&crate::PluginError::Parse("x".into()), 3),
+            crate::ErrorAction::Escalate
+        ));
+
+        let yolo = BehaviorMode::Yolo;
+        let behavior = yolo.to_behavior();
+        assert!(matches!(behavior.decide(0.1), crate::Action::Done));
+    }
+
+    #[test]
+    fn test_plugin_registry_register_and_get() {
+        use crate::bundle::{BehaviorMode, PluginBundle, PluginMeta};
+        use crate::registry::PluginRegistry;
+
+        let mut registry = PluginRegistry::new();
+        let bundle = PluginBundle {
+            meta: PluginMeta {
+                name: "test".into(),
+                version: "0.1".into(),
+                description: "test plugin".into(),
+                author: "test".into(),
+            },
+            plugin: Box::new(crate::CodeReviewPlugin::new()),
+            default_behavior: BehaviorMode::Yolo,
+            default_tools: vec![],
+        };
+        registry.register(bundle).unwrap();
+        assert!(registry.get("test").is_some());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_plugin_registry_duplicate_rejected() {
+        use crate::bundle::{BehaviorMode, PluginBundle, PluginMeta};
+        use crate::registry::PluginRegistry;
+
+        let mut registry = PluginRegistry::new();
+        let make_bundle = |name: &str| PluginBundle {
+            meta: PluginMeta {
+                name: name.into(),
+                version: "0.1".into(),
+                description: "".into(),
+                author: "".into(),
+            },
+            plugin: Box::new(crate::CodeReviewPlugin::new()),
+            default_behavior: BehaviorMode::Yolo,
+            default_tools: vec![],
+        };
+        registry.register(make_bundle("dup")).unwrap();
+        assert!(registry.register(make_bundle("dup")).is_err());
     }
 }

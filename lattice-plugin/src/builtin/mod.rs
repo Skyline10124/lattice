@@ -1,0 +1,10 @@
+pub mod code_review;
+pub mod deep_research;
+pub mod doc_gen;
+pub mod image_gen;
+pub mod knowledge_base;
+pub mod parse_utils;
+pub mod pptx_gen;
+pub mod refactor;
+pub mod security_audit;
+pub mod test_gen;

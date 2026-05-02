@@ -38,10 +38,21 @@ pub trait ToolExecutor: Send + Sync {
 /// Max retries for mid-stream errors in Agent::run() and run_async().
 const MAX_STREAM_RETRIES: u32 = 2;
 
+/// Tool loop max turns per Agent::run() call for send_message_with_tools.
+const MAX_TOOL_TURNS: u32 = 10;
+
 /// Minimal interface for an LLM-calling agent.
 /// Used by PluginRunner to call any agent that implements send + system_prompt.
 pub trait PluginAgent {
     fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>>;
+    /// Send a user message and automatically handle tool calls via Agent::run().
+    fn send_message_with_tools(
+        &mut self,
+        message: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        // Default: delegate to send() for backward compat with non-Agent impls
+        self.send(message)
+    }
     fn set_system_prompt(&mut self, _prompt: &str) {}
     fn token_usage(&self) -> u64 {
         0
@@ -94,6 +105,20 @@ impl Agent {
     pub fn with_tool_executor(mut self, executor: Box<dyn ToolExecutor>) -> Self {
         self.tool_executor = Some(executor);
         self
+    }
+
+    /// Replace the current system message (not append).
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        use lattice_core::types::{Message, Role};
+        let msg = Message::new(Role::System, prompt.to_string(), None, None, None);
+        match self.state.messages.first() {
+            Some(m) if m.role == Role::System => {
+                self.state.messages[0] = msg;
+            }
+            _ => {
+                self.state.messages.insert(0, msg);
+            }
+        }
     }
 
     pub fn token_usage(&self) -> u64 {
@@ -551,5 +576,43 @@ impl PluginAgent for Agent {
         } else {
             Ok(content)
         }
+    }
+
+    fn send_message_with_tools(
+        &mut self,
+        message: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let events = self.run(message, MAX_TOOL_TURNS);
+        let mut content = String::new();
+        for event in &events {
+            if let LoopEvent::Token { text } = event {
+                content.push_str(text);
+            }
+        }
+        Ok(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_system_prompt_does_not_panic() {
+        let resolved = lattice_core::ResolvedModel {
+            canonical_id: "test".into(),
+            api_model_id: "test".into(),
+            provider: "test".into(),
+            base_url: "http://localhost".to_string(),
+            api_key: Some("sk-test".into()),
+            api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
+            context_length: 4096,
+            credential_status: lattice_core::catalog::CredentialStatus::Present,
+            provider_specific: Default::default(),
+        };
+        let mut agent = Agent::new(resolved);
+        agent.set_system_prompt("first");
+        agent.set_system_prompt("second");
+        // If we get here without panic, the inherent method resolved correctly
     }
 }
