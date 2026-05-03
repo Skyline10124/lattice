@@ -14,6 +14,7 @@ pub async fn run(
     verbose: bool,
     json: bool,
     creds: &crate::credentials::CredentialStore,
+    save: bool,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -31,6 +32,9 @@ pub async fn run(
         );
     }
 
+    let resolved_model = resolved.canonical_id.clone();
+    let resolved_provider = resolved.provider.clone();
+
     let tools = tool_definitions();
     let mut agent = Agent::new(resolved.clone()).with_tools(tools);
 
@@ -39,11 +43,28 @@ pub async fn run(
     }
 
     let events = agent.send_message(prompt).await;
-    run_conversation(&mut agent, events, verbose, json).await?;
+    let content = run_conversation(&mut agent, events, verbose, json).await?;
 
     let elapsed = start.elapsed().as_millis();
     if verbose && !json {
         eprintln!("{}: {} ms", "elapsed".dimmed(), elapsed);
+    }
+
+    if save {
+        let mut session = crate::session::Session::new(resolved_model, resolved_provider);
+        session.messages.push(crate::session::SessionMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        });
+        session.messages.push(crate::session::SessionMessage {
+            role: "assistant".to_string(),
+            content,
+        });
+        let mgr = crate::session::SessionManager::new();
+        mgr.save(&session)?;
+        if verbose && !json {
+            eprintln!("{}", format!("session saved: {}", session.id).dimmed());
+        }
     }
 
     Ok(())
@@ -54,7 +75,7 @@ async fn run_conversation(
     mut events: Vec<LoopEvent>,
     verbose: bool,
     json: bool,
-) -> Result<()> {
+) -> Result<String> {
     let mut content_buf = String::new();
 
     loop {
@@ -125,7 +146,7 @@ async fn run_conversation(
         println!("{}", serde_json::to_string_pretty(&out)?);
     }
 
-    Ok(())
+    Ok(content_buf)
 }
 
 fn tool_definitions() -> Vec<ToolDefinition> {

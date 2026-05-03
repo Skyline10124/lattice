@@ -30,6 +30,7 @@ impl Session {
         }
     }
 
+    #[allow(dead_code)]
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }
@@ -56,6 +57,7 @@ impl SessionManager {
         Self { dir }
     }
 
+    #[allow(dead_code)]
     pub fn from_dir(dir: PathBuf) -> Self {
         Self { dir }
     }
@@ -120,6 +122,7 @@ impl SessionManager {
         Ok(true)
     }
 
+    #[allow(dead_code)]
     pub fn latest(&self) -> Result<Option<Session>> {
         let summaries = self.list()?;
         match summaries.into_iter().next() {

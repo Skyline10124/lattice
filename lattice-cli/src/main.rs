@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
             cli.verbose,
             cli.json,
             &creds,
+            !cli.no_save,
         )
         .await;
     }
@@ -250,6 +251,7 @@ async fn main() -> Result<()> {
                     cli.verbose,
                     cli.json,
                     &creds,
+                    !cli.no_save,
                 )
                 .await?;
             }

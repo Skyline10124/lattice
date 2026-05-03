@@ -25,6 +25,7 @@ pub async fn run(
     verbose: bool,
     json: bool,
     creds: &crate::credentials::CredentialStore,
+    save: bool,
 ) -> Result<()> {
     if verbose {
         eprintln!("{}", format!("resolve: {} ...", model).dimmed());
@@ -40,6 +41,9 @@ pub async fn run(
         );
     }
 
+    let resolved_model = resolved.canonical_id.clone();
+    let resolved_provider = resolved.provider.clone();
+
     let tools = default_tool_definitions();
     let mut agent = Agent::new(resolved)
         .with_tools(tools)
@@ -50,7 +54,25 @@ pub async fn run(
     }
 
     let events = agent.run(&prompt, 10).await;
+    let content = extract_content(&events);
     display_events(&agent, events, verbose, json)?;
+
+    if save {
+        let mut session = crate::session::Session::new(resolved_model, resolved_provider);
+        session.messages.push(crate::session::SessionMessage {
+            role: "user".to_string(),
+            content: prompt.clone(),
+        });
+        session.messages.push(crate::session::SessionMessage {
+            role: "assistant".to_string(),
+            content,
+        });
+        let mgr = crate::session::SessionManager::new();
+        mgr.save(&session)?;
+        if verbose {
+            eprintln!("{}", format!("session saved: {}", session.id).dimmed());
+        }
+    }
 
     Ok(())
 }
@@ -342,4 +364,14 @@ fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bo
     }
 
     Ok(())
+}
+
+fn extract_content(events: &[LoopEvent]) -> String {
+    let mut buf = String::new();
+    for event in events {
+        if let LoopEvent::Token { text } = event {
+            buf.push_str(text);
+        }
+    }
+    buf
 }
