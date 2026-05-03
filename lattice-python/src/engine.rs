@@ -23,33 +23,39 @@ use crate::errors::convert_core_error;
 // outermost sync boundary — it never calls Pipeline::run() or
 // MicroAgent::spawn(), which are now fully async.
 //
-// block_in_place handles the rare case where Python calls into us from
-// within an existing tokio context (e.g., Python asyncio via tokio bridge).
-// NOTE: block_in_place requires a multi-threaded runtime. If try_current()
-// returns Ok from a single-threaded runtime, block_in_place would panic.
-// This is safe in practice because SHARED_RUNTIME is multi-threaded
-// (Runtime::new() defaults to worker_threads = num_cpus), and the else
-// branch handles the no-existing-runtime case. The single-threaded edge
-// case only arises if someone embeds LATTICE Python bindings inside a
-// single-threaded tokio application — an unlikely scenario that should
-// be documented as unsupported if it ever becomes relevant.
+// We use spawn + oneshot channel instead of block_in_place, which avoids
+// the single-threaded runtime panic: block_in_place requires the current
+// runtime to be multi-threaded (it needs other worker threads to continue
+// processing). With spawn + blocking_recv, SHARED_RUNTIME processes the
+// task on its own threads regardless of the calling context. Works in
+// all scenarios: no runtime, multi-threaded runtime, single-threaded runtime.
 // ---------------------------------------------------------------------------
 
 static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
-    tokio::runtime::Runtime::new()
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
         .expect("Failed to create shared tokio runtime for Python bindings")
 });
 
-/// Run an async future synchronously, safely handling nested runtime contexts.
+/// Run an async future synchronously via spawn + oneshot channel.
+///
+/// Always spawns on SHARED_RUNTIME and blocks the calling thread until
+/// completion. This avoids `block_in_place` which panics inside a
+/// single-threaded tokio runtime, and avoids `block_on` which panics
+/// when called from within any tokio context ("Cannot start a runtime
+/// from within a runtime").
 fn run_async<F, T>(f: F) -> T
 where
-    F: std::future::Future<Output = T>,
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
 {
-    if let Ok(_handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| SHARED_RUNTIME.block_on(f))
-    } else {
-        SHARED_RUNTIME.block_on(f)
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    SHARED_RUNTIME.spawn(async move {
+        let result = f.await;
+        tx.send(result).ok();
+    });
+    rx.blocking_recv().expect("SHARED_RUNTIME task panicked or was cancelled")
 }
 
 // ---------------------------------------------------------------------------
@@ -261,12 +267,11 @@ impl LatticeEngine {
             Some(t) => tools_from_py(py, t)?,
             None => Vec::new(),
         };
+        let resolved_inner = resolved.inner.clone();
 
-        let response = run_async(lattice_core::chat_complete(
-            &resolved.inner,
-            &msgs,
-            &tool_defs,
-        ))
+        let response = run_async(async move {
+            lattice_core::chat_complete(&resolved_inner, &msgs, &tool_defs).await
+        })
         .map_err(convert_core_error)?;
 
         chat_response_to_py(py, response)
@@ -298,13 +303,18 @@ impl LatticeEngine {
             Some(t) => tools_from_py(py, t)?,
             None => Vec::new(),
         };
+        let resolved_inner = resolved.inner.clone();
 
-        let stream = run_async(lattice_core::chat(&resolved.inner, &msgs, &tool_defs))
-            .map_err(convert_core_error)?;
+        // Merge both async steps into a single spawn to satisfy 'static bounds:
+        // resolve the stream and collect all events in one async block.
+        let json_values: Vec<serde_json::Value> = run_async(async move {
+            let stream = match lattice_core::chat(&resolved_inner, &msgs, &tool_defs).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return vec![serde_json::json!({"type": "error", "content": e.to_string()})];
+                }
+            };
 
-        // Collect JSON values in the async block (no GIL needed), then
-        // convert to Python dicts outside with the GIL held.
-        let json_values: Vec<serde_json::Value> = run_async(async {
             use futures::StreamExt;
             let mut s = stream;
             let mut buf = Vec::new();
