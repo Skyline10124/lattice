@@ -13,6 +13,7 @@ use lattice_plugin::{
     bundle::{BehaviorMode, PluginBundle, PluginMeta},
     registry::PluginRegistry,
 };
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ pub async fn run(
 }
 
 /// Run a pipeline: load agent registry, create registries, and execute.
+#[allow(clippy::too_many_arguments)]
 pub fn run_pipeline(
     prompt: &str,
     start_agent: &str,
@@ -63,6 +65,7 @@ pub fn run_pipeline(
     _tools_dir: Option<&str>,
     verbose: bool,
     json: bool,
+    creds: HashMap<String, String>,
 ) -> Result<()> {
     let dir = agents_dir_path(agents_dir);
 
@@ -177,7 +180,8 @@ pub fn run_pipeline(
     let plugin_registry = Arc::new(plugin_registry);
 
     // Validate pipeline chain before running
-    let pipeline_check = Pipeline::new("pre-check", registry.clone(), None, None);
+    let pipeline_check = Pipeline::new("pre-check", registry.clone(), None, None)
+        .with_credentials(creds.clone());
     let report = pipeline_check.dry_run(start_agent);
     if !report.valid {
         eprintln!("{}", "Pipeline validation failed:".red());
@@ -204,7 +208,8 @@ pub fn run_pipeline(
     // Run the pipeline with plugin & tool registries
     let mut pipeline = Pipeline::new(start_agent, registry, None, None)
         .with_plugin_registry(plugin_registry)
-        .with_tool_registry(tool_registry);
+        .with_tool_registry(tool_registry)
+        .with_credentials(creds);
     let result = pipeline.run(start_agent, prompt);
 
     if json {

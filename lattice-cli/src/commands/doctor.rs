@@ -45,6 +45,25 @@ pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
         println!("  ... and {} more", all.len() - 20);
     }
 
+    // Detailed model status via inspect_model
+    println!("\n{}", "Model Details:".bold());
+    for m in &all[..all.len().min(20)] {
+        let result = lattice_core::inspect_model(m);
+        match result {
+            Ok(model) => {
+                let status = match model.credential_status {
+                    lattice_core::CredentialStatus::Present => "callable".green(),
+                    lattice_core::CredentialStatus::Missing => "no credential".red(),
+                    lattice_core::CredentialStatus::NotRequired => "no key needed".dimmed(),
+                };
+                println!("  {} -> {} [{}]", m, model.provider, status);
+            }
+            Err(e) => {
+                println!("  {} -> {}", m, e.to_string().red());
+            }
+        }
+    }
+
     // Catalog
     let catalog = Catalog::get()?;
     println!(

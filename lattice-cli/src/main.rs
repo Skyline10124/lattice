@@ -221,6 +221,7 @@ async fn main() -> Result<()> {
                     tools_dir.as_deref(),
                     cli.verbose,
                     cli.json,
+                    creds.to_hashmap(),
                 )?;
             } else {
                 let model = model
