@@ -159,6 +159,15 @@ impl ModelRouter {
                 if pe.provider_id == override_provider {
                     let api_key = self.resolve_credentials(pe);
                     let credential_status = Self::credential_status_from_key(&api_key, pe);
+                    // Return error if credentials are Missing and the provider requires them
+                    if credential_status == CredentialStatus::Missing
+                        && !Self::is_credentialless(pe)
+                    {
+                        return Err(Self::missing_credential_error(
+                            &pe.provider_id,
+                            &canonical_id,
+                        ));
+                    }
                     let model = ResolvedModel {
                         canonical_id: canonical_id.clone(),
                         provider: pe.provider_id.clone(),
@@ -333,6 +342,29 @@ impl ModelRouter {
             .collect::<Vec<&str>>()
             .join(",");
         (entry.provider_id.clone(), fingerprint)
+    }
+
+    /// Build an error message for missing credentials.
+    fn missing_credential_error(provider_id: &str, model_id: &str) -> LatticeError {
+        let keys: Vec<&str> = PROVIDER_CREDENTIALS_RAW
+            .iter()
+            .filter(|(s, _)| *s == provider_id)
+            .flat_map(|(_, creds)| creds.iter().map(|(ev, _)| *ev))
+            .collect();
+        let hint = if keys.is_empty() {
+            format!(
+                "provider '{}' requires a credential for model '{}'",
+                provider_id, model_id
+            )
+        } else {
+            format!(
+                "provider '{}' requires one of: {} for model '{}'",
+                provider_id,
+                keys.join(", "),
+                model_id
+            )
+        };
+        LatticeError::Config { message: hint }
     }
 
     /// Check env vars for a provider entry's credential_keys.
@@ -775,7 +807,7 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let saved = save_and_clear_all();
 
-        env::set_var("NOUS_API_KEY", "nous-key");
+        env::set_var("ANTHROPIC_API_KEY", "ant-key");
 
         let router = ModelRouter::new();
         let resolved = router

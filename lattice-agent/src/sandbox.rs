@@ -40,6 +40,16 @@ impl Default for SandboxConfig {
                 "credentials.json".into(),
                 "secrets".into(),
                 ".git/credentials".into(),
+                ".git/config".into(),
+                ".ssh/id_rsa".into(),
+                ".ssh/id_ed25519".into(),
+                ".ssh/authorized_keys".into(),
+                ".aws/credentials".into(),
+                ".npmrc".into(),
+                ".dockercfg".into(),
+                "id_rsa".into(),
+                "id_ed25519".into(),
+                ".kube/config".into(),
             ],
             max_read_size: 10 * 1024 * 1024, // 10 MB
             max_write_size: 1024 * 1024,     // 1 MB
@@ -69,27 +79,49 @@ impl SandboxConfig {
         }
     }
 
+    /// Resolve a path to a canonical form for sandbox checks.
+    /// Falls back to the original path if canonicalization fails.
+    fn resolve_path(&self, path: &str) -> std::path::PathBuf {
+        std::fs::canonicalize(std::path::Path::new(path))
+            .unwrap_or_else(|_| std::path::Path::new(path).to_path_buf())
+    }
+
+    /// Check if a canonical path matches any allowlist prefix using
+    /// secure starts_with component matching.
+    fn matches_allowlist(check_path: &std::path::Path, allowlist: &[String]) -> bool {
+        let cwd = std::env::current_dir().ok();
+        allowlist.iter().any(|prefix| {
+            // Direct starts_with (works for relative paths like "lattice-core/")
+            check_path.starts_with(prefix)
+            // Resolve prefix relative to cwd (works for absolute canonical paths)
+            || cwd.as_ref()
+                .map(|cwd| check_path.starts_with(cwd.join(prefix)))
+                .unwrap_or(false)
+        })
+    }
+
     /// Check if a file path is safe to read.
     pub fn check_read(&self, path: &str) -> Result<(), String> {
-        // Block sensitive files
+        let check_path = self.resolve_path(path);
+
+        // Block sensitive files using path component matching
         for sensitive in &self.sensitive_files {
-            if path.contains(sensitive) {
+            if path_matches_sensitive(&check_path, sensitive) {
                 return Err(format!(
                     "Sandbox: reading '{}' is blocked (matches sensitive pattern '{}')",
                     path, sensitive
                 ));
             }
         }
+
         // Block path traversal
         if path.contains("..") {
             return Err(format!("Sandbox: path '{}' contains '..'", path));
         }
-        // Enforce read allowlist
+
+        // Enforce read allowlist with starts_with matching
         if !self.read_allowlist.is_empty() {
-            let allowed = self
-                .read_allowlist
-                .iter()
-                .any(|prefix| path.contains(prefix));
+            let allowed = Self::matches_allowlist(&check_path, &self.read_allowlist);
             if !allowed {
                 return Err(format!(
                     "Sandbox: read from '{}' is not in read allowlist: {:?}",
@@ -103,11 +135,10 @@ impl SandboxConfig {
     /// Check if a file path is safe to write.
     pub fn check_write(&self, path: &str) -> Result<(), String> {
         self.check_read(path)?; // Same basic safety checks + write allowlist
+
         if !self.write_allowlist.is_empty() {
-            let allowed = self
-                .write_allowlist
-                .iter()
-                .any(|prefix| path.contains(prefix));
+            let check_path = self.resolve_path(path);
+            let allowed = Self::matches_allowlist(&check_path, &self.write_allowlist);
             if !allowed {
                 return Err(format!(
                     "Sandbox: write to '{}' is not in write allowlist: {:?}",
@@ -129,7 +160,7 @@ impl SandboxConfig {
         // Reject shell metacharacters that enable command injection.
         // Since commands are executed via `sh -c`, metacharacters like `;`, `|`,
         // `&&`, `||`, `$()`, and backticks allow chaining arbitrary commands.
-        for meta in &["&", ";", "|", "&&", "||", "$(", "`", "\n", "\r"] {
+        for meta in &["&", ";", "|", "&&", "||", "$(", "`", "\n", "\r", ">", "<"] {
             if cmd.contains(meta) {
                 return Err(format!(
                     "Sandbox: command contains dangerous shell metacharacter '{}'",
@@ -212,9 +243,7 @@ fn is_private_ip(host: &str) -> bool {
         _ => {}
     }
     // IPv6 Unique Local Address (fc00::/7)
-    if (host.starts_with("fc") || host.starts_with("fd"))
-        && host.len() >= 3
-    {
+    if (host.starts_with("fc") || host.starts_with("fd")) && host.len() >= 3 {
         let third = host.as_bytes().get(2).copied().unwrap_or(0);
         if third == b':' || third == b'0' {
             return true;
@@ -241,6 +270,38 @@ fn is_private_ip(host: &str) -> bool {
         }
     }
     false
+}
+
+/// Check if a path matches a sensitive file pattern using path component matching.
+///
+/// Unlike substring matching (which can have false positives like
+/// "some.env.file.txt" matching ".env"), this checks actual path components.
+/// For simple patterns like ".env", it matches any path component equal to ".env".
+/// For compound patterns like ".git/config", it matches consecutive components.
+fn path_matches_sensitive(path: &std::path::Path, pattern: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('/').collect();
+    let comps: Vec<_> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy()),
+            _ => None,
+        })
+        .collect();
+
+    if comps.is_empty() {
+        return false;
+    }
+
+    if parts.len() == 1 {
+        comps.iter().any(|c| c.as_ref() == parts[0])
+    } else {
+        comps.windows(parts.len()).any(|window| {
+            window
+                .iter()
+                .zip(parts.iter())
+                .all(|(a, b)| a.as_ref() == *b)
+        })
+    }
 }
 
 #[cfg(test)]

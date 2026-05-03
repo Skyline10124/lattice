@@ -25,12 +25,24 @@ impl std::fmt::Display for HandoffTarget {
     }
 }
 
+/// Maximum number of allowed fork targets to prevent resource exhaustion.
+const MAX_FORK_TARGETS: usize = 10;
+
 impl HandoffTarget {
     /// Parse a target string.  `"fork:A,B"` → `Fork(["A","B"])`,
     /// anything else → `Single(s)`.
     pub fn parse(s: &str) -> Self {
         if let Some(rest) = s.strip_prefix("fork:") {
-            let targets = rest.split(',').map(|t| t.trim().to_string()).collect();
+            let mut targets: Vec<String> = rest.split(',').map(|t| t.trim().to_string()).collect();
+            if targets.len() > MAX_FORK_TARGETS {
+                warn!(
+                    "Fork target count {} exceeds max {}, truncating to {}",
+                    targets.len(),
+                    MAX_FORK_TARGETS,
+                    MAX_FORK_TARGETS
+                );
+                targets.truncate(MAX_FORK_TARGETS);
+            }
             HandoffTarget::Fork(targets)
         } else {
             HandoffTarget::Single(s.to_string())

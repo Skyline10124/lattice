@@ -12,7 +12,7 @@ pub struct CredentialStore {
 }
 
 /// All env var names that lattice-core may look up.
-const KNOWN_ENV_VARS: &[&str] = &[
+pub(crate) const KNOWN_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -64,6 +64,11 @@ impl CredentialStore {
         }
 
         Ok(CredentialStore { values })
+    }
+
+    /// Create a CredentialStore from raw values (used in tests).
+    pub fn from_values(values: HashMap<String, String>) -> Self {
+        CredentialStore { values }
     }
 
     /// Return credentials as a HashMap for ModelRouter::with_credentials().

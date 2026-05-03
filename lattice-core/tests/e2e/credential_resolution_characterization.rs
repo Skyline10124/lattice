@@ -241,6 +241,8 @@ fn resolve_credentials_prefers_entry_credential_keys_over_fallback() {
 fn resolve_credentials_ignores_empty_env_var_values() {
     // CHARACTERIZATION: resolve_credentials() trims env var values and
     // returns None if the trimmed value is empty.
+    // When provider override is used and credentials are missing, an error
+    // is returned instead of silently proceeding with a missing credential.
     let _lock = crate::env_lock::lock();
     let prev = crate::save_env("ANTHROPIC_API_KEY");
     env::set_var("ANTHROPIC_API_KEY", "   ");
@@ -248,13 +250,8 @@ fn resolve_credentials_ignores_empty_env_var_values() {
     let router = ModelRouter::new();
     let result = router.resolve("claude-sonnet-4-6", Some("anthropic"));
     assert!(
-        result.is_ok(),
-        "should resolve metadata even with empty key"
-    );
-    let resolved = result.unwrap();
-    assert!(
-        resolved.api_key.is_none(),
-        "empty/whitespace-only env var should not produce an api_key"
+        result.is_err(),
+        "should error when override provider has empty/missing credentials"
     );
 
     crate::restore_env("ANTHROPIC_API_KEY", prev);
@@ -661,15 +658,12 @@ fn resolve_with_provider_override_skips_priority_loop() {
     env::set_var("GITHUB_TOKEN", "gh-key");
 
     let router = ModelRouter::new();
-    // Override to anthropic even though it has no key — copilot would win
-    // in the priority loop but we explicitly request anthropic
-    let resolved = router
-        .resolve("claude-sonnet-4-6", Some("anthropic"))
-        .unwrap();
-    assert_eq!(resolved.provider, "anthropic");
+    // Override to anthropic without ANTHROPIC_API_KEY — now returns an error
+    // because missing credentials with provider override is rejected.
+    let result = router.resolve("claude-sonnet-4-6", Some("anthropic"));
     assert!(
-        resolved.api_key.is_none(),
-        "anthropic has no key set, override still works"
+        result.is_err(),
+        "provider override with missing credentials should error"
     );
 
     crate::restore_env("ANTHROPIC_API_KEY", prev_ant);

@@ -148,6 +148,12 @@ impl AgentRunner {
         max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         let events = self.agent.run(input, max_turns).await;
+        // Propagate error events immediately
+        for event in &events {
+            if let lattice_agent::LoopEvent::Error { message } = event {
+                return Err(format!("Agent error: {}", message).into());
+            }
+        }
         let mut content = String::new();
         for event in &events {
             if let lattice_agent::LoopEvent::Token { text } = event {

@@ -7,6 +7,7 @@ use crate::types::{Message, ToolCall, ToolDefinition};
 
 static SHARED_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(120))
         .build()

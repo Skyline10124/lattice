@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
             trace,
             provider,
         }) => {
-            resolve::run(&model, provider.as_deref(), trace, cli.json)?;
+            resolve::run(&model, provider.as_deref(), trace, cli.json, &creds)?;
         }
         Some(Commands::Models { auth }) => {
             models::run(auth)?;

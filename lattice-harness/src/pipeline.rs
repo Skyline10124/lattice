@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use lattice_agent::memory::Memory;
 use lattice_agent::Agent;
+use tracing::warn;
 
 use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
@@ -12,6 +13,7 @@ use crate::runner::AgentRunner;
 
 /// Construct an Agent and AgentRunner from a resolved model, profile, and optional memory.
 ///
+/// Applies profile settings (system prompt, tools, executor) to the Agent.
 /// Eliminates the duplicated 12-line construction block that appeared in both
 /// `run()` and `run_fork()`.
 #[allow(deprecated)]
@@ -21,6 +23,31 @@ fn build_runner(
     memory: Option<Arc<dyn Memory>>,
 ) -> AgentRunner {
     let mut agent = Agent::new(resolved);
+
+    // Apply system prompt from profile
+    let system_prompt = profile.system_prompt();
+    agent.set_system_prompt(&system_prompt);
+
+    // Apply tools from profile — filter default tool definitions by enabled names
+    if !profile.tools.enabled.is_empty() {
+        let all_tools = lattice_agent::default_tool_definitions();
+        let enabled_tools: Vec<_> = all_tools
+            .into_iter()
+            .filter(|td| profile.tools.enabled.contains(&td.name))
+            .collect();
+        if enabled_tools.is_empty() {
+            warn!(
+                "Agent '{}' has tools enabled but no matching tool definitions found",
+                profile.agent.name
+            );
+        } else {
+            agent = agent.with_tools(enabled_tools);
+            // Create a default tool executor if one hasn't been set
+            let executor = lattice_agent::DefaultToolExecutor::new(".");
+            agent = agent.with_tool_executor(Box::new(executor));
+        }
+    }
+
     if let Some(ref mem) = memory {
         agent = agent.with_memory(mem.clone_box());
     }

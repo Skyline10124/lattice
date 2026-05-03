@@ -35,6 +35,7 @@ impl DefaultToolExecutor {
             sandbox: SandboxConfig::default(),
             http_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
         }
@@ -56,10 +57,22 @@ impl ToolExecutor for DefaultToolExecutor {
         match call.function.name.as_str() {
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_read(path) {
+                // Canonicalize path to resolve symlinks (TOCTOU prevention)
+                let canonical = match tokio::fs::canonicalize(path).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    }
+                };
+                let path_str = canonical.to_string_lossy();
+                if let Err(e) = self.sandbox.check_read(&path_str) {
                     return e;
                 }
-                match tokio::fs::metadata(path).await {
+                match tokio::fs::metadata(&canonical).await {
                     Ok(meta) if meta.len() > self.sandbox.max_read_size as u64 => {
                         return format!(
                             "Sandbox: file size {} exceeds max_read_size {}",
@@ -76,13 +89,15 @@ impl ToolExecutor for DefaultToolExecutor {
                     }
                     _ => {}
                 }
-                tokio::fs::read_to_string(path).await.unwrap_or_else(|e| {
-                    ToolError::IoError {
-                        path: path.to_string(),
-                        error: e,
-                    }
-                    .to_string()
-                })
+                tokio::fs::read_to_string(&canonical)
+                    .await
+                    .unwrap_or_else(|e| {
+                        ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    })
             }
             "grep" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -117,10 +132,36 @@ impl ToolExecutor for DefaultToolExecutor {
             "write_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
-                if let Err(e) = self.sandbox.check_write(path) {
-                    return e;
-                }
+                let abs = std::path::PathBuf::from(format!(
+                    "{}/{}",
+                    self.project_root,
+                    path.trim_start_matches('/')
+                ));
+                // Canonicalize parent directory (TOCTOU prevention)
+                let write_path = if let Some(parent) = abs.parent() {
+                    match tokio::fs::canonicalize(parent).await {
+                        Ok(canonical_parent) => {
+                            let canonical = canonical_parent.join(abs.file_name().unwrap());
+                            let path_str = canonical.to_string_lossy();
+                            if let Err(e) = self.sandbox.check_write(&path_str) {
+                                return e;
+                            }
+                            canonical
+                        }
+                        Err(_) => {
+                            // Parent doesn't exist — check original path
+                            if let Err(e) = self.sandbox.check_write(path) {
+                                return e;
+                            }
+                            abs.clone()
+                        }
+                    }
+                } else {
+                    if let Err(e) = self.sandbox.check_write(path) {
+                        return e;
+                    }
+                    abs.clone()
+                };
                 if content.len() > self.sandbox.max_write_size {
                     return ToolError::SizeLimit {
                         limit: self.sandbox.max_write_size,
@@ -128,10 +169,11 @@ impl ToolExecutor for DefaultToolExecutor {
                     }
                     .to_string();
                 }
-                match tokio::fs::write(&abs, content).await {
+                let path_str = write_path.to_string_lossy().to_string();
+                match tokio::fs::write(&write_path, content).await {
                     Ok(_) => format!("Wrote {} bytes to {}", content.len(), path),
                     Err(e) => ToolError::IoError {
-                        path: abs,
+                        path: path_str,
                         error: e,
                     }
                     .to_string(),
@@ -199,12 +241,10 @@ impl ToolExecutor for DefaultToolExecutor {
                         cmd_result
                     }
                     Ok(Err(e)) => ToolError::CommandError(e.to_string()).to_string(),
-                    Err(_) => ToolError::CommandError(
-                        format!(
-                            "bash command timed out after {}s",
-                            self.sandbox.max_command_timeout
-                        ),
-                    )
+                    Err(_) => ToolError::CommandError(format!(
+                        "bash command timed out after {}s",
+                        self.sandbox.max_command_timeout
+                    ))
                     .to_string(),
                 }
             }
@@ -212,10 +252,27 @@ impl ToolExecutor for DefaultToolExecutor {
                 let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
                 let search = args.get("search").and_then(|v| v.as_str()).unwrap_or("");
                 let insert = args.get("insert").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_write(path) {
-                    return e;
-                }
-                let abs = format!("{}/{}", self.project_root, path.trim_start_matches('/'));
+                let abs = std::path::PathBuf::from(format!(
+                    "{}/{}",
+                    self.project_root,
+                    path.trim_start_matches('/')
+                ));
+                // Canonicalize path for TOCTOU prevention
+                let abs = match tokio::fs::canonicalize(&abs).await {
+                    Ok(canonical) => {
+                        let path_str = canonical.to_string_lossy();
+                        if let Err(e) = self.sandbox.check_write(&path_str) {
+                            return e;
+                        }
+                        canonical
+                    }
+                    Err(_) => {
+                        if let Err(e) = self.sandbox.check_write(path) {
+                            return e;
+                        }
+                        abs
+                    }
+                };
                 match tokio::fs::read_to_string(&abs).await {
                     Ok(content) => {
                         let count = content.matches(search).count();
@@ -244,7 +301,7 @@ impl ToolExecutor for DefaultToolExecutor {
                                     format!("Patched {}. Changes:\n{}", path, diff_lines.join("\n"))
                                 }
                                 Err(e) => ToolError::IoError {
-                                    path: abs,
+                                    path: abs.to_string_lossy().to_string(),
                                     error: e,
                                 }
                                 .to_string(),
@@ -252,7 +309,7 @@ impl ToolExecutor for DefaultToolExecutor {
                         }
                     }
                     Err(e) => ToolError::IoError {
-                        path: abs,
+                        path: abs.to_string_lossy().to_string(),
                         error: e,
                     }
                     .to_string(),

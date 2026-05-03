@@ -2,10 +2,17 @@ use anyhow::Result;
 use colored::Colorize;
 use lattice_core::router::ModelRouter;
 
+use crate::credentials::CredentialStore;
 use crate::display::{credential_label, status_icon};
 
-pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool) -> Result<()> {
-    let router = ModelRouter::new();
+pub fn run(
+    model: &str,
+    provider_override: Option<&str>,
+    trace: bool,
+    json: bool,
+    creds: &CredentialStore,
+) -> Result<()> {
+    let router = ModelRouter::with_credentials(creds.to_hashmap());
     let resolved = router.resolve(model, provider_override)?;
 
     if json {
@@ -55,9 +62,23 @@ pub fn run(model: &str, provider_override: Option<&str>, trace: bool, json: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
 
     static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Build a CredentialStore from raw env var values for testing.
+    fn test_creds() -> CredentialStore {
+        let mut values = HashMap::new();
+        for var in crate::credentials::KNOWN_ENV_VARS {
+            if let Ok(val) = std::env::var(var) {
+                if !val.is_empty() {
+                    values.insert(var.to_string(), val);
+                }
+            }
+        }
+        CredentialStore::from_values(values)
+    }
 
     /// Save and restore env vars for test isolation.
     /// Uses a global mutex to prevent race conditions with parallel tests.
@@ -75,7 +96,8 @@ mod tests {
     #[test]
     fn test_resolve_gpt4o_with_key() {
         with_env_var("OPENAI_API_KEY", "sk-test-cli", || {
-            let result = run("gpt-4o", None, false, false);
+            let creds = test_creds();
+            let result = run("gpt-4o", None, false, false, &creds);
             assert!(result.is_ok(), "resolve gpt-4o with key should succeed");
         });
     }
@@ -83,7 +105,8 @@ mod tests {
     #[test]
     fn test_resolve_sonnet_with_key() {
         with_env_var("ANTHROPIC_API_KEY", "sk-test-cli", || {
-            let result = run("sonnet", None, false, false);
+            let creds = test_creds();
+            let result = run("sonnet", None, false, false, &creds);
             assert!(result.is_ok(), "resolve sonnet with key should succeed");
         });
     }
@@ -91,7 +114,8 @@ mod tests {
     #[test]
     fn test_resolve_json_output_with_key() {
         with_env_var("OPENAI_API_KEY", "sk-test-json", || {
-            let result = run("gpt-4o", None, false, true);
+            let creds = test_creds();
+            let result = run("gpt-4o", None, false, true, &creds);
             assert!(result.is_ok(), "resolve json output should succeed");
         });
     }
@@ -99,7 +123,8 @@ mod tests {
     #[test]
     fn test_resolve_trace_output() {
         with_env_var("ANTHROPIC_API_KEY", "sk-test-trace", || {
-            let result = run("sonnet", None, true, false);
+            let creds = test_creds();
+            let result = run("sonnet", None, true, false, &creds);
             assert!(result.is_ok(), "resolve with trace should succeed");
         });
     }
@@ -107,7 +132,8 @@ mod tests {
     #[test]
     fn test_resolve_provider_override() {
         with_env_var("ANTHROPIC_API_KEY", "sk-test-ovr", || {
-            let result = run("claude-sonnet-4-6", Some("anthropic"), false, false);
+            let creds = test_creds();
+            let result = run("claude-sonnet-4-6", Some("anthropic"), false, false, &creds);
             assert!(
                 result.is_ok(),
                 "resolve with provider override should succeed"

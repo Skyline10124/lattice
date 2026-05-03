@@ -291,7 +291,11 @@ impl AgentProfile {
     }
 
     /// Resolve the effective system prompt (file content or inline).
-    /// Only allows relative paths — absolute paths and paths containing `..` are rejected.
+    ///
+    /// Security: resolves symlinks via canonicalize and verifies the resolved
+    /// path is within the base directory to prevent symlink traversal attacks.
+    /// Only allows relative paths — absolute paths and paths containing `..`
+    /// are rejected.
     pub fn system_prompt(&self) -> String {
         if let Some(ref file) = self.system.file {
             let path = Path::new(file);
@@ -303,9 +307,28 @@ impl AgentProfile {
                 );
                 return self.system.prompt.clone();
             }
-            if path.exists() {
-                return std::fs::read_to_string(path)
-                    .unwrap_or_else(|_| self.system.prompt.clone());
+            // Resolve symlinks and verify the canonical path is safe
+            match std::fs::canonicalize(path) {
+                Ok(canonical) => {
+                    let canonical_str = canonical.to_string_lossy();
+                    // Verify canonical path doesn't escape into sensitive areas.
+                    // The base directory is the current working directory.
+                    if let Ok(cwd) = std::env::current_dir() {
+                        if !canonical.starts_with(&cwd) {
+                            tracing::warn!(
+                                "system.file '{}' resolved to '{}' which is outside the working directory",
+                                file, canonical_str
+                            );
+                            return self.system.prompt.clone();
+                        }
+                    }
+                    return std::fs::read_to_string(&canonical)
+                        .unwrap_or_else(|_| self.system.prompt.clone());
+                }
+                Err(_) => {
+                    // File doesn't exist yet — fall back to inline prompt
+                    return self.system.prompt.clone();
+                }
             }
         }
         self.system.prompt.clone()
@@ -614,7 +637,11 @@ rule = { default = true }
         std::fs::write(dir.join("agent.toml.sha256"), &hash).unwrap();
 
         let result = verify_config_integrity(&toml_path, content);
-        assert!(result.is_ok(), "Trailing newline should be trimmed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Trailing newline should be trimmed: {:?}",
+            result
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
