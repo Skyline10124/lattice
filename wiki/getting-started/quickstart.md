@@ -4,7 +4,7 @@
 
 ```bash
 cargo build --release
-./target/release/lattice run -m deepseek-v4-flash "1+1=?"
+./target/release/lattice run "1+1=?" -m deepseek-v4-flash
 # → 1+1=**2**
 ```
 
@@ -51,6 +51,35 @@ lattice run --pipeline code-review "审查一下 src/main.rs"
 
 # 使用 plugin DAG 编排
 lattice run --pipeline plugin-test "分析一下代码"
+```
+
+## CLI 常用命令
+
+```bash
+# 列出已加载的 agent
+lattice list agents
+
+# 会话管理
+lattice sessions list
+lattice sessions show <id>
+
+# 会话统计
+lattice stats
+
+# 配置管理
+lattice config init
+lattice config get core.default_model
+lattice config set core.default_model gpt-4
+
+# 继续上一次会话
+lattice run -c "继续上次的话题" -m sonnet
+
+# Debug 模式（model 为位置参数，--prompt 为可选）
+lattice debug sonnet --resolve-only
+lattice debug deepseek-v4-flash --prompt "Hello"
+
+# Bus 状态
+lattice bus
 ```
 
 ## Python

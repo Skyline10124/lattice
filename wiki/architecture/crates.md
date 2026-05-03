@@ -7,7 +7,7 @@
 | **lattice-plugin** | `Plugin` trait (Input/Output) + `ErasedPlugin` + `PluginRegistry` + 9 个内置插件 + `Behavior` (Strict/Yolo) + `PluginRunner`/`ErasedPluginRunner` | core, agent (PluginAgent) |
 | **lattice-harness** | `Pipeline`（async）+ `AgentRunner` + `PluginDagRunner` + `ToolRegistry` + TOML profile + handoff + registry/watcher + SqliteMemory + WebSocket | agent, plugin, core |
 | **lattice-bus** | Pub/sub event bus for inter-agent communication | 无 |
-| **lattice-cli** | CLI: `run`/`print`/`resolve`/`models` 子命令 | agent, harness, plugin |
+| **lattice-cli** | CLI: `run`/`resolve`/`models`/`doctor`/`bus`/`config`/`sessions`/`stats`/`debug`/`validate`/`list`/`new`/`tui`，session 自动持久化（SHA-256 ID），`--global` flags（`--json`/`--verbose`/`--continue-session`/`--no-save`） | agent, harness, plugin |
 | **lattice-tui** | Ratatui TUI + Agent streaming | agent |
 | **lattice-python** | PyO3 绑定（resolver only），pip 包 `lattice-core` | core |
 

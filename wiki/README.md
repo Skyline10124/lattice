@@ -14,7 +14,7 @@
 
 ## 项目状态
 
-alpha / dogfooding。Rust 侧 resolve + chat + chat_complete 可用，Python 绑定仅 resolver。
+alpha / dogfooding。Rust 侧 resolve + chat + chat_complete 可用，CLI 完整（run, sessions, stats, config, list, new, bus 等），Python 绑定支持 resolve + chat_complete。
 
 ## 目录
 
