@@ -1,4 +1,4 @@
-# LATTICE
+# LATTICE 
 
 A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-agent harness.
 
@@ -20,12 +20,12 @@ LATTICE/ (Cargo workspace)
 
 ### Four principles
 
-| | |
-|---|---|
-| **Fast** | Rust hot path, zero-cost abstractions |
-| **Minimal** | No DB required, no external services. Just Rust library + catalog.json. |
-| **Pluggable** | Overlay pattern for providers, tools, routing rules |
-| **Focused** | One thing well: given model + messages → return response |
+| <br />        | <br />                                                                  |
+| ------------- | ----------------------------------------------------------------------- |
+| **Fast**      | Rust hot path, zero-cost abstractions                                   |
+| **Minimal**   | No DB required, no external services. Just Rust library + catalog.json. |
+| **Pluggable** | Overlay pattern for providers, tools, routing rules                     |
+| **Focused**   | One thing well: given model + messages → return response                |
 
 ### Plugin model
 
@@ -135,10 +135,10 @@ engine.list_authenticated_models()
 
 LATTICE is in **alpha / dogfooding** stage. What works:
 
-- **Model resolution**: 98 models, 37 aliases, 27 provider defaults (23 with base_url)
+- **Model resolution**: 98 models, 37 aliases, 27 provider defaults (23 with base\_url)
 - **Rust inference**: `resolve()` + `chat()` for OpenAI and Anthropic protocols via unified Transport
 - **Streaming**: SSE parsers for both protocols, tool call tracking across chunks
-- **Thinking mode**: DeepSeek v4-pro (OpenAI reasoning_content), MiniMax M2.7 (Anthropic thinking_delta)
+- **Thinking mode**: DeepSeek v4-pro (OpenAI reasoning\_content), MiniMax M2.7 (Anthropic thinking\_delta)
 - **Agent**: multi-turn conversation, tool execution boundary, memory, token budget
 - **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
@@ -227,4 +227,4 @@ See [CLAUDE.md](CLAUDE.md) for detailed development guide.
 
 ## License
 
-MIT
+Apache 2.0
