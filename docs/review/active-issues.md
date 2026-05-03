@@ -3,7 +3,7 @@
 **最后更新**: 2026-05-02
 **审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
 **补充来源**: 2026-05-02 全代码库深扫（core/provider/streaming, agent/harness/bus, plugin/cli/python/tui）
-**状态**: 36 SECURITY ISSUES — 7 CRITICAL, 9 HIGH, 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
+**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH, 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
 
 ---
 
@@ -43,7 +43,7 @@
 | **来源** | [VULN-001](../issues/VULN-001-sandbox-newline-bypass.md) |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:119` |
-| **状态** | Open |
+| **状态** | Resolved (6d5b044) |
 
 **描述**: check_command() 的 metacharacter 黑名单未包含 \\n 和 \\r。sh -c 将换行符解析为命令分隔符。攻击路径: {"command": "cargo test\\nrm -rf /"} → cargo 通过 allowlist → 执行两条命令。
 
@@ -62,7 +62,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:119` |
-| **状态** | Open |
+| **状态** | Resolved (bdd6341) |
 
 **描述**: metacharacter 黑名单包含 "&&" 但不包含独立 "&"。sh -c 将 & 解析为后台操作符。{"command": "cargo test & rm -rf /"} 通过所有检查。
 
@@ -81,7 +81,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:162` |
-| **状态** | Open |
+| **状态** | Resolved (b5d57c3) |
 
 **描述**: check_url() 使用 starts_with("http://localhost") 做字符串前缀匹配。根据 RFC 3986，"http://localhost@evil.com/" 中 localhost 被视为用户名而非主机。攻击者可绕过 localhost-only 限制。
 
@@ -100,7 +100,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:162` |
-| **状态** | Open |
+| **状态** | Resolved (bdd6341) |
 
 **描述**: check_url() 对 https:// URL 无任何 host 检查。web_search 工具可访问 https://127.0.0.1:6379/（本地 Redis）、https://169.254.169.254/（AWS 元数据）、https://localhost:8443/ 等。
 
@@ -119,7 +119,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs + tools.rs |
 | **文件** | `sandbox.rs:20` / `tools.rs:135` |
-| **状态** | Open |
+| **状态** | Resolved (bdd6341) |
 
 **描述**: max_command_timeout: u32 = 30 已定义但 tools.rs 中的 bash 执行完全未使用。permissive 模式下 sleep 99999 即永久阻塞 agent 线程。
 
@@ -138,7 +138,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-harness/src/profile.rs |
 | **文件** | `profile.rs:114-118` |
-| **状态** | Open |
+| **状态** | Resolved (bdd6341) |
 
 **描述**: agent.toml 配置文件无数字签名或哈希校验。攻击者可添加 default=true 的 handoff 规则重定向到恶意 agent。watcher 自动 hot-reload 无完整性检查。
 
@@ -157,7 +157,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:73-88` |
-| **状态** | Open |
+| **状态** | Resolved (b5d57c3) |
 
 **描述**: read_allowlist 字段被定义并文档化但 check_read() 方法从未引用它。即使设置了读取目录限制，也完全不被执行。攻击者可读取任何不被 sensitive_files 匹配的文件。
 
@@ -371,12 +371,12 @@
 **描述**: https://anything@169.254.169.254/ 中 anything 被视为用户名而非 host。
 
 ### P2-07: HTTP header 注入 via header: 前缀 [VULN-022]
-**组件**: lattice-core/src/lib.rs + transport/gemini.rs | **状态**: Open
+**组件**: lattice-core/src/lib.rs + transport/gemini.rs | **状态**: Resolved (6d5b044)
 
 **描述**: provider_specific 的 header: 机制可注入任意 HTTP 头，无白名单。
 
 ### P2-08: 凭证通过错误响应体泄露 [VULN-023]
-**组件**: lattice-core/src/errors.rs + lib.rs | **状态**: Open
+**组件**: lattice-core/src/errors.rs + lib.rs | **状态**: Resolved (6d5b044)
 
 **描述**: 非 2xx 响应体存入错误消息，可能含 API key 回显。
 
@@ -456,9 +456,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/lib.rs + transport/* |
-| **状态** | Open |
-
-**描述**: `Transport::extra_headers()` 已定义，Anthropic transport 也设置了 `anthropic-version`，但 `chat()` 的真实 `send_streaming_request()` 调用路径没有自动合并 `transport.extra_headers()`，OpenAI/Anthropic 分支传入的是空 header 切片。
+| **状态** | Resolved (6d5b044) |
 
 **影响**: Anthropic Messages API 真实调用可能因缺少 `anthropic-version` header 失败；OpenAI-compatible provider 的扩展 header 机制也容易失效。
 
