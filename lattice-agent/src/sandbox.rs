@@ -151,9 +151,10 @@ impl SandboxConfig {
 
     /// Check if a command is safe to run.
     ///
-    /// Uses program-based allowlist matching (first whitespace token) instead of
-    /// prefix matching, and rejects dangerous shell metacharacters that enable
-    /// command injection via `sh -c` execution.
+    /// Uses token-prefix allowlist matching: single-word entries match by program
+    /// name, multi-word entries match by program + subcommand prefix. Also rejects
+    /// dangerous shell metacharacters that enable command injection via `sh -c`
+    /// execution.
     pub fn check_command(&self, cmd: &str) -> Result<(), String> {
         let cmd = cmd.trim();
 
@@ -193,29 +194,24 @@ impl SandboxConfig {
             return Ok(());
         }
 
-        // Extract program name (first whitespace-delimited token)
-        let program = cmd.split_whitespace().next().unwrap_or("");
-        if program.is_empty() {
+        if cmd.split_whitespace().next().unwrap_or("").is_empty() {
             return Err("Sandbox: empty command".into());
         }
 
-        // Check program against allowlist — compare by first token of each entry.
-        // This prevents prefix-match bypasses like "cargo test; rm -rf /"
-        // from passing because "cargo test; rm -rf /" is not a real program name.
         let allowed = self
             .command_allowlist
             .iter()
-            .any(|entry| entry.split_whitespace().next() == Some(program));
+            .any(|entry| command_matches_allowlist(cmd, entry));
 
         if !allowed {
-            let allowed_programs: Vec<&str> = self
+            let allowed_prefixes: Vec<&str> = self
                 .command_allowlist
                 .iter()
-                .map(|e| e.split_whitespace().next().unwrap())
+                .map(|e| e.as_ref())
                 .collect();
             return Err(format!(
-                "Sandbox: program '{}' is not in allowlist. Allowed programs: {:?}",
-                program, allowed_programs
+                "Sandbox: command '{}' does not match any allowlist entry. Allowed: {:?}",
+                cmd.trim(), allowed_prefixes
             ));
         }
         Ok(())
@@ -262,6 +258,37 @@ impl SandboxConfig {
             url_str
         ))
     }
+}
+
+/// Check if a command matches an allowlist entry using token-prefix matching.
+///
+/// Single-word entries (e.g. "grep") match by program name only.
+/// Multi-word entries (e.g. "cargo test") match by program + subcommand prefix,
+/// so "cargo test -p core" matches "cargo test" but "cargo run" does not.
+fn command_matches_allowlist(cmd: &str, entry: &str) -> bool {
+    let cmd_tokens: Vec<&str> = cmd.split_whitespace().take(4).collect();
+    let entry_tokens: Vec<&str> = entry.split_whitespace().collect();
+
+    if cmd_tokens.is_empty() {
+        return false;
+    }
+
+    // Single-word entry: match program name only
+    if entry_tokens.len() == 1 {
+        return cmd_tokens[0] == entry_tokens[0];
+    }
+
+    // Multi-word entry: match program + subcommand prefix
+    if cmd_tokens.len() < entry_tokens.len() {
+        return false;
+    }
+
+    for i in 0..entry_tokens.len() {
+        if cmd_tokens[i] != entry_tokens[i] {
+            return false;
+        }
+    }
+    true
 }
 
 /// Check if a host string resolves to a private or link-local IP.
@@ -710,5 +737,30 @@ mod tests {
         assert!(path_matches_sensitive(Path::new("src/../.env"), ".env"));
         // Empty path
         assert!(!path_matches_sensitive(Path::new(""), ".env"));
+    }
+
+    #[test]
+    fn test_command_matches_allowlist_token_prefix() {
+        let s = default_sandbox();
+        // Default allowlist: "cargo test", "cargo clippy", "cargo build", "cargo fmt", "grep", "find", "ls", "ps"
+
+        // Multi-word entries: "cargo test" allows "cargo test" + args, not "cargo run"
+        assert!(s.check_command("cargo test").is_ok());
+        assert!(s.check_command("cargo test -p lattice-core").is_ok());
+        assert!(s.check_command("cargo build").is_ok());
+        assert!(s.check_command("cargo build --release").is_ok());
+        assert!(s.check_command("cargo clippy").is_ok());
+        assert!(s.check_command("cargo fmt").is_ok());
+
+        // These should be REJECTED — not matching any multi-word allowlist entry
+        assert!(s.check_command("cargo run").is_err());
+        assert!(s.check_command("cargo install").is_err());
+        assert!(s.check_command("cargo publish").is_err());
+
+        // Single-word entries: "grep" allows any grep command
+        assert!(s.check_command("grep").is_ok());
+        assert!(s.check_command("grep -rn 'TODO' src/").is_ok());
+        assert!(s.check_command("ls -la").is_ok());
+        assert!(s.check_command("find . -name '*.rs'").is_ok());
     }
 }
