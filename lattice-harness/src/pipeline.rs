@@ -3,61 +3,12 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use lattice_agent::memory::Memory;
-use lattice_agent::Agent;
-use tracing::warn;
+use lattice_core::router::ModelRouter;
 
 use crate::events::{EventBus, PipelineEvent};
 use crate::handoff_rule::{eval_rules, HandoffTarget};
 use crate::profile::AgentProfile;
 use crate::registry::AgentRegistry;
-use crate::runner::AgentRunner;
-
-/// Construct an Agent and AgentRunner from a resolved model, profile, and optional memory.
-///
-/// Applies profile settings (system prompt, tools, executor) to the Agent.
-/// Eliminates the duplicated 12-line construction block that appeared in both
-/// `run()` and `run_fork()`.
-#[allow(deprecated)]
-fn build_runner(
-    profile: &AgentProfile,
-    resolved: lattice_core::ResolvedModel,
-    memory: Option<Arc<dyn Memory>>,
-) -> AgentRunner {
-    let mut agent = Agent::new(resolved);
-
-    // Apply system prompt from profile
-    let system_prompt = profile.system_prompt();
-    agent.set_system_prompt(&system_prompt);
-
-    // Apply tools from profile — filter default tool definitions by enabled names
-    if !profile.tools.enabled.is_empty() {
-        let all_tools = lattice_agent::default_tool_definitions();
-        let enabled_tools: Vec<_> = all_tools
-            .into_iter()
-            .filter(|td| profile.tools.enabled.contains(&td.name))
-            .collect();
-        if enabled_tools.is_empty() {
-            warn!(
-                "Agent '{}' has tools enabled but no matching tool definitions found",
-                profile.agent.name
-            );
-        } else {
-            agent = agent.with_tools(enabled_tools);
-            // Create a default tool executor if one hasn't been set
-            let executor = lattice_agent::DefaultToolExecutor::new(".");
-            agent = agent.with_tool_executor(Box::new(executor));
-        }
-    }
-
-    if let Some(ref mem) = memory {
-        agent = agent.with_memory(mem.clone_box());
-    }
-    let mut runner = AgentRunner::from_profile(profile.clone(), agent);
-    if let Some(ref mem) = memory {
-        runner = runner.with_memory(Arc::clone(mem));
-    }
-    runner
-}
 
 /// Decision after a skippable/non-skippable agent error in the main pipeline loop.
 enum LoopDecision {
@@ -108,6 +59,9 @@ pub struct Pipeline {
     pub event_bus: Option<Arc<EventBus>>,
     pub plugin_registry: Option<Arc<lattice_plugin::registry::PluginRegistry>>,
     pub tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
+    /// External credentials for programmatic injection.
+    /// When set, ModelRouter::with_credentials() is used instead of env-only resolve.
+    pub credentials: Option<std::collections::HashMap<String, String>>,
     /// Maximum number of memory entries (default: 1000).
     pub max_memory_entries: usize,
     /// Maximum total bytes for memory content (default: 10 MB).
@@ -156,6 +110,7 @@ impl Pipeline {
             event_bus,
             plugin_registry: None,
             tool_registry: None,
+            credentials: None,
             max_memory_entries: DEFAULT_MAX_MEMORY_ENTRIES,
             max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
             memory_entry_count: Cell::new(0),
@@ -173,6 +128,12 @@ impl Pipeline {
 
     pub fn with_tool_registry(mut self, tr: Arc<crate::tools::ToolRegistry>) -> Self {
         self.tool_registry = Some(tr);
+        self
+    }
+
+    /// Set external credentials for programmatic injection.
+    pub fn with_credentials(mut self, creds: std::collections::HashMap<String, String>) -> Self {
+        self.credentials = Some(creds);
         self
     }
 
@@ -220,7 +181,11 @@ impl Pipeline {
                 });
             }
 
-            let resolved = match lattice_core::resolve(&profile.agent.model) {
+            let router = match &self.credentials {
+                Some(creds) => ModelRouter::with_credentials(creds.clone()),
+                None => ModelRouter::new(),
+            };
+            let resolved = match router.resolve(&profile.agent.model, None) {
                 Ok(r) => r,
                 Err(e) => {
                     let err = AgentError {
@@ -251,7 +216,7 @@ impl Pipeline {
                 }
             };
 
-            let mut runner = build_runner(&profile, resolved, self.shared_memory.clone());
+            let mut runner = crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone());
 
             match runner.run(&current_input, agent_max_turns).await {
                 Ok(output) => {
@@ -406,6 +371,7 @@ impl Pipeline {
     ) -> Vec<AgentResult> {
         let registry = self.registry.clone();
         let memory_box = self.shared_memory.clone();
+        let credentials = self.credentials.clone();
         let fork_timeout = Duration::from_secs(DEFAULT_FORK_TIMEOUT_SECS);
 
         type ForkBranchOutput = (
@@ -420,6 +386,7 @@ impl Pipeline {
                 let input = input.to_string();
                 let registry = registry.clone();
                 let memory_box = memory_box.clone();
+                let credentials = credentials.clone();
 
                 let an = agent_name.clone();
                 let an_timeout = an.clone();
@@ -437,7 +404,11 @@ impl Pipeline {
                             }
                         };
 
-                        let resolved = match lattice_core::resolve(&profile.agent.model) {
+                        let router = match &credentials {
+                            Some(creds) => ModelRouter::with_credentials(creds.clone()),
+                            None => ModelRouter::new(),
+                        };
+                        let resolved = match router.resolve(&profile.agent.model, None) {
                             Ok(r) => r,
                             Err(e) => {
                                 let err = AgentError {
@@ -449,7 +420,7 @@ impl Pipeline {
                             }
                         };
 
-                        let mut runner = build_runner(&profile, resolved, memory_box.clone());
+                        let mut runner = crate::assembly::assemble_agent(&profile, resolved, memory_box.clone());
 
                         let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 
