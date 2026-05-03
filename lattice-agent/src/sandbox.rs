@@ -595,4 +595,22 @@ mod tests {
         assert!(s.check_read("/etc/passwd").is_ok());
         assert!(s.check_read("any/file.txt").is_ok());
     }
+
+    #[test]
+    fn test_path_matches_sensitive() {
+        use std::path::Path;
+        // Single component: exact match only
+        assert!(path_matches_sensitive(Path::new("/home/user/.env"), ".env"));
+        assert!(!path_matches_sensitive(Path::new("/home/user/some.env.txt"), ".env"));
+        assert!(!path_matches_sensitive(Path::new("/home/user/.env_local"), ".env"));
+        // Compound pattern: consecutive components
+        assert!(path_matches_sensitive(Path::new("/repo/.git/config"), ".git/config"));
+        assert!(!path_matches_sensitive(Path::new("/repo/.gitignore_config"), ".git/config"));
+        // SSH keys
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), ".ssh/id_rsa"));
+        // Non-canonical paths still match by components
+        assert!(path_matches_sensitive(Path::new("src/../.env"), ".env"));
+        // Empty path
+        assert!(!path_matches_sensitive(Path::new(""), ".env"));
+    }
 }

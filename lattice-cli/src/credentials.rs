@@ -67,7 +67,8 @@ impl CredentialStore {
     }
 
     /// Create a CredentialStore from raw values (used in tests).
-    pub fn from_values(values: HashMap<String, String>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_values(values: HashMap<String, String>) -> Self {
         CredentialStore { values }
     }
 
