@@ -208,124 +208,260 @@ impl Pipeline {
                 }
             };
 
-            let mut runner =
-                crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone(), self.tool_registry.clone());
+            // Plugin DAG delegation: when profile has plugins AND pipeline has plugin_registry,
+            // delegate to PluginDagRunner instead of AgentRunner.
+            if profile.plugins.is_some() && self.plugin_registry.is_some() {
+                let plugins_config = profile.plugins.as_ref().unwrap();
+                let pr = self.plugin_registry.as_ref().unwrap();
+                let empty_tr = crate::tools::ToolRegistry::new();
+                let tr_ref: &crate::tools::ToolRegistry = match self.tool_registry.as_ref() {
+                    Some(arc) => arc.as_ref(),
+                    None => &empty_tr,
+                };
 
-            match runner.run(&current_input, agent_max_turns).await {
-                Ok(output) => {
-                    let duration_ms = start.elapsed().as_millis() as u64;
+                let mut dag_runner = crate::dag_runner::PluginDagRunner::new(
+                    plugins_config,
+                    pr,
+                    tr_ref,
+                    lattice_core::retry::RetryPolicy::default(),
+                    self.shared_memory.clone(),
+                );
 
-                    let next = if profile.handoff.handoff_rules.is_empty() {
-                        profile.handoff.fallback.clone()
-                    } else {
-                        eval_rules(&profile.handoff.handoff_rules, &output)
-                    };
+                match dag_runner.run(&current_input, &profile.agent.model).await {
+                    Ok(output) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
 
-                    self.save_memory_entry(&profile, &output);
+                        let next = if profile.handoff.handoff_rules.is_empty() {
+                            profile.handoff.fallback.clone()
+                        } else {
+                            eval_rules(&profile.handoff.handoff_rules, &output)
+                        };
 
-                    if let Some(ref bus) = self.event_bus {
-                        let preview: String = output.to_string().chars().take(500).collect();
-                        bus.send(PipelineEvent::AgentCompleted {
-                            agent: profile.agent.name.clone(),
-                            output_preview: preview,
+                        self.save_memory_entry(&profile, &output);
+
+                        if let Some(ref bus) = self.event_bus {
+                            let preview: String = output.to_string().chars().take(500).collect();
+                            bus.send(PipelineEvent::AgentCompleted {
+                                agent: profile.agent.name.clone(),
+                                output_preview: preview,
+                                next: next.clone(),
+                                duration_ms,
+                            });
+                        }
+
+                        results.push(AgentResult {
+                            agent_name: profile.agent.name.clone(),
+                            output: output.clone(),
                             next: next.clone(),
                             duration_ms,
                         });
+
+                        match next {
+                            Some(HandoffTarget::Single(n)) => {
+                                if let Some(ref bus) = self.event_bus {
+                                    bus.send(PipelineEvent::Handoff {
+                                        from: profile.agent.name.clone(),
+                                        to: HandoffTarget::Single(n.clone()),
+                                    });
+                                }
+                                current_input = output.to_string();
+                                current_agent = n;
+                            }
+                            Some(HandoffTarget::Fork(targets)) => {
+                                if let Some(ref bus) = self.event_bus {
+                                    bus.send(PipelineEvent::Fork {
+                                        from: profile.agent.name.clone(),
+                                        branches: targets.clone(),
+                                    });
+                                }
+
+                                let fork_results = self
+                                    .run_fork_async(
+                                        &targets,
+                                        &output.to_string(),
+                                        agent_max_turns,
+                                        &mut errors,
+                                        &mut skipped,
+                                    )
+                                    .await;
+
+                                let merged = self.merge_fork_outputs(&fork_results);
+
+                                let fork_next = fork_results
+                                    .iter()
+                                    .find_map(|r| r.next.clone())
+                                    .or_else(|| profile.handoff.fallback.clone());
+
+                                current_input = merged.to_string();
+
+                                match fork_next {
+                                    Some(HandoffTarget::Single(n)) => {
+                                        current_agent = n;
+                                    }
+                                    Some(HandoffTarget::Fork(_)) => {
+                                        current_agent =
+                                            fork_results[0].next.clone().unwrap().agent_names()[0]
+                                                .to_string();
+                                    }
+                                    None => {
+                                        completed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            None => {
+                                completed = true;
+                                break;
+                            }
+                        }
                     }
-
-                    results.push(AgentResult {
-                        agent_name: profile.agent.name.clone(),
-                        output: output.clone(),
-                        next: next.clone(),
-                        duration_ms,
-                    });
-
-                    match next {
-                        Some(HandoffTarget::Single(n)) => {
-                            if let Some(ref bus) = self.event_bus {
-                                bus.send(PipelineEvent::Handoff {
-                                    from: profile.agent.name.clone(),
-                                    to: HandoffTarget::Single(n.clone()),
-                                });
-                            }
-                            current_input = output.to_string();
-                            current_agent = n;
+                    Err(e) => {
+                        let err = AgentError {
+                            agent_name: profile.agent.name.clone(),
+                            message: e.to_string(),
+                            skippable: profile.agent.skippable,
+                        };
+                        if let Some(ref bus) = self.event_bus {
+                            bus.send(PipelineEvent::PipelineError {
+                                agent: profile.agent.name.clone(),
+                                message: err.message.clone(),
+                                skippable: err.skippable,
+                            });
                         }
-                        Some(HandoffTarget::Fork(targets)) => {
-                            if let Some(ref bus) = self.event_bus {
-                                bus.send(PipelineEvent::Fork {
-                                    from: profile.agent.name.clone(),
-                                    branches: targets.clone(),
-                                });
+                        match handle_agent_error(
+                            err,
+                            &profile,
+                            &self.registry,
+                            &mut skipped,
+                            &mut errors,
+                        ) {
+                            LoopDecision::Continue(next) => {
+                                current_agent = next;
+                                continue;
                             }
-
-                            let fork_results = self
-                                .run_fork_async(
-                                    &targets,
-                                    &output.to_string(),
-                                    agent_max_turns,
-                                    &mut errors,
-                                    &mut skipped,
-                                )
-                                .await;
-
-                            let merged = self.merge_fork_outputs(&fork_results);
-
-                            // Use first non-None next target, or fallback from the originating profile
-                            let fork_next = fork_results
-                                .iter()
-                                .find_map(|r| r.next.clone())
-                                .or_else(|| profile.handoff.fallback.clone());
-
-                            current_input = merged.to_string();
-
-                            match fork_next {
-                                Some(HandoffTarget::Single(n)) => {
-                                    current_agent = n;
-                                }
-                                Some(HandoffTarget::Fork(_)) => {
-                                    current_agent =
-                                        fork_results[0].next.clone().unwrap().agent_names()[0]
-                                            .to_string();
-                                }
-                                None => {
-                                    completed = true;
-                                    break;
-                                }
-                            }
-                        }
-                        None => {
-                            completed = true;
-                            break;
+                            LoopDecision::Break => break,
                         }
                     }
                 }
-                Err(e) => {
-                    if let Some(ref bus) = self.event_bus {
-                        bus.send(PipelineEvent::PipelineError {
-                            agent: profile.agent.name.clone(),
+            } else {
+                // Standard AgentRunner path
+                let mut runner =
+                    crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone(), self.tool_registry.clone());
+
+                match runner.run(&current_input, agent_max_turns).await {
+                    Ok(output) => {
+                        let duration_ms = start.elapsed().as_millis() as u64;
+
+                        let next = if profile.handoff.handoff_rules.is_empty() {
+                            profile.handoff.fallback.clone()
+                        } else {
+                            eval_rules(&profile.handoff.handoff_rules, &output)
+                        };
+
+                        self.save_memory_entry(&profile, &output);
+
+                        if let Some(ref bus) = self.event_bus {
+                            let preview: String = output.to_string().chars().take(500).collect();
+                            bus.send(PipelineEvent::AgentCompleted {
+                                agent: profile.agent.name.clone(),
+                                output_preview: preview,
+                                next: next.clone(),
+                                duration_ms,
+                            });
+                        }
+
+                        results.push(AgentResult {
+                            agent_name: profile.agent.name.clone(),
+                            output: output.clone(),
+                            next: next.clone(),
+                            duration_ms,
+                        });
+
+                        match next {
+                            Some(HandoffTarget::Single(n)) => {
+                                if let Some(ref bus) = self.event_bus {
+                                    bus.send(PipelineEvent::Handoff {
+                                        from: profile.agent.name.clone(),
+                                        to: HandoffTarget::Single(n.clone()),
+                                    });
+                                }
+                                current_input = output.to_string();
+                                current_agent = n;
+                            }
+                            Some(HandoffTarget::Fork(targets)) => {
+                                if let Some(ref bus) = self.event_bus {
+                                    bus.send(PipelineEvent::Fork {
+                                        from: profile.agent.name.clone(),
+                                        branches: targets.clone(),
+                                    });
+                                }
+
+                                let fork_results = self
+                                    .run_fork_async(
+                                        &targets,
+                                        &output.to_string(),
+                                        agent_max_turns,
+                                        &mut errors,
+                                        &mut skipped,
+                                    )
+                                    .await;
+
+                                let merged = self.merge_fork_outputs(&fork_results);
+
+                                let fork_next = fork_results
+                                    .iter()
+                                    .find_map(|r| r.next.clone())
+                                    .or_else(|| profile.handoff.fallback.clone());
+
+                                current_input = merged.to_string();
+
+                                match fork_next {
+                                    Some(HandoffTarget::Single(n)) => {
+                                        current_agent = n;
+                                    }
+                                    Some(HandoffTarget::Fork(_)) => {
+                                        current_agent =
+                                            fork_results[0].next.clone().unwrap().agent_names()[0]
+                                                .to_string();
+                                    }
+                                    None => {
+                                        completed = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            None => {
+                                completed = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err = AgentError {
+                            agent_name: profile.agent.name.clone(),
                             message: e.to_string(),
                             skippable: profile.agent.skippable,
-                        });
-                    }
-
-                    let err = AgentError {
-                        agent_name: profile.agent.name.clone(),
-                        message: e.to_string(),
-                        skippable: profile.agent.skippable,
-                    };
-                    match handle_agent_error(
-                        err,
-                        &profile,
-                        &self.registry,
-                        &mut skipped,
-                        &mut errors,
-                    ) {
-                        LoopDecision::Continue(next) => {
-                            current_agent = next;
-                            continue;
+                        };
+                        if let Some(ref bus) = self.event_bus {
+                            bus.send(PipelineEvent::PipelineError {
+                                agent: profile.agent.name.clone(),
+                                message: err.message.clone(),
+                                skippable: err.skippable,
+                            });
                         }
-                        LoopDecision::Break => break,
+                        match handle_agent_error(
+                            err,
+                            &profile,
+                            &self.registry,
+                            &mut skipped,
+                            &mut errors,
+                        ) {
+                            LoopDecision::Continue(next) => {
+                                current_agent = next;
+                                continue;
+                            }
+                            LoopDecision::Break => break,
+                        }
                     }
                 }
             }
