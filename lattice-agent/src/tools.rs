@@ -371,16 +371,37 @@ impl ToolExecutor for DefaultToolExecutor {
                                 .to_string();
                             }
                         }
-                        let bytes = response.bytes().await.unwrap_or_default();
-                        if bytes.len() > limit {
-                            let truncated = String::from_utf8_lossy(&bytes[..limit]);
+                        // Stream the response body chunk-by-chunk, aborting at
+                        // the size limit. This prevents buffering an unbounded
+                        // response into memory before truncation.
+                        use futures::StreamExt;
+                        let mut buf = Vec::new();
+                        let mut exceeded = false;
+                        let mut stream = response.bytes_stream();
+                        while let Some(chunk) = stream.next().await {
+                            let chunk = match chunk {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    return ToolError::HttpError(e.to_string()).to_string();
+                                }
+                            };
+                            if buf.len() + chunk.len() > limit {
+                                let remaining = limit - buf.len();
+                                buf.extend_from_slice(&chunk[..remaining]);
+                                exceeded = true;
+                                break;
+                            }
+                            buf.extend_from_slice(&chunk);
+                        }
+                        if exceeded {
+                            let truncated = String::from_utf8_lossy(&buf);
                             format!(
                                 "{}[TRUNCATED: response exceeded {} bytes]",
                                 truncated.trim_end(),
                                 limit
                             )
                         } else {
-                            String::from_utf8_lossy(&bytes).to_string()
+                            String::from_utf8_lossy(&buf).to_string()
                         }
                     }
                     Err(e) => ToolError::HttpError(e.to_string()).to_string(),

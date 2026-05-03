@@ -389,17 +389,22 @@ impl Bus for InMemoryBus {
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        request_tx
-            .send(BusRequest {
-                payload: request,
-                reply_to: reply_tx,
-            })
-            .await
-            .map_err(|_| BusError::ChannelClosed)?;
+        // Wrap both send and reply under a single timeout budget, so
+        // a saturated target channel doesn't block indefinitely.
+        let send_and_reply = async {
+            request_tx
+                .send(BusRequest {
+                    payload: request,
+                    reply_to: reply_tx,
+                })
+                .await
+                .map_err(|_| BusError::ChannelClosed)?;
+            reply_rx.await.map_err(|_| BusError::ChannelClosed)
+        };
 
-        match tokio::time::timeout(timeout, reply_rx).await {
+        match tokio::time::timeout(timeout, send_and_reply).await {
             Ok(Ok(resp)) => resp,
-            Ok(Err(_)) => Err(BusError::ChannelClosed),
+            Ok(Err(e)) => Err(e),
             Err(_) => Err(BusError::Timeout(timeout)),
         }
     }

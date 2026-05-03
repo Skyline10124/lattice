@@ -55,7 +55,8 @@ where
         let result = f.await;
         tx.send(result).ok();
     });
-    rx.blocking_recv().expect("SHARED_RUNTIME task panicked or was cancelled")
+    rx.blocking_recv()
+        .expect("SHARED_RUNTIME task panicked or was cancelled")
 }
 
 // ---------------------------------------------------------------------------

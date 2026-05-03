@@ -209,6 +209,18 @@ impl Pipeline {
 
             // Plugin DAG delegation: when profile has plugins AND pipeline has plugin_registry,
             // delegate to PluginDagRunner instead of AgentRunner.
+            if profile.plugins.is_some() && self.plugin_registry.is_none() {
+                errors.push(AgentError {
+                    agent_name: current_agent.clone(),
+                    message:
+                        "Agent profile declares plugins but Pipeline has no plugin_registry — \
+                     call Pipeline::with_plugin_registry() before run()"
+                            .to_string(),
+                    skippable: false,
+                });
+                break;
+            }
+
             if let (Some(plugins_config), Some(pr)) = (&profile.plugins, &self.plugin_registry) {
                 let empty_tr = crate::tools::ToolRegistry::new();
                 let tr_ref: &crate::tools::ToolRegistry = match self.tool_registry.as_ref() {

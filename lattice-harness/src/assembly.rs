@@ -46,12 +46,19 @@ pub fn assemble_agent(
     };
 
     // Merge with registry tools if present
+    // When the enabled list is non-empty, only add registry definitions whose
+    // names appear in that list — profile tool constraints must not be bypassed.
+    // When the enabled list is empty (all defaults allowed), add all registry
+    // definitions except duplicates of defaults already selected.
     let (final_tools, executor) = if let Some(reg) = &tool_registry {
         if !reg.is_empty() {
             let registry_defs: Vec<lattice_core::types::ToolDefinition> = reg
                 .definitions()
                 .into_iter()
                 .filter(|d| !enabled_tools.iter().any(|et| et.name == d.name))
+                .filter(|d| {
+                    profile.tools.enabled.is_empty() || profile.tools.enabled.contains(&d.name)
+                })
                 .collect();
             let merged = enabled_tools.into_iter().chain(registry_defs).collect();
             let exec = DefaultToolExecutor::new_with_registry(
