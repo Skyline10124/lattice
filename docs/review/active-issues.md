@@ -3,7 +3,7 @@
 **最后更新**: 2026-05-02
 **审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
 **补充来源**: 2026-05-02 全代码库深扫（core/provider/streaming, agent/harness/bus, plugin/cli/python/tui）
-**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH (ALL RESOLVED), 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
+**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH (ALL RESOLVED), 12 MEDIUM (ALL RESOLVED), 8 LOW (ALL RESOLVED)；另有 22 个深扫工程问题见下方 DS-* 分区
 
 ---
 
@@ -341,32 +341,32 @@
 ## P2 — MEDIUM 安全/设计问题（12 项）
 
 ### P2-01: 敏感文件列表严重不完整 [VULN-015]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:36-43` | **状态**: Open
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:36-43` | **状态**: Resolved (3b68a95)
 
 **描述**: 仅 6 项。缺少 .git/config、~/.ssh/id_*、~/.aws/credentials、.npmrc 等。
 
 ### P2-02: DNS rebinding 绕过 HTTPS SSRF [VULN-016]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:162` | **状态**: Open
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:162` | **状态**: Resolved (3b68a95)
 
 **描述**: DNS rebinding 服务（nip.io, xip.io）可解析域名到内网 IP，绕过 host 检查。
 
 ### P2-03: reqwest 默认重定向跟踪 SSRF [VULN-017]
-**组件**: lattice-agent/src/tools.rs | **文件**: `tools.rs:195` | **状态**: Open
+**组件**: lattice-agent/src/tools.rs | **文件**: `tools.rs:195` | **状态**: Resolved (3b68a95)
 
 **描述**: 302 重定向可绕过 URL scheme 检查，访问内网 HTTP 服务。
 
 ### P2-04: Bash ANSI-C 引用绕过 [VULN-018]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:119` | **状态**: Open
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:119` | **状态**: Resolved (3b68a95)
 
 **描述**: $'\\n' 展开为换行符绕过黑名单。$'\\x3b' → ;。
 
 ### P2-05: 多向量组合绕过 [VULN-019]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:132-133` | **状态**: Open
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:132-133` | **状态**: Resolved (3b68a95)
 
 **描述**: PATH 注入 + 子进程继承 + check_command 参数不验证。
 
 ### P2-06: URL 验证 userinfo 注入绕过 [VULN-021]
-**组件**: lattice-core/src/router.rs | **文件**: `router.rs:592-624` | **状态**: Open
+**组件**: lattice-core/src/router.rs | **文件**: `router.rs:592-624` | **状态**: Resolved (3b68a95)
 
 **描述**: https://anything@169.254.169.254/ 中 anything 被视为用户名而非 host。
 
@@ -381,22 +381,22 @@
 **描述**: 非 2xx 响应体存入错误消息，可能含 API key 回显。
 
 ### P2-09: WebSocket 端点无鉴权 [VULN-031]
-**组件**: lattice-harness/src/ws.rs | **文件**: `ws.rs:22-59` | **状态**: Open
+**组件**: lattice-harness/src/ws.rs | **文件**: `ws.rs:22-59` | **状态**: Resolved (3b68a95)
 
 **描述**: /ws 端点无 Origin/Token/CORS。跨域可监听 pipeline 事件泄露。
 
 ### P2-10: LATTICE_AGENTS_DIR 环境变量毒化 [VULN-033]
-**组件**: lattice-harness + lattice-cli | **状态**: Open
+**组件**: lattice-harness + lattice-cli | **状态**: Resolved (3b68a95)
 
 **描述**: 环境变量可覆盖 agent 目录到攻击者控制的路径。
 
 ### P2-11: Python binding lock poisoning [VULN-005]
-**组件**: lattice-python | **状态**: Open
+**组件**: lattice-python | **状态**: Resolved (3b68a95)
 
 **描述**: Python GIL/lock 交互在异常路径上可能导致宿主进程 panic。
 
 ### P2-12: schema-retry JSON fallback [VULN-006]
-**组件**: lattice-harness | **状态**: Open
+**组件**: lattice-harness | **状态**: Resolved (3b68a95)
 
 **描述**: schema 校验失败时的 JSON fallback 行为可能隐藏畸形 agent 输出。
 
@@ -405,28 +405,28 @@
 ## P3 — LOW 代码质量问题（8 项）
 
 ### P3-01: URL 验证接受非 HTTP 协议 [VULN-024]
-**组件**: lattice-core/src/router.rs | **状态**: Open
+**组件**: lattice-core/src/router.rs | **状态**: Resolved (3b68a95)
 
 ### P3-02: 缺少全局请求超时 [VULN-025]
-**组件**: lattice-core/src/provider.rs | **状态**: Open
+**组件**: lattice-core/src/provider.rs | **状态**: Resolved (3b68a95)
 
 ### P3-03: chat_endpoint 覆盖可重定向 [VULN-026]
-**组件**: lattice-core/src/lib.rs | **状态**: Open
+**组件**: lattice-core/src/lib.rs | **状态**: Resolved (3b68a95)
 
 ### P3-04: Gemini URL model ID 无长度限制 [VULN-027]
-**组件**: lattice-core/src/transport/gemini.rs | **状态**: Open
+**组件**: lattice-core/src/transport/gemini.rs | **状态**: Resolved (3b68a95)
 
 ### P3-05: SQLite FTS5 查询构造脆弱 [VULN-030]
-**组件**: lattice-harness/src/memory/sqlite.rs | **状态**: Open
+**组件**: lattice-harness/src/memory/sqlite.rs | **状态**: Resolved (3b68a95)
 
 ### P3-06: diagnostics() 凭证枚举 [VULN-034]
-**组件**: lattice-cli/src/credentials.rs | **状态**: Open
+**组件**: lattice-cli/src/credentials.rs | **状态**: Resolved (3b68a95)
 
 ### P3-07: 内存条目无大小限制 [VULN-035]
-**组件**: lattice-harness/src/pipeline.rs | **状态**: Open
+**组件**: lattice-harness/src/pipeline.rs | **状态**: Resolved (3b68a95)
 
 ### P3-08: 深度嵌套 JSON 栈溢出风险 [VULN-036]
-**组件**: lattice-harness/src/handoff_rule.rs | **状态**: Open
+**组件**: lattice-harness/src/handoff_rule.rs | **状态**: Resolved (3b68a95)
 
 ---
 
