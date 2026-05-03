@@ -1,5 +1,7 @@
 # LATTICE 
 
+![LATTICE banner](logo-banner.png)
+
 A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-agent harness.
 
 **Not** a SaaS. Not a visual workflow builder. Model routing + inference + agent orchestration via TOML-defined pipelines.
