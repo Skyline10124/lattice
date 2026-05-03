@@ -116,9 +116,7 @@ pub async fn run_plugin_loop(
                         // Append structured correction hint so the model
                         // doesn't repeat the same error on the next attempt.
                         let mut hint = String::new();
-                        hint.push_str(
-                            "\n\n[SYSTEM: The previous response could not be parsed.",
-                        );
+                        hint.push_str("\n\n[SYSTEM: The previous response could not be parsed.");
                         hint.push_str(&format!("\nParse error: {}", e));
                         // Truncate raw output to avoid blowing the context window
                         let truncated = if raw.len() > 2000 {

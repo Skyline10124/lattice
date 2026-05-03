@@ -1,8 +1,6 @@
 use lattice_agent::Agent;
 use lattice_core::resolve;
-use lattice_plugin::{
-    CodeReviewPlugin, PluginConfig, PluginRunner, StrictBehavior,
-};
+use lattice_plugin::{CodeReviewPlugin, PluginConfig, PluginRunner, StrictBehavior};
 use std::fs;
 
 fn main() {

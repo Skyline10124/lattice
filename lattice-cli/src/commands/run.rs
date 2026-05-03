@@ -180,8 +180,8 @@ pub fn run_pipeline(
     let plugin_registry = Arc::new(plugin_registry);
 
     // Validate pipeline chain before running
-    let pipeline_check = Pipeline::new("pre-check", registry.clone(), None, None)
-        .with_credentials(creds.clone());
+    let pipeline_check =
+        Pipeline::new("pre-check", registry.clone(), None, None).with_credentials(creds.clone());
     let report = pipeline_check.dry_run(start_agent);
     if !report.valid {
         eprintln!("{}", "Pipeline validation failed:".red());

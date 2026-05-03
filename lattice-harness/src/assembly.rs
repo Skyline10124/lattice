@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use lattice_agent::{memory::Memory, Agent, DefaultToolExecutor, default_tool_definitions};
+use lattice_agent::{default_tool_definitions, memory::Memory, Agent, DefaultToolExecutor};
 use tracing::warn;
 
 use crate::profile::AgentProfile;

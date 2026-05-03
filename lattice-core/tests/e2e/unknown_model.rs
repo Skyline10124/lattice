@@ -23,7 +23,10 @@ fn test_inspect_model_provider_model_format() {
     // resolve() no longer falls through for non-catalog models;
     // use inspect_model() for diagnostic resolution of "provider/model" format.
     let resolve_result = router.resolve("anthropic/claude-opus-4", None);
-    assert!(resolve_result.is_err(), "resolve() should not fall through for non-catalog models");
+    assert!(
+        resolve_result.is_err(),
+        "resolve() should not fall through for non-catalog models"
+    );
 
     let result = router.inspect_model("anthropic/claude-opus-4");
     assert!(
@@ -64,7 +67,10 @@ fn test_inspect_model_gemini_model() {
     // resolve() no longer falls through for non-catalog models;
     // use inspect_model() for diagnostic resolution.
     let resolve_result = router.resolve("gemini/gemini-2.5-flash", None);
-    assert!(resolve_result.is_err(), "resolve() should not fall through for non-catalog models");
+    assert!(
+        resolve_result.is_err(),
+        "resolve() should not fall through for non-catalog models"
+    );
 
     let result = router.inspect_model("gemini/gemini-2.5-flash");
     assert!(

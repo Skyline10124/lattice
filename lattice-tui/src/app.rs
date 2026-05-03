@@ -207,8 +207,7 @@ impl App {
         };
 
         // --- Rebuild agent if none exists or model changed ---
-        let needs_rebuild = self.agent.is_none()
-            || self.current_model != self.previous_model;
+        let needs_rebuild = self.agent.is_none() || self.current_model != self.previous_model;
 
         if needs_rebuild {
             let model = self.current_model.clone();

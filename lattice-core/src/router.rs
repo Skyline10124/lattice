@@ -138,7 +138,9 @@ impl ModelRouter {
                 {
                     normalized.clone()
                 } else {
-                    return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
+                    return Err(LatticeError::ModelNotFound {
+                        model: model_name.to_string(),
+                    });
                 }
             }
         };
@@ -151,7 +153,11 @@ impl ModelRouter {
 
         let entry = match entry {
             Some(e) => e,
-            None => return Err(LatticeError::ModelNotFound { model: model_name.to_string() }),
+            None => {
+                return Err(LatticeError::ModelNotFound {
+                    model: model_name.to_string(),
+                })
+            }
         };
 
         if let Some(override_provider) = provider_override {
@@ -180,7 +186,9 @@ impl ModelRouter {
                         credential_status,
                     };
                     validate_base_url(&model.base_url)?;
-                    if model.base_url.is_empty() && model.credential_status != CredentialStatus::NotRequired {
+                    if model.base_url.is_empty()
+                        && model.credential_status != CredentialStatus::NotRequired
+                    {
                         return Err(LatticeError::Config {
                             message: format!(
                                 "Model '{}' resolved with empty base_url for provider '{}' (credential required). \
@@ -247,7 +255,9 @@ impl ModelRouter {
                     credential_status: CredentialStatus::Present,
                 };
                 validate_base_url(&model.base_url)?;
-                if model.base_url.is_empty() && model.credential_status != CredentialStatus::NotRequired {
+                if model.base_url.is_empty()
+                    && model.credential_status != CredentialStatus::NotRequired
+                {
                     return Err(LatticeError::Config {
                         message: format!(
                             "Model '{}' resolved with empty base_url for provider '{}' (credential required). \
@@ -295,7 +305,10 @@ impl ModelRouter {
             }
         }
         let hint = if provider_details.is_empty() {
-            format!("No credentialled providers available for model '{}'", canonical_id)
+            format!(
+                "No credentialled providers available for model '{}'",
+                canonical_id
+            )
         } else {
             format!(
                 "All providers Missing credentials for '{}': {}. Set one of these env vars or use with_credentials()",
@@ -531,7 +544,9 @@ impl ModelRouter {
                 return Ok(model);
             }
             // Provider has no defaults — "provider/model" format is specifically for permissive fallback
-            return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
+            return Err(LatticeError::ModelNotFound {
+                model: model_name.to_string(),
+            });
         }
 
         // 2. Try catalog and custom models — inspect allows Missing credentials and empty base_url
@@ -545,7 +560,9 @@ impl ModelRouter {
                 {
                     normalized.clone()
                 } else {
-                    return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
+                    return Err(LatticeError::ModelNotFound {
+                        model: model_name.to_string(),
+                    });
                 }
             }
         };
@@ -558,7 +575,11 @@ impl ModelRouter {
 
         let entry = match entry {
             Some(e) => e,
-            None => return Err(LatticeError::ModelNotFound { model: model_name.to_string() }),
+            None => {
+                return Err(LatticeError::ModelNotFound {
+                    model: model_name.to_string(),
+                })
+            }
         };
 
         if entry.providers.is_empty() {
@@ -1213,7 +1234,10 @@ mod tests {
         // inspect_model should return Ok with Missing credential status
         let router = ModelRouter::new();
         let result = router.inspect_model("openai/gpt-5-turbo");
-        assert!(result.is_ok(), "inspect_model should return Ok even with Missing credentials");
+        assert!(
+            result.is_ok(),
+            "inspect_model should return Ok even with Missing credentials"
+        );
         let model = result.unwrap();
         assert_eq!(model.credential_status, CredentialStatus::Missing);
         assert_eq!(model.provider, "openai");
@@ -1227,7 +1251,10 @@ mod tests {
         // A model name that doesn't exist in catalog and isn't "provider/model" format
         let router = ModelRouter::new();
         let result = router.resolve("totally-unknown-model-xyz", None);
-        assert!(result.is_err(), "resolve should not fall through to permissive for unknown models");
+        assert!(
+            result.is_err(),
+            "resolve should not fall through to permissive for unknown models"
+        );
         match result.err().unwrap() {
             LatticeError::ModelNotFound { model } => {
                 assert_eq!(model, "totally-unknown-model-xyz");
@@ -1244,7 +1271,10 @@ mod tests {
         // "provider/model" format but provider has no defaults in catalog
         let router = ModelRouter::new();
         let result = router.resolve("unknown-provider/some-model", None);
-        assert!(result.is_err(), "resolve should reject unknown provider/model format");
+        assert!(
+            result.is_err(),
+            "resolve should reject unknown provider/model format"
+        );
         // normalize_model_id strips the provider prefix, so "some-model" is not in catalog
         match result.err().unwrap() {
             LatticeError::ModelNotFound { .. } => {}
@@ -1258,9 +1288,10 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         let saved = save_and_clear_all();
 
-        let mut router = ModelRouter::with_credentials(HashMap::from([
-            ("TEST_EMPTY_URL_API_KEY".to_string(), "sk-test".to_string()),
-        ]));
+        let mut router = ModelRouter::with_credentials(HashMap::from([(
+            "TEST_EMPTY_URL_API_KEY".to_string(),
+            "sk-test".to_string(),
+        )]));
         // Register a model whose provider has empty effective base_url and requires credentials
         // Using a provider_id not in provider_defaults so resolve_base_url returns ""
         let entry = ModelCatalogEntry {

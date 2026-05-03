@@ -216,7 +216,8 @@ impl Pipeline {
                 }
             };
 
-            let mut runner = crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone());
+            let mut runner =
+                crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone());
 
             match runner.run(&current_input, agent_max_turns).await {
                 Ok(output) => {
@@ -420,7 +421,8 @@ impl Pipeline {
                             }
                         };
 
-                        let mut runner = crate::assembly::assemble_agent(&profile, resolved, memory_box.clone());
+                        let mut runner =
+                            crate::assembly::assemble_agent(&profile, resolved, memory_box.clone());
 
                         let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 

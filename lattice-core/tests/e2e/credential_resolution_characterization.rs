@@ -460,9 +460,7 @@ fn permissive_resolves_credentials_from_defaults() {
     env::set_var("ANTHROPIC_API_KEY", "ant-permissive-key");
 
     let router = ModelRouter::new();
-    let resolved = router
-        .inspect_model("anthropic/my-custom-model")
-        .unwrap();
+    let resolved = router.inspect_model("anthropic/my-custom-model").unwrap();
     assert_eq!(resolved.api_key.as_deref(), Some("ant-permissive-key"));
 
     crate::restore_env("ANTHROPIC_API_KEY", prev);
@@ -475,9 +473,7 @@ fn permissive_returns_none_api_key_without_env_var() {
     env::remove_var("ANTHROPIC_API_KEY");
 
     let router = ModelRouter::new();
-    let resolved = router
-        .inspect_model("anthropic/my-custom-model")
-        .unwrap();
+    let resolved = router.inspect_model("anthropic/my-custom-model").unwrap();
     assert!(resolved.api_key.is_none());
 
     crate::restore_env("ANTHROPIC_API_KEY", prev);
@@ -488,9 +484,7 @@ fn permissive_uses_default_context_length() {
     // CHARACTERIZATION: inspect_model() sets context_length to 0
     // because permissive models have no catalog data.
     let router = ModelRouter::new();
-    let resolved = router
-        .inspect_model("anthropic/my-custom-model")
-        .unwrap();
+    let resolved = router.inspect_model("anthropic/my-custom-model").unwrap();
     assert_eq!(resolved.context_length, 0);
 }
 
@@ -520,9 +514,7 @@ fn permissive_provider_model_becomes_canonical_id() {
     let prev_keys = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
 
     let router = ModelRouter::new();
-    let resolved = router
-        .inspect_model("anthropic/claude-sonnet-4.6")
-        .unwrap();
+    let resolved = router.inspect_model("anthropic/claude-sonnet-4.6").unwrap();
     assert_eq!(resolved.canonical_id, "claude-sonnet-4.6");
 
     crate::restore_env_batch(&prev_keys);
@@ -707,7 +699,10 @@ fn inspect_model_used_for_unknown_provider_model_format() {
     let router = ModelRouter::new();
     // "openai/gpt-future-model" is not in the catalog — resolve() returns Err
     let resolve_result = router.resolve("openai/gpt-future-model", None);
-    assert!(resolve_result.is_err(), "resolve() should not fall through to inspect_model for unknown models");
+    assert!(
+        resolve_result.is_err(),
+        "resolve() should not fall through to inspect_model for unknown models"
+    );
 
     // But inspect_model() still allows "provider/model" for known providers
     let result = router.inspect_model("openai/gpt-future-model");

@@ -204,14 +204,12 @@ impl SandboxConfig {
             .any(|entry| command_matches_allowlist(cmd, entry));
 
         if !allowed {
-            let allowed_prefixes: Vec<&str> = self
-                .command_allowlist
-                .iter()
-                .map(|e| e.as_ref())
-                .collect();
+            let allowed_prefixes: Vec<&str> =
+                self.command_allowlist.iter().map(|e| e.as_ref()).collect();
             return Err(format!(
                 "Sandbox: command '{}' does not match any allowlist entry. Allowed: {:?}",
-                cmd.trim(), allowed_prefixes
+                cmd.trim(),
+                allowed_prefixes
             ));
         }
         Ok(())
