@@ -18,6 +18,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: String,
     model: String,
@@ -26,6 +27,7 @@ pub async fn run(
     json: bool,
     creds: &crate::credentials::CredentialStore,
     save: bool,
+    previous_session: Option<crate::session::Session>,
 ) -> Result<()> {
     if verbose {
         eprintln!("{}", format!("resolve: {} ...", model).dimmed());
@@ -44,6 +46,24 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
+    // Build the final prompt, prepending previous session context if available
+    let final_prompt = if let Some(ref session) = previous_session {
+        let mut ctx = String::from("Previous conversation:\n");
+        for msg in &session.messages {
+            let role = match msg.role.to_lowercase().as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => &msg.role,
+            };
+            ctx.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+        ctx.push_str("---\n");
+        ctx.push_str(&prompt);
+        ctx
+    } else {
+        prompt.clone()
+    };
+
     let tools = default_tool_definitions();
     let mut agent = Agent::new(resolved)
         .with_tools(tools)
@@ -53,7 +73,7 @@ pub async fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.run(&prompt, 10).await;
+    let events = agent.run(&final_prompt, 10).await;
     let content = extract_content(&events);
     display_events(&agent, events, verbose, json)?;
 

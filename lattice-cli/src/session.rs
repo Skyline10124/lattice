@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -20,7 +22,12 @@ pub struct SessionMessage {
 
 impl Session {
     pub fn new(model: String, provider: String) -> Self {
-        let id = chrono::Local::now().format("%Y-%m-%d-%H%M%S").to_string();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let hash = Sha256::digest(format!("{}|{}|{}", model, provider, now));
+        let id = format!("{:016x}", u64::from_be_bytes(hash[..8].try_into().unwrap()));
         Self {
             id,
             model,

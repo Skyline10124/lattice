@@ -7,6 +7,7 @@ use serde::Deserialize;
 use std::io::Write;
 use std::time::Instant;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     model: &str,
     prompt: &str,
@@ -15,6 +16,7 @@ pub async fn run(
     json: bool,
     creds: &crate::credentials::CredentialStore,
     save: bool,
+    previous_session: Option<crate::session::Session>,
 ) -> Result<()> {
     let start = Instant::now();
 
@@ -35,6 +37,24 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
+    // Build the final prompt, prepending previous session context if available
+    let final_prompt = if let Some(ref session) = previous_session {
+        let mut ctx = String::from("Previous conversation:\n");
+        for msg in &session.messages {
+            let role = match msg.role.to_lowercase().as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => &msg.role,
+            };
+            ctx.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+        ctx.push_str("---\n");
+        ctx.push_str(prompt);
+        ctx
+    } else {
+        prompt.to_string()
+    };
+
     let tools = tool_definitions();
     let mut agent = Agent::new(resolved.clone()).with_tools(tools);
 
@@ -42,7 +62,7 @@ pub async fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.send_message(prompt).await;
+    let events = agent.send_message(&final_prompt).await;
     let content = run_conversation(&mut agent, events, verbose, json).await?;
 
     let elapsed = start.elapsed().as_millis();

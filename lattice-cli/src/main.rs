@@ -179,6 +179,12 @@ async fn main() -> Result<()> {
     // Print mode (single-turn streaming)
     if let Some(prompt) = cli.print {
         let model = cli.model.unwrap_or_else(|| config.default_model());
+        let previous_session = if cli.continue_session {
+            let mgr = crate::session::SessionManager::new();
+            mgr.latest().ok().flatten()
+        } else {
+            None
+        };
         return print::run(
             &model,
             &prompt,
@@ -187,6 +193,7 @@ async fn main() -> Result<()> {
             cli.json,
             &creds,
             !cli.no_save,
+            previous_session,
         )
         .await;
     }
@@ -244,6 +251,12 @@ async fn main() -> Result<()> {
                     .or_else(|| cli.model.clone())
                     .unwrap_or_else(|| config.default_model());
                 let provider = provider.or_else(|| cli.provider.clone());
+                let previous_session = if cli.continue_session {
+                    let mgr = crate::session::SessionManager::new();
+                    mgr.latest().ok().flatten()
+                } else {
+                    None
+                };
                 run::run(
                     prompt,
                     model,
@@ -252,6 +265,7 @@ async fn main() -> Result<()> {
                     cli.json,
                     &creds,
                     !cli.no_save,
+                    previous_session,
                 )
                 .await?;
             }
