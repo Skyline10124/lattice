@@ -3,7 +3,6 @@ use std::sync::LazyLock;
 
 use crate::memory::SharedMemory;
 use lattice_agent::memory::{Memory, MemoryEntry, PartitionAccess, SharedPartition};
-use lattice_agent::Agent;
 use lattice_bus::{
     AgentBusConfig, AgentDescriptor, AgentId, Bus, BusError, BusEvent, BusHandler, BusRequest,
     BusResponse,
@@ -96,7 +95,6 @@ impl MicroAgent {
 
     /// Register on Bus, resolve model, create Agent, spawn agent loop.
     /// Returns MicroAgentHandle for crash detection (D5).
-    #[allow(deprecated)]
     pub fn spawn(self) -> Result<MicroAgentHandle, BusError> {
         let bus_config = bus_config_from_profile(&self.profile.bus);
 
@@ -114,10 +112,7 @@ impl MicroAgent {
         let resolved = lattice_core::resolve(&self.profile.agent.model)
             .map_err(|e| BusError::Resolve(e.to_string()))?;
 
-        let mut agent = Agent::new(resolved);
-        if let Some(ref mem) = self.memory {
-            agent = agent.with_memory(mem.clone_box());
-        }
+        let runner = crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone());
 
         let max_turns = self.profile.handoff.max_turns.unwrap_or(10);
         let ctx = AgentLoopContext {
@@ -159,7 +154,7 @@ impl MicroAgent {
         }
 
         let join_handle = tokio::spawn(async move {
-            micro_agent_loop(agent, ctx, max_turns, request_rx).await;
+            micro_agent_loop(runner, ctx, max_turns, request_rx).await;
         });
 
         Ok(MicroAgentHandle { id, join_handle })
@@ -177,7 +172,7 @@ struct AgentLoopContext {
 
 /// Core agent loop: receive BusRequest, run inference, send BusResponse.
 async fn micro_agent_loop(
-    mut agent: Agent,
+    mut runner: crate::runner::AgentRunner,
     ctx: AgentLoopContext,
     max_turns: u32,
     mut request_rx: tokio::sync::mpsc::Receiver<BusRequest>,
@@ -187,12 +182,23 @@ async fn micro_agent_loop(
 
     while let Some(req) = request_rx.recv().await {
         let input = extract_input(&req.payload);
-        let enriched = enrich_input(&input, &ctx.memory);
-
-        let events = agent.run(&enriched, max_turns).await;
-
-        let content = extract_content(&events);
-        let output_json = parse_output(&content);
+        // AgentRunner::run() returns Result<Value, Box<dyn StdError>>.
+        // Box<dyn StdError> is !Send, so we must fully consume the result
+        // before any subsequent .await to satisfy tokio::spawn's Send bound.
+        let (content, output_json) = {
+            let result = runner.run(&input, max_turns).await;
+            match result {
+                Ok(json) => {
+                    let s = json.to_string();
+                    (s, json)
+                }
+                Err(e) => {
+                    let err_msg = e.to_string(); // consume the !Send Box<dyn StdError>
+                    warn!("MicroAgent '{}': run error: {}", agent_name, err_msg);
+                    (err_msg.clone(), serde_json::json!({"error": err_msg}))
+                }
+            }
+        };
 
         let resp = BusResponse {
             payload: output_json,
@@ -277,37 +283,8 @@ fn extract_input(payload: &serde_json::Value) -> String {
     }
 }
 
-/// Enrich input with memory recall context.
-fn enrich_input(input: &str, memory: &Option<Arc<dyn Memory>>) -> String {
-    if let Some(ref mem) = memory {
-        let recall = mem.recall(input, 5);
-        if !recall.is_empty() {
-            let context: String = recall
-                .iter()
-                .map(|e| {
-                    format!(
-                        "- {}: {} (session: {})",
-                        match e.kind {
-                            lattice_agent::memory::EntryKind::Fact => "Fact",
-                            lattice_agent::memory::EntryKind::Decision => "Decision",
-                            _ => "Log",
-                        },
-                        e.summary,
-                        e.session_id
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return format!(
-                "[Relevant past context from memory:]\n{}\n\n[Current task:]\n{}",
-                context, input
-            );
-        }
-    }
-    input.to_string()
-}
-
 /// Extract text content from LoopEvents.
+#[cfg(test)]
 fn extract_content(events: &[lattice_agent::LoopEvent]) -> String {
     let mut content = String::new();
     for event in events {
@@ -319,6 +296,7 @@ fn extract_content(events: &[lattice_agent::LoopEvent]) -> String {
 }
 
 /// Parse agent output as JSON. Strip markdown code fences if present.
+#[cfg(test)]
 fn parse_output(content: &str) -> serde_json::Value {
     let trimmed = content.trim();
     let json_str = if trimmed.starts_with("```") {
