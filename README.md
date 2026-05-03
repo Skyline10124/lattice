@@ -98,20 +98,63 @@ let output = agent.send("Review this code").await?;
 ### CLI
 
 ```bash
-# Run a single agent
-LATTICE run "Review src/router.rs" --agent code-review
+# Resolve a model alias to provider details
+lattice resolve sonnet
 
-# Run a pipeline
-LATTICE run "Review src/router.rs" --pipeline review
+# Resolve with JSON output
+lattice resolve sonnet --json
 
-# Validate pipeline chain without calling any LLM
-LATTICE validate review
+# List all available models
+lattice models
+
+# Only show models with valid credentials
+lattice models --auth
+
+# Run a single prompt (streaming to stdout)
+lattice run "Hello, world!" --model sonnet
+
+# Run a pipeline (sequential agents with handoff rules)
+lattice run "Review src/router.rs" --pipeline code-review
+
+# Validate agent profiles in ~/.lattice/agents/
+lattice validate
 
 # List loaded agents
-LATTICE list agents
+lattice list agents
 
-# Debug model resolution
-LATTICE debug sonnet
+# Debug model resolution (optional positional model arg)
+lattice debug sonnet --resolve-only
+
+# Debug with a chat prompt
+lattice debug deepseek-v4-flash --prompt "Hello"
+
+# Run diagnostics
+lattice doctor
+
+# Show bus status (agents, subscriptions, bus configuration)
+lattice bus
+
+# Session management
+lattice sessions list
+lattice sessions show <id>
+lattice sessions rm <id>
+
+# Session statistics
+lattice stats
+
+# Manage configuration
+lattice config init
+lattice config get core.default_model
+lattice config set core.default_model gpt-4
+
+# Single-turn print mode (pipe-friendly)
+lattice -p "Hello" --model sonnet
+
+# Verbose mode (show resolve trace)
+lattice run "Hello" -v --model sonnet
+
+# JSON output
+lattice resolve sonnet --json
 ```
 
 ### Python
@@ -142,7 +185,7 @@ LATTICE is in **alpha / dogfooding** stage. What works:
 - **Agent**: multi-turn conversation, tool execution boundary, memory, token budget
 - **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
-- **CLI**: run, validate, debug, list agents
+- **CLI**: run, resolve, models, debug, doctor, bus, config, sessions, stats, validate, list, new
 - **HTTPS enforced**: non-localhost HTTP base URLs rejected at the engine level
 
 ## Project structure
@@ -174,7 +217,7 @@ LATTICE/                 Git root (Cargo workspace)
 │   │   ├── tools.rs     ToolRegistry + ToolHandler + merge_tool_definitions()
 │   │   └── events.rs    EventBus + PipelineEvent
 ├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), 9 builtin plugins
-├── lattice-cli/         CLI commands: run, validate, debug, resolve, models, doctor
+├── lattice-cli/         CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
 ├── lattice-tui/         Terminal UI (ratatui)
 └── lattice-python/      PyO3 bindings (pip: lattice-core)
 ```
