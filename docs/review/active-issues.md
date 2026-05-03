@@ -528,7 +528,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/catalog/data.json |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: catalog 中模型虽然暴露 `context_length` 字段，但当前数据基本为 0。
 
@@ -546,7 +546,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/lib.rs + retry.rs + errors.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `RetryPolicy` 和 `ErrorClassifier::is_retryable()` 存在，但 `lattice_core::chat()` 真实请求路径不执行 retry；retry 主要在 `lattice-agent` 外层包装。
 
@@ -564,7 +564,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-harness/src/pipeline.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: fork branch 出错时，其他 spawned tasks 可能继续后台运行；partial fork result 可能继续 merge/route；多个 branch 产生不同 next target 时没有冲突策略。
 
@@ -582,7 +582,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-plugin/src/lib.rs + erased_runner.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `Plugin` 暴露 `system_prompt()`、`tools()`、`preferred_model()`、`output_schema()`，`PluginConfig` 暴露 timeout/context_check，但 runner 未完整应用这些语义。
 
@@ -600,7 +600,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-agent + lattice-harness + lattice-python |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: 项目中存在多种 runtime 模式：CLI async path、pipeline static runtime sync wrapper、micro-agent bus runtime、Python binding runtime、`tokio::spawn` 对当前 runtime 的隐式依赖等。
 
@@ -618,7 +618,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-bus/src/lib.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `AgentBusConfig` 有 subscribe/publish/rpc，但只有 RPC whitelist 有部分检查。pub/sub API 没有 caller identity，无法强制 publish/subscribe 权限；`AtLeastOnce`、`subscriber_buffer`、handler error/backpressure 等语义未落实。
 
@@ -636,7 +636,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-agent/src/memory + lattice-harness/src/memory |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `Agent`、`AgentRunner`、`Pipeline`、`MicroAgent` 都有 memory 概念，但职责边界不清。`Memory::clone_box` 默认返回新的 in-memory backend，若真实后端未覆盖，clone 后可能丢失 SQLite/共享后端语义。
 
@@ -654,7 +654,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-cli/src/* |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `resolve/models` 与 `run/print/debug/doctor` 的 credential 加载路径不完全一致；`print` 与 `run` 的 tool 集合和执行策略不同；`sessions`、`stats`、`config set`、`--continue-session`、`--no-save` 等功能部分仍是 placeholder。
 
@@ -674,7 +674,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/transport/gemini.rs + streaming.rs + catalog/data.json |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: Gemini native streaming transport/parser 存在，但 catalog 默认 Gemini provider 更像走 OpenAI-compatible endpoint；文档中对 Gemini streaming/non-streaming 的描述也不一致。
 
@@ -692,7 +692,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/streaming.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `sse_from_bytes_stream()` 只在遇到空行分隔时解析事件，stream EOF 时未 flush residual buffer。虽然规范 SSE 应以空行结束，但真实 provider/proxy 可能不稳定。
 
@@ -710,7 +710,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-python/src/* |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: Python 当前比 resolver-only 更进一步，已有 non-streaming `chat_complete()`，但未暴露 streaming iterator/callback、Agent loop、tool continuation、credentials map、provider override。
 
@@ -728,7 +728,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-tui + lattice-cli |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `lattice-cli` 无子命令时只提示 TUI 未实现，真实 TUI 是独立 `lattice-tui` binary；TUI UI 保存 messages，但每次 submit 可能新建 Agent，导致界面像多轮，模型实际只看到单轮上下文。
 
@@ -746,7 +746,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | README.md + STATUS.md + ROADMAP.md + CLAUDE.md |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: 文档仍提到 `lattice-memory`/`lattice-token-pool` 独立 crate，未解释 `lattice-bus`；CLI 示例和实际命令不匹配；Python 状态在 resolver-only、chat_complete、StreamIterator 之间互相矛盾；STATUS 中的 runtime/memory refactor 描述与当前代码不完全一致。
 
@@ -764,7 +764,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/lib.rs + errors.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: 非 2xx 响应路径只读取 body 并调用 `ErrorClassifier::classify(status, body, provider)`；`Retry-After` HTTP header 未传入分类器。
 
@@ -784,7 +784,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-plugin/src/erased_runner.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: parse/schema/confidence 失败后的 retry 多数情况下重新发送同一 prompt，未包含上次 raw output、parse error、schema expectation 或 correction instruction。
 
@@ -800,7 +800,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-tui/src/ui.rs + event.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: TUI 消息高度、长文本、滚动方向、多行输入、bracketed paste 恢复、panic 后终端恢复等体验仍比较粗糙。
 
@@ -816,7 +816,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/transport/openai_compat.rs + dispatcher.rs |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `OpenAICompatTransport` 有独立结构和文档，但 dispatcher 对 `ApiProtocol::OpenAiChat` 返回的是 `ChatCompletionsTransport::default()`，真实 URL/auth/header 多来自 `ResolvedModel`，使 compat transport 更像未接入/测试遗留。
 
@@ -832,7 +832,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | workspace tests/examples |
-| **状态** | Open |
+| **状态** | Resolved (1d1ed59) |
 
 **描述**: `cargo test --workspace --quiet` 当前通过，但存在 unused imports、unused variable、deprecated API 使用等 warnings。
 
