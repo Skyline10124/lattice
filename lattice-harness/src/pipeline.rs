@@ -93,7 +93,6 @@ pub struct AgentError {
     pub skippable: bool,
 }
 
-
 impl Pipeline {
     pub fn new(
         name: &str,
@@ -210,9 +209,7 @@ impl Pipeline {
 
             // Plugin DAG delegation: when profile has plugins AND pipeline has plugin_registry,
             // delegate to PluginDagRunner instead of AgentRunner.
-            if profile.plugins.is_some() && self.plugin_registry.is_some() {
-                let plugins_config = profile.plugins.as_ref().unwrap();
-                let pr = self.plugin_registry.as_ref().unwrap();
+            if let (Some(plugins_config), Some(pr)) = (&profile.plugins, &self.plugin_registry) {
                 let empty_tr = crate::tools::ToolRegistry::new();
                 let tr_ref: &crate::tools::ToolRegistry = match self.tool_registry.as_ref() {
                     Some(arc) => arc.as_ref(),
@@ -345,8 +342,12 @@ impl Pipeline {
                 }
             } else {
                 // Standard AgentRunner path
-                let mut runner =
-                    crate::assembly::assemble_agent(&profile, resolved, self.shared_memory.clone(), self.tool_registry.clone());
+                let mut runner = crate::assembly::assemble_agent(
+                    &profile,
+                    resolved,
+                    self.shared_memory.clone(),
+                    self.tool_registry.clone(),
+                );
 
                 match runner.run(&current_input, agent_max_turns).await {
                     Ok(output) => {
@@ -551,8 +552,12 @@ impl Pipeline {
                             }
                         };
 
-                        let mut runner =
-                            crate::assembly::assemble_agent(&profile, resolved, memory_box.clone(), tool_registry.clone());
+                        let mut runner = crate::assembly::assemble_agent(
+                            &profile,
+                            resolved,
+                            memory_box.clone(),
+                            tool_registry.clone(),
+                        );
 
                         let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 

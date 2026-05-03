@@ -222,7 +222,8 @@ async fn main() -> Result<()> {
                     cli.verbose,
                     cli.json,
                     creds.to_hashmap(),
-                ).await?;
+                )
+                .await?;
             } else {
                 let model = model
                     .or_else(|| cli.model.clone())

@@ -10,7 +10,6 @@ use tracing::{info, warn};
 
 use crate::profile::{AgentProfile, BusConfigProfile, MemoryConfigProfile};
 
-
 /// Convert profile [bus] section into AgentBusConfig.
 fn bus_config_from_profile(bus: &BusConfigProfile) -> AgentBusConfig {
     AgentBusConfig {
@@ -125,7 +124,8 @@ impl MicroAgent {
             .resolve(&self.profile.agent.model, None)
             .map_err(|e| BusError::Resolve(e.to_string()))?;
 
-        let runner = crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone(), None);
+        let runner =
+            crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone(), None);
 
         let max_turns = self.profile.handoff.max_turns.unwrap_or(10);
         let ctx = AgentLoopContext {

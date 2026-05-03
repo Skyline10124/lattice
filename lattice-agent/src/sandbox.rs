@@ -53,8 +53,8 @@ impl Default for SandboxConfig {
                 "id_ed25519".into(),
                 ".kube/config".into(),
             ],
-            max_read_size: 10 * 1024 * 1024, // 10 MB
-            max_write_size: 1024 * 1024,     // 1 MB
+            max_read_size: 10 * 1024 * 1024,          // 10 MB
+            max_write_size: 1024 * 1024,              // 1 MB
             max_http_response_size: 10 * 1024 * 1024, // 10 MB
             command_allowlist: vec![
                 "cargo test".into(),
@@ -773,7 +773,9 @@ mod tests {
         // changing one must not affect the other.
         let original_read_size = config.max_read_size;
         config.max_http_response_size = 0;
-        assert_eq!(config.max_read_size, original_read_size,
-            "max_read_size should not change when max_http_response_size is modified");
+        assert_eq!(
+            config.max_read_size, original_read_size,
+            "max_read_size should not change when max_http_response_size is modified"
+        );
     }
 }

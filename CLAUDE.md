@@ -241,9 +241,10 @@ Two SSE parsers (`OpenAiSseParser`, `AnthropicSseParser`) implement `SseParser` 
 
 ### Runtime model
 
-LATTICE is fully async. There is no `SHARED_RUNTIME` or global `block_on` bridge:
+LATTICE is fully async. No static runtimes in the Rust engine layer:
 
 - **CLI path**: `#[tokio::main]` — the tokio runtime is created at main entry, all `.await` flows through it
-- **Pipeline path**: async — `Pipeline::run()` is `async fn`
+- **Pipeline path**: `Pipeline::run()` is `async fn` — callers must `.await` it (no `block_on` wrapper)
+- **MicroAgent path**: `MicroAgent::spawn()` is `async fn` — no `BUS_RT` static runtime
 - **Embedded path**: callers inject their own `Handle` — LATTICE never creates a tokio Runtime internally
-- **Sync callers**: use `tokio::runtime::Runtime::block_on()` at the outermost boundary only
+- **Python path**: `SHARED_RUNTIME` in `lattice-python` is the only exception — it bridges PyO3 sync→async and uses `block_in_place` for nested contexts. This is intentional and correct; it never calls Pipeline::run() or MicroAgent::spawn()

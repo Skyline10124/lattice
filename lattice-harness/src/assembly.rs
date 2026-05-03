@@ -72,10 +72,7 @@ pub fn assemble_agent(
         agent = agent.with_tools(final_tools);
         agent = agent.with_tool_executor(Box::new(executor));
     } else {
-        warn!(
-            "Agent '{}' has no tool definitions",
-            profile.agent.name
-        );
+        warn!("Agent '{}' has no tool definitions", profile.agent.name);
     }
 
     if let Some(ref mem) = memory {

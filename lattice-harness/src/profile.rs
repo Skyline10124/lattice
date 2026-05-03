@@ -238,7 +238,11 @@ struct AgentProfileRaw {
 
 /// Verify the integrity of a TOML config file against its `.agent.toml.sha256`
 /// sidecar file. If no sidecar exists, the check is skipped (graceful degradation).
-fn verify_config_integrity(path: &Path, content: &str, strict: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn verify_config_integrity(
+    path: &Path,
+    content: &str,
+    strict: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let hash_path = path.with_extension("toml.sha256");
     if !hash_path.exists() {
         if strict {
@@ -658,8 +662,16 @@ rule = { default = true }
     fn test_strict_config_rejects_missing_hash() {
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
-        std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        let result = verify_config_integrity(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n", true);
+        std::fs::write(
+            &toml_path,
+            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
+        )
+        .unwrap();
+        let result = verify_config_integrity(
+            &toml_path,
+            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
+            true,
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("integrity hash not found"));
@@ -669,8 +681,16 @@ rule = { default = true }
     fn test_graceful_config_accepts_missing_hash() {
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
-        std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        let result = verify_config_integrity(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n", false);
+        std::fs::write(
+            &toml_path,
+            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
+        )
+        .unwrap();
+        let result = verify_config_integrity(
+            &toml_path,
+            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
+            false,
+        );
         assert!(result.is_ok());
     }
 }

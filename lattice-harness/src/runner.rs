@@ -204,7 +204,9 @@ impl AgentRunner {
 
         // Empty output + output_schema → error (tool-only completion needs schema response)
         if content.is_empty() && self.profile.handoff.output_schema.is_some() {
-            return Err("Agent produced empty output; output_schema requires structured response".into());
+            return Err(
+                "Agent produced empty output; output_schema requires structured response".into(),
+            );
         }
 
         // If the content looks like a provider/auth error, don't silently fall
@@ -233,7 +235,10 @@ impl AgentRunner {
         let output: serde_json::Value = match serde_json::from_str(&json_str) {
             Ok(v) => v,
             Err(_) if self.profile.handoff.output_schema.is_some() => {
-                return Err("Agent output is not valid JSON; output_schema requires structured output".into());
+                return Err(
+                    "Agent output is not valid JSON; output_schema requires structured output"
+                        .into(),
+                );
             }
             Err(_) => serde_json::json!({"content": content}),
         };

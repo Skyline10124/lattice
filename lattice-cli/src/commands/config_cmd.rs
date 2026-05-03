@@ -9,10 +9,17 @@ use crate::config::Config;
 #[derive(Subcommand)]
 pub enum ConfigAction {
     Init,
-    Get { key: String },
-    Set { key: String, value: String },
+    Get {
+        key: String,
+    },
+    Set {
+        key: String,
+        value: String,
+    },
     #[command(about = "Compute and write SHA-256 hash for an agent TOML config")]
-    Hash { path: String },
+    Hash {
+        path: String,
+    },
 }
 
 pub fn run(action: ConfigAction) -> Result<()> {

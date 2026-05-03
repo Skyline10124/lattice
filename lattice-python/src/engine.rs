@@ -15,6 +15,16 @@ use crate::errors::convert_core_error;
 
 // ---------------------------------------------------------------------------
 // Shared tokio runtime for bridging sync → async in PyO3 methods
+//
+// This is intentional and correct: PyO3 methods are synchronous (Python
+// calling convention), but lattice-core functions are async. We need a
+// runtime bridge. Unlike the removed SYNC_RT/BUS_RT in lattice-harness
+// (which caused nested-runtime panics), this runtime is only used at the
+// outermost sync boundary — it never calls Pipeline::run() or
+// MicroAgent::spawn(), which are now fully async.
+//
+// block_in_place handles the rare case where Python calls into us from
+// within an existing tokio context (e.g., Python asyncio via tokio bridge).
 // ---------------------------------------------------------------------------
 
 static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
