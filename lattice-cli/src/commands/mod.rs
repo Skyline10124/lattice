@@ -2,6 +2,7 @@ pub mod bus_status;
 pub mod config_cmd;
 pub mod debug;
 pub mod doctor;
+pub mod list_agents;
 pub mod models;
 pub mod new_agent;
 pub mod print;

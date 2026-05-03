@@ -9,8 +9,8 @@ mod display;
 mod session;
 
 use commands::{
-    bus_status, config_cmd, debug, doctor, models, new_agent, print, resolve, run, sessions, stats,
-    validate,
+    bus_status, config_cmd, debug, doctor, list_agents, models, new_agent, print, resolve, run,
+    sessions, stats, validate,
 };
 use config::Config;
 use credentials::CredentialStore;
@@ -124,6 +124,11 @@ enum Commands {
         #[command(subcommand)]
         action: NewAction,
     },
+    #[command(about = "List agents, models, etc.")]
+    List {
+        #[command(subcommand)]
+        action: ListCommands,
+    },
     #[command(about = "Launch the terminal UI (TUI)")]
     Tui {
         #[arg(long, help = "Optional prompt to pre-fill")]
@@ -140,6 +145,12 @@ enum NewAction {
         #[arg(help = "Agent name")]
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ListCommands {
+    #[command(about = "List loaded agent profiles")]
+    Agents,
 }
 
 #[tokio::main]
@@ -278,6 +289,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::New { action }) => match action {
             NewAction::Agent { name } => new_agent::run(name)?,
+        },
+        Some(Commands::List { action }) => match action {
+            ListCommands::Agents => list_agents::run()?,
         },
         None => {
             // No command and no -p: launch TUI
