@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use lattice_harness::{AgentRegistry, Pipeline};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
 
     // Load agents from ~/.lattice/agents/
@@ -48,7 +49,7 @@ fn string_contains(a: &Value, b: &Value) -> bool {
     println!("Input size: {} bytes", input.len());
 
     let mut pipeline = Pipeline::new("dogfood", registry, None, None);
-    let result = pipeline.run("code-review", &input);
+    let result = pipeline.run("code-review", &input).await;
 
     println!("\n=== Pipeline Results ===");
     println!("Completed: {}", result.completed);

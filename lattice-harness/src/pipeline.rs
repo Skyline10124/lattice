@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lattice_agent::memory::Memory;
@@ -93,8 +93,6 @@ pub struct AgentError {
     pub skippable: bool,
 }
 
-static SYNC_RT: LazyLock<tokio::runtime::Runtime> =
-    LazyLock::new(|| tokio::runtime::Runtime::new().expect("pipeline sync runtime"));
 
 impl Pipeline {
     pub fn new(
@@ -141,13 +139,7 @@ impl Pipeline {
     ///
     /// When profile.plugins is Some, this delegates to PluginDagRunner instead
     /// of the standard AgentRunner path, using the same handoff/fork machinery.
-    /// Sync wrapper — delegates to run_async() for CLI callers.
-    pub fn run(&mut self, start_agent: &str, input: &str) -> PipelineRun {
-        SYNC_RT.block_on(self.run_async(start_agent, input))
-    }
-
-    /// Async variant of `run()`. Uses `tokio::spawn` for fork parallelism.
-    pub async fn run_async(&mut self, start_agent: &str, input: &str) -> PipelineRun {
+    pub async fn run(&mut self, start_agent: &str, input: &str) -> PipelineRun {
         let pipeline_start = Instant::now();
         let mut results = Vec::new();
         let mut errors = Vec::new();
@@ -960,7 +952,7 @@ target = "fork:missing-a,missing-b"
     async fn test_run_async_error_handling() {
         let registry = test_registry();
         let mut pipeline = Pipeline::new("test", registry, None, None);
-        let result = pipeline.run_async("code-review", "test input").await;
+        let result = pipeline.run("code-review", "test input").await;
         // Without API keys, resolve() should fail, producing errors
         assert!(
             !result.errors.is_empty(),

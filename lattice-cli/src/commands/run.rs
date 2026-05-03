@@ -57,7 +57,7 @@ pub async fn run(
 
 /// Run a pipeline: load agent registry, create registries, and execute.
 #[allow(clippy::too_many_arguments)]
-pub fn run_pipeline(
+pub async fn run_pipeline(
     prompt: &str,
     start_agent: &str,
     agents_dir: Option<&str>,
@@ -210,7 +210,7 @@ pub fn run_pipeline(
         .with_plugin_registry(plugin_registry)
         .with_tool_registry(tool_registry)
         .with_credentials(creds);
-    let result = pipeline.run(start_agent, prompt);
+    let result = pipeline.run(start_agent, prompt).await;
 
     if json {
         let out = serde_json::json!({
