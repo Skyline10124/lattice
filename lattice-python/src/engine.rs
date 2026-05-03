@@ -25,6 +25,14 @@ use crate::errors::convert_core_error;
 //
 // block_in_place handles the rare case where Python calls into us from
 // within an existing tokio context (e.g., Python asyncio via tokio bridge).
+// NOTE: block_in_place requires a multi-threaded runtime. If try_current()
+// returns Ok from a single-threaded runtime, block_in_place would panic.
+// This is safe in practice because SHARED_RUNTIME is multi-threaded
+// (Runtime::new() defaults to worker_threads = num_cpus), and the else
+// branch handles the no-existing-runtime case. The single-threaded edge
+// case only arises if someone embeds LATTICE Python bindings inside a
+// single-threaded tokio application — an unlikely scenario that should
+// be documented as unsupported if it ever becomes relevant.
 // ---------------------------------------------------------------------------
 
 static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
