@@ -121,8 +121,9 @@ impl ModelRouter {
     /// 3. catalog.get_model(canonical_id) or custom_models
     /// 4. provider_override → find specific provider, or priority-sorted iteration
     /// 5. resolve_credentials per provider entry (env var check)
-    /// 6. If all fail, try permissive fallback
-    /// 7. If even permissive fails, return ModelNotFound error
+    /// 6. If all providers have Missing credentials, return Config error
+    ///    listing provider names, env vars, and with_credentials() hint
+    /// 7. Unknown model names return ModelNotFound (no permissive fallback)
     pub fn resolve(
         &self,
         model_name: &str,

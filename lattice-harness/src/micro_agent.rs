@@ -45,6 +45,9 @@ pub struct MicroAgent {
     pub memory: Option<Arc<dyn Memory>>,
     pub shared_memory: Option<Arc<dyn SharedMemory>>,
     pub partition_access: PartitionAccess,
+    /// External credentials for programmatic injection.
+    /// When set, ModelRouter::with_credentials() is used instead of env-only resolve.
+    pub credentials: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Handle returned by spawn(). Owns the JoinHandle for crash detection (D5).
@@ -82,6 +85,7 @@ impl MicroAgent {
         bus: Arc<dyn Bus>,
         memory: Option<Arc<dyn Memory>>,
         shared_memory: Option<Arc<dyn SharedMemory>>,
+        credentials: Option<std::collections::HashMap<String, String>>,
     ) -> Self {
         let partition_access = partition_access_from_profile(&profile.memory);
         Self {
@@ -90,7 +94,14 @@ impl MicroAgent {
             memory,
             shared_memory,
             partition_access,
+            credentials,
         }
+    }
+
+    /// Set external credentials for programmatic injection.
+    pub fn with_credentials(mut self, creds: std::collections::HashMap<String, String>) -> Self {
+        self.credentials = Some(creds);
+        self
     }
 
     /// Register on Bus, resolve model, create Agent, spawn agent loop.
@@ -109,7 +120,12 @@ impl MicroAgent {
         let request_rx = reg.request_rx;
         let id = reg.id;
 
-        let resolved = lattice_core::resolve(&self.profile.agent.model)
+        let router = match &self.credentials {
+            Some(creds) => lattice_core::router::ModelRouter::with_credentials(creds.clone()),
+            None => lattice_core::router::ModelRouter::new(),
+        };
+        let resolved = router
+            .resolve(&self.profile.agent.model, None)
             .map_err(|e| BusError::Resolve(e.to_string()))?;
 
         let runner = crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone());
