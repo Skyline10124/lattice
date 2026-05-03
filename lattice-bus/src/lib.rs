@@ -138,7 +138,7 @@ impl Default for BusConfig {
             timeout_rpc: Duration::from_secs(30),
             delivery_policy: DeliveryPolicy::AtMostOnce,
             subscriber_buffer: 1024,
-            max_concurrent_calls: 1,
+            max_concurrent_calls: 32,
         }
     }
 }
@@ -694,7 +694,7 @@ mod tests {
         assert_eq!(c.timeout_rpc, Duration::from_secs(30));
         assert_eq!(c.delivery_policy, DeliveryPolicy::AtMostOnce);
         assert_eq!(c.subscriber_buffer, 1024);
-        assert_eq!(c.max_concurrent_calls, 1);
+        assert_eq!(c.max_concurrent_calls, 32);
     }
 
     #[tokio::test]
