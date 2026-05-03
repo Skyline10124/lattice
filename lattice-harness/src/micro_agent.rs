@@ -155,7 +155,7 @@ impl MicroAgent {
                 })
             });
             // Use BUS_RT since spawn() is called in sync context
-            BUS_RT.block_on(self.bus.subscribe(topic, handler))?;
+            BUS_RT.block_on(self.bus.subscribe(topic, None, handler))?;
         }
 
         let join_handle = tokio::spawn(async move {

@@ -184,7 +184,19 @@ async fn send_streaming_request(
 
     let status = response.status();
     if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
+        // Read Retry-After header (RFC 7231) and inject it into the body
+        // text so the existing body-based extract_retry_after can find it.
+        let retry_after_header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut body_text = response.text().await.unwrap_or_default();
+        if let Some(ref ra) = retry_after_header {
+            // Append as a synthetic field so classify / extract_retry_after
+            // can pick it up alongside any body-based retry_after.
+            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
+        }
         return Err(crate::errors::ErrorClassifier::classify(
             status.as_u16(),
             &body_text,
@@ -205,6 +217,12 @@ async fn send_streaming_request(
 /// 1. Normalizes the request using the protocol-appropriate transport
 /// 2. POSTs to the provider's streaming endpoint with auth
 /// 3. Parses the SSE stream into [`StreamEvent`]s
+///
+/// # Retry behaviour
+///
+/// This function does **NOT** retry on error — it returns errors directly.
+/// Retry is handled by the caller (typically `lattice-agent`'s `Agent`).
+/// See [`lattice_agent::Agent::run()`] for the retry-aware agent loop.
 ///
 /// # Example
 ///

@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lattice_agent::memory::Memory;
 use lattice_agent::Agent;
@@ -97,6 +97,9 @@ const DEFAULT_MAX_MEMORY_ENTRIES: usize = 1000;
 
 /// Default maximum total bytes for memory entry content.
 const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
+/// Default timeout for each fork branch in seconds.
+const DEFAULT_FORK_TIMEOUT_SECS: u64 = 120;
 
 pub struct Pipeline {
     pub name: String,
@@ -388,6 +391,11 @@ impl Pipeline {
     }
 
     /// Async variant of run_fork. Uses `tokio::spawn` for fork parallelism.
+    ///
+    /// Each branch is subject to `DEFAULT_FORK_TIMEOUT_SECS`.  When a
+    /// non-skippable error occurs, the remaining spawned tasks are cancelled
+    /// via `JoinHandle::abort()`.  If multiple branches disagree on the next
+    /// target, the first non-error result's decision is used.
     async fn run_fork_async(
         &self,
         targets: &[String],
@@ -398,6 +406,7 @@ impl Pipeline {
     ) -> Vec<AgentResult> {
         let registry = self.registry.clone();
         let memory_box = self.shared_memory.clone();
+        let fork_timeout = Duration::from_secs(DEFAULT_FORK_TIMEOUT_SECS);
 
         type ForkBranchOutput = (
             String,
@@ -412,61 +421,81 @@ impl Pipeline {
                 let registry = registry.clone();
                 let memory_box = memory_box.clone();
 
+                let an = agent_name.clone();
+                let an_timeout = an.clone();
                 tokio::spawn(async move {
-                    let profile = match registry.get(&agent_name) {
-                        Some(p) => p.clone(),
-                        None => {
+                    let branch_future = async {
+                        let profile = match registry.get(&an) {
+                            Some(p) => p.clone(),
+                            None => {
+                                let err = AgentError {
+                                    agent_name: an.clone(),
+                                    message: format!("Agent '{}' not found in registry", an),
+                                    skippable: false,
+                                };
+                                return (an, Err(err));
+                            }
+                        };
+
+                        let resolved = match lattice_core::resolve(&profile.agent.model) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let err = AgentError {
+                                    agent_name: an.clone(),
+                                    message: format!("Resolve failed: {}", e),
+                                    skippable: profile.agent.skippable,
+                                };
+                                return (an, Err(err));
+                            }
+                        };
+
+                        let mut runner = build_runner(&profile, resolved, memory_box.clone());
+
+                        let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
+
+                        let start = Instant::now();
+                        match runner.run(&input, max_turns).await {
+                            Ok(output) => {
+                                let duration_ms = start.elapsed().as_millis() as u64;
+                                let next = if profile.handoff.handoff_rules.is_empty() {
+                                    profile.handoff.fallback.clone()
+                                } else {
+                                    eval_rules(&profile.handoff.handoff_rules, &output)
+                                };
+                                (an, Ok((output, duration_ms, next)))
+                            }
+                            Err(e) => {
+                                let err = AgentError {
+                                    agent_name: an.clone(),
+                                    message: e.to_string(),
+                                    skippable: profile.agent.skippable,
+                                };
+                                (an, Err(err))
+                            }
+                        }
+                    };
+                    tokio::time::timeout(fork_timeout, branch_future)
+                        .await
+                        .unwrap_or_else(move |_| {
+                            // Use an_timeout (cloned from an before the async block captured it)
                             let err = AgentError {
-                                agent_name: agent_name.clone(),
-                                message: format!("Agent '{}' not found in registry", agent_name),
+                                agent_name: an_timeout.clone(),
+                                message: format!(
+                                    "fork branch '{}' timed out after {}s",
+                                    an_timeout, DEFAULT_FORK_TIMEOUT_SECS,
+                                ),
                                 skippable: false,
                             };
-                            return (agent_name, Err(err));
-                        }
-                    };
-
-                    let resolved = match lattice_core::resolve(&profile.agent.model) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let err = AgentError {
-                                agent_name: agent_name.clone(),
-                                message: format!("Resolve failed: {}", e),
-                                skippable: profile.agent.skippable,
-                            };
-                            return (agent_name, Err(err));
-                        }
-                    };
-
-                    let mut runner = build_runner(&profile, resolved, memory_box.clone());
-
-                    let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
-
-                    let start = Instant::now();
-                    match runner.run(&input, max_turns).await {
-                        Ok(output) => {
-                            let duration_ms = start.elapsed().as_millis() as u64;
-                            let next = if profile.handoff.handoff_rules.is_empty() {
-                                profile.handoff.fallback.clone()
-                            } else {
-                                eval_rules(&profile.handoff.handoff_rules, &output)
-                            };
-                            (agent_name, Ok((output, duration_ms, next)))
-                        }
-                        Err(e) => {
-                            let err = AgentError {
-                                agent_name: agent_name.clone(),
-                                message: e.to_string(),
-                                skippable: profile.agent.skippable,
-                            };
-                            (agent_name, Err(err))
-                        }
-                    }
+                            (an_timeout, Err(err))
+                        })
                 })
             })
             .collect();
 
         let mut fork_results = Vec::new();
-        for handle in handles {
+        // Process handles in order, tracking which ones remain
+        let mut remaining = handles.into_iter().enumerate().peekable();
+        while let Some((_idx, handle)) = remaining.next() {
             let result = handle.await;
             let (agent_name, result) = match result {
                 Ok(v) => v,
@@ -495,6 +524,10 @@ impl Pipeline {
                         errors.push(err);
                     } else {
                         errors.push(err);
+                        // Cancel remaining spawned branches
+                        for (_, h) in remaining {
+                            h.abort();
+                        }
                         return fork_results;
                     }
                 }

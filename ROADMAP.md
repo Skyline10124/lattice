@@ -111,11 +111,26 @@ Full asyncification and elimination of C-isms across the stack:
 
 ## Current focus
 
-The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. Current priorities:
+The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. DS-P0/P1/P2/P3 security + engineering improvements are all addressed.
+
+Current priorities:
 
 1. **Phase 6 (Nix paradigm)**: declarative config, response caching, derivation model
-2. **Deep scan issues**: address DS-P0 and DS-P1 items from `docs/review/active-issues.md`
+2. **DS-P3 items**: remaining deep scan findings from `docs/review/active-issues.md`
 3. **iOS embedding**: verify `aarch64-apple-ios` cross-compilation, finalize runtime handle injection
+
+## Current workspace (8 crates)
+
+```text
+lattice-core        Pure Rust: catalog, router, provider, transport, streaming, retry, tokens, errors
+lattice-agent       Agent state, tool boundary, memory (merged former lattice-memory + lattice-token-pool)
+lattice-bus         Micro-agent pub/sub + RPC communication bus
+lattice-harness     Pipeline, AgentRunner, PluginDagRunner, SqliteMemory, TOML profiles
+lattice-plugin      Plugin trait, 9 builtins, ErasedPluginRunner, PluginRegistry
+lattice-cli         CLI: run, resolve, models, doctor, debug, validate, tui
+lattice-tui         Terminal UI (ratatui)
+lattice-python      PyO3 bindings (pip: lattice-core)
+```
 
 ## Timeline
 

@@ -62,9 +62,18 @@ pub trait Memory: Send + Sync {
     fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry>;
     fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry>;
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String>;
-    fn clone_box(&self) -> Box<dyn Memory> {
-        Box::new(InMemoryMemory::new())
-    }
+    /// Clone the memory backend.
+    ///
+    /// For in-memory backends (`InMemoryMemory`) this shares the underlying
+    /// store via `Arc`.  For persistent backends (e.g. `SqliteMemory`) this
+    /// opens a new connection to the same database.
+    ///
+    /// # Panics
+    ///
+    /// Implementations that cannot be cloned **must** panic with a clear
+    /// message.  Callers that need shared ownership should use
+    /// `Arc<dyn Memory>` instead.
+    fn clone_box(&self) -> Box<dyn Memory>;
 }
 
 // ---------------------------------------------------------------------------

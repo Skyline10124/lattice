@@ -124,7 +124,11 @@ pub struct BusConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryPolicy {
+    /// Fire-and-forget: the publisher does not wait for delivery confirmation.
+    /// This is the only variant currently implemented.
     AtMostOnce,
+    /// **Not yet implemented.**  Will retry delivery on handler failure.
+    /// For the alpha, `AtLeastOnce` behaves identically to `AtMostOnce`.
     AtLeastOnce,
 }
 
@@ -151,7 +155,12 @@ pub trait Bus: Send + Sync {
     async fn discover(&self, capability: &str) -> Vec<AgentDescriptor>;
     async fn deregister(&self, id: &AgentId) -> Result<(), BusError>;
 
-    async fn subscribe(&self, topic: &str, handler: BusHandlerFn) -> Result<(), BusError>;
+    async fn subscribe(
+        &self,
+        topic: &str,
+        agent_id: Option<AgentId>,
+        handler: BusHandlerFn,
+    ) -> Result<(), BusError>;
     async fn unsubscribe(&self, topic: &str) -> Result<(), BusError>;
     async fn publish(&self, topic: &str, event: BusEvent) -> Result<(), BusError>;
 
@@ -168,6 +177,17 @@ pub trait Bus: Send + Sync {
         request: serde_json::Value,
         timeout: Duration,
     ) -> Result<BusResponse, BusError>;
+}
+
+// ---------------------------------------------------------------------------
+// Subscriber entry — handler plus optional agent identity for auditing
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub(crate) struct SubscriberEntry {
+    #[allow(dead_code)]
+    pub agent_id: Option<AgentId>,
+    pub handler: BusHandlerFn,
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +270,7 @@ struct AgentEntry {
 pub struct InMemoryBus {
     config: BusConfig,
     agents: RwLock<HashMap<AgentId, AgentEntry>>,
-    subscriptions: RwLock<HashMap<String, Vec<BusHandlerFn>>>,
+    subscriptions: RwLock<HashMap<String, Vec<SubscriberEntry>>>,
 }
 
 impl InMemoryBus {
@@ -301,13 +321,18 @@ impl Bus for InMemoryBus {
         }
     }
 
-    async fn subscribe(&self, topic: &str, handler: BusHandlerFn) -> Result<(), BusError> {
+    async fn subscribe(
+        &self,
+        topic: &str,
+        agent_id: Option<AgentId>,
+        handler: BusHandlerFn,
+    ) -> Result<(), BusError> {
         self.subscriptions
             .write()
             .await
             .entry(topic.to_string())
             .or_default()
-            .push(handler);
+            .push(SubscriberEntry { agent_id, handler });
         Ok(())
     }
 
@@ -317,9 +342,9 @@ impl Bus for InMemoryBus {
     }
 
     async fn publish(&self, topic: &str, event: BusEvent) -> Result<(), BusError> {
-        if let Some(handlers) = self.subscriptions.read().await.get(topic) {
-            for handler in handlers {
-                let h = handler.clone();
+        if let Some(entries) = self.subscriptions.read().await.get(topic) {
+            for entry in entries {
+                let h = entry.handler.clone();
                 let evt = event.clone();
                 tokio::spawn(async move {
                     // Handler errors are intentionally swallowed — bus must not
@@ -618,6 +643,7 @@ mod tests {
 
         bus.subscribe(
             "code-changes",
+            None,
             bus_handler(move |event: BusEvent| {
                 let r = rc.clone();
                 Box::pin(async move {
@@ -703,7 +729,7 @@ mod tests {
             })
         });
 
-        bus.subscribe("test-topic", handler).await.unwrap();
+        bus.subscribe("test-topic", None, handler).await.unwrap();
         bus.publish(
             "test-topic",
             BusEvent {
@@ -735,7 +761,7 @@ mod tests {
             })
         });
 
-        bus.subscribe("macro-topic", handler).await.unwrap();
+        bus.subscribe("macro-topic", None, handler).await.unwrap();
         bus.publish(
             "macro-topic",
             BusEvent {

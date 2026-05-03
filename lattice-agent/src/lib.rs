@@ -49,6 +49,25 @@ pub use sandbox::SandboxConfig;
 pub use tool_definitions::default_tool_definitions;
 pub use tools::DefaultToolExecutor;
 
+/// An async LLM agent with tool execution and conversation state.
+///
+/// # Runtime model
+///
+/// `Agent::run()` is `async` and **must** be called from within a Tokio runtime
+/// (e.g. from `#[tokio::main]` or a `tokio::spawn`-ed task).  Internally it calls
+/// [`lattice_core::chat()`] which uses `reqwest` — a Tokio-aware HTTP client.
+///
+/// For callers that are **not** inside a Tokio runtime (e.g. synchronous library
+/// code or FFI), wrap the call at the outermost boundary:
+///
+/// ```ignore
+/// let rt = tokio::runtime::Runtime::new()?;
+/// let result = rt.block_on(agent.run("prompt", 10));
+/// ```
+///
+/// Do **not** call `block_on` from within a Tokio context — this will panic
+/// or deadlock.  The Python bindings in `lattice-python` handle this via a
+/// shared runtime and `tokio::task::block_in_place`.
 #[allow(dead_code)]
 pub struct Agent {
     resolved: ResolvedModel,

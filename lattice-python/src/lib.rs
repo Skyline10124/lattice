@@ -43,6 +43,7 @@ fn lattice_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register engine types
     m.add_class::<engine::LatticeEngine>()?;
     m.add_class::<engine::PyResolvedModel>()?;
+    m.add_class::<engine::StreamIterator>()?;
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::memory::{
-    ConversationTurn, EntryKind, Memory, MemoryEntry, MemoryError, PartitionAccess, SharedMemory,
-    SharedPartition,
+    ConversationTurn, EntryKind, InMemoryMemory, Memory, MemoryEntry, MemoryError, PartitionAccess,
+    SharedMemory, SharedPartition,
 };
 use async_trait::async_trait;
 use rusqlite::{params, Connection};
@@ -10,6 +10,7 @@ use std::sync::Mutex;
 /// Implements both Memory (private) and SharedMemory (cross-agent partitioned).
 pub struct SqliteMemory {
     conn: Mutex<Connection>,
+    db_path: String,
 }
 
 impl SqliteMemory {
@@ -42,6 +43,7 @@ impl SqliteMemory {
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
+            db_path: path.to_string(),
         })
     }
 
@@ -202,6 +204,20 @@ impl Memory for SqliteMemory {
 
     fn reflect(&self, _session_log: &[ConversationTurn]) -> Vec<String> {
         vec![]
+    }
+
+    fn clone_box(&self) -> Box<dyn Memory> {
+        match SqliteMemory::open(&self.db_path) {
+            Ok(clone) => Box::new(clone),
+            Err(e) => {
+                tracing::error!(
+                    "SqliteMemory::clone_box: failed to reopen '{}': {} — falling back to empty InMemoryMemory",
+                    self.db_path,
+                    e,
+                );
+                Box::new(InMemoryMemory::new())
+            }
+        }
     }
 }
 

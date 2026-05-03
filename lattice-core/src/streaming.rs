@@ -644,28 +644,36 @@ pub fn parse_raw_sse(input: &str) -> Vec<RawSseEvent> {
 
 /// Parse a stream of byte chunks (from a raw HTTP response body) into SSE events.
 ///
-/// Parse a stream of byte chunks (from a raw HTTP response body) into SSE events.
+/// On end-of-stream, any residual data in the buffer that does not end with
+/// an empty-line delimiter is flushed and parsed as a final SSE event.
 pub fn sse_from_bytes_stream(
     body: impl futures::Stream<Item = Result<impl AsRef<[u8]>, impl std::fmt::Display>> + Send + 'static,
     parser: Box<dyn SseParser>,
 ) -> impl futures::Stream<Item = StreamEvent> + Send {
     use futures::StreamExt;
 
+    // Chain a synthetic `None` sentinel after the real stream so we can
+    // flush the residual buffer.
+    let body = body.map(Some).chain(futures::stream::once(async { None }));
+
     let mut parser = parser;
     let mut buf = String::new();
 
-    body.flat_map(move |chunk| {
-        let text = match chunk {
-            Ok(bytes) => String::from_utf8_lossy(bytes.as_ref()).to_string(),
-            Err(e) => {
-                return futures::stream::iter(vec![StreamEvent::Error {
-                    message: format!("HTTP body stream error: {e}"),
-                }])
-            }
-        };
+    body.flat_map(move |item| {
+        // --- Process incoming chunk ---
+        if let Some(ref chunk) = item {
+            let text = match chunk {
+                Ok(bytes) => String::from_utf8_lossy(bytes.as_ref()).to_string(),
+                Err(e) => {
+                    return futures::stream::iter(vec![StreamEvent::Error {
+                        message: format!("HTTP body stream error: {e}"),
+                    }])
+                }
+            };
 
-        // Normalize CRLF to LF so SSE framing works across all servers
-        buf.push_str(&text.replace("\r\n", "\n"));
+            // Normalize CRLF to LF so SSE framing works across all servers
+            buf.push_str(&text.replace("\r\n", "\n"));
+        }
 
         // If the buffer exceeds the size limit, force-parse what we have
         // to prevent unbounded memory growth.
@@ -721,6 +729,23 @@ pub fn sse_from_bytes_stream(
                 });
                 buf.clear();
             }
+        }
+
+        // --- End-of-stream flush: parse residual buffer as final SSE event ---
+        if item.is_none() && !buf.is_empty() {
+            tracing::debug!(
+                "SSE stream ended with {} residual bytes — flushing as final event",
+                buf.len()
+            );
+            for raw_event in parse_raw_sse(&buf) {
+                match parser.parse_chunk(&raw_event.event, &raw_event.data) {
+                    Ok(evts) => events.extend(evts),
+                    Err(e) => events.push(StreamEvent::Error {
+                        message: format!("SSE flush parse error: {e}"),
+                    }),
+                }
+            }
+            buf.clear();
         }
 
         futures::stream::iter(events)

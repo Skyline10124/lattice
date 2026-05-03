@@ -1,5 +1,18 @@
 //! Gemini transport — message normalizer for Google's `generateContent` API format.
 //!
+//! # Strategy
+//!
+//! Gemini uses the native `generateContent` REST API for both streaming and
+//! non-streaming inference.  The catalog assigns `"gemini"` as the
+//! [`ApiProtocol`](crate::catalog::ApiProtocol) for all Gemini models.
+//!
+//! - **Streaming**: `{base_url}/models/{model}:streamGenerateContent?alt=sse`
+//! - **Non-streaming**: `{base_url}/models/{model}:generateContent`
+//!
+//! For custom Gemini-compatible endpoints (e.g. Ollama, local proxies), set
+//! the protocol to `"openai"` with an appropriate `base_url` — these typically
+//! speak the OpenAI Chat Completions protocol, not the Gemini wire format.
+//!
 //! Converts between LATTICE internal types ([`ChatRequest`], [`ChatResponse`])
 //! and the Gemini-native JSON schema used by `models/{model}:generateContent`.
 //!
@@ -465,7 +478,15 @@ pub async fn send_gemini_streaming_request(
 
     let status = response.status();
     if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
+        let retry_after_header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut body_text = response.text().await.unwrap_or_default();
+        if let Some(ref ra) = retry_after_header {
+            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
+        }
         return Err(crate::errors::ErrorClassifier::classify(
             status.as_u16(),
             &body_text,
@@ -535,7 +556,15 @@ pub async fn send_gemini_nonstreaming_request(
 
     let status = response.status();
     if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
+        let retry_after_header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let mut body_text = response.text().await.unwrap_or_default();
+        if let Some(ref ra) = retry_after_header {
+            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
+        }
         return Err(crate::errors::ErrorClassifier::classify(
             status.as_u16(),
             &body_text,

@@ -21,6 +21,22 @@ pub async fn run_plugin_loop(
     retry_policy: Option<&RetryPolicy>,
     memory: Option<&dyn lattice_agent::memory::Memory>,
 ) -> Result<RunResult, PluginError> {
+    // Apply plugin system prompt to the agent
+    let system_prompt = plugin.system_prompt();
+    if !system_prompt.is_empty() {
+        agent.set_system_prompt(system_prompt);
+    }
+
+    // Log preferred model hint (the caller decides whether to honour it)
+    let preferred = plugin.preferred_model();
+    if !preferred.is_empty() {
+        tracing::debug!(
+            plugin = plugin.name(),
+            model = preferred,
+            "plugin prefers a specific model — external agent may override"
+        );
+    }
+
     let prompt = plugin.to_prompt_json(context)?;
     let mut attempt = 0u32;
 
@@ -35,9 +51,19 @@ pub async fn run_plugin_loop(
 
         // L1 retry (chat_with_retry) handled inside Agent::run()
         // L2 retry (behavior loop) handled here
-        let raw = agent
-            .send_message_with_tools(&prompt)
+
+        // Apply timeout from config
+        let timeout_duration = std::time::Duration::from_secs(config.timeout_per_call_secs);
+        let raw = tokio::time::timeout(timeout_duration, agent.send_message_with_tools(&prompt))
             .await
+            .map_err(|_| {
+                PluginError::Other(format!(
+                    "plugin '{}' timed out after {}s on attempt {}",
+                    plugin.name(),
+                    config.timeout_per_call_secs,
+                    attempt,
+                ))
+            })?
             .map_err(|e| PluginError::Other(e.to_string()))?;
 
         match plugin.parse_output_json(&raw) {

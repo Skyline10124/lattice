@@ -122,6 +122,13 @@ enum Commands {
         #[command(subcommand)]
         action: NewAction,
     },
+    #[command(about = "Launch the terminal UI (TUI)")]
+    Tui {
+        #[arg(long, help = "Optional prompt to pre-fill")]
+        prompt: Option<String>,
+        #[arg(long, help = "Model alias or canonical ID")]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -180,7 +187,7 @@ async fn main() -> Result<()> {
             resolve::run(&model, provider.as_deref(), trace, cli.json, &creds)?;
         }
         Some(Commands::Models { auth }) => {
-            models::run(auth)?;
+            models::run(auth, &creds)?;
         }
         Some(Commands::Doctor) => {
             doctor::run(&config, &creds)?;
@@ -243,6 +250,25 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Validate { dir }) => {
             validate::run(dir)?;
+        }
+        Some(Commands::Tui { prompt, model }) => {
+            let mut cmd = std::process::Command::new("lattice-tui");
+            if let Some(p) = &prompt {
+                cmd.arg("--prompt").arg(p);
+            }
+            if let Some(m) = &model {
+                cmd.arg("--model").arg(m);
+            }
+            let status = cmd.status().map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to launch lattice-tui: {} (is it built and on $PATH?)",
+                    e
+                )
+            })?;
+            if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                anyhow::bail!("lattice-tui exited with code {}", code);
+            }
         }
         Some(Commands::New { action }) => match action {
             NewAction::Agent { name } => new_agent::run(name)?,

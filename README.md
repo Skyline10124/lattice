@@ -9,12 +9,11 @@ A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-ag
 ```
 LATTICE/ (Cargo workspace)
 ├── lattice-core/       Pure Rust: resolve + chat + streaming + retry
-├── lattice-agent/      Agent struct, conversation state, tool boundary, memory
-├── lattice-memory/     Memory trait + InMemoryMemory + SqliteMemory (async)
-├── lattice-token-pool/ TokenPool trait + UnlimitedPool
-├── lattice-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload
-├── lattice-plugin/     Plugin trait (typed Input → LLM → Output)
-├── lattice-cli/        CLI: run, validate, debug, list agents
+├── lattice-agent/      Agent struct, conversation state, tool boundary, memory (merged lattice-memory + lattice-token-pool)
+├── lattice-bus/        Micro-agent pub/sub + RPC communication bus
+├── lattice-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload, PluginDagRunner
+├── lattice-plugin/     Plugin trait (typed Input → LLM → Output), 9 builtin plugins
+├── lattice-cli/        CLI: run, validate, debug, resolve, models, doctor
 ├── lattice-tui/        Terminal UI (ratatui)
 └── lattice-python/     PyO3 bindings (pip: lattice-core)
 ```
@@ -162,19 +161,20 @@ LATTICE/                 Git root (Cargo workspace)
 │   │   ├── errors.rs    LatticeError enum
 │   │   └── types.rs     Role, Message, ToolDefinition, ToolCall, FunctionCall
 │   └── tests/e2e/       End-to-end + regression tests
-├── lattice-agent/       Agent struct, conversation state, tool boundary
-├── lattice-memory/      Memory trait + InMemoryMemory + SqliteMemory
-├── lattice-token-pool/  TokenPool trait + UnlimitedPool
-├── lattice-harness/     Pipeline orchestrator, TOML rule engine, hot reload
+├── lattice-agent/       Agent struct, conversation state, tool boundary, memory (merged lattice-memory + lattice-token-pool)
+├── lattice-bus/         Micro-agent pub/sub + RPC communication bus
+├── lattice-harness/     Pipeline orchestrator, TOML rule engine, hot reload, PluginDagRunner
 │   ├── src/
 │   │   ├── pipeline.rs  Pipeline + PipelineRun + DryRunReport (sequential + fork)
+│   │   ├── dag_runner.rs PluginDagRunner: intra-agent DAG slot/edge orchestration
 │   │   ├── handoff_rule.rs  HandoffTarget (Single/Fork) + TOML rule parsing + evaluation
-│   │   ├── profile.rs   AgentProfile TOML parsing
+│   │   ├── profile.rs   AgentProfile + PluginsConfig TOML parsing
 │   │   ├── registry.rs  AgentRegistry loading + hot reload
 │   │   ├── runner.rs    AgentRunner (wraps Agent + profile)
+│   │   ├── tools.rs     ToolRegistry + ToolHandler + merge_tool_definitions()
 │   │   └── events.rs    EventBus + PipelineEvent
-├── lattice-plugin/      Plugin trait (typed Input → LLM → Output)
-├── lattice-cli/         CLI commands: run, validate, debug, list
+├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), 9 builtin plugins
+├── lattice-cli/         CLI commands: run, validate, debug, resolve, models, doctor
 ├── lattice-tui/         Terminal UI (ratatui)
 └── lattice-python/      PyO3 bindings (pip: lattice-core)
 ```

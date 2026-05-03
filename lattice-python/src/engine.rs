@@ -253,6 +253,126 @@ impl LatticeEngine {
 
         chat_response_to_py(py, response)
     }
+
+    /// Send messages to a resolved model and return a synchronous iterator of
+    /// stream event dicts.  Each dict has the keys:
+    ///
+    /// - `"type"`: one of `"token"`, `"reasoning"`, `"tool_call_start"`,
+    ///   `"tool_call_delta"`, `"tool_call_end"`, `"done"`, `"error"`
+    /// - `"content"`: the string payload (present for `token`, `reasoning`, `error`)
+    /// - `"id"`: tool call id (present for tool_call events)
+    /// - `"name"`: tool call name (present for `tool_call_start`)
+    /// - `"arguments_delta"`: partial JSON arguments (present for `tool_call_delta`)
+    /// - `"finish_reason"`: reason string (present for `done`)
+    ///
+    /// This is a **sync** wrapper — all events are materialised eagerly into
+    /// memory before the iterator is returned.
+    #[pyo3(signature = (resolved, messages, tools=None))]
+    fn stream_chat(
+        &self,
+        py: Python<'_>,
+        resolved: &PyResolvedModel,
+        messages: Vec<HashMap<String, Py<PyAny>>>,
+        tools: Option<Vec<HashMap<String, Py<PyAny>>>>,
+    ) -> PyResult<StreamIterator> {
+        let msgs = messages_from_py(py, messages)?;
+        let tool_defs = match tools {
+            Some(t) => tools_from_py(py, t)?,
+            None => Vec::new(),
+        };
+
+        let stream = run_async(lattice_core::chat(&resolved.inner, &msgs, &tool_defs))
+            .map_err(convert_core_error)?;
+
+        // Collect JSON values in the async block (no GIL needed), then
+        // convert to Python dicts outside with the GIL held.
+        let json_values: Vec<serde_json::Value> = run_async(async {
+            use futures::StreamExt;
+            let mut s = stream;
+            let mut buf = Vec::new();
+            while let Some(event) = s.next().await {
+                let json_val = match event {
+                    lattice_core::StreamEvent::Token { content } => {
+                        serde_json::json!({"type": "token", "content": content})
+                    }
+                    lattice_core::StreamEvent::Reasoning { content } => {
+                        serde_json::json!({"type": "reasoning", "content": content})
+                    }
+                    lattice_core::StreamEvent::ToolCallStart { id, name } => {
+                        serde_json::json!({"type": "tool_call_start", "id": id, "name": name})
+                    }
+                    lattice_core::StreamEvent::ToolCallDelta {
+                        id,
+                        arguments_delta,
+                    } => {
+                        serde_json::json!({"type": "tool_call_delta", "id": id, "arguments_delta": arguments_delta})
+                    }
+                    lattice_core::StreamEvent::ToolCallEnd { id } => {
+                        serde_json::json!({"type": "tool_call_end", "id": id})
+                    }
+                    lattice_core::StreamEvent::Done {
+                        finish_reason,
+                        usage,
+                    } => {
+                        let mut d =
+                            serde_json::json!({"type": "done", "finish_reason": finish_reason});
+                        if let Some(ref u) = usage {
+                            d["usage"] = serde_json::json!({
+                                "prompt_tokens": u.prompt_tokens,
+                                "completion_tokens": u.completion_tokens,
+                                "total_tokens": u.total_tokens,
+                            });
+                        }
+                        d
+                    }
+                    lattice_core::StreamEvent::Error { message } => {
+                        serde_json::json!({"type": "error", "content": message})
+                    }
+                };
+                buf.push(json_val);
+            }
+            buf
+        });
+
+        // Convert JSON values to Python dicts (GIL held here)
+        let json_mod = py
+            .import("json")
+            .map_err(|e| PyValueError::new_err(format!("Failed to import json: {e}")))?;
+        let mut py_events = Vec::with_capacity(json_values.len());
+        for val in json_values {
+            let json_str =
+                serde_json::to_string(&val).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let py_dict: Py<PyAny> = json_mod
+                .call_method1("loads", (json_str,))
+                .map_err(|e| PyValueError::new_err(format!("JSON decode failed: {e}")))?
+                .into();
+            py_events.push(py_dict);
+        }
+
+        Ok(StreamIterator {
+            events: py_events.into_iter(),
+        })
+    }
+}
+
+/// Python iterator that yields stream events as dicts.
+///
+/// Wraps the async [`StreamEvent`] stream from `stream_chat()` and
+/// materialises events synchronously on each `__next__()` call.
+#[pyclass]
+pub struct StreamIterator {
+    events: std::vec::IntoIter<Py<PyAny>>,
+}
+
+#[pymethods]
+impl StreamIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<Py<PyAny>> {
+        slf.events.next()
+    }
 }
 
 /// Python-facing resolved model (read-only).

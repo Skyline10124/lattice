@@ -1,54 +1,46 @@
 # LATTICE Project Status
 
-**Updated**: 2026-04-30
-**Focus**: Runtime hang fix for Agent.send_message()
+**Updated**: 2026-05-03
+**Focus**: Security hardening, alpha fixes, DS-P1/P2 engineering improvements
 
-## This Sprint: Nested Runtime Hang Fix
+## Recent Sprints
 
-### Problem
-`Agent.send_message()` and related sync methods called `SHARED_RUNTIME.block_on()` directly.
-When invoked from inside a tokio runtime context (e.g., `#[tokio::main]`), `block_on()` on
-a different runtime causes thread deadlock: the calling thread blocks, the outer runtime
-can't make progress, and reqwest HTTP requests stall indefinitely.
+### Phase 4: Security hardening + Alpha fixes (complete)
 
-### Root Cause (5-Why RCA)
-1. **Why hang?** → `SHARED_RUNTIME.block_on()` called from thread already inside a runtime
-2. **Why block_on fails?** → Nested runtime: outer `#[tokio::main]` already owns the thread, inner block_on needs it too
-3. **Why need same thread?** → `current_thread` runtime has 1 thread; blocking it freezes IO driver
-4. **Why no detection?** → Agent sync API had no mechanism to detect/reuse caller's runtime
-5. **Root cause** → Sync methods directly called `block_on()` without handling "already inside runtime" scenario
+14 P0-P3 security fixes across all crates:
+- P0: Critical (sandbox escape, SSRF, TOCTOU, credential leaks)
+- P1-P2: Core security (redirect policy, write allowlist, sensitive file canonical matching)
+- P3: Quality (env var validation, module isolation)
 
-### Fix
-Added `run_async()` helper in `lattice-agent/src/lib.rs`:
-- **Outside any runtime**: `SHARED_RUNTIME.block_on(future)` directly (fast path)
-- **Inside a runtime**: `Handle::try_current()` → `spawn_blocking()` + `SHARED_RUNTIME.block_on()` + `mpsc::channel`. The blocking thread pool runs outside any runtime context, so `block_on()` is safe. Works on both `current_thread` and `multi_thread` runtimes.
+### DS-P1/P2 Engineering improvements (complete)
 
-Additional changes:
-- `Agent.memory` field: `Box<dyn Memory>` → `Arc<dyn Memory>` (enables `Send + 'static` for async memory saves)
-- `Memory` trait: added `clone_arc()` method (complements existing `clone_box()`)
-- `chat_with_retry()`: clones resolved/messages/tools before passing to `run_async()` (removes `&self` borrows)
-- `run_chat()`: all mutable state moved inside `async move` block, returns tuple; self mutations deferred to after async completion
-- `with_memory()` signature: `Box<dyn Memory>` → `Arc<dyn Memory>`
-- Harness callers: `clone_box()` → `clone_arc()`
+14 engineering items covering documentation, correctness, and defaults:
+- Context length values filled for all catalog models
+- chat() retry documentation clarified, Agent runtime model documented
+- Pipeline fork cancellation with timeout + task abort
+- PluginRunner system prompt + tools injection + timeout enforcement
+- Bus: agent identity tracking, AtLeastOnce documented as not-yet-implemented
+- Memory clone_box default removed (dangerous silent data loss)
+- CLI credential consistency across all commands
+- SSE EOF residual buffer flush
+- Python stream_chat() API
+- TUI CLI integration (`lattice tui`)
+- Gemini strategy documentation
+- Retry-After HTTP header consumption
+- README/STATUS/ROADMAP synced to workspace structure
 
-### Files Modified
-- `lattice-agent/src/lib.rs` — run_async() helper, all 4 block_on() calls replaced, memory Arc refactor
-- `lattice-memory/src/lib.rs` — added `clone_arc()` to Memory trait
-- `lattice-harness/src/pipeline.rs` — `clone_box()` → `clone_arc()`
-- `lattice-harness/src/dispatch.rs` — `clone_box()` → `clone_arc()`
+### Pre-existing Issues (NOT from these fixes)
+- `router::tests` — 8 tests fail due to global Mutex poisoning (PoisonError cascade from one panic). These are a pre-existing concurrency bug in the router's credential cache.
 
-### Test Results
-- lattice-agent: 3/3 passed
-- lattice-memory: 6/6 passed
-- lattice-token-pool: 3/3 passed
-- lattice-core (excluding pre-existing router mutex failures): 155/155 passed
+## Current Workspace (8 crates)
 
-### Pre-existing Issues (NOT from this fix)
-- `router::tests` — 8 tests fail due to global Mutex poisoning (PoisonError cascade from one panic). These are a pre-existing concurrency bug in the router's credential cache, unrelated to this fix.
-
-## Remaining Work
-- P0-1: Python API only exposes resolver, no chat/streaming
-- P1-4: ErrorClassifier not wired through streaming phase
-- W-1: lattice-cli compilation failures (16 E0583 errors)
-- W-2: lattice-tui directory missing (but now exists with skeleton)
-- Router Mutex poisoning (newly surfaced)
+```
+lattice-core        Pure Rust: resolve, chat, streaming, retry
+lattice-agent       Agent, tool execution, memory (merged lattice-memory + lattice-token-pool)
+lattice-bus         Micro-agent pub/sub + RPC bus
+lattice-harness     Pipeline, AgentRunner, PluginDagRunner, SqliteMemory
+lattice-plugin      Plugin trait, 9 builtin plugins, ErasedPluginRunner
+lattice-cli         CLI: run, resolve, models, doctor, debug, validate, tui
+lattice-tui         Terminal UI (ratatui)
+lattice-python      PyO3 bindings (pip: lattice-core)
+```
