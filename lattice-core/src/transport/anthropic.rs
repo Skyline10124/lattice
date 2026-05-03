@@ -33,10 +33,7 @@ impl AnthropicTransport {
         Self {
             base: TransportBase::with_extra_headers(
                 "https://api.anthropic.com",
-                HashMap::from([(
-                    String::from("anthropic-version"),
-                    String::from("2023-06-01"),
-                )]),
+                HashMap::from([("anthropic-version".to_string(), "2023-06-01".to_string())]),
             ),
         }
     }
@@ -102,24 +99,21 @@ impl Transport for AnthropicTransport {
                         // the provider layer if needed.
                     }
                     "tool_use" => {
-                        let id = block.get("id").and_then(|i| i.as_str()).ok_or_else(|| {
-                            TransportError::UnexpectedFormat(
-                                "tool_use block missing 'id' field".into(),
-                            )
-                        })?;
-                        let name = block.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
-                            TransportError::UnexpectedFormat(
-                                "tool_use block missing 'name' field".into(),
-                            )
-                        })?;
+                        let id = block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let input = block.get("input").cloned().unwrap_or(json!({}));
                         let arguments = serde_json::to_string(&input).unwrap_or_default();
                         tool_calls.push(ToolCall {
-                            id: id.to_string(),
-                            function: FunctionCall {
-                                name: name.to_string(),
-                                arguments,
-                            },
+                            id,
+                            function: FunctionCall { name, arguments },
                         });
                     }
                     _ => {}
@@ -530,9 +524,8 @@ mod tests {
     #[test]
     fn test_extra_headers_contains_anthropic_version() {
         let transport = AnthropicTransport::new();
-        assert_eq!(
-            transport.extra_headers().get("anthropic-version"),
-            Some(&String::from("2023-06-01"))
-        );
+        let headers = transport.extra_headers();
+        assert_eq!(headers.get("anthropic-version").map(|s| s.as_str()), Some("2023-06-01"));
+        assert_eq!(headers.len(), 1);
     }
 }

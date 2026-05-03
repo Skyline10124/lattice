@@ -2,7 +2,8 @@
 
 **最后更新**: 2026-05-02
 **审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
-**状态**: 36 ISSUES — 7 CRITICAL, 9 HIGH, 12 MEDIUM, 8 LOW
+**补充来源**: 2026-05-02 全代码库深扫（core/provider/streaming, agent/harness/bus, plugin/cli/python/tui）
+**状态**: 36 SECURITY ISSUES — 7 CRITICAL, 9 HIGH, 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
 
 ---
 
@@ -426,6 +427,418 @@
 
 ### P3-08: 深度嵌套 JSON 栈溢出风险 [VULN-036]
 **组件**: lattice-harness/src/handoff_rule.rs | **状态**: Open
+
+---
+
+# 深扫新增工程问题追踪
+
+> 本分区记录 2026-05-02 全代码库深扫发现的**非 VULN 编号工程问题**。其中部分问题会影响真实 provider 可用性、profile-driven orchestration 正确性、插件语义闭环、Python/TUI/CLI 对外体验。安全类问题仍使用上方 VULN/P0-P3 编号追踪。
+
+## 深扫新增统计
+
+| 等级 | 数量 |
+|------|------|
+| DS-P0 | 4 |
+| DS-P1 | 8 |
+| DS-P2 | 6 |
+| DS-P3 | 4 |
+| **总计** | **22** |
+
+---
+
+## DS-P0 — 对外可用性 / 运行正确性阻断（4 项）
+
+### DS-P0-01: Transport extra_headers 未合并到真实 HTTP 请求路径
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P0-01 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/lib.rs + transport/* |
+| **状态** | Open |
+
+**描述**: `Transport::extra_headers()` 已定义，Anthropic transport 也设置了 `anthropic-version`，但 `chat()` 的真实 `send_streaming_request()` 调用路径没有自动合并 `transport.extra_headers()`，OpenAI/Anthropic 分支传入的是空 header 切片。
+
+**影响**: Anthropic Messages API 真实调用可能因缺少 `anthropic-version` header 失败；OpenAI-compatible provider 的扩展 header 机制也容易失效。
+
+**建议修复**: 在 `send_streaming_request()` 中统一合并 `transport.extra_headers()`、调用方显式 headers、`provider_specific` 的 `header:*`、以及 auth header；为 Anthropic 增加真实请求路径测试。
+
+---
+
+### DS-P0-02: resolve() 可能返回缺凭证或空 base_url 的伪可用模型
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P0-02 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/router.rs + catalog/data.json |
+| **状态** | Open |
+
+**描述**: 普通 catalog resolve、`provider_override`、permissive `provider/model` fallback 的 credential/base_url 语义不一致。部分路径即使 credential missing 或 provider default base_url 为空，也可能返回 `Ok(ResolvedModel)`。
+
+**影响**: 用户看到 resolve 成功，但 `chat()` 阶段才因 401、invalid URL、empty base_url 等失败，破坏“自动选择可用 provider/credential”的核心承诺。
+
+**建议修复**: 明确区分 `resolve()` 与 debug/doctor 用的 inspect API。默认 `resolve()` 只返回可调用模型；新增 `resolve_allow_missing()` 或 `inspect_model()` 才允许返回 `CredentialStatus::Missing`。
+
+---
+
+### DS-P0-03: Harness profile 的 system prompt / tools / executor 未完整装配到 Agent
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P0-03 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-harness/src/pipeline.rs + runner.rs + micro_agent.rs |
+| **状态** | Open |
+
+**描述**: 标准 pipeline 构建 `AgentRunner` 时主要执行 `Agent::new(resolved)` 和可选 memory 注入，未完整应用 profile 中的 `system.prompt`、`tools.enabled`、tool executor、sandbox policy 等配置。
+
+**影响**: TOML profile 看起来定义了 agent 行为，但运行时 agent 可能没有系统提示词、没有工具定义或没有工具执行器。profile-driven orchestration 语义不成立。
+
+**建议修复**: 在 runner/build path 中统一装配 `profile.system_prompt()`、工具定义、工具执行器和 sandbox；如果 profile 声明工具但 executor 缺失，应显式报错或禁用工具，不应静默运行。
+
+---
+
+### DS-P0-04: AgentRunner 吞掉 LoopEvent::Error 并可能把失败当成功输出
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P0-04 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-harness/src/runner.rs |
+| **状态** | Open |
+
+**描述**: `AgentRunner::run_once()` 主要收集 `LoopEvent::Token`，没有把 `LoopEvent::Error` 转成 `Err`。如果底层 model/provider/auth/network 失败，runner 可能把空内容 fallback 成 `{"content":""}` 并继续 pipeline。
+
+**影响**: pipeline 的 `errors` 列表不可靠，handoff 可能基于空成功结果继续执行，schema retry 也可能掩盖真实 transport/auth/model 错误。
+
+**建议修复**: 只要出现 `LoopEvent::Error` 即返回 error；空输出应单独建模；schema retry 只处理结构化输出错误，不应吞掉底层调用失败。
+
+---
+
+## DS-P1 — 本迭代应修复的工程问题（8 项）
+
+### DS-P1-01: Catalog context_length 全为 0，模型能力目录不可用
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-01 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/catalog/data.json |
+| **状态** | Open |
+
+**描述**: catalog 中模型虽然暴露 `context_length` 字段，但当前数据基本为 0。
+
+**影响**: token budget、context trimming、ContextWindowExceeded 预防、模型能力展示都无法可靠工作，削弱 model-centric engine 的核心价值。
+
+**建议修复**: 为 catalog 模型填充真实 context window；增加 catalog schema/CI 校验，禁止 known model 的 `context_length = 0` 静默进入主分支。
+
+---
+
+### DS-P1-02: lattice-core::chat() 不使用 retry policy，文档和实现语义不一致
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-02 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/lib.rs + retry.rs + errors.rs |
+| **状态** | Open |
+
+**描述**: `RetryPolicy` 和 `ErrorClassifier::is_retryable()` 存在，但 `lattice_core::chat()` 真实请求路径不执行 retry；retry 主要在 `lattice-agent` 外层包装。
+
+**影响**: 直接使用 core API 的调用方不会获得文档暗示的 retry 行为，core/agent 行为割裂。
+
+**建议修复**: 二选一：将 retry 接入 core 首请求路径；或修改文档，明确 core 只做错误分类，retry 属于 agent/harness 层。
+
+---
+
+### DS-P1-03: Pipeline fork 缺少取消、冲突和资源控制语义
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-03 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-harness/src/pipeline.rs |
+| **状态** | Open |
+
+**描述**: fork branch 出错时，其他 spawned tasks 可能继续后台运行；partial fork result 可能继续 merge/route；多个 branch 产生不同 next target 时没有冲突策略。
+
+**影响**: LLM/API 资源可能泄露，pipeline 结果不确定，fork handoff 在失败场景下不可审计。
+
+**建议修复**: 为 fork 添加 branch 上限、timeout、cancellation、all/any 成功策略、next target 冲突策略和 deterministic merge policy。
+
+---
+
+### DS-P1-04: PluginRunner 未完整执行 Plugin trait 语义
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-04 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-plugin/src/lib.rs + erased_runner.rs |
+| **状态** | Open |
+
+**描述**: `Plugin` 暴露 `system_prompt()`、`tools()`、`preferred_model()`、`output_schema()`，`PluginConfig` 暴露 timeout/context_check，但 runner 未完整应用这些语义。
+
+**影响**: 插件 API 看起来成熟，但运行时只完成 prompt → agent → parse → behavior 的部分闭环，开发者会误以为 schema、tools、preferred model、timeout 已生效。
+
+**建议修复**: runner 应调用 `agent.set_system_prompt()`，注入 plugin tools，应用 preferred model 或显式声明由外部 agent 决定，执行 output schema validation，落实 timeout/context check。
+
+---
+
+### DS-P1-05: Runtime 模型混用 static Runtime、block_on、tokio::spawn，嵌入场景易出问题
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-05 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-agent + lattice-harness + lattice-python |
+| **状态** | Open |
+
+**描述**: 项目中存在多种 runtime 模式：CLI async path、pipeline static runtime sync wrapper、micro-agent bus runtime、Python binding runtime、`tokio::spawn` 对当前 runtime 的隐式依赖等。
+
+**影响**: 嵌入到已有 Tokio runtime、Python runtime 或服务端 async 应用时，可能出现 panic、nested runtime、阻塞 worker thread 或 lifecycle 混乱。
+
+**建议修复**: 核心库 API async-first；sync wrapper 限制在 CLI/convenience 层并检测当前 runtime；blocking SQLite/IO 使用 `spawn_blocking`；micro-agent 提供显式 `spawn_async()`。
+
+---
+
+### DS-P1-06: Bus pub/sub capability 未强制，delivery policy 基本未实现
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-06 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-bus/src/lib.rs |
+| **状态** | Open |
+
+**描述**: `AgentBusConfig` 有 subscribe/publish/rpc，但只有 RPC whitelist 有部分检查。pub/sub API 没有 caller identity，无法强制 publish/subscribe 权限；`AtLeastOnce`、`subscriber_buffer`、handler error/backpressure 等语义未落实。
+
+**影响**: profile 中的 bus capability 容易被误认为安全边界；高负载下 pub/sub 也缺乏可靠 delivery/backpressure 行为。
+
+**建议修复**: `subscribe`/`publish` 增加 agent identity 并校验配置；delivery policy 未实现前标记 unsupported；handler 使用 bounded queue，并记录/传播 handler error。
+
+---
+
+### DS-P1-07: Memory API 职责重复，clone_box 默认实现可能丢失真实后端
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-07 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-agent/src/memory + lattice-harness/src/memory |
+| **状态** | Open |
+
+**描述**: `Agent`、`AgentRunner`、`Pipeline`、`MicroAgent` 都有 memory 概念，但职责边界不清。`Memory::clone_box` 默认返回新的 in-memory backend，若真实后端未覆盖，clone 后可能丢失 SQLite/共享后端语义。
+
+**影响**: `Agent::with_memory()` 看起来有效但 agent loop 内使用有限；shared/private/session memory 语义容易产生误解和数据丢失。
+
+**建议修复**: 统一 memory ownership：要么由 harness 管理，要么 agent 通过明确 hook 使用；移除危险默认 `clone_box`，优先使用 `Arc<dyn Memory>`；为 SQLite memory 明确 clone/share 语义。
+
+---
+
+### DS-P1-08: CLI credential、tool、session/config 行为不一致或半成品暴露
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P1-08 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-cli/src/* |
+| **状态** | Open |
+
+**描述**: `resolve/models` 与 `run/print/debug/doctor` 的 credential 加载路径不完全一致；`print` 与 `run` 的 tool 集合和执行策略不同；`sessions`、`stats`、`config set`、`--continue-session`、`--no-save` 等功能部分仍是 placeholder。
+
+**影响**: 用户会看到同一配置在不同命令下行为不同；半成品 flag/命令暴露会造成产品可信度下降。
+
+**建议修复**: 统一 credential injection；统一 tool registry/sandbox；未实现命令 hidden/experimental 或补齐实现；更新 CLI help 和 README 示例。
+
+---
+
+## DS-P2 — 计划中修复的设计/产品问题（6 项）
+
+### DS-P2-01: Gemini native transport 已实现但默认 catalog 策略不清
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-01 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/transport/gemini.rs + streaming.rs + catalog/data.json |
+| **状态** | Open |
+
+**描述**: Gemini native streaming transport/parser 存在，但 catalog 默认 Gemini provider 更像走 OpenAI-compatible endpoint；文档中对 Gemini streaming/non-streaming 的描述也不一致。
+
+**影响**: 实现、数据、文档三者脱节，后续维护和用户预期都不稳定。
+
+**建议修复**: 明确 Gemini 策略：要么 catalog 默认走 native `gemini_generate_content`，要么把 native transport 标为 experimental/custom-only，并同步文档。
+
+---
+
+### DS-P2-02: SSE parser EOF residual buffer 未 flush，可能丢最后事件
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-02 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/streaming.rs |
+| **状态** | Open |
+
+**描述**: `sse_from_bytes_stream()` 只在遇到空行分隔时解析事件，stream EOF 时未 flush residual buffer。虽然规范 SSE 应以空行结束，但真实 provider/proxy 可能不稳定。
+
+**影响**: 最后一个未以空行终止的 SSE event 可能被丢弃。
+
+**建议修复**: bytes stream 结束时如果 buffer 非空，尝试解析 residual event；增加无尾随空行测试。
+
+---
+
+### DS-P2-03: Python API 缺少 streaming、Agent/tool loop、credentials injection
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-03 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-python/src/* |
+| **状态** | Open |
+
+**描述**: Python 当前比 resolver-only 更进一步，已有 non-streaming `chat_complete()`，但未暴露 streaming iterator/callback、Agent loop、tool continuation、credentials map、provider override。
+
+**影响**: Python 用户无法使用 Rust 主线中的 streaming/agent/tool 能力，embedding 场景也难以避免全局环境变量依赖。
+
+**建议修复**: 暴露 streaming API；提供 credentials/provider override；增加 Agent 或 submit_tools continuation；修正文档中 resolver-only/StreamIterator 的矛盾描述。
+
+---
+
+### DS-P2-04: TUI 未接入主 CLI，且 UI 多轮与模型上下文可能不一致
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-04 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-tui + lattice-cli |
+| **状态** | Open |
+
+**描述**: `lattice-cli` 无子命令时只提示 TUI 未实现，真实 TUI 是独立 `lattice-tui` binary；TUI UI 保存 messages，但每次 submit 可能新建 Agent，导致界面像多轮，模型实际只看到单轮上下文。
+
+**影响**: 用户体验和模型行为不一致；README/CLI 入口预期不可靠。
+
+**建议修复**: 明确 TUI 入口；让 CLI 启动 TUI 或文档改为 `lattice-tui`；TUI 应复用长期 Agent 或把历史消息传入下一轮。
+
+---
+
+### DS-P2-05: README/STATUS/ROADMAP/CLAUDE 与当前代码状态漂移
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-05 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | README.md + STATUS.md + ROADMAP.md + CLAUDE.md |
+| **状态** | Open |
+
+**描述**: 文档仍提到 `lattice-memory`/`lattice-token-pool` 独立 crate，未解释 `lattice-bus`；CLI 示例和实际命令不匹配；Python 状态在 resolver-only、chat_complete、StreamIterator 之间互相矛盾；STATUS 中的 runtime/memory refactor 描述与当前代码不完全一致。
+
+**影响**: 新贡献者和用户会被文档误导，后续问题定位成本增加。
+
+**建议修复**: 以当前 workspace 为准重写项目结构、CLI 示例、Python/TUI/plugin 状态和 known limitations；将历史状态移入 changelog 或 resolved docs。
+
+---
+
+### DS-P2-06: ErrorClassifier 未消费 HTTP Retry-After header，限流等待不准
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P2-06 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/lib.rs + errors.rs |
+| **状态** | Open |
+
+**描述**: 非 2xx 响应路径只读取 body 并调用 `ErrorClassifier::classify(status, body, provider)`；`Retry-After` HTTP header 未传入分类器。
+
+**影响**: `RateLimit.retry_after` 多数情况下为 None，agent retry 只能使用本地 jitter backoff，不能尊重 provider 指定等待时间。
+
+**建议修复**: error classification 接收 response headers；优先解析标准 `Retry-After` header，再 fallback 到 body 字段。
+
+---
+
+## DS-P3 — 延后处理的代码质量/体验问题（4 项）
+
+### DS-P3-01: Plugin retry 未带 correction hint，重复同一 prompt 成本高
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P3-01 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-plugin/src/erased_runner.rs |
+| **状态** | Open |
+
+**描述**: parse/schema/confidence 失败后的 retry 多数情况下重新发送同一 prompt，未包含上次 raw output、parse error、schema expectation 或 correction instruction。
+
+**建议修复**: retry prompt 中加入结构化 correction hint，避免模型重复产生同样坏输出。
+
+---
+
+### DS-P3-02: TUI 长消息渲染、滚动、终端恢复仍是 early-stage
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P3-02 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-tui/src/ui.rs + event.rs |
+| **状态** | Open |
+
+**描述**: TUI 消息高度、长文本、滚动方向、多行输入、bracketed paste 恢复、panic 后终端恢复等体验仍比较粗糙。
+
+**建议修复**: 基于内容高度布局；明确 scroll model；退出时恢复 bracketed paste；增加 panic hook 恢复 terminal state。
+
+---
+
+### DS-P3-03: OpenAICompatTransport 存在但 dispatcher 默认路径未真正使用
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P3-03 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | lattice-core/src/transport/openai_compat.rs + dispatcher.rs |
+| **状态** | Open |
+
+**描述**: `OpenAICompatTransport` 有独立结构和文档，但 dispatcher 对 `ApiProtocol::OpenAiChat` 返回的是 `ChatCompletionsTransport::default()`，真实 URL/auth/header 多来自 `ResolvedModel`，使 compat transport 更像未接入/测试遗留。
+
+**建议修复**: 明确 OpenAI-compatible provider 的实现策略：删除/合并未用 transport，或让 dispatcher/provider defaults 能真正选择 compat transport。
+
+---
+
+### DS-P3-04: Workspace 测试通过但 warnings 未收敛
+
+| 字段 | 值 |
+|------|-----|
+| **ID** | DS-P3-04 |
+| **首次报告** | 2026-05-02 |
+| **来源** | 全代码库深扫 |
+| **组件** | workspace tests/examples |
+| **状态** | Open |
+
+**描述**: `cargo test --workspace --quiet` 当前通过，但存在 unused imports、unused variable、deprecated API 使用等 warnings。
+
+**建议修复**: 清理 warnings，并在 CI 中继续保持 `cargo clippy -- -D warnings` 和 `cargo fmt --check --all`。
 
 ---
 

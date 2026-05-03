@@ -75,8 +75,7 @@ impl Plugin for RefactorPlugin {
     }
 
     fn parse_output(&self, raw: &str) -> Result<Self::Output, PluginError> {
-        let json = super::parse_utils::parse_json_from_response(raw)
-            .map_err(|e| PluginError::Parse(e.to_string()))?;
+        let json = super::parse_utils::parse_json_from_response(raw)?;
         serde_json::from_value(json).map_err(|e| PluginError::Parse(e.to_string()))
     }
 }

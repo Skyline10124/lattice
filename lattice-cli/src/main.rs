@@ -93,6 +93,10 @@ enum Commands {
         pipeline: Option<String>,
         #[arg(long, help = "Agent directory path (default: ~/.lattice/agents/)")]
         agents_dir: Option<String>,
+        #[arg(long, help = "Plugin directory for DAG execution (default: builtin plugins)")]
+        plugins_dir: Option<String>,
+        #[arg(long, help = "Tool definitions path (default: agent default tools)")]
+        tools_dir: Option<String>,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
@@ -195,12 +199,16 @@ async fn main() -> Result<()> {
             model,
             pipeline,
             agents_dir,
+            plugins_dir,
+            tools_dir,
         }) => {
             if let Some(start_agent) = pipeline {
                 run::run_pipeline(
                     &prompt,
                     &start_agent,
                     agents_dir.as_deref(),
+                    plugins_dir.as_deref(),
+                    tools_dir.as_deref(),
                     cli.verbose,
                     cli.json,
                 )?;

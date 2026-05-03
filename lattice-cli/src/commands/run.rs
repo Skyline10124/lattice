@@ -3,6 +3,18 @@ use colored::Colorize;
 use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
 use lattice_core::router::ModelRouter;
 use lattice_harness::{AgentRegistry, Pipeline};
+use lattice_plugin::{
+    builtin::{
+        code_review::CodeReviewPlugin, deep_research::DeepResearchPlugin,
+        doc_gen::DocGenPlugin, image_gen::ImageGenPlugin,
+        knowledge_base::KnowledgeBasePlugin, pptx_gen::PptxGenPlugin,
+        refactor::RefactorPlugin, security_audit::SecurityAuditPlugin,
+        test_gen::TestGenPlugin,
+    },
+    bundle::{BehaviorMode, PluginBundle, PluginMeta},
+    registry::PluginRegistry,
+};
+use lattice_harness::tools::{ToolHandler, ToolRegistry};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -44,11 +56,13 @@ pub async fn run(
     Ok(())
 }
 
-/// Run a pipeline: load agent registry, create Pipeline, and execute.
+/// Run a pipeline: load agent registry, create registries, and execute.
 pub fn run_pipeline(
     prompt: &str,
     start_agent: &str,
     agents_dir: Option<&str>,
+    _plugins_dir: Option<&str>,
+    _tools_dir: Option<&str>,
     verbose: bool,
     json: bool,
 ) -> Result<()> {
@@ -80,6 +94,54 @@ pub fn run_pipeline(
         }
     }
 
+    // Build ToolRegistry with default tool definitions
+    let mut tool_registry = ToolRegistry::new();
+    for td in default_tool_definitions() {
+        let name = td.name.clone();
+        tool_registry.register(
+            &name,
+            ToolHandler::Native(Arc::new(move |_| {
+                Ok("execution delegated to Agent tool executor".into())
+            })),
+            td,
+        );
+    }
+    let tool_registry = Arc::new(tool_registry);
+
+    // Build PluginRegistry with all 9 builtin plugins
+    let mut plugin_registry = PluginRegistry::new();
+    let builtins: Vec<(&str, Box<dyn lattice_plugin::erased::ErasedPlugin>, &str)> = vec![
+        ("CodeReview", Box::new(CodeReviewPlugin::new()), "Code review plugin"),
+        ("Refactor", Box::new(RefactorPlugin::new()), "Code refactoring plugin"),
+        ("TestGen", Box::new(TestGenPlugin::new()), "Test generation plugin"),
+        ("SecurityAudit", Box::new(SecurityAuditPlugin::new()), "Security audit plugin"),
+        ("DocGen", Box::new(DocGenPlugin::new()), "Documentation generation plugin"),
+        ("PptxGen", Box::new(PptxGenPlugin::new()), "PPTX generation plugin"),
+        ("DeepResearch", Box::new(DeepResearchPlugin::new()), "Deep research plugin"),
+        ("ImageGen", Box::new(ImageGenPlugin::new()), "Image generation plugin"),
+        ("KnowledgeBase", Box::new(KnowledgeBasePlugin::new()), "Knowledge base plugin"),
+    ];
+    for (name, plugin, desc) in builtins {
+        let bundle = PluginBundle {
+            meta: PluginMeta {
+                name: name.to_string(),
+                version: "0.1".into(),
+                description: desc.to_string(),
+                author: "lattice".into(),
+            },
+            plugin,
+            default_behavior: BehaviorMode::Yolo,
+            default_tools: vec![],
+        };
+        plugin_registry
+            .register(bundle)
+            .map_err(|e| anyhow::anyhow!("Failed to register plugin '{}': {}", name, e))?;
+        if verbose {
+            eprintln!("  plugin: {} — {}", name, desc);
+        }
+    }
+    let plugin_registry = Arc::new(plugin_registry);
+
     // Validate pipeline chain before running
     let pipeline_check = Pipeline::new("pre-check", registry.clone(), None, None);
     let report = pipeline_check.dry_run(start_agent);
@@ -105,8 +167,10 @@ pub fn run_pipeline(
         );
     }
 
-    // Run the pipeline
-    let mut pipeline = Pipeline::new(start_agent, registry, None, None);
+    // Run the pipeline with plugin & tool registries
+    let mut pipeline = Pipeline::new(start_agent, registry, None, None)
+        .with_plugin_registry(plugin_registry)
+        .with_tool_registry(tool_registry);
     let result = pipeline.run(start_agent, prompt);
 
     if json {

@@ -1,3 +1,5 @@
+use crate::PluginError;
+
 /// Extract a confidence score from LLM response text.
 pub fn extract_confidence(raw: &str) -> f64 {
     for line in raw.lines() {
@@ -28,7 +30,10 @@ pub fn strip_markdown_fence(raw: &str) -> &str {
 }
 
 /// Parse JSON from LLM response, stripping markdown fences.
-pub fn parse_json_from_response(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+pub fn parse_json_from_response(raw: &str) -> Result<serde_json::Value, PluginError> {
     let cleaned = strip_markdown_fence(raw);
-    serde_json::from_str(cleaned)
+    serde_json::from_str(cleaned).map_err(|e| {
+        let preview: String = raw.chars().take(200).collect();
+        PluginError::Parse(format!("{} (response preview: {})", e, preview))
+    })
 }

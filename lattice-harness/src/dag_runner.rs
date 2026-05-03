@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use lattice_agent::memory::Memory;
-use lattice_agent::Agent;
+use lattice_agent::{Agent, DefaultToolExecutor};
 use lattice_core::retry::RetryPolicy;
 use lattice_plugin::erased_runner::run_plugin_loop;
 use lattice_plugin::PluginConfig;
@@ -145,6 +145,7 @@ impl<'a> PluginDagRunner<'a> {
                 bundle.plugin.tools(),
             );
             agent = agent.with_tools(tools);
+            agent = agent.with_tool_executor(Box::new(DefaultToolExecutor::new(".")));
 
             let behavior = slot
                 .behavior

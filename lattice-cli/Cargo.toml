@@ -11,6 +11,7 @@ path = "src/main.rs"
 lattice-core = { path = "../lattice-core" }
 lattice-agent = { path = "../lattice-agent" }
 lattice-harness = { path = "../lattice-harness" }
+lattice-plugin = { path = "../lattice-plugin" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
