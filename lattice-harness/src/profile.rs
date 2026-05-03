@@ -656,27 +656,26 @@ rule = { default = true }
 
     #[test]
     fn test_strict_config_rejects_missing_hash() {
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
         std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        // No .toml.sha256 sidecar — strict mode should fail
         std::env::set_var("LATTICE_STRICT_CONFIG", "1");
         let result = AgentProfile::load(&toml_path);
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("integrity hash not found"));
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
     }
 
     #[test]
     fn test_graceful_config_accepts_missing_hash() {
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
         std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        // Explicitly set LATTICE_STRICT_CONFIG=0 (not strict) — should load fine without hash
-        std::env::set_var("LATTICE_STRICT_CONFIG", "0");
         let result = AgentProfile::load(&toml_path);
-        assert!(result.is_ok());
         std::env::remove_var("LATTICE_STRICT_CONFIG");
+        assert!(result.is_ok());
     }
 }

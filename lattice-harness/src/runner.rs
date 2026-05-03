@@ -153,8 +153,9 @@ impl AgentRunner {
     /// Check if agent output content looks like an error message rather than
     /// a genuine attempt to produce structured output.
     fn looks_like_error(content: &str) -> bool {
+        let lower = content.trim().to_ascii_lowercase();
         let trimmed = content.trim();
-        // Provider/auth errors typically start with these prefixes
+        // Provider/auth errors — case-sensitive prefixes
         trimmed.starts_with("Error:")
             || trimmed.starts_with("error:")
             || trimmed.starts_with("Provider error:")
@@ -165,6 +166,20 @@ impl AgentRunner {
             || trimmed.starts_with("403")
             || trimmed.starts_with("429")
             || trimmed.starts_with("500")
+        // Provider error patterns — case-insensitive
+            || lower.starts_with("rate limit")
+            || lower.starts_with("authentication")
+            || lower.starts_with("api key")
+            || lower.starts_with("invalid request")
+            || lower.starts_with("server error")
+            || lower.starts_with("service unavailable")
+        // Transport error patterns — case-insensitive
+            || lower.starts_with("timeout")
+            || lower.starts_with("connection refused")
+            || lower.starts_with("connection reset")
+            || lower.starts_with("dns")
+            || lower.starts_with("tls")
+            || lower.starts_with("certificate")
     }
 
     /// Run the agent once and parse the output as JSON.
@@ -185,6 +200,11 @@ impl AgentRunner {
             if let lattice_agent::LoopEvent::Token { text } = event {
                 content.push_str(text);
             }
+        }
+
+        // Empty output + output_schema → error (tool-only completion needs schema response)
+        if content.is_empty() && self.profile.handoff.output_schema.is_some() {
+            return Err("Agent produced empty output; output_schema requires structured response".into());
         }
 
         // If the content looks like a provider/auth error, don't silently fall
@@ -210,8 +230,13 @@ impl AgentRunner {
             trimmed.to_string()
         };
 
-        let output: serde_json::Value = serde_json::from_str(&json_str)
-            .unwrap_or_else(|_| serde_json::json!({"content": content}));
+        let output: serde_json::Value = match serde_json::from_str(&json_str) {
+            Ok(v) => v,
+            Err(_) if self.profile.handoff.output_schema.is_some() => {
+                return Err("Agent output is not valid JSON; output_schema requires structured output".into());
+            }
+            Err(_) => serde_json::json!({"content": content}),
+        };
 
         Ok(output)
     }
