@@ -238,10 +238,10 @@ struct AgentProfileRaw {
 
 /// Verify the integrity of a TOML config file against its `.agent.toml.sha256`
 /// sidecar file. If no sidecar exists, the check is skipped (graceful degradation).
-fn verify_config_integrity(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn verify_config_integrity(path: &Path, content: &str, strict: bool) -> Result<(), Box<dyn std::error::Error>> {
     let hash_path = path.with_extension("toml.sha256");
     if !hash_path.exists() {
-        if std::env::var("LATTICE_STRICT_CONFIG").unwrap_or_default() == "1" {
+        if strict {
             return Err(format!(
                 "Config integrity hash not found at {}; set LATTICE_STRICT_CONFIG=0 to allow unverified configs",
                 hash_path.display()
@@ -268,7 +268,8 @@ impl AgentProfile {
     /// Load a profile from a TOML file.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        verify_config_integrity(path, &content)?;
+        let strict = std::env::var("LATTICE_STRICT_CONFIG").unwrap_or_default() == "1";
+        verify_config_integrity(path, &content, strict)?;
         let raw: AgentProfileRaw = toml::from_str(&content)?;
         let mut profile = AgentProfile {
             agent: raw.agent,
@@ -595,7 +596,7 @@ rule = { default = true }
         let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
         std::fs::write(dir.join("agent.toml.sha256"), &hash).unwrap();
 
-        let result = verify_config_integrity(&toml_path, content);
+        let result = verify_config_integrity(&toml_path, content, false);
         assert!(result.is_ok(), "Valid hash should pass: {:?}", result);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -611,7 +612,7 @@ rule = { default = true }
         // Write a DIFFERENT hash than what the content produces
         std::fs::write(dir.join("agent.toml.sha256"), "badhash").unwrap();
 
-        let result = verify_config_integrity(&toml_path, content);
+        let result = verify_config_integrity(&toml_path, content, false);
         assert!(result.is_err(), "Tampered hash should fail");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -619,7 +620,6 @@ rule = { default = true }
 
     #[test]
     fn test_verify_config_integrity_no_sidecar() {
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = std::env::temp_dir().join("lattice_test_no_sidecar");
         let _ = std::fs::create_dir_all(&dir);
         let toml_path = dir.join("agent.toml");
@@ -627,7 +627,7 @@ rule = { default = true }
         std::fs::write(&toml_path, content).unwrap();
 
         // No sidecar file — should pass (graceful degradation)
-        let result = verify_config_integrity(&toml_path, content);
+        let result = verify_config_integrity(&toml_path, content, false);
         assert!(result.is_ok(), "Missing sidecar should pass: {:?}", result);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -644,7 +644,7 @@ rule = { default = true }
         let hash = format!("{:x}\n", Sha256::digest(content.as_bytes()));
         std::fs::write(dir.join("agent.toml.sha256"), &hash).unwrap();
 
-        let result = verify_config_integrity(&toml_path, content);
+        let result = verify_config_integrity(&toml_path, content, false);
         assert!(
             result.is_ok(),
             "Trailing newline should be trimmed: {:?}",
@@ -656,13 +656,10 @@ rule = { default = true }
 
     #[test]
     fn test_strict_config_rejects_missing_hash() {
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
         std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        std::env::set_var("LATTICE_STRICT_CONFIG", "1");
-        let result = AgentProfile::load(&toml_path);
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
+        let result = verify_config_integrity(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n", true);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("integrity hash not found"));
@@ -670,12 +667,10 @@ rule = { default = true }
 
     #[test]
     fn test_graceful_config_accepts_missing_hash() {
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
         std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
-        let result = AgentProfile::load(&toml_path);
-        std::env::remove_var("LATTICE_STRICT_CONFIG");
+        let result = verify_config_integrity(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n", false);
         assert!(result.is_ok());
     }
 }

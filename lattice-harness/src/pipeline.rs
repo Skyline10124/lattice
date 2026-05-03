@@ -373,6 +373,7 @@ impl Pipeline {
         let registry = self.registry.clone();
         let memory_box = self.shared_memory.clone();
         let credentials = self.credentials.clone();
+        let tool_registry = self.tool_registry.clone();
         let fork_timeout = Duration::from_secs(DEFAULT_FORK_TIMEOUT_SECS);
 
         type ForkBranchOutput = (
@@ -388,6 +389,7 @@ impl Pipeline {
                 let registry = registry.clone();
                 let memory_box = memory_box.clone();
                 let credentials = credentials.clone();
+                let tool_registry = tool_registry.clone();
 
                 let an = agent_name.clone();
                 let an_timeout = an.clone();
@@ -422,7 +424,7 @@ impl Pipeline {
                         };
 
                         let mut runner =
-                            crate::assembly::assemble_agent(&profile, resolved, memory_box.clone(), self.tool_registry.clone());
+                            crate::assembly::assemble_agent(&profile, resolved, memory_box.clone(), tool_registry.clone());
 
                         let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 
