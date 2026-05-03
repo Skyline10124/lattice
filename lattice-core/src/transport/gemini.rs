@@ -509,6 +509,7 @@ pub async fn send_gemini_nonstreaming_request(
 
     for (key, value) in &resolved.provider_specific {
         if let Some(header_name) = key.strip_prefix("header:") {
+            crate::validate_injected_header(header_name)?;
             req = req.header(header_name, value);
         }
     }

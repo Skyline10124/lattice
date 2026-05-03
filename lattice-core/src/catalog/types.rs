@@ -121,7 +121,7 @@ pub struct ProviderDefaults {
 pub struct ResolvedModel {
     pub canonical_id: String,
     pub provider: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
     #[serde(default)]
     pub base_url: String,
@@ -194,31 +194,44 @@ mod tests {
     }
 
     #[test]
-    fn test_api_protocol_serde_rejects_typo() {
-        let result: Result<ApiProtocol, _> = serde_json::from_str(r#""chat_compltions""#);
+    fn test_serialize_hides_api_key() {
+        let model = ResolvedModel {
+            canonical_id: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            api_key: Some("secret-123".to_string()),
+            base_url: "https://test.api.com".to_string(),
+            api_protocol: ApiProtocol::OpenAiChat,
+            api_model_id: "test-model-id".to_string(),
+            context_length: 4096,
+            provider_specific: HashMap::new(),
+            credential_status: CredentialStatus::Present,
+        };
+        let serialized = serde_json::to_string(&model).unwrap();
         assert!(
-            result.is_err(),
-            "serde should reject typo 'chat_compltions'"
+            !serialized.contains("secret-123"),
+            "Serialize output should not contain the actual API key"
         );
+        assert!(
+            !serialized.contains("api_key"),
+            "Serialize output should not contain the api_key field at all"
+        );
+    }
+
+    #[test]
+    fn test_api_protocol_serde_rejects_typo() {
+        let result: Result<ApiProtocol, _> = serde_json::from_str("\"chat_compltions\"");
+        assert!(result.is_err(), "serde should reject typo 'chat_compltions'");
     }
 
     #[test]
     fn test_api_protocol_serde_accepts_short_alias() {
         let result: ApiProtocol = serde_json::from_str(r#""anthropic""#).unwrap();
-        assert_eq!(
-            result,
-            ApiProtocol::AnthropicMessages,
-            "serde should accept 'anthropic' as alias"
-        );
+        assert_eq!(result, ApiProtocol::AnthropicMessages, "serde should accept 'anthropic' as alias");
     }
 
     #[test]
     fn test_api_protocol_serde_custom_unknown() {
         let result: ApiProtocol = serde_json::from_str(r#""acp""#).unwrap();
-        assert_eq!(
-            result,
-            ApiProtocol::Custom("acp".to_string()),
-            "serde should accept truly unknown strings as Custom"
-        );
+        assert_eq!(result, ApiProtocol::Custom("acp".to_string()), "serde should accept truly unknown strings as Custom");
     }
 }

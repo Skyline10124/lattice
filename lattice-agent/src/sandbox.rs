@@ -129,7 +129,7 @@ impl SandboxConfig {
         // Reject shell metacharacters that enable command injection.
         // Since commands are executed via `sh -c`, metacharacters like `;`, `|`,
         // `&&`, `||`, `$()`, and backticks allow chaining arbitrary commands.
-        for meta in &[";", "|", "&&", "||", "$(", "`"] {
+        for meta in &[";", "|", "&&", "||", "$(", "`", "\n", "\r"] {
             if cmd.contains(meta) {
                 return Err(format!(
                     "Sandbox: command contains dangerous shell metacharacter '{}'",
@@ -304,6 +304,33 @@ mod tests {
             s.check_command("curl http://example.com; rm -rf /")
                 .is_err(),
             "permissive mode should still reject metacharacters"
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_via_newline_rejected() {
+        let s = default_sandbox();
+        let result = s.check_command("ls\nrm -rf /");
+        assert!(result.is_err(), "newline injection should be rejected");
+        assert!(
+            result.unwrap_err().contains("metacharacter"),
+            "error should mention metacharacter"
+        );
+    }
+
+    #[test]
+    fn test_shell_injection_via_carriage_return_rejected() {
+        let s = default_sandbox();
+        let result = s.check_command("ls\rrm -rf /");
+        assert!(result.is_err(), "carriage return injection should be rejected");
+    }
+
+    #[test]
+    fn test_permissive_mode_rejects_newline_injection() {
+        let s = SandboxConfig::permissive();
+        assert!(
+            s.check_command("curl http://example.com\nrm -rf /").is_err(),
+            "permissive mode should reject newline injection"
         );
     }
 

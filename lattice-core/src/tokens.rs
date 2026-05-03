@@ -56,7 +56,37 @@ impl TokenEstimator {
     pub fn estimate_messages_for_model(messages: &[Message], model_id: &str) -> u32 {
         messages
             .iter()
-            .map(|m| Self::estimate_text_for_model(&m.content, model_id))
+            .map(|m| {
+                let base = Self::estimate_text_for_model(&m.content, model_id);
+                let tool_calls_estimate = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| {
+                                Self::estimate_text_for_model(
+                                    &format!(
+                                        "{} {} {}",
+                                        tc.id, tc.function.name, tc.function.arguments
+                                    ),
+                                    model_id,
+                                )
+                            })
+                            .sum::<u32>()
+                    })
+                    .unwrap_or(0);
+                let reasoning_estimate = m
+                    .reasoning_content
+                    .as_ref()
+                    .map(|r| Self::estimate_text_for_model(r, model_id))
+                    .unwrap_or(0);
+                let name_estimate = m
+                    .name
+                    .as_ref()
+                    .map(|n| Self::estimate_text_for_model(n, model_id))
+                    .unwrap_or(0);
+                base + tool_calls_estimate + reasoning_estimate + name_estimate
+            })
             .sum()
     }
 
@@ -86,6 +116,7 @@ impl TokenEstimator {
 mod tests {
     use super::*;
     use crate::types::Role;
+    use crate::types::{FunctionCall, ToolCall};
 
     #[test]
     fn test_estimate_empty() {
@@ -122,5 +153,39 @@ mod tests {
             name: None,
         }];
         assert!(TokenEstimator::fits_in_context(&msgs, "gpt-4o"));
+    }
+
+
+    #[test]
+    fn test_estimate_messages_includes_tool_calls() {
+        let msgs_with_tools = vec![Message {
+            role: Role::Assistant,
+            content: "Let me check".to_string(),
+            reasoning_content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_123".to_string(),
+                function: FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city": "Tokyo", "unit": "celsius"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        }];
+        let msgs_without = vec![Message {
+            role: Role::Assistant,
+            content: "Let me check".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let with_tools = TokenEstimator::estimate_messages_for_model(&msgs_with_tools, "claude-sonnet-4-6");
+        let without = TokenEstimator::estimate_messages_for_model(&msgs_without, "claude-sonnet-4-6");
+        assert!(
+            with_tools > without,
+            "tool_calls should add token estimate: with={} vs without={}",
+            with_tools, without
+        );
     }
 }

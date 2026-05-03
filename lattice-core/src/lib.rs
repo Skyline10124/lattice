@@ -43,6 +43,35 @@ use crate::transport::TransportDispatcher;
 
 static DISPATCHER: LazyLock<TransportDispatcher> = LazyLock::new(TransportDispatcher::new);
 
+/// Sensitive HTTP header names that must not be overridden via provider_specific.
+const SENSITIVE_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "host",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-goog-api-key",
+    "origin",
+    "referer",
+    "proxy-authorization",
+    "connection",
+    "upgrade",
+];
+
+fn validate_injected_header(header_name: &str) -> Result<(), LatticeError> {
+    let lower = header_name.to_lowercase();
+    if SENSITIVE_HEADER_NAMES.contains(&lower.as_str()) {
+        return Err(LatticeError::Config {
+            message: format!(
+                "provider_specific header '{}' is a protected header and cannot be injected",
+                header_name
+            ),
+        });
+    }
+    Ok(())
+}
+
+
 /// Send a streaming HTTP request through the transport layer and return the
 /// SSE event stream.
 ///
@@ -69,12 +98,17 @@ async fn send_streaming_request(
         req = req.header(*name, *value);
     }
 
+    for (key, value) in transport.extra_headers() {
+        req = req.header(key.as_str(), value.as_str());
+    }
+
     if let Some(ref api_key) = resolved.api_key {
         req = transport.apply_auth_to_request(req, api_key.as_str());
     }
 
     for (key, value) in &resolved.provider_specific {
         if let Some(header_name) = key.strip_prefix("header:") {
+            validate_injected_header(header_name)?;
             req = req.header(header_name, value);
         }
     }
@@ -176,10 +210,16 @@ pub async fn chat(
                         message: e.to_string(),
                     })?;
 
-            send_streaming_request(transport, client, resolved, &body, &[]).await
+            send_streaming_request(
+                transport,
+                client,
+                resolved,
+                &body,
+                &[],
+            )
+            .await
         }
 
-        // Gemini streaming uses SSE via `streamGenerateContent?alt=sse`.
         ApiProtocol::GeminiGenerateContent => {
             let transport = DISPATCHER
                 .dispatch(&ApiProtocol::GeminiGenerateContent)
@@ -194,7 +234,7 @@ pub async fn chat(
                         message: e.to_string(),
                     })?;
 
-            crate::transport::gemini::send_gemini_streaming_request(
+            crate::transport::gemini::send_gemini_nonstreaming_request(
                 transport, client, resolved, &body,
             )
             .await
@@ -628,3 +668,25 @@ mod send_streaming_request_tests {
         .await;
     }
 }
+
+#[cfg(test)]
+mod validate_header_tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_injected_header_rejects_sensitive() {
+        for sensitive in &["authorization", "host", "cookie", "x-api-key", "x-goog-api-key"] {
+            let result = validate_injected_header(sensitive);
+            assert!(result.is_err(), "should reject '{}'", sensitive);
+        }
+    }
+
+    #[test]
+    fn test_validate_injected_header_accepts_non_sensitive() {
+        for ok in &["x-custom-id", "x-request-source", "content-type"] {
+            let result = validate_injected_header(ok);
+            assert!(result.is_ok(), "should accept '{}'", ok);
+        }
+    }
+}
+
