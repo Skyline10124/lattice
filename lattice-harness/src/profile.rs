@@ -235,10 +235,33 @@ struct AgentProfileRaw {
 // AgentProfile — loading
 // ---------------------------------------------------------------------------
 
+/// Verify the integrity of a TOML config file against its `.agent.toml.sha256`
+/// sidecar file. If no sidecar exists, the check is skipped (graceful degradation).
+fn verify_config_integrity(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let hash_path = path.with_extension("toml.sha256");
+    if !hash_path.exists() {
+        return Ok(()); // No hash file = no integrity check
+    }
+    let expected = std::fs::read_to_string(&hash_path)?.trim().to_string();
+    use sha2::{Digest, Sha256};
+    let actual = format!("{:x}", Sha256::digest(content.as_bytes()));
+    if actual != expected {
+        return Err(format!(
+            "Config integrity mismatch: {} (expected sha256 {}, got {})",
+            path.display(),
+            expected,
+            actual
+        )
+        .into());
+    }
+    Ok(())
+}
+
 impl AgentProfile {
     /// Load a profile from a TOML file.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
+        verify_config_integrity(path, &content)?;
         let raw: AgentProfileRaw = toml::from_str(&content)?;
         let mut profile = AgentProfile {
             agent: raw.agent,

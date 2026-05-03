@@ -155,7 +155,6 @@ mod tests {
         assert!(TokenEstimator::fits_in_context(&msgs, "gpt-4o"));
     }
 
-
     #[test]
     fn test_estimate_messages_includes_tool_calls() {
         let msgs_with_tools = vec![Message {
@@ -180,12 +179,15 @@ mod tests {
             tool_call_id: None,
             name: None,
         }];
-        let with_tools = TokenEstimator::estimate_messages_for_model(&msgs_with_tools, "claude-sonnet-4-6");
-        let without = TokenEstimator::estimate_messages_for_model(&msgs_without, "claude-sonnet-4-6");
+        let with_tools =
+            TokenEstimator::estimate_messages_for_model(&msgs_with_tools, "claude-sonnet-4-6");
+        let without =
+            TokenEstimator::estimate_messages_for_model(&msgs_without, "claude-sonnet-4-6");
         assert!(
             with_tools > without,
             "tool_calls should add token estimate: with={} vs without={}",
-            with_tools, without
+            with_tools,
+            without
         );
     }
 }

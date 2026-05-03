@@ -129,7 +129,7 @@ impl SandboxConfig {
         // Reject shell metacharacters that enable command injection.
         // Since commands are executed via `sh -c`, metacharacters like `;`, `|`,
         // `&&`, `||`, `$()`, and backticks allow chaining arbitrary commands.
-        for meta in &[";", "|", "&&", "||", "$(", "`", "\n", "\r"] {
+        for meta in &["&", ";", "|", "&&", "||", "$(", "`", "\n", "\r"] {
             if cmd.contains(meta) {
                 return Err(format!(
                     "Sandbox: command contains dangerous shell metacharacter '{}'",
@@ -170,13 +170,25 @@ impl SandboxConfig {
         Ok(())
     }
 
-    /// Check if a URL scheme is safe (only https, http://localhost, http://127.0.0.1, http://[::1]).
+    /// Check if a URL scheme is safe.
+    ///
+    /// Rules:
+    /// - HTTPS allowed only to non-private IPs (SSRF protection).
+    /// - HTTP allowed only to explicit localhost/127.0.0.1/[::1].
+    /// - Private IPs (10.x, 172.16-31.x, 192.168.x, 169.254.x, loopback) are
+    ///   rejected for all schemes except the http localhost allowlist above.
     pub fn check_url(&self, url_str: &str) -> Result<(), String> {
         let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
         let scheme = parsed.scheme();
         let host = parsed.host_str().unwrap_or("");
 
         if scheme == "https" {
+            if is_private_ip(host) {
+                return Err(format!(
+                    "Sandbox: HTTPS URL not allowed: {} (private IP)",
+                    url_str
+                ));
+            }
             return Ok(());
         }
         if scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "[::1]") {
@@ -187,6 +199,38 @@ impl SandboxConfig {
             url_str
         ))
     }
+}
+
+/// Check if a host string resolves to a private or link-local IP.
+///
+/// Covers: loopback (127.0.0.1, ::1, localhost), 10.x.x.x, 172.16-31.x.x,
+/// 192.168.x.x, and 169.254.x.x (link-local).
+fn is_private_ip(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host {
+        "localhost" | "127.0.0.1" | "::1" => return true,
+        _ => {}
+    }
+    // Parse dotted IPv4
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == 4 {
+        let first = octets[0];
+        match first {
+            "10" => return true,
+            "169" if octets[1] == "254" => return true,
+            "172" => {
+                // 172.16.0.0 - 172.31.255.255
+                if let Ok(second) = octets[1].parse::<u8>() {
+                    if (16..=31).contains(&second) {
+                        return true;
+                    }
+                }
+            }
+            "192" if octets[1] == "168" => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -266,6 +310,28 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_injection_via_ampersand_rejected() {
+        let s = default_sandbox();
+        // Standalone & (background)
+        assert!(
+            s.check_command("sleep 10 &").is_err(),
+            "standalone & should be rejected"
+        );
+        // & in compound (&& would also be caught)
+        assert!(s.check_command("cmd &").is_err());
+    }
+
+    #[test]
+    fn test_shell_injection_via_ampersand_permissive_rejected() {
+        let s = SandboxConfig::permissive();
+        // Permissive mode still rejects metacharacters
+        assert!(
+            s.check_command("sleep 10 &").is_err(),
+            "permissive mode should reject &"
+        );
+    }
+
+    #[test]
     fn test_prefix_match_injection_rejected() {
         let s = default_sandbox();
         // "grep-inject" is a different program than "grep"
@@ -322,14 +388,18 @@ mod tests {
     fn test_shell_injection_via_carriage_return_rejected() {
         let s = default_sandbox();
         let result = s.check_command("ls\rrm -rf /");
-        assert!(result.is_err(), "carriage return injection should be rejected");
+        assert!(
+            result.is_err(),
+            "carriage return injection should be rejected"
+        );
     }
 
     #[test]
     fn test_permissive_mode_rejects_newline_injection() {
         let s = SandboxConfig::permissive();
         assert!(
-            s.check_command("curl http://example.com\nrm -rf /").is_err(),
+            s.check_command("curl http://example.com\nrm -rf /")
+                .is_err(),
             "permissive mode should reject newline injection"
         );
     }
@@ -391,6 +461,48 @@ mod tests {
             s.check_url("not-a-url").is_err(),
             "garbage input should be rejected"
         );
+    }
+
+    #[test]
+    fn test_url_https_private_ip_rejected() {
+        let s = default_sandbox();
+        assert!(
+            s.check_url("https://10.0.0.1").is_err(),
+            "HTTPS to 10.x.x.x should be rejected (SSRF)"
+        );
+        assert!(
+            s.check_url("https://172.16.0.1").is_err(),
+            "HTTPS to 172.16.x.x should be rejected (SSRF)"
+        );
+        assert!(
+            s.check_url("https://192.168.1.1").is_err(),
+            "HTTPS to 192.168.x.x should be rejected (SSRF)"
+        );
+        assert!(
+            s.check_url("https://169.254.169.254").is_err(),
+            "HTTPS to 169.254.x.x should be rejected (SSRF)"
+        );
+        assert!(
+            s.check_url("https://127.0.0.1").is_err(),
+            "HTTPS to 127.0.0.1 should be rejected (SSRF)"
+        );
+    }
+
+    #[test]
+    fn test_is_private_ip() {
+        use super::is_private_ip;
+        assert!(is_private_ip("10.0.0.1"));
+        assert!(is_private_ip("172.16.0.1"));
+        assert!(is_private_ip("172.31.255.255"));
+        assert!(!is_private_ip("172.32.0.1"));
+        assert!(is_private_ip("192.168.0.1"));
+        assert!(is_private_ip("169.254.169.254"));
+        assert!(!is_private_ip("169.255.0.1"));
+        assert!(is_private_ip("127.0.0.1"));
+        assert!(is_private_ip("::1"));
+        assert!(is_private_ip("localhost"));
+        assert!(!is_private_ip("93.184.216.34"));
+        assert!(!is_private_ip("example.com"));
     }
 
     #[test]

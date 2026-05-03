@@ -179,20 +179,28 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.sandbox.check_command(cmd) {
                     return e;
                 }
-                let output = tokio::process::Command::new("sh")
-                    .args(["-c", cmd])
-                    .output()
-                    .await;
-                match output {
-                    Ok(o) => {
-                        let mut result = String::from_utf8_lossy(&o.stdout).to_string();
+                let result = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(std::cmp::max(
+                        self.sandbox.max_command_timeout,
+                        1,
+                    ) as u64),
+                    tokio::process::Command::new("sh")
+                        .args(["-c", cmd])
+                        .output(),
+                )
+                .await;
+                match result {
+                    Ok(Ok(o)) => {
+                        let mut cmd_result = String::from_utf8_lossy(&o.stdout).to_string();
                         if !o.stderr.is_empty() {
-                            result
+                            cmd_result
                                 .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
                         }
-                        result
+                        cmd_result
                     }
-                    Err(e) => ToolError::CommandError(e.to_string()).to_string(),
+                    Ok(Err(e)) => ToolError::CommandError(e.to_string()).to_string(),
+                    Err(_) => ToolError::CommandError("bash command timed out after 30s".into())
+                        .to_string(),
                 }
             }
             "patch" => {

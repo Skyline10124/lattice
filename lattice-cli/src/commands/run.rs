@@ -2,19 +2,17 @@ use anyhow::Result;
 use colored::Colorize;
 use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
 use lattice_core::router::ModelRouter;
+use lattice_harness::tools::{ToolHandler, ToolRegistry};
 use lattice_harness::{AgentRegistry, Pipeline};
 use lattice_plugin::{
     builtin::{
-        code_review::CodeReviewPlugin, deep_research::DeepResearchPlugin,
-        doc_gen::DocGenPlugin, image_gen::ImageGenPlugin,
-        knowledge_base::KnowledgeBasePlugin, pptx_gen::PptxGenPlugin,
-        refactor::RefactorPlugin, security_audit::SecurityAuditPlugin,
-        test_gen::TestGenPlugin,
+        code_review::CodeReviewPlugin, deep_research::DeepResearchPlugin, doc_gen::DocGenPlugin,
+        image_gen::ImageGenPlugin, knowledge_base::KnowledgeBasePlugin, pptx_gen::PptxGenPlugin,
+        refactor::RefactorPlugin, security_audit::SecurityAuditPlugin, test_gen::TestGenPlugin,
     },
     bundle::{BehaviorMode, PluginBundle, PluginMeta},
     registry::PluginRegistry,
 };
-use lattice_harness::tools::{ToolHandler, ToolRegistry};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -111,15 +109,51 @@ pub fn run_pipeline(
     // Build PluginRegistry with all 9 builtin plugins
     let mut plugin_registry = PluginRegistry::new();
     let builtins: Vec<(&str, Box<dyn lattice_plugin::erased::ErasedPlugin>, &str)> = vec![
-        ("CodeReview", Box::new(CodeReviewPlugin::new()), "Code review plugin"),
-        ("Refactor", Box::new(RefactorPlugin::new()), "Code refactoring plugin"),
-        ("TestGen", Box::new(TestGenPlugin::new()), "Test generation plugin"),
-        ("SecurityAudit", Box::new(SecurityAuditPlugin::new()), "Security audit plugin"),
-        ("DocGen", Box::new(DocGenPlugin::new()), "Documentation generation plugin"),
-        ("PptxGen", Box::new(PptxGenPlugin::new()), "PPTX generation plugin"),
-        ("DeepResearch", Box::new(DeepResearchPlugin::new()), "Deep research plugin"),
-        ("ImageGen", Box::new(ImageGenPlugin::new()), "Image generation plugin"),
-        ("KnowledgeBase", Box::new(KnowledgeBasePlugin::new()), "Knowledge base plugin"),
+        (
+            "CodeReview",
+            Box::new(CodeReviewPlugin::new()),
+            "Code review plugin",
+        ),
+        (
+            "Refactor",
+            Box::new(RefactorPlugin::new()),
+            "Code refactoring plugin",
+        ),
+        (
+            "TestGen",
+            Box::new(TestGenPlugin::new()),
+            "Test generation plugin",
+        ),
+        (
+            "SecurityAudit",
+            Box::new(SecurityAuditPlugin::new()),
+            "Security audit plugin",
+        ),
+        (
+            "DocGen",
+            Box::new(DocGenPlugin::new()),
+            "Documentation generation plugin",
+        ),
+        (
+            "PptxGen",
+            Box::new(PptxGenPlugin::new()),
+            "PPTX generation plugin",
+        ),
+        (
+            "DeepResearch",
+            Box::new(DeepResearchPlugin::new()),
+            "Deep research plugin",
+        ),
+        (
+            "ImageGen",
+            Box::new(ImageGenPlugin::new()),
+            "Image generation plugin",
+        ),
+        (
+            "KnowledgeBase",
+            Box::new(KnowledgeBasePlugin::new()),
+            "Knowledge base plugin",
+        ),
     ];
     for (name, plugin, desc) in builtins {
         let bundle = PluginBundle {

@@ -93,7 +93,10 @@ enum Commands {
         pipeline: Option<String>,
         #[arg(long, help = "Agent directory path (default: ~/.lattice/agents/)")]
         agents_dir: Option<String>,
-        #[arg(long, help = "Plugin directory for DAG execution (default: builtin plugins)")]
+        #[arg(
+            long,
+            help = "Plugin directory for DAG execution (default: builtin plugins)"
+        )]
         plugins_dir: Option<String>,
         #[arg(long, help = "Tool definitions path (default: agent default tools)")]
         tools_dir: Option<String>,

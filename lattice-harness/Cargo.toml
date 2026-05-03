@@ -21,6 +21,7 @@ async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 indexmap = "2"
 thiserror = "2"
+sha2 = "0.10"
 
 [dev-dependencies]
 dotenvy = "0.15"

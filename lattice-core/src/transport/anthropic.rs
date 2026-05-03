@@ -525,7 +525,10 @@ mod tests {
     fn test_extra_headers_contains_anthropic_version() {
         let transport = AnthropicTransport::new();
         let headers = transport.extra_headers();
-        assert_eq!(headers.get("anthropic-version").map(|s| s.as_str()), Some("2023-06-01"));
+        assert_eq!(
+            headers.get("anthropic-version").map(|s| s.as_str()),
+            Some("2023-06-01")
+        );
         assert_eq!(headers.len(), 1);
     }
 }

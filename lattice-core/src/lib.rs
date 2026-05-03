@@ -71,7 +71,6 @@ fn validate_injected_header(header_name: &str) -> Result<(), LatticeError> {
     Ok(())
 }
 
-
 /// Send a streaming HTTP request through the transport layer and return the
 /// SSE event stream.
 ///
@@ -210,14 +209,7 @@ pub async fn chat(
                         message: e.to_string(),
                     })?;
 
-            send_streaming_request(
-                transport,
-                client,
-                resolved,
-                &body,
-                &[],
-            )
-            .await
+            send_streaming_request(transport, client, resolved, &body, &[]).await
         }
 
         ApiProtocol::GeminiGenerateContent => {
@@ -675,7 +667,13 @@ mod validate_header_tests {
 
     #[test]
     fn test_validate_injected_header_rejects_sensitive() {
-        for sensitive in &["authorization", "host", "cookie", "x-api-key", "x-goog-api-key"] {
+        for sensitive in &[
+            "authorization",
+            "host",
+            "cookie",
+            "x-api-key",
+            "x-goog-api-key",
+        ] {
             let result = validate_injected_header(sensitive);
             assert!(result.is_err(), "should reject '{}'", sensitive);
         }
@@ -689,4 +687,3 @@ mod validate_header_tests {
         }
     }
 }
-
