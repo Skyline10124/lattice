@@ -12,18 +12,24 @@ pub struct CredentialStore {
 }
 
 /// All env var names that lattice-core may look up.
-pub(crate) const KNOWN_ENV_VARS: &[&str] = &[
+pub const KNOWN_ENV_VARS: &[&str] = &[
+    "AI_GATEWAY_API_KEY",
     "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
+    "ARK_API_KEY",
     "DEEPSEEK_API_KEY",
-    "NOUS_API_KEY",
-    "GROQ_API_KEY",
-    "MISTRAL_API_KEY",
-    "XAI_API_KEY",
     "GEMINI_API_KEY",
     "GITEA_API_KEY",
     "GITHUB_TOKEN",
+    "GROQ_API_KEY",
+    "INFINI_AI_API_KEY",
+    "MINIMAX_API_KEY",
+    "MISTRAL_API_KEY",
+    "NOUS_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENCODE_GO_API_KEY",
     "OPENROUTER_API_KEY",
+    "QWEN_API_KEY",
+    "XAI_API_KEY",
 ];
 
 impl CredentialStore {

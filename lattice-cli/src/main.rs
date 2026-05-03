@@ -26,22 +26,22 @@ struct Cli {
     #[arg(short, long, help = "Single-turn print mode (pipe-friendly)")]
     print: Option<String>,
 
-    #[arg(short, long, help = "Model alias or canonical ID")]
+    #[arg(short, long, help = "Default model alias (can be overridden by subcommand --model)")]
     model: Option<String>,
 
     #[arg(long, help = "Provider override")]
     provider: Option<String>,
 
-    #[arg(short, long, help = "Continue last session")]
+    #[arg(short, long, global = true, help = "Continue last session")]
     continue_session: bool,
 
-    #[arg(long, help = "Do not save session")]
+    #[arg(long, global = true, help = "Do not save session")]
     no_save: bool,
 
-    #[arg(short, long, help = "Verbose output (show resolve trace)")]
+    #[arg(short, long, global = true, help = "Verbose output (show resolve trace)")]
     verbose: bool,
 
-    #[arg(short, long, help = "JSON output")]
+    #[arg(short, long, global = true, help = "JSON output")]
     json: bool,
 
     #[arg(long, help = "Configuration file path")]
@@ -89,6 +89,8 @@ enum Commands {
         prompt: String,
         #[arg(short, long, help = "Model alias or canonical ID")]
         model: Option<String>,
+        #[arg(long, help = "Provider override")]
+        provider: Option<String>,
         #[arg(long, help = "Run as pipeline (start agent name)")]
         pipeline: Option<String>,
         #[arg(long, help = "Agent directory path (default: ~/.lattice/agents/)")]
@@ -103,10 +105,10 @@ enum Commands {
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
-        #[arg(help = "Prompt to send (optional, for chat debugging)")]
-        prompt: Option<String>,
-        #[arg(short, long, help = "Model alias or canonical ID")]
+        #[arg(help = "Model alias or canonical ID (positional)")]
         model: Option<String>,
+        #[arg(long, help = "Prompt to send (for chat debugging)")]
+        prompt: Option<String>,
         #[arg(long, help = "Provider override")]
         provider: Option<String>,
         #[arg(long, help = "Only resolve, don't chat")]
@@ -207,6 +209,7 @@ async fn main() -> Result<()> {
         Some(Commands::Run {
             prompt,
             model,
+            provider,
             pipeline,
             agents_dir,
             plugins_dir,
@@ -228,10 +231,11 @@ async fn main() -> Result<()> {
                 let model = model
                     .or_else(|| cli.model.clone())
                     .unwrap_or_else(|| config.default_model());
+                let provider = provider.or_else(|| cli.provider.clone());
                 run::run(
                     prompt,
                     model,
-                    cli.provider.as_deref(),
+                    provider.as_deref(),
                     cli.verbose,
                     cli.json,
                     &creds,
