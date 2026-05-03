@@ -211,7 +211,7 @@ impl<'a> PluginDagRunner<'a> {
 mod tests {
     use super::*;
     use crate::handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};
-    use crate::profile::{AgentEdgeConfig, PluginSlotConfig, PluginsConfig};
+    use crate::profile::{AgentEdgeConfig, PluginsConfig};
     use lattice_plugin::registry::PluginRegistry;
 
     #[test]

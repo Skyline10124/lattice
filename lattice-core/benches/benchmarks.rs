@@ -184,16 +184,17 @@ fn anthropic_stream_chunks(n_tokens: usize) -> Vec<(String, String)> {
 }
 
 fn anthropic_tool_call_stream() -> Vec<(String, String)> {
-    let mut chunks = Vec::new();
-    chunks.push(anthropic_message_start_chunk());
-    chunks.push(anthropic_tool_use_start_chunk());
-    chunks.push(anthropic_input_json_delta_chunk(r#"search_param"#));
-    chunks.push(anthropic_input_json_delta_chunk(r#"_value"#));
-    chunks.push((
-        "content_block_stop".to_string(),
-        r#"{"type":"content_block_stop","index":0}"#.to_string(),
-    ));
-    chunks.push(anthropic_message_delta_chunk());
+    let chunks = vec![
+        anthropic_message_start_chunk(),
+        anthropic_tool_use_start_chunk(),
+        anthropic_input_json_delta_chunk(r#"search_param"#),
+        anthropic_input_json_delta_chunk(r#"_value"#),
+        (
+            "content_block_stop".to_string(),
+            r#"{"type":"content_block_stop","index":0}"#.to_string(),
+        ),
+        anthropic_message_delta_chunk(),
+    ];
     chunks
 }
 
@@ -390,8 +391,8 @@ fn bench_streaming_parse(c: &mut Criterion) {
         b.iter(|| {
             let mut parser = OpenAiSseParser::new();
             parser.parse_chunk("message", &tc_start).unwrap();
-            parser.parse_chunk("message", &tc_delta1).unwrap();
-            parser.parse_chunk("message", &tc_delta2).unwrap();
+            parser.parse_chunk("message", tc_delta1).unwrap();
+            parser.parse_chunk("message", tc_delta2).unwrap();
             parser.parse_chunk("message", &tc_finish).unwrap();
             black_box(parser);
         })

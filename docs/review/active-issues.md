@@ -1,9 +1,7 @@
 # LATTICE 活跃问题追踪
 
-**最后更新**: 2026-05-02
-**审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
-**补充来源**: 2026-05-02 全代码库深扫（core/provider/streaming, agent/harness/bus, plugin/cli/python/tui）
-**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH (ALL RESOLVED), 12 MEDIUM (ALL RESOLVED), 8 LOW (ALL RESOLVED)；另有 22 个深扫工程问题见下方 DS-* 分区
+**最后更新**: 2026-05-03
+**状态**: ALL ISSUES RESOLVED — see [resolved-issues.md](resolved-issues.md) for archive
 
 ---
 

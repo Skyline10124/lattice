@@ -1,5 +1,3 @@
-use futures::StreamExt;
-
 #[tokio::main]
 async fn main() {
     let resolved = lattice_core::resolve("deepseek-v4-pro").expect("resolve failed");

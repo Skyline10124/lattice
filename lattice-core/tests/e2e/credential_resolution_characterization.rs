@@ -745,8 +745,7 @@ fn credentialless_provider_ollama_resolves_with_none_api_key() {
     let router = ModelRouter::new();
 
     let result = router.resolve_permissive("ollama/llama3");
-    if result.is_ok() {
-        let resolved = result.unwrap();
+    if let Ok(resolved) = result {
         assert_eq!(resolved.provider, "ollama");
         assert!(
             resolved.api_key.is_none(),

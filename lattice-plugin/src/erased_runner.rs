@@ -37,7 +37,8 @@ pub async fn run_plugin_loop(
         );
     }
 
-    let prompt = plugin.to_prompt_json(context)?;
+    let mut prompt = plugin.to_prompt_json(context)?;
+    let schema = plugin.output_schema();
     let mut attempt = 0u32;
 
     if let Some(h) = hooks {
@@ -112,6 +113,35 @@ pub async fn run_plugin_loop(
                 }
                 match behavior.on_error(&e, attempt) {
                     crate::ErrorAction::Retry => {
+                        // Append structured correction hint so the model
+                        // doesn't repeat the same error on the next attempt.
+                        let mut hint = String::new();
+                        hint.push_str(
+                            "\n\n[SYSTEM: The previous response could not be parsed.",
+                        );
+                        hint.push_str(&format!("\nParse error: {}", e));
+                        // Truncate raw output to avoid blowing the context window
+                        let truncated = if raw.len() > 2000 {
+                            format!("{} ... [truncated {} bytes]", &raw[..2000], raw.len())
+                        } else {
+                            raw.clone()
+                        };
+                        hint.push_str(&format!("\nRaw output received:\n{}", truncated));
+                        if let Some(ref s) = schema {
+                            let schema_str = serde_json::to_string(s).unwrap_or_default();
+                            let schema_truncated = if schema_str.len() > 1000 {
+                                format!("{} ... [truncated]", &schema_str[..1000])
+                            } else {
+                                schema_str
+                            };
+                            hint.push_str(&format!(
+                                "\nExpected output schema:\n{}",
+                                schema_truncated
+                            ));
+                        }
+                        hint.push_str("\nPlease correct the output to match the expected format.]");
+                        prompt.push_str(&hint);
+
                         attempt += 1;
                         if let Some(p) = retry_policy {
                             tokio::time::sleep(p.jittered_backoff(attempt)).await;

@@ -1,7 +1,7 @@
 use lattice_agent::Agent;
 use lattice_core::resolve;
 use lattice_plugin::{
-    CodeReviewPlugin, Plugin, PluginAgent, PluginConfig, PluginRunner, StrictBehavior,
+    CodeReviewPlugin, PluginConfig, PluginRunner, StrictBehavior,
 };
 use std::fs;
 
@@ -17,7 +17,7 @@ fn main() {
         "lattice-tui/src/app.rs",
         "lattice-tui/src/main.rs",
     ] {
-        if let Ok(content) = fs::read_to_string(&format!("/home/astrin/lattice/{}", path)) {
+        if let Ok(content) = fs::read_to_string(format!("/home/astrin/lattice/{}", path)) {
             code.push_str(&format!(
                 "\n=== {} ===\n{}",
                 path,

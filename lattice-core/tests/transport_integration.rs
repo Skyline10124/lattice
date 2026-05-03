@@ -7,7 +7,6 @@
 
 use lattice_core::catalog::{ApiProtocol, CredentialStatus, ResolvedModel};
 use lattice_core::provider::ChatRequest;
-use lattice_core::streaming::StreamEvent;
 use lattice_core::transport::anthropic::AnthropicTransport;
 use lattice_core::transport::chat_completions::ChatCompletionsTransport;
 use lattice_core::transport::dispatcher::TransportDispatcher;
@@ -501,6 +500,7 @@ mod anthropic {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn denormalize_stream_chunk_returns_empty_vec() {
         // denormalize_stream_chunk is deprecated — Anthropic transport uses SseParser instead.
         let transport = AnthropicTransport::new();
@@ -1081,7 +1081,7 @@ mod cross_transport {
 
         // Anthropic
         let anthropic = AnthropicTransport::new();
-        let anth = anthropic.normalize_messages(&[msg.clone()]);
+        let anth = anthropic.normalize_messages(std::slice::from_ref(&msg));
         let anth_user = anth.messages.iter().find(|m| m["role"] == "user").unwrap();
         let anth_text = anth_user["content"][0]["text"].as_str().unwrap();
         assert_eq!(anth_text, "What is 2+2?");

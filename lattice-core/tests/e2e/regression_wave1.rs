@@ -343,7 +343,7 @@ fn regress_transport_type_all_variants_serialize() {
 
     for (proto, expected_key) in &test_cases {
         // ApiProtocol serializes via serde using its string representation
-        let json = serde_json::to_value(proto).expect("serialize");
+        let _json = serde_json::to_value(proto).expect("serialize");
         // The ApiProtocol serialization should produce the relevant string
         let repr = format!("{:?}", proto);
         assert!(

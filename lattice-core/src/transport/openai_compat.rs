@@ -1,9 +1,25 @@
+//! OpenAI-compatible provider transport.
+//!
+//! # Current strategy
+//!
+//! OpenAI-compatible providers (OpenAI, OpenRouter, Together, etc.) use
+//! [`ChatCompletionsTransport`] via the dispatcher in `transport/dispatcher.rs`.
+//! This transport is retained for potential future use with non-standard
+//! OpenAI-compatible providers (e.g. custom endpoints with non-standard auth
+//! or header requirements) but is **not** currently selected by the default
+//! dispatch path.
+
 use std::collections::HashMap;
 
 use crate::provider::{ChatRequest, ChatResponse};
 use crate::transport::chat_completions::{ChatCompletionsTransport, Transport, TransportError};
 use crate::transport::TransportBase;
 
+/// OpenAI-compatible provider transport.
+///
+/// Delegates to [`ChatCompletionsTransport`] for request normalization and
+/// response denormalization. Not currently selected by the default dispatch
+/// path — see module-level documentation for details.
 pub struct OpenAICompatTransport {
     base: TransportBase,
     inner: ChatCompletionsTransport,

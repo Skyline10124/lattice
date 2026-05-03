@@ -1,11 +1,12 @@
 use anyhow::Result;
 use crossterm::{
     event::{DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io;
+use std::io::{self, Write};
 
 mod app;
 mod event;
@@ -16,6 +17,17 @@ mod widgets;
 use app::App;
 use event::EventHandler;
 
+/// Drop guard that restores terminal state on panic or early exit.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = std::io::stdout().flush();
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env from working directory (API keys, etc.)
@@ -23,6 +35,7 @@ async fn main() -> Result<()> {
 
     // Setup terminal
     terminal::enable_raw_mode()?;
+    let _guard = TerminalGuard;
     let mut stdout = io::stdout();
     crossterm::execute!(
         stdout,
