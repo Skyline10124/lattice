@@ -241,7 +241,14 @@ struct AgentProfileRaw {
 fn verify_config_integrity(path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
     let hash_path = path.with_extension("toml.sha256");
     if !hash_path.exists() {
-        return Ok(()); // No hash file = no integrity check
+        if std::env::var("LATTICE_STRICT_CONFIG").unwrap_or_default() == "1" {
+            return Err(format!(
+                "Config integrity hash not found at {}; set LATTICE_STRICT_CONFIG=0 to allow unverified configs",
+                hash_path.display()
+            )
+            .into());
+        }
+        return Ok(()); // Graceful: no hash file = no integrity check
     }
     let expected = std::fs::read_to_string(&hash_path)?.trim().to_string();
     let actual = format!("{:x}", Sha256::digest(content.as_bytes()));
@@ -612,6 +619,7 @@ rule = { default = true }
 
     #[test]
     fn test_verify_config_integrity_no_sidecar() {
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
         let dir = std::env::temp_dir().join("lattice_test_no_sidecar");
         let _ = std::fs::create_dir_all(&dir);
         let toml_path = dir.join("agent.toml");
@@ -644,5 +652,31 @@ rule = { default = true }
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_strict_config_rejects_missing_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("test_agent.toml");
+        std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
+        // No .toml.sha256 sidecar — strict mode should fail
+        std::env::set_var("LATTICE_STRICT_CONFIG", "1");
+        let result = AgentProfile::load(&toml_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("integrity hash not found"));
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
+    }
+
+    #[test]
+    fn test_graceful_config_accepts_missing_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("test_agent.toml");
+        std::fs::write(&toml_path, "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n").unwrap();
+        // Explicitly set LATTICE_STRICT_CONFIG=0 (not strict) — should load fine without hash
+        std::env::set_var("LATTICE_STRICT_CONFIG", "0");
+        let result = AgentProfile::load(&toml_path);
+        assert!(result.is_ok());
+        std::env::remove_var("LATTICE_STRICT_CONFIG");
     }
 }

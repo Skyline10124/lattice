@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::config::Config;
@@ -10,6 +11,8 @@ pub enum ConfigAction {
     Init,
     Get { key: String },
     Set { key: String, value: String },
+    #[command(about = "Compute and write SHA-256 hash for an agent TOML config")]
+    Hash { path: String },
 }
 
 pub fn run(action: ConfigAction) -> Result<()> {
@@ -58,6 +61,20 @@ show_reasoning = true
                 value,
                 config_path.display()
             );
+        }
+        ConfigAction::Hash { path } => {
+            let file_path = std::path::Path::new(&path);
+            let content = std::fs::read_to_string(file_path)?;
+            let digest = Sha256::digest(content.as_bytes());
+            let hash_str = format!("{:x}", digest);
+            let hash_path = file_path.with_extension("toml.sha256");
+            std::fs::write(&hash_path, &hash_str)?;
+            println!(
+                "{} SHA-256 hash written to {}",
+                "\u{2713}".green(),
+                hash_path.display()
+            );
+            println!("{}", hash_str);
         }
     }
 
