@@ -10,3 +10,4 @@ Cargo.lock
 .lattice/
 .claude/
 .cursor/
+docs/
