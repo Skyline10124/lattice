@@ -48,6 +48,7 @@ pub trait PluginAgent {
 pub use sandbox::SandboxConfig;
 pub use tool_definitions::default_tool_definitions;
 pub use tools::DefaultToolExecutor;
+pub use tools::RegistryToolAccess;
 
 /// An async LLM agent with tool execution and conversation state.
 ///

@@ -13,6 +13,17 @@ use crate::sandbox::SandboxConfig;
 use crate::tool_error::ToolError;
 use crate::ToolExecutor;
 
+/// Trait abstracting tool registry access. lattice-harness::tools::ToolRegistry implements this.
+/// This abstraction lets DefaultToolExecutor (in lattice-agent) use ToolRegistry (in lattice-harness)
+/// without a direct crate dependency.
+pub trait RegistryToolAccess: Send + Sync {
+    fn get_handler(
+        &self,
+        tool_name: &str,
+    ) -> Option<std::sync::Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>>;
+    fn get_definitions(&self) -> Vec<lattice_core::types::ToolDefinition>;
+}
+
 /// Executes tools using the local filesystem and shell.
 ///
 /// Supports: read_file, grep, write_file, list_directory, bash, patch,
@@ -22,10 +33,14 @@ use crate::ToolExecutor;
 /// All tool operations are gated by the `sandbox` configuration
 /// (path validation, sensitive-file blocking, command allowlisting,
 /// URL scheme restrictions, and size/timeout limits).
+///
+/// When a `registry` is set, custom tool handlers from the registry are
+/// checked first before falling back to the default 7 tools.
 pub struct DefaultToolExecutor {
     pub project_root: String,
     pub sandbox: SandboxConfig,
     pub http_client: reqwest::Client,
+    pub registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
 }
 
 impl DefaultToolExecutor {
@@ -38,6 +53,23 @@ impl DefaultToolExecutor {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
+            registry: None,
+        }
+    }
+
+    pub fn new_with_registry(
+        project_root: &str,
+        registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
+    ) -> Self {
+        Self {
+            project_root: project_root.to_string(),
+            sandbox: SandboxConfig::default(),
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("reqwest client"),
+            registry,
         }
     }
 
@@ -53,6 +85,13 @@ impl ToolExecutor for DefaultToolExecutor {
     async fn execute(&self, call: &lattice_core::types::ToolCall) -> String {
         let args: serde_json::Value =
             serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+
+        // Check registry for custom tools first
+        if let Some(reg) = &self.registry {
+            if let Some(handler) = reg.get_handler(&call.function.name) {
+                return handler(args);
+            }
+        }
 
         match call.function.name.as_str() {
             "read_file" => {

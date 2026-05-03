@@ -54,6 +54,31 @@ impl ToolRegistry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|entry| entry.definition.clone()).collect()
+    }
+}
+
+impl lattice_agent::RegistryToolAccess for ToolRegistry {
+    fn get_handler(
+        &self,
+        tool_name: &str,
+    ) -> Option<std::sync::Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>> {
+        self.tools.get(tool_name).and_then(|entry| match &entry.handler {
+            ToolHandler::Native(f) => {
+                let original = std::sync::Arc::clone(f);
+                Some(std::sync::Arc::new(move |args: serde_json::Value| {
+                    original(args).unwrap_or_else(|e| e.to_string())
+                }) as std::sync::Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>)
+            }
+            ToolHandler::McpBacked { .. } => None,
+        })
+    }
+
+    fn get_definitions(&self) -> Vec<ToolDefinition> {
+        self.definitions()
+    }
 }
 
 /// Merge tool definitions from three layers. Priority: plugin > slot > shared.
