@@ -14,6 +14,8 @@ pub struct SandboxConfig {
     pub max_read_size: usize,
     /// Maximum file size for write operations (bytes). Default: 1 MB.
     pub max_write_size: usize,
+    /// Maximum HTTP response size for web_search (bytes). Default: 10 MB.
+    pub max_http_response_size: usize,
     /// Commands allowed via bash/run_command. Empty = any command.
     pub command_allowlist: Vec<String>,
     /// Max command execution time (seconds). Default: 30.
@@ -53,6 +55,7 @@ impl Default for SandboxConfig {
             ],
             max_read_size: 10 * 1024 * 1024, // 10 MB
             max_write_size: 1024 * 1024,     // 1 MB
+            max_http_response_size: 10 * 1024 * 1024, // 10 MB
             command_allowlist: vec![
                 "cargo test".into(),
                 "cargo clippy".into(),
@@ -760,5 +763,17 @@ mod tests {
         assert!(s.check_command("grep -rn 'TODO' src/").is_ok());
         assert!(s.check_command("ls -la").is_ok());
         assert!(s.check_command("find . -name '*.rs'").is_ok());
+    }
+
+    #[test]
+    fn test_sandbox_config_has_max_http_response_size() {
+        let mut config = SandboxConfig::default();
+        assert_eq!(config.max_http_response_size, 10 * 1024 * 1024);
+        // Verify max_http_response_size and max_read_size are independent fields:
+        // changing one must not affect the other.
+        let original_read_size = config.max_read_size;
+        config.max_http_response_size = 0;
+        assert_eq!(config.max_read_size, original_read_size,
+            "max_read_size should not change when max_http_response_size is modified");
     }
 }

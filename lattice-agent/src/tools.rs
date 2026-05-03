@@ -321,10 +321,29 @@ impl ToolExecutor for DefaultToolExecutor {
                     return e;
                 }
                 match self.http_client.get(url).send().await {
-                    Ok(response) => response
-                        .text()
-                        .await
-                        .unwrap_or_else(|e| ToolError::HttpError(e.to_string()).to_string()),
+                    Ok(response) => {
+                        let limit = self.sandbox.max_http_response_size;
+                        if let Some(content_length) = response.content_length() {
+                            if content_length > limit as u64 {
+                                return ToolError::HttpError(format!(
+                                    "Response too large: {} bytes (max {})",
+                                    content_length, limit
+                                ))
+                                .to_string();
+                            }
+                        }
+                        let bytes = response.bytes().await.unwrap_or_default();
+                        if bytes.len() > limit {
+                            let truncated = String::from_utf8_lossy(&bytes[..limit]);
+                            format!(
+                                "{}[TRUNCATED: response exceeded {} bytes]",
+                                truncated.trim_end(),
+                                limit
+                            )
+                        } else {
+                            String::from_utf8_lossy(&bytes).to_string()
+                        }
+                    }
                     Err(e) => ToolError::HttpError(e.to_string()).to_string(),
                 }
             }
