@@ -3,7 +3,7 @@
 **最后更新**: 2026-05-02
 **审核来源**: 蓝军自攻击全代码库安全审计（lattice-core, lattice-agent, lattice-harness, lattice-cli）
 **补充来源**: 2026-05-02 全代码库深扫（core/provider/streaming, agent/harness/bus, plugin/cli/python/tui）
-**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH, 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
+**状态**: 36 SECURITY ISSUES — 7 CRITICAL (ALL RESOLVED), 9 HIGH (ALL RESOLVED), 12 MEDIUM, 8 LOW；另有 22 个深扫工程问题见下方 DS-* 分区
 
 ---
 
@@ -178,7 +178,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:119` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: > 和 < 不在 metacharacter 黑名单中。"grep . < /etc/shadow" 读取系统文件，"cargo test > /etc/crontab" 覆盖关键文件。bash 工具仅调用 check_command()，不调用 check_read/check_write，完全绕过文件沙箱。
 
@@ -197,7 +197,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/tools.rs |
 | **文件** | `tools.rs:49-63, 90-99` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: check_read/check_write 和实际 fs 操作之间无原子性。并发攻击可替换 symlink 指向后再执行操作。
 
@@ -216,7 +216,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/tools.rs |
 | **文件** | `tools.rs:195` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: reqwest::blocking::get(url) 无任何超时配置。攻击者可通过 Slowloris 技术永久阻塞 agent 线程。
 
@@ -235,7 +235,7 @@
 | **来源** | [VULN-002](../issues/VULN-002-sandbox-write-allowlist-substring-bypass.md) |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:97` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: check_write() 使用 path.contains(prefix) 子串匹配。evil-lattice-core/ 匹配 lattice-core/ 前缀。结合 symlink 可写入任意位置。
 
@@ -253,7 +253,7 @@
 | **首次报告** | 2026-05-01 |
 | **来源** | [VULN-004](../issues/VULN-004-process-env-cross-request-contamination.md) |
 | **组件** | lattice-cli/src/commands/resolve.rs |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: 使用 std::env::set_var() 修改进程级环境变量。多请求并发时污染其他请求的凭证解析。
 
@@ -272,7 +272,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-core/src/provider.rs |
 | **文件** | `provider.rs:8-14` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: reqwest::Client 默认跟踪 HTTP 重定向。恶意端点可 302 → http://169.254.169.254/。validate_base_url() 仅检查初始 URL。Authorization header 随重定向发送。
 
@@ -291,7 +291,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-harness/src/handoff_rule.rs + pipeline.rs |
 | **文件** | `handoff_rule.rs:31-38` / `pipeline.rs:535-594` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: HandoffTarget::parse() 接受任意数量的 fork 目标，无上限。可创建 500 个线程同时调用 LLM API。
 
@@ -310,7 +310,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-harness/src/profile.rs |
 | **文件** | `profile.rs:127-144` |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: system_prompt() 拒绝 .. 但不解析 symlink。可创建 symlink 指向敏感文件，内容作为系统提示词注入 LLM provider。
 
@@ -328,7 +328,7 @@
 | **首次报告** | 2026-05-01 |
 | **来源** | [VULN-003](../issues/VULN-003-sandbox-sensitive-file-filter-noncanonical.md) |
 | **组件** | lattice-agent/src/sandbox.rs |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: 敏感文件过滤使用 path.contains(".env") 子串匹配，不解析路径。可能误挡合法文件，也可能被编码或 symlink 绕过。
 
@@ -472,7 +472,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/router.rs + catalog/data.json |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: 普通 catalog resolve、`provider_override`、permissive `provider/model` fallback 的 credential/base_url 语义不一致。部分路径即使 credential missing 或 provider default base_url 为空，也可能返回 `Ok(ResolvedModel)`。
 
@@ -490,7 +490,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-harness/src/pipeline.rs + runner.rs + micro_agent.rs |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: 标准 pipeline 构建 `AgentRunner` 时主要执行 `Agent::new(resolved)` 和可选 memory 注入，未完整应用 profile 中的 `system.prompt`、`tools.enabled`、tool executor、sandbox policy 等配置。
 
@@ -508,7 +508,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-harness/src/runner.rs |
-| **状态** | Open |
+| **状态** | Resolved (22863b8) |
 
 **描述**: `AgentRunner::run_once()` 主要收集 `LoopEvent::Token`，没有把 `LoopEvent::Error` 转成 `Err`。如果底层 model/provider/auth/network 失败，runner 可能把空内容 fallback 成 `{"content":""}` 并继续 pipeline。
 
