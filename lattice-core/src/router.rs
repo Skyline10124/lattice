@@ -138,7 +138,7 @@ impl ModelRouter {
                 {
                     normalized.clone()
                 } else {
-                    return self.resolve_permissive(model_name);
+                    return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
                 }
             }
         };
@@ -151,7 +151,7 @@ impl ModelRouter {
 
         let entry = match entry {
             Some(e) => e,
-            None => return self.resolve_permissive(model_name),
+            None => return Err(LatticeError::ModelNotFound { model: model_name.to_string() }),
         };
 
         if let Some(override_provider) = provider_override {
@@ -180,6 +180,15 @@ impl ModelRouter {
                         credential_status,
                     };
                     validate_base_url(&model.base_url)?;
+                    if model.base_url.is_empty() && model.credential_status != CredentialStatus::NotRequired {
+                        return Err(LatticeError::Config {
+                            message: format!(
+                                "Model '{}' resolved with empty base_url for provider '{}' (credential required). \
+                                 Set a valid API endpoint URL in catalog defaults or config.",
+                                canonical_id, model.provider
+                            ),
+                        });
+                    }
                     return Ok(model);
                 }
             }
@@ -238,6 +247,15 @@ impl ModelRouter {
                     credential_status: CredentialStatus::Present,
                 };
                 validate_base_url(&model.base_url)?;
+                if model.base_url.is_empty() && model.credential_status != CredentialStatus::NotRequired {
+                    return Err(LatticeError::Config {
+                        message: format!(
+                            "Model '{}' resolved with empty base_url for provider '{}' (credential required). \
+                             Set a valid API endpoint URL in catalog defaults or config.",
+                            canonical_id, model.provider
+                        ),
+                    });
+                }
                 return Ok(model);
             }
         }
@@ -264,37 +282,28 @@ impl ModelRouter {
             });
         }
 
-        let best = &sorted_providers[0];
-        if !Self::is_credentialless(best) {
-            let keys: Vec<&str> = PROVIDER_CREDENTIALS_RAW
-                .iter()
-                .filter(|(s, _)| *s == best.provider_id)
-                .flat_map(|(_, creds)| creds.iter().map(|(ev, _)| *ev))
-                .collect();
-            let hint = if keys.is_empty() {
-                format!("provider '{}' requires a credential", best.provider_id)
-            } else {
-                format!(
-                    "provider '{}' requires one of: {}",
-                    best.provider_id,
-                    keys.join(", ")
-                )
-            };
-            return Err(LatticeError::Config { message: hint });
+        // All providers Missing — list every credentialled provider with its env vars
+        let mut provider_details: Vec<String> = Vec::new();
+        for pe in &sorted_providers {
+            if !Self::is_credentialless(pe) {
+                let keys: Vec<&str> = PROVIDER_CREDENTIALS_RAW
+                    .iter()
+                    .filter(|(s, _)| *s == pe.provider_id)
+                    .flat_map(|(_, creds)| creds.iter().map(|(ev, _)| *ev))
+                    .collect();
+                provider_details.push(format!("{} ({})", pe.provider_id, keys.join(", ")));
+            }
         }
-        let model = ResolvedModel {
-            canonical_id: canonical_id.clone(),
-            provider: best.provider_id.clone(),
-            api_key: None,
-            base_url: self.resolve_base_url(&best.provider_id, &best.base_url),
-            api_protocol: best.api_protocol.clone(),
-            api_model_id: best.api_model_id.clone(),
-            context_length: entry.context_length,
-            provider_specific: best.provider_specific.clone(),
-            credential_status: CredentialStatus::NotRequired,
+        let hint = if provider_details.is_empty() {
+            format!("No credentialled providers available for model '{}'", canonical_id)
+        } else {
+            format!(
+                "All providers Missing credentials for '{}': {}. Set one of these env vars or use with_credentials()",
+                canonical_id,
+                provider_details.join("; ")
+            )
         };
-        validate_base_url(&model.base_url)?;
-        Ok(model)
+        Err(LatticeError::Config { message: hint })
     }
 
     /// Determine the credential status from an api_key and provider entry.
@@ -482,11 +491,14 @@ impl ModelRouter {
         None
     }
 
-    /// Permissive fallback for models not in the catalog.
+    /// Inspect a model without requiring it to be callable.
+    ///
+    /// Unlike `resolve()`, this allows returning models with `Missing` credentials
+    /// and empty `base_url`. Useful for diagnostic commands (`doctor`, `debug`).
     ///
     /// Tries "provider/model" split, looks up provider defaults,
     /// and constructs a ResolvedModel from the defaults.
-    pub fn resolve_permissive(&self, model_name: &str) -> Result<ResolvedModel, LatticeError> {
+    pub fn inspect_model(&self, model_name: &str) -> Result<ResolvedModel, LatticeError> {
         if let Some((provider_part, model_part)) = model_name.split_once('/') {
             let provider_lower = provider_part.to_lowercase();
             let model_lower = model_part.to_lowercase();
@@ -518,11 +530,127 @@ impl ModelRouter {
                 validate_base_url(&model.base_url)?;
                 return Ok(model);
             }
+            // Provider has no defaults — "provider/model" format is specifically for permissive fallback
+            return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
         }
 
-        Err(LatticeError::ModelNotFound {
-            model: model_name.to_string(),
-        })
+        // 2. Try catalog and custom models — inspect allows Missing credentials and empty base_url
+        // This path only handles non-"provider/model" names (no "/" separator)
+        let normalized = normalize_model_id(model_name);
+        let canonical_id = match self.resolve_alias(&normalized) {
+            Some(id) => id,
+            None => {
+                if self.catalog.get_model(&normalized).is_some()
+                    || self.custom_models.contains_key(&normalized)
+                {
+                    normalized.clone()
+                } else {
+                    return Err(LatticeError::ModelNotFound { model: model_name.to_string() });
+                }
+            }
+        };
+
+        let entry = self
+            .catalog
+            .get_model(&canonical_id)
+            .cloned()
+            .or_else(|| self.custom_models.get(&canonical_id).cloned());
+
+        let entry = match entry {
+            Some(e) => e,
+            None => return Err(LatticeError::ModelNotFound { model: model_name.to_string() }),
+        };
+
+        if entry.providers.is_empty() {
+            return Err(LatticeError::Config {
+                message: format!("no providers available for model '{}'", canonical_id),
+            });
+        }
+
+        let mut sorted_providers = entry.providers.clone();
+        sorted_providers.sort_by_key(|p| p.priority);
+
+        // Pick best provider following resolve priority logic, but without rejection checks
+        let mut best_credentialless: Option<&CatalogProviderEntry> = None;
+        let mut current_priority = u32::MAX;
+
+        for pe in &sorted_providers {
+            if pe.priority != current_priority {
+                if let Some(cpe) = best_credentialless.take() {
+                    let model = ResolvedModel {
+                        canonical_id: canonical_id.clone(),
+                        provider: cpe.provider_id.clone(),
+                        api_key: None,
+                        base_url: self.resolve_base_url(&cpe.provider_id, &cpe.base_url),
+                        api_protocol: cpe.api_protocol.clone(),
+                        api_model_id: cpe.api_model_id.clone(),
+                        context_length: entry.context_length,
+                        provider_specific: cpe.provider_specific.clone(),
+                        credential_status: CredentialStatus::NotRequired,
+                    };
+                    validate_base_url(&model.base_url)?;
+                    return Ok(model);
+                }
+                current_priority = pe.priority;
+            }
+
+            if Self::is_credentialless(pe) {
+                if best_credentialless.is_none() {
+                    best_credentialless = Some(pe);
+                }
+                continue;
+            }
+
+            let api_key = self.resolve_credentials(pe);
+            if api_key.is_some() {
+                let model = ResolvedModel {
+                    canonical_id: canonical_id.clone(),
+                    provider: pe.provider_id.clone(),
+                    api_key,
+                    base_url: self.resolve_base_url(&pe.provider_id, &pe.base_url),
+                    api_protocol: pe.api_protocol.clone(),
+                    api_model_id: pe.api_model_id.clone(),
+                    context_length: entry.context_length,
+                    provider_specific: pe.provider_specific.clone(),
+                    credential_status: CredentialStatus::Present,
+                };
+                validate_base_url(&model.base_url)?;
+                return Ok(model);
+            }
+        }
+
+        if let Some(cpe) = best_credentialless.take() {
+            let model = ResolvedModel {
+                canonical_id: canonical_id.clone(),
+                provider: cpe.provider_id.clone(),
+                api_key: None,
+                base_url: self.resolve_base_url(&cpe.provider_id, &cpe.base_url),
+                api_protocol: cpe.api_protocol.clone(),
+                api_model_id: cpe.api_model_id.clone(),
+                context_length: entry.context_length,
+                provider_specific: cpe.provider_specific.clone(),
+                credential_status: CredentialStatus::NotRequired,
+            };
+            validate_base_url(&model.base_url)?;
+            return Ok(model);
+        }
+
+        // All providers Missing — return first provider for diagnostic info
+        // inspect_model allows Missing credentials and empty base_url
+        let pe = &sorted_providers[0];
+        let model = ResolvedModel {
+            canonical_id: canonical_id.clone(),
+            provider: pe.provider_id.clone(),
+            api_key: None,
+            base_url: self.resolve_base_url(&pe.provider_id, &pe.base_url),
+            api_protocol: pe.api_protocol.clone(),
+            api_model_id: pe.api_model_id.clone(),
+            context_length: entry.context_length,
+            provider_specific: pe.provider_specific.clone(),
+            credential_status: CredentialStatus::Missing,
+        };
+        validate_base_url(&model.base_url)?;
+        Ok(model)
     }
 
     /// Register a custom model at runtime.
@@ -1075,5 +1203,136 @@ mod tests {
             }
             other => panic!("Expected Err(LatticeError::Config), got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_inspect_model_returns_missing_credential() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+        // "openai/gpt-5-turbo" is not in catalog but "openai" is a known provider
+        // inspect_model should return Ok with Missing credential status
+        let router = ModelRouter::new();
+        let result = router.inspect_model("openai/gpt-5-turbo");
+        assert!(result.is_ok(), "inspect_model should return Ok even with Missing credentials");
+        let model = result.unwrap();
+        assert_eq!(model.credential_status, CredentialStatus::Missing);
+        assert_eq!(model.provider, "openai");
+        restore_all(&saved);
+    }
+
+    #[test]
+    fn test_resolve_rejects_unknown_model_no_permissive_fallthrough() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+        // A model name that doesn't exist in catalog and isn't "provider/model" format
+        let router = ModelRouter::new();
+        let result = router.resolve("totally-unknown-model-xyz", None);
+        assert!(result.is_err(), "resolve should not fall through to permissive for unknown models");
+        match result.err().unwrap() {
+            LatticeError::ModelNotFound { model } => {
+                assert_eq!(model, "totally-unknown-model-xyz");
+            }
+            other => panic!("Expected ModelNotFound, got {:?}", other),
+        }
+        restore_all(&saved);
+    }
+
+    #[test]
+    fn test_resolve_rejects_unknown_provider_model_format() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+        // "provider/model" format but provider has no defaults in catalog
+        let router = ModelRouter::new();
+        let result = router.resolve("unknown-provider/some-model", None);
+        assert!(result.is_err(), "resolve should reject unknown provider/model format");
+        // normalize_model_id strips the provider prefix, so "some-model" is not in catalog
+        match result.err().unwrap() {
+            LatticeError::ModelNotFound { .. } => {}
+            other => panic!("Expected ModelNotFound, got {:?}", other),
+        }
+        restore_all(&saved);
+    }
+
+    #[test]
+    fn test_resolve_rejects_empty_base_url_for_credentialed_provider() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+
+        let mut router = ModelRouter::with_credentials(HashMap::from([
+            ("TEST_EMPTY_URL_API_KEY".to_string(), "sk-test".to_string()),
+        ]));
+        // Register a model whose provider has empty effective base_url and requires credentials
+        // Using a provider_id not in provider_defaults so resolve_base_url returns ""
+        let entry = ModelCatalogEntry {
+            canonical_id: "test-empty-url-model".into(),
+            context_length: 0,
+            providers: vec![CatalogProviderEntry {
+                provider_id: "custom-empty-url".into(),
+                api_model_id: "test-empty-url-model".into(),
+                priority: 1,
+                credential_keys: HashMap::from([(
+                    "api_key".to_string(),
+                    "TEST_EMPTY_URL_API_KEY".to_string(),
+                )]),
+                base_url: Some("".into()), // empty base_url
+                api_protocol: ApiProtocol::OpenAiChat,
+                provider_specific: HashMap::new(),
+            }],
+            aliases: vec![],
+        };
+        router.register_model(entry);
+
+        // with_credentials supplies the key, so we get Present status but empty base_url
+        let result = router.resolve("test-empty-url-model", None);
+        assert!(
+            result.is_err(),
+            "resolve should reject empty base_url for credentialed provider"
+        );
+        if let Err(LatticeError::Config { message }) = result {
+            assert!(
+                message.contains("empty base_url"),
+                "error should mention empty base_url, got: {}",
+                message
+            );
+        }
+
+        restore_all(&saved);
+    }
+
+    #[test]
+    fn test_inspect_model_allows_empty_base_url() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let saved = save_and_clear_all();
+
+        let mut router = ModelRouter::new();
+        // Register a model whose provider has empty base_url and requires credentials
+        // Using provider_id not in provider_defaults so resolve_base_url returns ""
+        let entry = ModelCatalogEntry {
+            canonical_id: "test-inspect-empty-url".into(),
+            context_length: 0,
+            providers: vec![CatalogProviderEntry {
+                provider_id: "custom-inspect-prov".into(),
+                api_model_id: "test-inspect-empty-url".into(),
+                priority: 1,
+                credential_keys: HashMap::from([(
+                    "api_key".to_string(),
+                    "TEST_INSPECT_API_KEY".to_string(),
+                )]),
+                base_url: Some("".into()),
+                api_protocol: ApiProtocol::OpenAiChat,
+                provider_specific: HashMap::new(),
+            }],
+            aliases: vec![],
+        };
+        router.register_model(entry);
+
+        // No credential set — Missing status
+        let result = router.inspect_model("test-inspect-empty-url");
+        assert!(result.is_ok(), "inspect_model should allow empty base_url");
+        let model = result.unwrap();
+        assert!(model.base_url.is_empty(), "base_url should be empty");
+        assert_eq!(model.credential_status, CredentialStatus::Missing);
+
+        restore_all(&saved);
     }
 }

@@ -12,7 +12,7 @@
 //! - BUG: Ollama (priority 1, no creds needed) is NOT selected over Anthropic
 //!   (priority 5, with API key) because the priority loop only returns providers
 //!   with api_key.is_some()
-//! - resolve_permissive() constructs ResolvedModel from provider defaults
+//! - inspect_model() constructs ResolvedModel from provider defaults
 //! - normalize_model_id() is the hot path that transforms user input before resolution
 
 use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry};
@@ -423,15 +423,15 @@ fn fallback_errors_when_no_credentials_available() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SECTION 5: resolve_permissive() characterization
+// SECTION 5: inspect_model() characterization
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
 fn permissive_splits_provider_model_format() {
-    // CHARACTERIZATION: resolve_permissive() splits on the first '/'
+    // CHARACTERIZATION: inspect_model() splits on the first '/'
     // to extract provider_part and model_part.
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("anthropic/claude-sonnet-4.6");
+    let result = router.inspect_model("anthropic/claude-sonnet-4.6");
     assert!(result.is_ok());
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "anthropic");
@@ -440,10 +440,10 @@ fn permissive_splits_provider_model_format() {
 
 #[test]
 fn permissive_looks_up_provider_defaults() {
-    // CHARACTERIZATION: resolve_permissive() uses catalog provider_defaults
+    // CHARACTERIZATION: inspect_model() uses catalog provider_defaults
     // to populate base_url, api_protocol, and credential_keys.
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("anthropic/claude-sonnet-4.6");
+    let result = router.inspect_model("anthropic/claude-sonnet-4.6");
     assert!(result.is_ok());
     let resolved = result.unwrap();
     assert_eq!(resolved.base_url, "https://api.anthropic.com");
@@ -452,7 +452,7 @@ fn permissive_looks_up_provider_defaults() {
 
 #[test]
 fn permissive_resolves_credentials_from_defaults() {
-    // CHARACTERIZATION: resolve_permissive() constructs a CatalogProviderEntry
+    // CHARACTERIZATION: inspect_model() constructs a CatalogProviderEntry
     // from provider defaults (including credential_keys) and then calls
     // resolve_credentials() on it.
     let _lock = crate::env_lock::lock();
@@ -461,7 +461,7 @@ fn permissive_resolves_credentials_from_defaults() {
 
     let router = ModelRouter::new();
     let resolved = router
-        .resolve_permissive("anthropic/my-custom-model")
+        .inspect_model("anthropic/my-custom-model")
         .unwrap();
     assert_eq!(resolved.api_key.as_deref(), Some("ant-permissive-key"));
 
@@ -476,7 +476,7 @@ fn permissive_returns_none_api_key_without_env_var() {
 
     let router = ModelRouter::new();
     let resolved = router
-        .resolve_permissive("anthropic/my-custom-model")
+        .inspect_model("anthropic/my-custom-model")
         .unwrap();
     assert!(resolved.api_key.is_none());
 
@@ -485,11 +485,11 @@ fn permissive_returns_none_api_key_without_env_var() {
 
 #[test]
 fn permissive_uses_default_context_length() {
-    // CHARACTERIZATION: resolve_permissive() sets context_length to 0
+    // CHARACTERIZATION: inspect_model() sets context_length to 0
     // because permissive models have no catalog data.
     let router = ModelRouter::new();
     let resolved = router
-        .resolve_permissive("anthropic/my-custom-model")
+        .inspect_model("anthropic/my-custom-model")
         .unwrap();
     assert_eq!(resolved.context_length, 0);
 }
@@ -497,7 +497,7 @@ fn permissive_uses_default_context_length() {
 #[test]
 fn permissive_fails_for_unknown_provider() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("unknown-provider/model");
+    let result = router.inspect_model("unknown-provider/model");
     assert!(
         result.is_err(),
         "should fail for provider not in provider_defaults"
@@ -506,10 +506,10 @@ fn permissive_fails_for_unknown_provider() {
 
 #[test]
 fn permissive_fails_without_slash() {
-    // CHARACTERIZATION: resolve_permissive() requires a '/' in the model name.
+    // CHARACTERIZATION: inspect_model() requires a '/' in the model name.
     // Without it, there's no (provider, model) split.
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("just-a-model-name");
+    let result = router.inspect_model("just-a-model-name");
     assert!(result.is_err());
 }
 
@@ -521,7 +521,7 @@ fn permissive_provider_model_becomes_canonical_id() {
 
     let router = ModelRouter::new();
     let resolved = router
-        .resolve_permissive("anthropic/claude-sonnet-4.6")
+        .inspect_model("anthropic/claude-sonnet-4.6")
         .unwrap();
     assert_eq!(resolved.canonical_id, "claude-sonnet-4.6");
 
@@ -530,7 +530,7 @@ fn permissive_provider_model_becomes_canonical_id() {
 
 #[test]
 fn permissive_deepseek_provider() {
-    // CHARACTERIZATION: resolve_permissive() works for providers in provider_defaults.
+    // CHARACTERIZATION: inspect_model() works for providers in provider_defaults.
     // "openrouter" is NOT in provider_defaults, so it would fail.
     // "deepseek" IS in provider_defaults.
     let _lock = crate::env_lock::lock();
@@ -538,7 +538,7 @@ fn permissive_deepseek_provider() {
     env::set_var("DEEPSEEK_API_KEY", "ds-test-key");
 
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("deepseek/deepseek-chat");
+    let result = router.inspect_model("deepseek/deepseek-chat");
     assert!(result.is_ok());
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "deepseek");
@@ -550,9 +550,9 @@ fn permissive_deepseek_provider() {
 #[test]
 fn permissive_openrouter_not_in_defaults() {
     // CHARACTERIZATION: "openrouter" is NOT in catalog provider_defaults,
-    // so resolve_permissive() returns ModelNotFound for it.
+    // so inspect_model() returns ModelNotFound for it.
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("openrouter/anthropic/claude-sonnet-4.6");
+    let result = router.inspect_model("openrouter/anthropic/claude-sonnet-4.6");
     assert!(
         result.is_err(),
         "openrouter is not in provider_defaults, should fail"
@@ -696,18 +696,21 @@ fn resolve_unnormalized_input_gets_normalized() {
 }
 
 #[test]
-fn resolve_permissive_called_for_unknown_models() {
+fn inspect_model_used_for_unknown_provider_model_format() {
     // CHARACTERIZATION: When a model is not in the catalog and not an alias,
-    // resolve() calls resolve_permissive() automatically.
-    // This enables "provider/model" syntax for uncataloged models.
+    // resolve() returns ModelNotFound. inspect_model() allows the
+    // "provider/model" syntax for uncataloged models (diagnostic use).
     let _lock = crate::env_lock::lock();
     let prev = crate::save_env("OPENAI_API_KEY");
     env::set_var("OPENAI_API_KEY", "sk-test");
 
     let router = ModelRouter::new();
-    // "openai/gpt-future-model" is not in the catalog but
-    // "openai" is a known provider — permissive fallback works
-    let result = router.resolve("openai/gpt-future-model", None);
+    // "openai/gpt-future-model" is not in the catalog — resolve() returns Err
+    let resolve_result = router.resolve("openai/gpt-future-model", None);
+    assert!(resolve_result.is_err(), "resolve() should not fall through to inspect_model for unknown models");
+
+    // But inspect_model() still allows "provider/model" for known providers
+    let result = router.inspect_model("openai/gpt-future-model");
     assert!(result.is_ok());
     let resolved = result.unwrap();
     assert_eq!(resolved.provider, "openai");
@@ -744,7 +747,7 @@ fn credentialless_provider_ollama_resolves_with_none_api_key() {
 
     let router = ModelRouter::new();
 
-    let result = router.resolve_permissive("ollama/llama3");
+    let result = router.inspect_model("ollama/llama3");
     if let Ok(resolved) = result {
         assert_eq!(resolved.provider, "ollama");
         assert!(

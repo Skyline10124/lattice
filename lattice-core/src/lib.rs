@@ -28,6 +28,14 @@ pub fn resolve(model: &str) -> Result<ResolvedModel, LatticeError> {
     ModelRouter::new().resolve(model, None)
 }
 
+/// Inspect a model without requiring it to be callable.
+///
+/// Unlike `resolve()`, this allows returning models with Missing credentials
+/// and empty base_url. Useful for diagnostic commands (`doctor`, `debug`).
+pub fn inspect_model(model: &str) -> Result<ResolvedModel, LatticeError> {
+    ModelRouter::new().inspect_model(model)
+}
+
 // ---------------------------------------------------------------------------
 // chat() — streaming chat
 // ---------------------------------------------------------------------------

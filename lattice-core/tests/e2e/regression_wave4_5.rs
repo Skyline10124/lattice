@@ -14,7 +14,7 @@
 //! - T31 (L1): OpenAI SSE delta tracking
 //! - T32 (L2+L3): Model body extraction + retry_after parsing
 //! - T33 (L4): HTTP status code classification matrix
-//! - T34 (L7): resolve_permissive normalization
+//! - T34 (L7): inspect_model normalization
 //! - T35 (L9): ChatRequest model field consistency
 
 use std::collections::HashMap;
@@ -595,13 +595,13 @@ fn error_classify_is_not_retryable_for_other_errors() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Wave 5: T34 (L7) — resolve_permissive with uppercase/mixed-case providers
+// Wave 5: T34 (L7) — inspect_model with uppercase/mixed-case providers
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn resolve_permissive_works_with_lowercase_provider() {
+fn inspect_model_works_with_lowercase_provider() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("anthropic/claude-sonnet-4.6");
+    let result = router.inspect_model("anthropic/claude-sonnet-4.6");
     assert!(
         result.is_ok(),
         "should resolve known provider in provider/model format"
@@ -612,10 +612,10 @@ fn resolve_permissive_works_with_lowercase_provider() {
 }
 
 #[test]
-fn resolve_permissive_works_with_uppercase_provider() {
+fn inspect_model_works_with_uppercase_provider() {
     // L7 regression: verify provider is lowercased during permissive resolution
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("ANTHROPIC/claude-sonnet-4.6");
+    let result = router.inspect_model("ANTHROPIC/claude-sonnet-4.6");
     assert!(
         result.is_ok(),
         "uppercase provider should be normalized to lowercase"
@@ -625,9 +625,9 @@ fn resolve_permissive_works_with_uppercase_provider() {
 }
 
 #[test]
-fn resolve_permissive_works_with_mixed_case_provider() {
+fn inspect_model_works_with_mixed_case_provider() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("OpenAI/gpt-4o");
+    let result = router.inspect_model("OpenAI/gpt-4o");
     assert!(
         result.is_ok(),
         "mixed-case provider should be normalized to lowercase"
@@ -637,9 +637,9 @@ fn resolve_permissive_works_with_mixed_case_provider() {
 }
 
 #[test]
-fn resolve_permissive_rejects_unknown_provider() {
+fn inspect_model_rejects_unknown_provider() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("nonexistent42/model-name");
+    let result = router.inspect_model("nonexistent42/model-name");
     assert!(result.is_err(), "unknown provider should return error");
 }
 
@@ -826,7 +826,7 @@ fn openai_sse_multiple_tool_calls_tracked_correctly() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Wave 5: model ID normalization (used by resolve_permissive path)
+// Wave 5: model ID normalization (used by inspect_model path)
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -906,9 +906,9 @@ fn router_resolve_uses_correct_provider_details() {
 }
 
 #[test]
-fn router_resolve_permissive_gives_api_model_id_not_canonical_id() {
+fn router_inspect_model_gives_api_model_id_not_canonical_id() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("openai/gpt-4o");
+    let result = router.inspect_model("openai/gpt-4o");
     assert!(result.is_ok());
     let model = result.unwrap();
     // api_model_id should be the model part from the input
@@ -917,13 +917,13 @@ fn router_resolve_permissive_gives_api_model_id_not_canonical_id() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Wave 5: Provider defaults used by resolve_permissive
+// Wave 5: Provider defaults used by inspect_model
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn resolve_permissive_uses_provider_defaults_for_base_url() {
+fn inspect_model_uses_provider_defaults_for_base_url() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("anthropic/claude-sonnet-4-6");
+    let result = router.inspect_model("anthropic/claude-sonnet-4-6");
     assert!(result.is_ok());
     let model = result.unwrap();
     assert_eq!(model.base_url, "https://api.anthropic.com");
@@ -931,9 +931,9 @@ fn resolve_permissive_uses_provider_defaults_for_base_url() {
 }
 
 #[test]
-fn resolve_permissive_uses_provider_defaults_for_gemini() {
+fn inspect_model_uses_provider_defaults_for_gemini() {
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("gemini/gemini-2.5-flash");
+    let result = router.inspect_model("gemini/gemini-2.5-flash");
     assert!(result.is_ok());
     let model = result.unwrap();
     assert_eq!(model.provider, "gemini");

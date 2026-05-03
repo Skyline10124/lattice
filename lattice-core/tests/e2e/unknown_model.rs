@@ -16,14 +16,19 @@ fn user_message(content: &str) -> Message {
 }
 
 #[test]
-fn test_permissive_fallback_provider_model_format() {
+fn test_inspect_model_provider_model_format() {
     let _lock = crate::env_lock::lock();
     let saved = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
     let router = ModelRouter::new();
-    let result = router.resolve("anthropic/claude-opus-4", None);
+    // resolve() no longer falls through for non-catalog models;
+    // use inspect_model() for diagnostic resolution of "provider/model" format.
+    let resolve_result = router.resolve("anthropic/claude-opus-4", None);
+    assert!(resolve_result.is_err(), "resolve() should not fall through for non-catalog models");
+
+    let result = router.inspect_model("anthropic/claude-opus-4");
     assert!(
         result.is_ok(),
-        "provider/model format should resolve via permissive fallback"
+        "provider/model format should resolve via inspect_model"
     );
 
     let resolved = result.unwrap();
@@ -38,7 +43,7 @@ fn test_permissive_fallback_openai_model() {
     let _lock = crate::env_lock::lock();
     let saved = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
     let router = ModelRouter::new();
-    let result = router.resolve_permissive("openai/gpt-4o-mini");
+    let result = router.inspect_model("openai/gpt-4o-mini");
     assert!(
         result.is_ok(),
         "openai/model format should resolve via permissive fallback"
@@ -52,14 +57,19 @@ fn test_permissive_fallback_openai_model() {
 }
 
 #[test]
-fn test_permissive_fallback_gemini_model() {
+fn test_inspect_model_gemini_model() {
     let _lock = crate::env_lock::lock();
     let saved = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
     let router = ModelRouter::new();
-    let result = router.resolve("gemini/gemini-2.5-flash", None);
+    // resolve() no longer falls through for non-catalog models;
+    // use inspect_model() for diagnostic resolution.
+    let resolve_result = router.resolve("gemini/gemini-2.5-flash", None);
+    assert!(resolve_result.is_err(), "resolve() should not fall through for non-catalog models");
+
+    let result = router.inspect_model("gemini/gemini-2.5-flash");
     assert!(
         result.is_ok(),
-        "gemini/model format should resolve via permissive fallback"
+        "gemini/model format should resolve via inspect_model"
     );
 
     let resolved = result.unwrap();
@@ -128,7 +138,7 @@ fn test_permissive_resolved_model_fields() {
     let _lock = crate::env_lock::lock();
     let saved = crate::isolate_env(crate::ALL_CREDENTIAL_ENV_VARS);
     let router = ModelRouter::new();
-    let resolved = router.resolve_permissive("openai/gpt-4o-mini").unwrap();
+    let resolved = router.inspect_model("openai/gpt-4o-mini").unwrap();
 
     assert_eq!(resolved.provider, "openai");
     assert_eq!(resolved.api_model_id, "gpt-4o-mini");
