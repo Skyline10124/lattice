@@ -1,7 +1,7 @@
 # LATTICE 活跃问题追踪
 
 **最后更新**: 2026-05-03
-**状态**: ALL ISSUES RESOLVED — see [resolved-issues.md](resolved-issues.md) for archive
+**状态**: 11 Resolved / 20 Partial / 2 Open — 逐项状态见下表
 
 ---
 
@@ -117,7 +117,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/sandbox.rs + tools.rs |
 | **文件** | `sandbox.rs:20` / `tools.rs:135` |
-| **状态** | Resolved (bdd6341) |
+| **状态** | Partial (bdd6341) — timeout wrapper added, still sh -c |
 
 **描述**: max_command_timeout: u32 = 30 已定义但 tools.rs 中的 bash 执行完全未使用。permissive 模式下 sleep 99999 即永久阻塞 agent 线程。
 
@@ -136,7 +136,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-harness/src/profile.rs |
 | **文件** | `profile.rs:114-118` |
-| **状态** | Resolved (bdd6341) |
+| **状态** | Partial (bdd6341) — SHA-256 sidecar opt-in, not enforced by default |
 
 **描述**: agent.toml 配置文件无数字签名或哈希校验。攻击者可添加 default=true 的 handoff 规则重定向到恶意 agent。watcher 自动 hot-reload 无完整性检查。
 
@@ -195,7 +195,7 @@
 | **来源** | 蓝军自攻击安全审计 |
 | **组件** | lattice-agent/src/tools.rs |
 | **文件** | `tools.rs:49-63, 90-99` |
-| **状态** | Resolved (22863b8) |
+| **状态** | Partial (22863b8) — canonicalize added, list_directory/patch edge cases remain |
 
 **描述**: check_read/check_write 和实际 fs 操作之间无原子性。并发攻击可替换 symlink 指向后再执行操作。
 
@@ -233,7 +233,7 @@
 | **来源** | [VULN-002](../issues/VULN-002-sandbox-write-allowlist-substring-bypass.md) |
 | **组件** | lattice-agent/src/sandbox.rs |
 | **文件** | `sandbox.rs:97` |
-| **状态** | Resolved (22863b8) |
+| **状态** | Partial (22863b8) — canonicalize+starts_with added, symlink edge cases remain |
 
 **描述**: check_write() 使用 path.contains(prefix) 子串匹配。evil-lattice-core/ 匹配 lattice-core/ 前缀。结合 symlink 可写入任意位置。
 
@@ -326,7 +326,7 @@
 | **首次报告** | 2026-05-01 |
 | **来源** | [VULN-003](../issues/VULN-003-sandbox-sensitive-file-filter-noncanonical.md) |
 | **组件** | lattice-agent/src/sandbox.rs |
-| **状态** | Resolved (22863b8) |
+| **状态** | Partial (22863b8) — component matching added, not exhaustive |
 
 **描述**: 敏感文件过滤使用 path.contains(".env") 子串匹配，不解析路径。可能误挡合法文件，也可能被编码或 symlink 绕过。
 
@@ -339,12 +339,12 @@
 ## P2 — MEDIUM 安全/设计问题（12 项）
 
 ### P2-01: 敏感文件列表严重不完整 [VULN-015]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:36-43` | **状态**: Resolved (3b68a95)
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:36-43` | **状态**: Partial (3b68a95) — expanded to 16 items, still not complete
 
 **描述**: 仅 6 项。缺少 .git/config、~/.ssh/id_*、~/.aws/credentials、.npmrc 等。
 
 ### P2-02: DNS rebinding 绕过 HTTPS SSRF [VULN-016]
-**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:162` | **状态**: Resolved (3b68a95)
+**组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:162` | **状态**: Partial (3b68a95) — nip/xip blocked, DNS-resolve IP check missing
 
 **描述**: DNS rebinding 服务（nip.io, xip.io）可解析域名到内网 IP，绕过 host 检查。
 
@@ -361,7 +361,7 @@
 ### P2-05: 多向量组合绕过 [VULN-019]
 **组件**: lattice-agent/src/sandbox.rs | **文件**: `sandbox.rs:132-133` | **状态**: Resolved (3b68a95)
 
-**描述**: PATH 注入 + 子进程继承 + check_command 参数不验证。
+**描述**: PATH 注入 + 子进程继承 + check_command 参数不验证。**状态**: Partial (3b68a95) — PATH=/LD_PRELOAD= blocked, still sh -c
 
 ### P2-06: URL 验证 userinfo 注入绕过 [VULN-021]
 **组件**: lattice-core/src/router.rs | **文件**: `router.rs:592-624` | **状态**: Resolved (3b68a95)
@@ -369,12 +369,12 @@
 **描述**: https://anything@169.254.169.254/ 中 anything 被视为用户名而非 host。
 
 ### P2-07: HTTP header 注入 via header: 前缀 [VULN-022]
-**组件**: lattice-core/src/lib.rs + transport/gemini.rs | **状态**: Resolved (6d5b044)
+**组件**: lattice-core/src/lib.rs + transport/gemini.rs | **状态**: Partial (6d5b044) — sensitive header denylist added, arbitrary non-sensitive headers still allowed
 
 **描述**: provider_specific 的 header: 机制可注入任意 HTTP 头，无白名单。
 
 ### P2-08: 凭证通过错误响应体泄露 [VULN-023]
-**组件**: lattice-core/src/errors.rs + lib.rs | **状态**: Resolved (6d5b044)
+**组件**: lattice-core/src/errors.rs + lib.rs | **状态**: Partial (6d5b044) — Retry-After consumed, body still stored
 
 **描述**: 非 2xx 响应体存入错误消息，可能含 API key 回显。
 
@@ -384,17 +384,17 @@
 **描述**: /ws 端点无 Origin/Token/CORS。跨域可监听 pipeline 事件泄露。
 
 ### P2-10: LATTICE_AGENTS_DIR 环境变量毒化 [VULN-033]
-**组件**: lattice-harness + lattice-cli | **状态**: Resolved (3b68a95)
+**组件**: lattice-harness + lattice-cli | **状态**: Partial (3b68a95) — allowlist validation added, only covers /home/Users/tmp
 
 **描述**: 环境变量可覆盖 agent 目录到攻击者控制的路径。
 
 ### P2-11: Python binding lock poisoning [VULN-005]
-**组件**: lattice-python | **状态**: Resolved (3b68a95)
+**组件**: lattice-python | **状态**: Partial (3b68a95) — catch_unwind recovery, not full prevention
 
 **描述**: Python GIL/lock 交互在异常路径上可能导致宿主进程 panic。
 
 ### P2-12: schema-retry JSON fallback [VULN-006]
-**组件**: lattice-harness | **状态**: Resolved (3b68a95)
+**组件**: lattice-harness | **状态**: Partial (3b68a95) — fallback still hides malformed output
 
 **描述**: schema 校验失败时的 JSON fallback 行为可能隐藏畸形 agent 输出。
 
@@ -415,7 +415,7 @@
 **组件**: lattice-core/src/transport/gemini.rs | **状态**: Resolved (3b68a95)
 
 ### P3-05: SQLite FTS5 查询构造脆弱 [VULN-030]
-**组件**: lattice-harness/src/memory/sqlite.rs | **状态**: Resolved (3b68a95)
+**组件**: lattice-harness/src/memory/sqlite.rs | **状态**: Partial (3b68a95) — uses parameterization, format!() still present
 
 ### P3-06: diagnostics() 凭证枚举 [VULN-034]
 **组件**: lattice-cli/src/credentials.rs | **状态**: Resolved (3b68a95)
@@ -470,7 +470,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/router.rs + catalog/data.json |
-| **状态** | Resolved (22863b8) |
+| **状态** | Partial (22863b8) — provider_override fixed, resolve_permissive still returns missing creds |
 
 **描述**: 普通 catalog resolve、`provider_override`、permissive `provider/model` fallback 的 credential/base_url 语义不一致。部分路径即使 credential missing 或 provider default base_url 为空，也可能返回 `Ok(ResolvedModel)`。
 
@@ -488,7 +488,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-harness/src/pipeline.rs + runner.rs + micro_agent.rs |
-| **状态** | Resolved (22863b8) |
+| **状态** | Partial (22863b8) — standard pipeline fixed, micro-agent/ToolRegistry not wired |
 
 **描述**: 标准 pipeline 构建 `AgentRunner` 时主要执行 `Agent::new(resolved)` 和可选 memory 注入，未完整应用 profile 中的 `system.prompt`、`tools.enabled`、tool executor、sandbox policy 等配置。
 
@@ -562,7 +562,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-harness/src/pipeline.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — timeout/abort/上限 added, next conflict/partial result semantics weak |
 
 **描述**: fork branch 出错时，其他 spawned tasks 可能继续后台运行；partial fork result 可能继续 merge/route；多个 branch 产生不同 next target 时没有冲突策略。
 
@@ -580,7 +580,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-plugin/src/lib.rs + erased_runner.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — system_prompt/timeout/correction hint added, tools/schema/model not wired |
 
 **描述**: `Plugin` 暴露 `system_prompt()`、`tools()`、`preferred_model()`、`output_schema()`，`PluginConfig` 暴露 timeout/context_check，但 runner 未完整应用这些语义。
 
@@ -598,7 +598,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-agent + lattice-harness + lattice-python |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — still mixed static runtime/block_on/tokio::spawn |
 
 **描述**: 项目中存在多种 runtime 模式：CLI async path、pipeline static runtime sync wrapper、micro-agent bus runtime、Python binding runtime、`tokio::spawn` 对当前 runtime 的隐式依赖等。
 
@@ -616,7 +616,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-bus/src/lib.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — RPC whitelist added, pub/sub capability not enforced, delivery unimplemented |
 
 **描述**: `AgentBusConfig` 有 subscribe/publish/rpc，但只有 RPC whitelist 有部分检查。pub/sub API 没有 caller identity，无法强制 publish/subscribe 权限；`AtLeastOnce`、`subscriber_buffer`、handler error/backpressure 等语义未落实。
 
@@ -634,7 +634,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-agent/src/memory + lattice-harness/src/memory |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — clone_box removed, Arc approach documented but not unified |
 
 **描述**: `Agent`、`AgentRunner`、`Pipeline`、`MicroAgent` 都有 memory 概念，但职责边界不清。`Memory::clone_box` 默认返回新的 in-memory backend，若真实后端未覆盖，clone 后可能丢失 SQLite/共享后端语义。
 
@@ -652,7 +652,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-cli/src/* |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — resolve/run/print/debug unified, pipeline/validate/TUI still env-only |
 
 **描述**: `resolve/models` 与 `run/print/debug/doctor` 的 credential 加载路径不完全一致；`print` 与 `run` 的 tool 集合和执行策略不同；`sessions`、`stats`、`config set`、`--continue-session`、`--no-save` 等功能部分仍是 placeholder。
 
@@ -672,7 +672,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/transport/gemini.rs + streaming.rs + catalog/data.json |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — Gemini native transport exists, catalog strategy still unclear |
 
 **描述**: Gemini native streaming transport/parser 存在，但 catalog 默认 Gemini provider 更像走 OpenAI-compatible endpoint；文档中对 Gemini streaming/non-streaming 的描述也不一致。
 
@@ -708,7 +708,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-python/src/* |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — stream_chat() added but eager collect, no real streaming/Agent/credentials |
 
 **描述**: Python 当前比 resolver-only 更进一步，已有 non-streaming `chat_complete()`，但未暴露 streaming iterator/callback、Agent loop、tool continuation、credentials map、provider override。
 
@@ -726,7 +726,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-tui + lattice-cli |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — CLI entry added, TUI still false multi-turn |
 
 **描述**: `lattice-cli` 无子命令时只提示 TUI 未实现，真实 TUI 是独立 `lattice-tui` binary；TUI UI 保存 messages，但每次 submit 可能新建 Agent，导致界面像多轮，模型实际只看到单轮上下文。
 
@@ -744,7 +744,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | README.md + STATUS.md + ROADMAP.md + CLAUDE.md |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Open — docs drift unresolved |
 
 **描述**: 文档仍提到 `lattice-memory`/`lattice-token-pool` 独立 crate，未解释 `lattice-bus`；CLI 示例和实际命令不匹配；Python 状态在 resolver-only、chat_complete、StreamIterator 之间互相矛盾；STATUS 中的 runtime/memory refactor 描述与当前代码不完全一致。
 
@@ -762,7 +762,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/lib.rs + errors.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — Retry-After header consumed, but hacky (body injection); HTTP-date unsupported |
 
 **描述**: 非 2xx 响应路径只读取 body 并调用 `ErrorClassifier::classify(status, body, provider)`；`Retry-After` HTTP header 未传入分类器。
 
@@ -798,7 +798,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-tui/src/ui.rs + event.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — TerminalGuard added, rendering still early-stage |
 
 **描述**: TUI 消息高度、长文本、滚动方向、多行输入、bracketed paste 恢复、panic 后终端恢复等体验仍比较粗糙。
 
@@ -814,7 +814,7 @@
 | **首次报告** | 2026-05-02 |
 | **来源** | 全代码库深扫 |
 | **组件** | lattice-core/src/transport/openai_compat.rs + dispatcher.rs |
-| **状态** | Resolved (1d1ed59) |
+| **状态** | Partial (1d1ed59) — deprecation doc added, transport still disconnected |
 
 **描述**: `OpenAICompatTransport` 有独立结构和文档，但 dispatcher 对 `ApiProtocol::OpenAiChat` 返回的是 `ChatCompletionsTransport::default()`，真实 URL/auth/header 多来自 `ResolvedModel`，使 compat transport 更像未接入/测试遗留。
 
@@ -835,6 +835,243 @@
 **描述**: `cargo test --workspace --quiet` 当前通过，但存在 unused imports、unused variable、deprecated API 使用等 warnings。
 
 **建议修复**: 清理 warnings，并在 CI 中继续保持 `cargo clippy -- -D warnings` 和 `cargo fmt --check --all`。
+
+---
+
+# 深度工程审计新增问题（2026-05-03 第二轮）
+
+> 本分区记录第二轮深度审计发现的 runtime 阻断、架构断连、内存安全和产品性问题。
+
+## 审计新增统计
+
+| 等级 | 数量 |
+|------|------|
+| P0 | 5 |
+| P1 | 5 |
+| P2 | 6 |
+| P3 | 7 |
+| **总计** | **23** |
+
+---
+
+## P0 — Runtime 阻断 / 架构断连 / Silent Failure（5 项）
+
+### P0-01: Runner 静默 JSON 回退导致 pipeline 吞掉错误
+
+| 字段 | 值 |
+|------|-----|
+| **组件** | lattice-harness/src/runner.rs:204-206 |
+| **状态** | Open |
+
+**描述**: run_once() 中若 LLM 输出不是合法 JSON，静默回退到 `{"content": raw_text}`。looks_like_error() 只检查几种前缀（"Error:", "401", "403"），覆盖率有限。
+
+**影响**: Pipeline 在 LLM 返回错误/非 JSON 内容时静默继续执行，评估错误规则，可能路由到错误的下一步 agent。
+
+**建议修复**: 增强错误检测覆盖率。检测到错误时直接返回 Err 而不是静默包装。
+
+---
+
+### P0-02: 嵌套 Runtime 导致 pipeline 模式必定 panic
+
+| 字段 | 值 |
+|------|-----|
+| **组件** | lattice-harness/src/pipeline.rs:142-185, micro_agent.rs:15-110 |
+| **状态** | Open |
+
+**描述**: CLI 使用 `#[tokio::main]`。Pipeline 的 `run()` 使用 `SYNC_RT.block_on()`。如果 CLI 调用 pipeline，在已运行的 tokio runtime 内部调用 `block_on` 会 panic。MicroAgent::spawn() 同样有 `BUS_RT.block_on()` 问题。
+
+**影响**: `lattice run --pipeline code-review` 在 #[tokio::main] 上下文中**必定 panic**，无法在生产环境中工作。
+
+**建议修复**: Pipeline::run() 改为 async fn，去掉 SYNC_RT。sync wrapper 通过 `Handle::try_current()` 检测当前 runtime，决定是否可 block_in_place。
+
+---
+
+### P0-03: Bus RPC 通道容量 = 1 导致 fork 丢消息
+
+| 字段 | 值 |
+|------|-----|
+| **组件** | lattice-bus/src/lib.rs:141, 297 |
+| **状态** | Open |
+
+**描述**: `register()` 创建 `mpsc::channel(self.config.max_concurrent_calls)`，默认值 = 1。Fork 并行运行 2+ agents 时，如果它们都需要 RPC 到同一个 agent，第二个请求会静默丢失（channel send 返回 Err）。
+
+**影响**: Fork 并行执行中的 RPC 调用不可靠。当任意两个 fork 分支同时请求同一 agent 时，至少一个请求会丢失。
+
+**建议修复**: 默认 max_concurrent_calls 改为 32。
+
+---
+
+### P0-04: build_runner() 完全不使用 Pipeline 的 tool_registry 和 plugin_registry
+
+| 字段 | 值 |
+|------|-----|
+| **组件** | lattice-harness/src/pipeline.rs:21-60, 109-110, 181 |
+| **状态** | Open |
+
+**描述**: Pipeline 有 `tool_registry` 和 `plugin_registry` 字段，`with_tool_registry()` 和 `with_plugin_registry()` 可以设置。但 `build_runner()` 只使用 `default_tool_definitions()`，从不查询 tool_registry。`run_async()` 也不检查 `profile.plugins` 来委托给 PluginDagRunner（只在注释 line 181 提到）。
+
+**影响**: --plugins-dir CLI flag 传入的任何自定义插件不会被使用；所有 pipeline 执行使用固定的 7 个默认 tools；TOML profile 中 `[plugins]` 配置了但被忽略。整个 Plugin DAG 系统不可运行。
+
+**建议修复**: build_runner() 接受 &ToolRegistry 参数，合并 registry tools 和 default tools。run_async() 检查 profile.plugins.is_some() 时委托给 PluginDagRunner。
+
+---
+
+### P0-05: web_search 无响应大小限制
+
+| 字段 | 值 |
+|------|-----|
+| **组件** | lattice-agent/src/tools.rs:318-329 |
+| **状态** | Open |
+
+**描述**: web_search 工具直接调用 `self.http_client.get(url).send().await`，然后 `response.text().await`，没有任何 max_response_size 限制。攻击者可构造返回无限数据流的 URL。
+
+**影响**: SSRF 防护阻止了向私有 IP 的请求，但外部域可直接通过此工具耗尽内存。
+
+**建议修复**: 增加 max_response_size 配置，默认 10MB。读取 response 时使用大小限制。
+
+---
+
+## P1 — 本迭代应修的问题（5 项）
+
+### P1-01: AgentState 和 Pipeline 使用 unwrap() 在 Mutex 上
+
+**组件**: lattice-agent/src/state.rs, lattice-harness/src/pipeline.rs | **状态**: Open
+
+**描述**: 多处 `Mutex.lock().unwrap()`，无 poison 恢复。一旦 panic，后续所有操作都会 panic。
+
+**建议修复**: 关键路径使用 `.unwrap_or_else(|e| e.into_inner())`。
+
+---
+
+### P1-02: Python Engine Mutex Poison 恢复不安全
+
+**组件**: lattice-python/src/engine.rs:169-214 | **状态**: Open
+
+**描述**: 三个方法在 Mutex poison 后调用 `e.into_inner()`，但未验证内部数据完整性。into_inner() 返回可能半初始化的 router。
+
+**建议修复**: 改用 RwLock 或增加状态校验。
+
+---
+
+### P1-03: Agent run_chat() 重试不清理 tool result
+
+**组件**: lattice-agent/src/lib.rs:159-170 | **状态**: Open
+
+**描述**: Agent::run() 在 run_chat() 返回错误时重试，通过 `pop_last_assistant_message()` 撤销上一条 assistant 消息。但 tool execution 错误时 tool result 不被清理，导致对话状态膨胀。
+
+**建议修复**: 重试时使用快照/回滚机制。
+
+---
+
+### P1-04: Catalog gpt-oss-120b context_length = 0
+
+**组件**: lattice-core/src/catalog/data.json | **状态**: Open
+
+**描述**: 97/98 模型 context_length 正确，但 gpt-oss-120b 的 context_length 为 0。占位模型遗漏。
+
+**建议修复**: 填写 gpt-oss-120b 的真实 context_length 或移除占位模型。
+
+---
+
+### P1-05: TUI streaming 错误被静默吞掉
+
+**组件**: lattice-tui/src/app.rs | **状态**: Open
+
+**描述**: streaming 出错时错误被 `pack_error()` 包装为 StreamToken 事件，`apply_stream_token` 仅当 `last.content.is_empty()` 时显示为 "Error: ..."。非空的错误被静默吞掉。
+
+**建议修复**: apply_stream_token 的 error 处理应始终设置 status = AppStatus::Error。
+
+---
+
+## P2 — 设计/产品/维护性问题（6 项）
+
+### P2-01: InMemoryMemory::recall() O(n) 子串搜索
+
+**组件**: lattice-agent/src/memory/mod.rs:153-161 | **状态**: Open
+
+**建议修复**: 增加 created_at 降序 + limit 预筛选。
+
+---
+
+### P2-02: trim_messages() 每次循环全量重算 token
+
+**组件**: lattice-agent/src/state.rs:156-162 | **状态**: Open
+
+**建议修复**: 累积估算值，移除时减去被移除消息的估算值。
+
+---
+
+### P2-03: Pipeline dry_run() 只跟踪默认路由
+
+**组件**: lattice-harness/src/pipeline.rs:598-708 | **状态**: Open
+
+**建议修复**: 支持示例 JSON 验证条件规则。
+
+---
+
+### P2-04: AgentProfile system_prompt() 静默回退
+
+**组件**: lattice-harness/src/profile.rs:299-335 | **状态**: Open
+
+**建议修复**: 文件读取失败时增加 strict 模式硬错误。
+
+---
+
+### P2-05: PipelineEvent::Token 从未发射
+
+**组件**: lattice-harness/src/events.rs:19, pipeline.rs | **状态**: Open
+
+**建议修复**: 删除 Token 变体或在 runner 中增加 token 转发。
+
+---
+
+### P2-06: CLI -p mode 和 run subcommand 命名混乱
+
+**组件**: lattice-cli/src/main.rs:29-30 | **状态**: Open
+
+---
+
+## P3 — 代码质量/体验问题（7 项）
+
+### P3-01: Agent::new() 依赖字段声明顺序
+
+**组件**: lattice-agent/src/lib.rs:82-90 | **状态**: Open
+
+---
+
+### P3-02: MicroAgentHandle watch_and_deregister 消耗 self
+
+**组件**: lattice-harness/src/micro_agent.rs:60-76 | **状态**: Open
+
+---
+
+### P3-03: Bus echo_agent_loop 吞掉 send error
+
+**组件**: lattice-bus/src/lib.rs:252-258 | **状态**: Open
+
+---
+
+### P3-04: --json mode pipeline run 缺少工具调用信息
+
+**组件**: lattice-cli/src/commands/run.rs:210-227 | **状态**: Open
+
+---
+
+### P3-05: Events send() unchecked
+
+**组件**: lattice-harness/src/events.rs:65-67 | **状态**: Open
+
+---
+
+### P3-06: PluginRegistry register() 需要 &mut self
+
+**组件**: lattice-plugin/src/registry.rs | **状态**: Open
+
+---
+
+### P3-07: Python maturin 发布配置缺失
+
+**组件**: lattice-python/Cargo.toml | **状态**: Open
 
 ---
 
