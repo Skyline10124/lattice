@@ -309,8 +309,15 @@ fn agents_dir_path(override_path: Option<&str>) -> PathBuf {
     }
 }
 
+fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
+    if verbose && !json && !buf.is_empty() {
+        eprintln!("{} {}", "reasoning:".dimmed(), buf.trim());
+    }
+}
+
 fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bool) -> Result<()> {
     let mut content_buf = String::new();
+    let mut reasoning_buf = String::new();
 
     for event in events {
         match event {
@@ -322,16 +329,18 @@ fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bo
                 content_buf.push_str(&text);
             }
             LoopEvent::Reasoning { text } => {
-                if verbose {
-                    eprintln!("{} {}", "reasoning:".dimmed(), text);
-                }
+                reasoning_buf.push_str(&text);
             }
             LoopEvent::ToolCallRequired { calls } => {
+                flush_reasoning(&reasoning_buf, verbose, json);
+                reasoning_buf.clear();
                 if verbose && !json {
                     eprintln!("\n{} {} tool call(s)...", "executing".dimmed(), calls.len());
                 }
             }
             LoopEvent::Done { usage } => {
+                flush_reasoning(&reasoning_buf, verbose, json);
+                reasoning_buf.clear();
                 if verbose && !json {
                     if let Some(u) = usage {
                         eprintln!(
@@ -345,10 +354,13 @@ fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bo
                 }
             }
             LoopEvent::Error { message } => {
+                flush_reasoning(&reasoning_buf, verbose, json);
+                reasoning_buf.clear();
                 eprintln!("{} {}", "error:".red(), message);
             }
         }
     }
+    flush_reasoning(&reasoning_buf, verbose, json);
 
     if !json {
         println!();

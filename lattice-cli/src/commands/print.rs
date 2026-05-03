@@ -70,6 +70,12 @@ pub async fn run(
     Ok(())
 }
 
+fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
+    if verbose && !json && !buf.is_empty() {
+        eprintln!("{} {}", "reasoning:".dimmed(), buf.trim());
+    }
+}
+
 async fn run_conversation(
     agent: &mut Agent,
     mut events: Vec<LoopEvent>,
@@ -77,6 +83,7 @@ async fn run_conversation(
     json: bool,
 ) -> Result<String> {
     let mut content_buf = String::new();
+    let mut reasoning_buf = String::new();
 
     loop {
         let mut tool_calls = Vec::new();
@@ -91,14 +98,16 @@ async fn run_conversation(
                     content_buf.push_str(&text);
                 }
                 LoopEvent::Reasoning { text } => {
-                    if verbose {
-                        eprintln!("{} {}", "reasoning:".dimmed(), text);
-                    }
+                    reasoning_buf.push_str(&text);
                 }
                 LoopEvent::ToolCallRequired { calls } => {
+                    flush_reasoning(&reasoning_buf, verbose, json);
+                    reasoning_buf.clear();
                     tool_calls = calls;
                 }
                 LoopEvent::Done { usage } => {
+                    flush_reasoning(&reasoning_buf, verbose, json);
+                    reasoning_buf.clear();
                     if verbose && !json {
                         if let Some(u) = usage {
                             eprintln!(
@@ -112,10 +121,13 @@ async fn run_conversation(
                     }
                 }
                 LoopEvent::Error { message } => {
+                    flush_reasoning(&reasoning_buf, verbose, json);
+                    reasoning_buf.clear();
                     eprintln!("{} {}", "error:".red(), message);
                 }
             }
         }
+        flush_reasoning(&reasoning_buf, verbose, json);
 
         if tool_calls.is_empty() {
             break;

@@ -4,6 +4,12 @@ use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEv
 use lattice_core::router::ModelRouter;
 use std::time::Instant;
 
+fn flush_reasoning(buf: &str) {
+    if !buf.is_empty() {
+        eprintln!("  {} {}", "reasoning:".dimmed(), buf.trim());
+    }
+}
+
 pub async fn run(
     prompt: Option<String>,
     model: String,
@@ -99,31 +105,43 @@ pub async fn run(
     );
 
     let mut tool_call_names: Vec<String> = Vec::new();
+    let mut tool_call_events: u64 = 0;
     let mut total_tokens: u64 = 0;
     let mut content_buf = String::new();
+    let mut reasoning_buf = String::new();
 
     for event in &events {
         match event {
             LoopEvent::Token { text } => {
                 content_buf.push_str(text);
             }
-            LoopEvent::Reasoning { .. } => {}
+            LoopEvent::Reasoning { text } => {
+                reasoning_buf.push_str(text);
+            }
             LoopEvent::ToolCallRequired { calls } => {
+                flush_reasoning(&reasoning_buf);
+                reasoning_buf.clear();
+                tool_call_events += 1;
                 for c in calls {
                     tool_call_names.push(c.function.name.clone());
                 }
             }
             LoopEvent::Done { ref usage } => {
+                flush_reasoning(&reasoning_buf);
+                reasoning_buf.clear();
                 if let Some(u) = usage {
                     total_tokens = u.total_tokens as u64;
                 }
             }
             LoopEvent::Error { message } => {
+                flush_reasoning(&reasoning_buf);
+                reasoning_buf.clear();
                 tracing::error!(error = %message, "debug: stream error");
                 println!("  {} {}", "error:".red(), message.red());
             }
         }
     }
+    flush_reasoning(&reasoning_buf);
 
     println!(
         "  {} {}",
@@ -155,7 +173,8 @@ pub async fn run(
         "provider:".dimmed(),
         resolved_summary.provider.cyan()
     );
-    println!("  {} {}", "turns:".dimmed(), events.len());
+    let turns = tool_call_events + 1;
+    println!("  {} {}", "turns:".dimmed(), turns);
     println!(
         "  {} {}",
         "tool_executions:".dimmed(),
