@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use lattice_plugin::bundle::BehaviorMode;
@@ -243,7 +244,6 @@ fn verify_config_integrity(path: &Path, content: &str) -> Result<(), Box<dyn std
         return Ok(()); // No hash file = no integrity check
     }
     let expected = std::fs::read_to_string(&hash_path)?.trim().to_string();
-    use sha2::{Digest, Sha256};
     let actual = format!("{:x}", Sha256::digest(content.as_bytes()));
     if actual != expected {
         return Err(format!(
@@ -553,5 +553,69 @@ rule = { default = true }
             Some(BehaviorMode::Strict { .. })
         ));
         assert_eq!(config.edges.len(), 2);
+    }
+
+    #[test]
+    fn test_verify_config_integrity_valid() {
+        let dir = std::env::temp_dir().join("lattice_test_valid");
+        let _ = std::fs::create_dir_all(&dir);
+        let toml_path = dir.join("agent.toml");
+        let content = "name = 'test'\nversion = '1.0'\n";
+        std::fs::write(&toml_path, content).unwrap();
+        let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+        std::fs::write(dir.join("agent.toml.sha256"), &hash).unwrap();
+
+        let result = verify_config_integrity(&toml_path, content);
+        assert!(result.is_ok(), "Valid hash should pass: {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_config_integrity_tampered() {
+        let dir = std::env::temp_dir().join("lattice_test_tampered");
+        let _ = std::fs::create_dir_all(&dir);
+        let toml_path = dir.join("agent.toml");
+        let content = "name = 'test'\nversion = '1.0'\n";
+        std::fs::write(&toml_path, content).unwrap();
+        // Write a DIFFERENT hash than what the content produces
+        std::fs::write(dir.join("agent.toml.sha256"), "badhash").unwrap();
+
+        let result = verify_config_integrity(&toml_path, content);
+        assert!(result.is_err(), "Tampered hash should fail");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_config_integrity_no_sidecar() {
+        let dir = std::env::temp_dir().join("lattice_test_no_sidecar");
+        let _ = std::fs::create_dir_all(&dir);
+        let toml_path = dir.join("agent.toml");
+        let content = "name = 'test'\n";
+        std::fs::write(&toml_path, content).unwrap();
+
+        // No sidecar file — should pass (graceful degradation)
+        let result = verify_config_integrity(&toml_path, content);
+        assert!(result.is_ok(), "Missing sidecar should pass: {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_verify_config_integrity_wrong_format() {
+        let dir = std::env::temp_dir().join("lattice_test_wrong_format");
+        let _ = std::fs::create_dir_all(&dir);
+        let toml_path = dir.join("agent.toml");
+        let content = "name = 'test'\n";
+        std::fs::write(&toml_path, content).unwrap();
+        // Sidecar has extra whitespace/newline tolerance
+        let hash = format!("{:x}\n", Sha256::digest(content.as_bytes()));
+        std::fs::write(dir.join("agent.toml.sha256"), &hash).unwrap();
+
+        let result = verify_config_integrity(&toml_path, content);
+        assert!(result.is_ok(), "Trailing newline should be trimmed: {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

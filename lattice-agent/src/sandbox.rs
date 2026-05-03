@@ -203,13 +203,23 @@ impl SandboxConfig {
 
 /// Check if a host string resolves to a private or link-local IP.
 ///
-/// Covers: loopback (127.0.0.1, ::1, localhost), 10.x.x.x, 172.16-31.x.x,
-/// 192.168.x.x, and 169.254.x.x (link-local).
+/// Covers: loopback (127.0.0.1, ::1, localhost), IPv6 ULA (fc00::/7),
+/// 10.x.x.x, 172.16-31.x.x, 192.168.x.x, and 169.254.x.x (link-local).
 fn is_private_ip(host: &str) -> bool {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     match host {
         "localhost" | "127.0.0.1" | "::1" => return true,
         _ => {}
+    }
+    // IPv6 Unique Local Address (fc00::/7)
+    if (host.starts_with("fc") || host.starts_with("fd"))
+        && host.len() >= 3
+    {
+        let third = host.as_bytes().get(2).copied().unwrap_or(0);
+        if third == b':' || third == b'0' {
+            return true;
+        }
+        // Not a valid ULA format — fall through to IPv4 check
     }
     // Parse dotted IPv4
     let octets: Vec<&str> = host.split('.').collect();

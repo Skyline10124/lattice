@@ -199,8 +199,13 @@ impl ToolExecutor for DefaultToolExecutor {
                         cmd_result
                     }
                     Ok(Err(e)) => ToolError::CommandError(e.to_string()).to_string(),
-                    Err(_) => ToolError::CommandError("bash command timed out after 30s".into())
-                        .to_string(),
+                    Err(_) => ToolError::CommandError(
+                        format!(
+                            "bash command timed out after {}s",
+                            self.sandbox.max_command_timeout
+                        ),
+                    )
+                    .to_string(),
                 }
             }
             "patch" => {
