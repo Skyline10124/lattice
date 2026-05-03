@@ -7,7 +7,16 @@ use std::path::PathBuf;
 pub fn run(json: bool, project_dir: Option<String>) -> Result<()> {
     let root = project_dir_path(project_dir);
 
-    let ld = LatticeDir::discover(&root).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let ld = LatticeDir::discover(&root).map_err(|e| {
+        let msg = format!("{}", e);
+        if msg.contains(".lattice/ directory not found") {
+            anyhow::anyhow!(
+                "LATTICE directory not found. Create ~/.lattice/agents/ or specify --dir."
+            )
+        } else {
+            anyhow::anyhow!("{}", e)
+        }
+    })?;
     let agents = ld.registry.list();
     let bus_config = &ld.bus_config;
 
@@ -87,7 +96,11 @@ pub fn run(json: bool, project_dir: Option<String>) -> Result<()> {
 }
 
 fn project_dir_path(override_path: Option<String>) -> PathBuf {
-    override_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    if let Some(p) = override_path {
+        PathBuf::from(p)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home) // discover() looks for $HOME/.lattice/agents/
+    } else {
+        PathBuf::from(".")
+    }
 }

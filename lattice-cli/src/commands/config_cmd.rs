@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use colored::Colorize;
 use sha2::{Digest, Sha256};
@@ -61,13 +61,38 @@ show_reasoning = true
             }
         }
         ConfigAction::Set { key, value } => {
-            println!(
-                "{} {} = {} (not yet persisted — edit {} directly)",
-                "\u{2713}".green(),
-                key.bold(),
-                value,
-                config_path.display()
-            );
+            // Ensure parent dir exists
+            if let Some(parent) = config_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            // Read existing config or start fresh
+            let content = if config_path.exists() {
+                std::fs::read_to_string(&config_path)?
+            } else {
+                String::new()
+            };
+
+            // Parse with toml_edit for comment-preserving editing
+            let mut doc = content
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|e| anyhow!("Failed to parse config: {}", e))?;
+
+            // Navigate key path (e.g., "core.default_model" → doc["core"]["default_model"])
+            let parts: Vec<&str> = key.split('.').collect();
+            if parts.len() == 2 {
+                // Get or create the table
+                if !doc.contains_table(parts[0]) {
+                    doc[parts[0]] = toml_edit::table();
+                }
+                doc[parts[0]][parts[1]] = toml_edit::value(value.as_str());
+            } else {
+                doc[&key] = toml_edit::value(value.as_str());
+            }
+
+            // Write back
+            std::fs::write(&config_path, doc.to_string())?;
+            println!("{} {} = {}", "\u{2713}".green(), key.bold(), value);
         }
         ConfigAction::Hash { path } => {
             let file_path = std::path::Path::new(&path);
