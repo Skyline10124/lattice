@@ -36,6 +36,15 @@ impl AgentRunner {
         self
     }
 
+    /// Access the inner Agent for bus registration or direct manipulation.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    pub fn agent_mut(&mut self) -> &mut Agent {
+        &mut self.agent
+    }
+
     /// Run the agent with the given input. Returns the JSON output.
     ///
     /// If `output_schema` is configured on the profile, the output is validated

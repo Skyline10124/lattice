@@ -1,3 +1,4 @@
+pub mod assembly;
 pub mod dag_runner;
 pub mod events;
 pub mod handoff_rule;
@@ -11,6 +12,7 @@ pub mod runner;
 pub mod tools;
 pub mod watcher;
 
+pub use assembly::assemble_agent;
 pub use dag_runner::{DAGError, PluginDagRunner};
 pub use events::{EventBus, PipelineEvent};
 pub use handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};
