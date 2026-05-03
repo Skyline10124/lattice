@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use lattice_agent::{
@@ -5,6 +7,7 @@ use lattice_agent::{
 };
 use lattice_core::types::Role;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use crate::event::Event;
 
@@ -52,10 +55,12 @@ pub struct App {
     pub input_cursor: usize,
     pub status: AppStatus,
     pub current_model: String,
+    pub previous_model: String,
     pub current_provider: String,
     pub token_count: usize,
     pub scroll_offset: usize,
     pub event_tx: Option<UnboundedSender<Event>>,
+    pub agent: Option<Arc<Mutex<Agent>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,10 +79,12 @@ impl App {
             input_cursor: 0,
             status: AppStatus::Ready,
             current_model: "deepseek-v4-flash".into(),
+            previous_model: String::new(),
             current_provider: "".into(),
             token_count: 0,
             scroll_offset: 0,
             event_tx: None,
+            agent: None,
         }
     }
 
@@ -97,6 +104,7 @@ impl App {
                 self.messages.clear();
                 self.input.clear();
                 self.input_cursor = 0;
+                self.agent = None; // drop agent so next submit rebuilds with fresh history
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.input_cursor, c);
@@ -197,20 +205,25 @@ impl App {
                 return Ok(());
             }
         };
-        let model = self.current_model.clone();
 
-        tokio::spawn(async move {
-            // --- Resolve model (in-place to avoid blocking) ---
+        // --- Rebuild agent if none exists or model changed ---
+        let needs_rebuild = self.agent.is_none()
+            || self.current_model != self.previous_model;
+
+        if needs_rebuild {
+            let model = self.current_model.clone();
             let resolved =
                 match tokio::task::spawn_blocking(move || lattice_core::resolve(&model)).await {
                     Ok(Ok(r)) => r,
                     Ok(Err(e)) => {
                         let _ = tx.send(pack_error(format!("resolve failed: {e}")));
-                        return;
+                        self.status = AppStatus::Ready;
+                        return Ok(());
                     }
                     Err(_) => {
                         let _ = tx.send(pack_error("resolve task panicked".into()));
-                        return;
+                        self.status = AppStatus::Ready;
+                        return Ok(());
                     }
                 };
 
@@ -220,12 +233,20 @@ impl App {
                 provider: resolved.provider.clone(),
             });
 
-            // --- Create Agent ---
             let mut agent = Agent::new(resolved).with_tools(default_tool_definitions());
-            let executor = DefaultToolExecutor::new(".");
+            agent.set_system_prompt("You are a helpful assistant.");
+            self.agent = Some(Arc::new(Mutex::new(agent)));
+            self.previous_model = self.current_model.clone();
+        }
 
-            // --- Send message (async) ---
-            let mut events = agent.send_message(&text).await;
+        // Clone Arc for spawned task — cheap, just increments ref count
+        let agent_arc = self.agent.clone().unwrap();
+        let text_for_spawn = text;
+
+        tokio::spawn(async move {
+            let executor = DefaultToolExecutor::new(".");
+            let mut agent = agent_arc.lock().await;
+            let mut events = agent.send_message(&text_for_spawn).await;
             let mut cumulative_tokens = 0u64;
 
             // --- Conversation loop (handles tool call rounds) ---
@@ -296,14 +317,14 @@ impl App {
                     error: None,
                 });
 
-                // Execute tools
+                // Execute tools using the separate executor
                 let mut results: Vec<(String, String)> = Vec::new();
                 for call in &tool_calls {
                     let result = executor.execute(call).await;
                     results.push((call.id.clone(), result));
                 }
 
-                // Submit results and get next round of events
+                // Submit results and continue the conversation
                 events = agent.submit_tools(results, None).await;
             }
         });
