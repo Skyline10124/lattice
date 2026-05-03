@@ -45,7 +45,7 @@ P0-05(1st) (bash sh-c) is documented as intentional architecture choice — meta
 
 - Delete `static SYNC_RT`
 - Change `pub fn run(&mut self, ...) -> PipelineRun` to `pub async fn run(&mut self, ...) -> PipelineRun`
-- `run_async()` renamed or merged — currently `run_async()` is the real async implementation; `run()` was just `SYNC_RT.block_on(run_async())`. After this change, `run()` IS the async fn.
+- `run()` (formerly `run_async()`) becomes the single async entry point. `run_async()` is deleted — its body is `run()` now.
 
 **API change**:
 ```rust
@@ -78,7 +78,18 @@ pub async fn run(&mut self, start_agent: &str, input: &str) -> PipelineRun
 #### Python binding adaptation
 
 `lattice-python/src/engine.rs`:
-- If Python calls pipeline sync, use `Handle::try_current()` + `block_in_place()` when in runtime, or create a temporary runtime when not
+- Dual-path sync boundary:
+  ```rust
+  if let Ok(handle) = tokio::runtime::Handle::try_current() {
+      // Already in a multi-threaded runtime — use block_in_place
+      handle.block_in_place(|| handle.block_on(async_fn()))
+  } else {
+      // No runtime — create temporary one
+      let rt = tokio::runtime::Runtime::new().expect("temp runtime");
+      rt.block_on(async_fn())
+  }
+  ```
+- `block_in_place` only works on multi-threaded runtime; single-threaded runtime would panic. The fallback to temporary runtime handles this case.
 - This is the ONLY remaining `block_on` usage — at the Python sync boundary, which is correct
 
 #### Call Site Changes
@@ -128,9 +139,22 @@ let output = match serde_json::from_str(&json_str) {
 #### looks_like_error() expansion
 
 Add these prefixes to the existing list:
-- All `LatticeError` Display variant prefixes: `"RateLimitError"`, `"AuthenticationError"`, `"ModelNotFoundError"`, `"ProviderUnavailableError"`, `"ContextWindowExceeded"`, `"ToolExecutionError"`, `"StreamingError"`, `"ConfigError"`, `"NetworkError"`
-- Common transport errors: `"timeout"`, `"connection refused"`, `"connection reset"`, `"dns"`, `"TLS"`, `"certificate"`
-- Empty output: if `content.is_empty()` after collecting tokens, return Err
+- HTTP status code prefixes: `"401"`, `"403"`, `"429"`, `"500"` (already present)
+- Common transport/infrastructure error phrases: `"timeout"`, `"connection refused"`, `"connection reset"`, `"dns"`, `"TLS"`, `"certificate"`
+- Provider error patterns: `"rate limit"`, `"authentication"`, `"api key"`, `"invalid request"`, `"server error"`, `"service unavailable"`
+- Do NOT add Rust `LatticeError` enum Display prefixes — LLMs never output Rust enum format strings like `"RateLimitError"`. Real provider errors use natural language, not Rust type names.
+
+#### Empty output handling
+
+Empty output → `Err` only when `output_schema.is_some()`. Without schema, empty output may be legitimate (e.g., agent completed via tool calls with no final text response). Do not add empty-output check to the no-schema path.
+
+Implementation:
+```rust
+// After collecting content from LoopEvent::Token events
+if content.is_empty() && self.output_schema.is_some() {
+    return Err("Agent produced empty output; output_schema requires structured response".into());
+}
+```
 
 **File**: lattice-harness/src/runner.rs only
 
@@ -155,28 +179,55 @@ pub fn assemble_agent(
 When `tool_registry` is present and not empty:
 1. Get custom tool definitions from registry
 2. Merge with default tools using `merge_tool_definitions()` (existing function in tools.rs)
-3. Build a composite tool executor that delegates:
-   - Default tools → `DefaultToolExecutor`
-   - Custom tools → registry's `ToolHandler::Native` closures
-4. Attach merged definitions + composite executor to Agent
+3. Use `DefaultToolExecutor` with registry fallback — no separate composite executor struct needed:
+   ```rust
+   // DefaultToolExecutor gains an optional registry reference
+   pub struct DefaultToolExecutor {
+       working_dir: String,
+       registry: Option<Arc<ToolRegistry>>,
+   }
+   
+   // In execute() — check registry first, fall back to default behavior
+   fn execute(&self, call: &ToolCall) -> Result<String, ToolError> {
+       if let Some(reg) = &self.registry {
+           if let Some(entry) = reg.get(&call.function.name) {
+               match &entry.handler {
+                   ToolHandler::Native(f) => f(call.function.arguments.clone()),
+                   ToolHandler::McpBacked { .. } => {
+                       // MCP not supported in this executor yet
+                       ToolError::McpUnreachable { ... }
+                   }
+               }
+           } else {
+               self.execute_default(call) // existing 7 default tools
+           }
+       } else {
+           self.execute_default(call) // existing behavior
+       }
+   }
+   ```
+4. Attach merged definitions + enriched executor to Agent
 
 When `tool_registry` is absent or empty:
 - Existing behavior: `default_tool_definitions()` + `DefaultToolExecutor`
 
 #### run_async() PluginDagRunner delegation
 
-Add check at the start of each agent turn in `run_async()`:
+Add check at the start of each agent turn in `run()` (formerly `run_async()`):
 ```rust
 if profile.plugins.is_some() && self.plugin_registry.is_some() {
     // Delegate entire turn to PluginDagRunner
-    let dag_result = PluginDagRunner::run(
-        profile,
-        self.plugin_registry.as_ref().unwrap(),
-        resolved,
-        &current_input,
+    let plugins_config = profile.plugins.as_ref().unwrap();
+    let pr = self.plugin_registry.as_ref().unwrap();
+    // ToolRegistry is required — create empty if Pipeline has none
+    let tr = self.tool_registry.as_ref().unwrap_or(&Arc::new(ToolRegistry::new()));
+    let mut dag_runner = PluginDagRunner::new(
+        plugins_config, pr, tr,
+        RetryPolicy::default(),
         self.shared_memory.clone(),
-    ).await;
-    // Process dag_result as the agent output for handoff evaluation
+    );
+    let dag_result = dag_runner.run(&current_input, &profile.agent.model).await;
+    // Convert DAGError/Result<Value> to PipelineRun output format
 } else {
     // Standard AgentRunner path (existing)
     let mut runner = assemble_agent(&profile, resolved, ...);
@@ -226,10 +277,14 @@ impl Default for BusConfig {
 
 **Current**: `response.text().await` reads unlimited response body.
 
-**Change**: Use `SandboxConfig.max_read_size` (existing field, default 1MB) as HTTP response size limit.
+**Change**: Add `max_http_response_size: usize` field to `SandboxConfig`, default 10MB (web pages frequently exceed 1MB). This is a separate field from `max_read_size` (file read limit) — HTTP responses have different size expectations.
 
 Implementation:
 ```rust
+// In SandboxConfig (sandbox.rs)
+pub max_http_response_size: usize,  // Default: 10 * 1024 * 1024 (10MB)
+
+// In web_search handler (tools.rs)
 "web_search" => {
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if let Err(e) = self.sandbox.check_url(url) {
@@ -239,18 +294,18 @@ Implementation:
         Ok(response) => {
             // Check content-length header first
             if let Some(content_length) = response.content_length() {
-                if content_length > self.sandbox.max_read_size as u64 {
+                if content_length > self.sandbox.max_http_response_size as u64 {
                     return ToolError::HttpError(format!(
                         "Response too large: {} bytes (max {})",
-                        content_length, self.sandbox.max_read_size
+                        content_length, self.sandbox.max_http_response_size
                     ))).to_string();
                 }
             }
             // Read with size limit — read bytes then truncate if oversized
             let bytes = response.bytes().await.unwrap_or_default();
-            if bytes.len() > self.sandbox.max_read_size {
-                let truncated = String::from_utf8_lossy(&bytes[..self.sandbox.max_read_size]);
-                format!("{}[TRUNCATED: response exceeded {} bytes]", truncated.trim_end(), self.sandbox.max_read_size)
+            if bytes.len() > self.sandbox.max_http_response_size {
+                let truncated = String::from_utf8_lossy(&bytes[..self.sandbox.max_http_response_size]);
+                format!("{}[TRUNCATED: response exceeded {} bytes]", truncated.trim_end(), self.sandbox.max_http_response_size)
             } else {
                 String::from_utf8_lossy(&bytes).to_string()
             }
@@ -260,7 +315,7 @@ Implementation:
 }
 ```
 
-**Files**: lattice-agent/src/tools.rs (web_search handler)
+**Files**: lattice-agent/src/sandbox.rs (add field + default), lattice-agent/src/tools.rs (web_search handler)
 
 ### P0-06: SHA-256 Enforcement
 
@@ -355,14 +410,15 @@ Current mitigations are sufficient for Alpha:
 - Pipeline::run() is async fn — compile check
 - CLI run_pipeline() works in #[tokio::main] — cargo test + manual run
 - MicroAgent::spawn() is async — compile check
-- Python Engine sync wrapper works with Handle — unit test
+- Python Engine sync wrapper works with dual-path (Handle+block_in_place / temp_rt) — unit test
 - No static runtimes anywhere — grep for `LazyLock<Runtime>`
 
 ### Runner Error Detection (P0-01)
 - run_once() with output_schema + non-JSON output → Err
 - run_once() without output_schema + non-JSON output → Ok({"content": ...})
 - run_once() with expanded error prefix → Err for each new prefix
-- run_once() with empty output → Err
+- run_once() with empty output + output_schema → Err
+- run_once() with empty output + no output_schema → Ok (tool-call-only completion)
 
 ### Registry Wiring (P0-04)
 - assemble_agent() with ToolRegistry → merged definitions + composite executor
@@ -374,9 +430,10 @@ Current mitigations are sufficient for Alpha:
 - BusConfig::default() max_concurrent_calls == 32
 
 ### web_search Size (P0-05(r2))
-- Response within limit → full content
-- Response exceeding limit → truncated + [TRUNCATED] marker
+- Response within 10MB limit → full content
+- Response exceeding 10MB limit → truncated + [TRUNCATED] marker
 - content-length header exceeds limit → immediate error
+- max_http_response_size is independent of max_read_size
 
 ### SHA-256 Strict (P0-06)
 - LATTICE_STRICT_CONFIG=1 + missing sidecar → Err
