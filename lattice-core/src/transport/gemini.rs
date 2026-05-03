@@ -433,10 +433,17 @@ pub async fn send_gemini_streaming_request(
 
     let base_url = resolved.base_url.trim_end_matches('/');
     let model = &resolved.api_model_id;
+    let max_model_len = 256;
+    if model.len() > max_model_len {
+        tracing::warn!(
+            "Gemini model_id '{}' exceeds {max_model_len} chars, truncating",
+            model
+        );
+    }
     let url = format!(
         "{}/models/{}:streamGenerateContent?alt=sse",
         base_url,
-        urlencoding::encode(model)
+        urlencoding::encode(&model.chars().take(max_model_len).collect::<String>())
     );
 
     let mut req = client.post(&url).json(body);
@@ -495,10 +502,17 @@ pub async fn send_gemini_nonstreaming_request(
 
     let base_url = resolved.base_url.trim_end_matches('/');
     let model = &resolved.api_model_id;
+    let max_model_len = 256;
+    if model.len() > max_model_len {
+        tracing::warn!(
+            "Gemini model_id '{}' exceeds {max_model_len} chars, truncating",
+            model
+        );
+    }
     let url = format!(
         "{}/models/{}:generateContent",
         base_url,
-        urlencoding::encode(model)
+        urlencoding::encode(&model.chars().take(max_model_len).collect::<String>())
     );
 
     let mut req = client.post(&url).json(body);

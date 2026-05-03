@@ -160,6 +160,26 @@ impl SandboxConfig {
         // Reject shell metacharacters that enable command injection.
         // Since commands are executed via `sh -c`, metacharacters like `;`, `|`,
         // `&&`, `||`, `$()`, and backticks allow chaining arbitrary commands.
+        // Reject ANSI-C quoting ($'...') which can expand to metacharacters
+        // e.g. $'\n', $'\x3b' (semicolon), $'\x26' (ampersand).
+        // ANSI-C quoting is rarely used in legitimate dev commands and is a
+        // common shell injection vector.
+        if cmd.contains("$'") {
+            return Err(
+                "Sandbox: command contains ANSI-C quoting ($'...') which may expand to shell metacharacters"
+                    .into(),
+            );
+        }
+
+        // Reject PATH= or LD_PRELOAD= environment variable overrides
+        let upper = cmd.to_uppercase();
+        if upper.contains("PATH=") || upper.contains("LD_PRELOAD=") {
+            return Err(
+                "Sandbox: command contains environment variable override (PATH= or LD_PRELOAD=) which is not allowed"
+                    .into(),
+            );
+        }
+
         for meta in &["&", ";", "|", "&&", "||", "$(", "`", "\n", "\r", ">", "<"] {
             if cmd.contains(meta) {
                 return Err(format!(
@@ -212,6 +232,18 @@ impl SandboxConfig {
         let parsed = url::Url::parse(url_str).map_err(|e| format!("invalid URL: {}", e))?;
         let scheme = parsed.scheme();
         let host = parsed.host_str().unwrap_or("");
+
+        // Block known DNS rebinding service domains that can resolve to internal IPs
+        let rebinding_domains = ["nip.io", "xip.io"];
+        if rebinding_domains
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{}", d)))
+        {
+            return Err(format!(
+                "Sandbox: URL not allowed: {} (DNS rebinding domain '{}' blocked)",
+                url_str, host
+            ));
+        }
 
         if scheme == "https" {
             if is_private_ip(host) {
@@ -597,17 +629,83 @@ mod tests {
     }
 
     #[test]
+    fn test_ansi_c_quoting_rejected() {
+        let s = default_sandbox();
+        // ANSI-C $'...' with escape sequences
+        assert!(
+            s.check_command("echo $'\\n'").is_err(),
+            "ANSI-C $' with backslash should be rejected"
+        );
+        assert!(
+            s.check_command("echo $'\\x3b'").is_err(),
+            "ANSI-C hex escape for semicolon should be rejected"
+        );
+        assert!(
+            s.check_command("echo $'\\x26'").is_err(),
+            "ANSI-C hex escape for ampersand should be rejected"
+        );
+        assert!(
+            s.check_command("echo $'\\x0a'").is_err(),
+            "ANSI-C hex escape for newline should be rejected"
+        );
+        // All $' quoting is rejected regardless of content
+        assert!(
+            s.check_command("ls $'normal'").is_err(),
+            "All $' quoting should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_path_env_override_rejected() {
+        let s = default_sandbox();
+        // PATH= override
+        assert!(s.check_command("PATH=/evil:/usr/bin ls").is_err());
+        assert!(s.check_command("export PATH=/evil").is_err());
+        // LD_PRELOAD= override
+        assert!(s.check_command("LD_PRELOAD=/evil.so ls").is_err());
+        assert!(s.check_command("export LD_PRELOAD=/evil.so").is_err());
+    }
+
+    #[test]
+    fn test_dns_rebinding_domains_rejected() {
+        let s = default_sandbox();
+        // nip.io
+        assert!(s.check_url("https://10.0.0.1.nip.io/path").is_err());
+        assert!(s.check_url("https://nip.io").is_err());
+        // xip.io
+        assert!(s.check_url("https://192.168.1.1.xip.io/path").is_err());
+        assert!(s.check_url("https://xip.io").is_err());
+        // Non-rebinding domains should still work
+        assert!(s.check_url("https://example.com").is_ok());
+    }
+
+    #[test]
     fn test_path_matches_sensitive() {
         use std::path::Path;
         // Single component: exact match only
         assert!(path_matches_sensitive(Path::new("/home/user/.env"), ".env"));
-        assert!(!path_matches_sensitive(Path::new("/home/user/some.env.txt"), ".env"));
-        assert!(!path_matches_sensitive(Path::new("/home/user/.env_local"), ".env"));
+        assert!(!path_matches_sensitive(
+            Path::new("/home/user/some.env.txt"),
+            ".env"
+        ));
+        assert!(!path_matches_sensitive(
+            Path::new("/home/user/.env_local"),
+            ".env"
+        ));
         // Compound pattern: consecutive components
-        assert!(path_matches_sensitive(Path::new("/repo/.git/config"), ".git/config"));
-        assert!(!path_matches_sensitive(Path::new("/repo/.gitignore_config"), ".git/config"));
+        assert!(path_matches_sensitive(
+            Path::new("/repo/.git/config"),
+            ".git/config"
+        ));
+        assert!(!path_matches_sensitive(
+            Path::new("/repo/.gitignore_config"),
+            ".git/config"
+        ));
         // SSH keys
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), ".ssh/id_rsa"));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_rsa"),
+            ".ssh/id_rsa"
+        ));
         // Non-canonical paths still match by components
         assert!(path_matches_sensitive(Path::new("src/../.env"), ".env"));
         // Empty path

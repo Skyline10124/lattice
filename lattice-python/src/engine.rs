@@ -166,12 +166,22 @@ impl LatticeEngine {
     /// Resolve a model name to connection details.
     /// Rejects non-localhost HTTP base URLs for security.
     pub fn resolve_model(&self, model: &str) -> PyResult<PyResolvedModel> {
-        let resolved = self
-            .router
-            .lock()
-            .unwrap()
-            .resolve(model, None)
-            .map_err(convert_core_error)?;
+        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.router.lock().unwrap_or_else(|e| {
+                // Mutex was poisoned — recover by replacing the lock
+                tracing::warn!("Mutex poisoned in LatticeEngine::resolve_model, replacing lock");
+                e.into_inner()
+            })
+        })) {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Err(PyValueError::new_err(
+                    "Internal error: mutex lock panicked".to_string(),
+                ));
+            }
+        };
+
+        let resolved = router.resolve(model, None).map_err(convert_core_error)?;
 
         // Security: reject non-localhost HTTP
         lattice_core::router::validate_base_url(&resolved.base_url).map_err(convert_core_error)?;
@@ -181,12 +191,32 @@ impl LatticeEngine {
 
     /// List all canonical model IDs.
     pub fn list_models(&self) -> Vec<String> {
-        self.router.lock().unwrap().list_models()
+        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.router.lock().unwrap_or_else(|e| {
+                tracing::warn!("Mutex poisoned in LatticeEngine::list_models, replacing lock");
+                e.into_inner()
+            })
+        })) {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
+        router.list_models()
     }
 
     /// List models with valid credentials.
     pub fn list_authenticated_models(&self) -> Vec<String> {
-        self.router.lock().unwrap().list_authenticated_models()
+        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.router.lock().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Mutex poisoned in LatticeEngine::list_authenticated_models, replacing lock"
+                );
+                e.into_inner()
+            })
+        })) {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
+        router.list_authenticated_models()
     }
 
     /// Send messages to a resolved model and return the complete response.

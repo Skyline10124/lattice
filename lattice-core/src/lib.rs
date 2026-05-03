@@ -43,6 +43,44 @@ use crate::transport::TransportDispatcher;
 
 static DISPATCHER: LazyLock<TransportDispatcher> = LazyLock::new(TransportDispatcher::new);
 
+/// Check if a host string resolves to a private or link-local IP.
+///
+/// Covers: loopback (127.0.0.1, ::1, localhost), IPv6 ULA (fc00::/7),
+/// 10.x.x.x, 172.16-31.x.x, 192.168.x.x, and 169.254.x.x (link-local).
+fn is_private_ip(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host {
+        "localhost" | "127.0.0.1" | "::1" => return true,
+        _ => {}
+    }
+    // IPv6 Unique Local Address (fc00::/7)
+    if (host.starts_with("fc") || host.starts_with("fd")) && host.len() >= 3 {
+        let third = host.as_bytes().get(2).copied().unwrap_or(0);
+        if third == b':' || third == b'0' {
+            return true;
+        }
+    }
+    // Parse dotted IPv4
+    let octets: Vec<&str> = host.split('.').collect();
+    if octets.len() == 4 {
+        let first = octets[0];
+        match first {
+            "10" => return true,
+            "169" if octets[1] == "254" => return true,
+            "172" => {
+                if let Ok(second) = octets[1].parse::<u8>() {
+                    if (16..=31).contains(&second) {
+                        return true;
+                    }
+                }
+            }
+            "192" if octets[1] == "168" => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Sensitive HTTP header names that must not be overridden via provider_specific.
 const SENSITIVE_HEADER_NAMES: &[&str] = &[
     "authorization",
@@ -85,12 +123,39 @@ async fn send_streaming_request(
     extra_headers: &[(&str, &str)],
 ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>, LatticeError> {
     let base_url = resolved.base_url.trim_end_matches('/');
-    let endpoint = resolved
-        .provider_specific
-        .get("chat_endpoint")
-        .map(|s| s.as_str())
-        .unwrap_or_else(|| transport.chat_endpoint());
+    let is_custom_endpoint = resolved.provider_specific.contains_key("chat_endpoint");
+    let endpoint = if is_custom_endpoint {
+        let custom = resolved
+            .provider_specific
+            .get("chat_endpoint")
+            .map(|s| s.as_str())
+            .unwrap();
+        tracing::warn!(
+            "Using custom chat_endpoint '{}' for provider '{}' — this deviates from the provider default",
+            custom,
+            resolved.provider
+        );
+        custom
+    } else {
+        transport.chat_endpoint()
+    };
     let url = format!("{}{}", base_url, endpoint);
+
+    // Reject custom endpoints that point to private/reserved IPs (SSRF protection)
+    if is_custom_endpoint {
+        if let Ok(parsed) = url::Url::parse(&url) {
+            if let Some(host) = parsed.host_str() {
+                if is_private_ip(host) {
+                    return Err(LatticeError::Config {
+                        message: format!(
+                            "Custom chat_endpoint points to private IP '{}' in URL '{}' — rejected for SSRF protection",
+                            host, url
+                        ),
+                    });
+                }
+            }
+        }
+    }
 
     let mut req = client.post(&url).json(body);
     for (name, value) in extra_headers {

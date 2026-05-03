@@ -141,6 +141,23 @@ impl AgentRunner {
         input.to_string()
     }
 
+    /// Check if agent output content looks like an error message rather than
+    /// a genuine attempt to produce structured output.
+    fn looks_like_error(content: &str) -> bool {
+        let trimmed = content.trim();
+        // Provider/auth errors typically start with these prefixes
+        trimmed.starts_with("Error:")
+            || trimmed.starts_with("error:")
+            || trimmed.starts_with("Provider error:")
+            || trimmed.starts_with("API error:")
+            || trimmed.starts_with("Authentication error:")
+            || trimmed.starts_with("Rate limit")
+            || trimmed.starts_with("401")
+            || trimmed.starts_with("403")
+            || trimmed.starts_with("429")
+            || trimmed.starts_with("500")
+    }
+
     /// Run the agent once and parse the output as JSON.
     async fn run_once(
         &mut self,
@@ -159,6 +176,13 @@ impl AgentRunner {
             if let lattice_agent::LoopEvent::Token { text } = event {
                 content.push_str(text);
             }
+        }
+
+        // If the content looks like a provider/auth error, don't silently fall
+        // back to JSON wrapping — return an error so the pipeline can decide
+        // whether to retry based on the error type.
+        if Self::looks_like_error(&content) {
+            return Err(format!("Agent returned error-like output: {}", content).into());
         }
 
         // Try to parse as JSON. Strip markdown code fences if present.

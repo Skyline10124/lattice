@@ -1,16 +1,33 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::Query;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
 use tokio::sync::broadcast;
+use tracing::warn;
 
 use crate::events::{EventBus, PipelineEvent};
 
 // ---------------------------------------------------------------------------
 // WebSocket endpoint for live pipeline event streaming
 // ---------------------------------------------------------------------------
+
+/// The base path for the WebSocket endpoint. Typically mounted at
+/// `/pipeline/ws` (or similar).
+const WS_PATH: &str = "/ws";
+
+/// Allowed origin prefix for CORS when `WS_SECRET` is configured.
+/// Defaults to allowing local development origins.
+const DEFAULT_ALLOWED_ORIGINS: &[&str] = &[
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+];
 
 /// Build an axum [`Router`] that serves the pipeline event stream at `/ws`.
 ///
@@ -19,12 +36,77 @@ use crate::events::{EventBus, PipelineEvent};
 /// let app = axum::Router::new()
 ///     .nest("/pipeline", pipeline_ws_router(bus));
 /// ```
+///
+/// # Authentication
+///
+/// When the `WS_SECRET` environment variable is set, clients must provide a
+/// matching `token` query parameter. Additionally, the `Origin` header is
+/// validated against a hardcoded allowlist of known development origins.
+/// Authentication is opt-in: if `WS_SECRET` is not set, connections are
+/// accepted without restriction.
 pub fn pipeline_ws_router(bus: Arc<EventBus>) -> axum::Router {
-    axum::Router::new().route("/ws", get(move |ws| ws_handler(ws, bus.clone())))
+    axum::Router::new().route(
+        WS_PATH,
+        get(move |ws, query, headers| ws_handler(ws, query, headers, bus.clone())),
+    )
 }
 
-/// Handle a WebSocket upgrade request — subscribe the client to the event bus.
-async fn ws_handler(ws: WebSocketUpgrade, bus: Arc<EventBus>) -> impl IntoResponse {
+/// Query parameters for WebSocket authentication.
+#[derive(Deserialize)]
+struct WsQuery {
+    token: Option<String>,
+}
+
+/// Handle a WebSocket upgrade request — validate auth and subscribe the client
+/// to the event bus.
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    query: Query<WsQuery>,
+    headers: HeaderMap,
+    bus: Arc<EventBus>,
+) -> impl IntoResponse {
+    // Check WS_SECRET env var (opt-in authentication)
+    if let Ok(secret) = std::env::var("WS_SECRET") {
+        if !secret.is_empty() {
+            let token = query.token.as_deref().unwrap_or("");
+            if token != secret {
+                warn!("WebSocket connection rejected: invalid token");
+                return ws.on_upgrade(move |socket| async move {
+                    let mut socket = socket;
+                    let _ = socket
+                        .send(Message::Text(
+                            r#"{"error":"authentication failed: invalid token"}"#.into(),
+                        ))
+                        .await;
+                });
+            }
+        }
+    }
+
+    // Validate Origin header when WS_SECRET is configured
+    if std::env::var("WS_SECRET").is_ok() {
+        let origin_str = headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let allowed =
+            DEFAULT_ALLOWED_ORIGINS.iter().any(|a| *a == origin_str) || origin_str.is_empty(); // Allow missing Origin for non-browser clients
+
+        if !allowed {
+            warn!(
+                "WebSocket connection rejected: origin '{}' not allowed",
+                origin_str
+            );
+            return ws.on_upgrade(move |socket| async move {
+                let mut socket = socket;
+                let _ = socket
+                    .send(Message::Text(r#"{"error":"origin not allowed"}"#.into()))
+                    .await;
+            });
+        }
+    }
+
     ws.on_upgrade(move |socket| handle_socket(socket, bus))
 }
 

@@ -620,33 +620,53 @@ impl ModelRouter {
 /// Rules:
 /// - Empty URLs are allowed (backward compatibility)
 /// - Non-empty URLs must contain `://` with a non-empty host
+/// - Only http:// and https:// schemes are allowed (reject file://, ftp://, data://)
 /// - HTTP is only allowed for localhost/127.0.0.1/::1
+/// - URLs with userinfo (user:pass@host) are rejected (SSRF protection)
 pub fn validate_base_url(url: &str) -> Result<(), LatticeError> {
     if url.is_empty() {
         return Ok(());
     }
 
-    let proto_end = url.find("://").ok_or_else(|| LatticeError::Config {
-        message: format!(
-            "Invalid base_url '{}': URL must contain a scheme separator (://)",
-            url
-        ),
+    let parsed = url::Url::parse(url).map_err(|e| LatticeError::Config {
+        message: format!("Invalid base_url '{}': {}", url, e),
     })?;
 
-    let scheme = &url[..proto_end];
-    let after_proto = &url[proto_end + 3..];
-    let host_port = after_proto.split('/').next().unwrap_or("");
-    let host = host_port.split(':').next().unwrap_or("");
-    if host.is_empty() {
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
         return Err(LatticeError::Config {
-            message: format!("Invalid base_url '{}': URL has scheme but no host", url),
+            message: format!(
+                "Invalid base_url '{}': scheme '{}' is not allowed. Only http:// and https:// are permitted.",
+                url, scheme
+            ),
         });
     }
+
+    let host = match parsed.host_str() {
+        Some(h) if !h.is_empty() => h,
+        _ => {
+            return Err(LatticeError::Config {
+                message: format!("Invalid base_url '{}': URL has scheme but no host", url),
+            });
+        }
+    };
 
     if scheme == "http" && host != "localhost" && host != "127.0.0.1" && host != "::1" {
         return Err(LatticeError::Config {
             message: format!(
                 "Insecure base_url '{}': HTTP is only allowed for localhost. Use HTTPS.",
+                url
+            ),
+        });
+    }
+
+    // Reject URLs with userinfo (user:pass@host) — prevents SSRF bypass
+    // where the host after @ could be a private IP that the URL parser
+    // would route to, while the userinfo part masks the real destination.
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(LatticeError::Config {
+            message: format!(
+                "Invalid base_url '{}': URL contains userinfo which is not allowed",
                 url
             ),
         });
@@ -980,13 +1000,32 @@ mod tests {
         assert!(validate_base_url("https://api.openai.com/v1").is_ok());
         assert!(validate_base_url("http://localhost:8080").is_ok());
         assert!(validate_base_url("http://127.0.0.1:11434").is_ok());
-        assert!(validate_base_url("custom://host/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_base_url_rejects_non_http_schemes() {
+        assert!(validate_base_url("file:///etc/passwd").is_err());
+        assert!(validate_base_url("ftp://files.example.com").is_err());
+        assert!(validate_base_url("data://text/plain;base64,abc").is_err());
+        assert!(validate_base_url("custom://host/path").is_err());
+    }
+
+    #[test]
+    fn test_validate_base_url_rejects_userinfo() {
+        assert!(
+            validate_base_url("https://user:pass@192.168.1.1/api").is_err(),
+            "URL with userinfo should be rejected"
+        );
+        assert!(
+            validate_base_url("https://user@example.com/api").is_err(),
+            "URL with user (no password) should be rejected"
+        );
     }
 
     #[test]
     fn test_validate_base_url_no_host() {
-        assert!(validate_base_url("https:///path").is_err());
         assert!(validate_base_url("http://").is_err());
+        assert!(validate_base_url("https://").is_err());
     }
 
     #[test]

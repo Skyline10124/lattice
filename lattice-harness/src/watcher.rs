@@ -70,10 +70,35 @@ impl Watcher {
     }
 }
 
+/// Permitted base directories for `LATTICE_AGENTS_DIR`.
+/// The resolved path must be within one of these directories (or their subdirectories).
+const PERMITTED_AGENTS_DIR_PARENTS: &[&str] = &["/home", "/Users", "/tmp", "/var/tmp"];
+
 /// Load a registry from `~/.lattice/agents/` (or override via `LATTICE_AGENTS_DIR`).
+///
+/// When `LATTICE_AGENTS_DIR` is set, the path is validated against a hardcoded
+/// allowlist of permitted base directories. If the path falls outside the
+/// allowlist, a warning is logged and the default path is used instead.
 pub fn default_agents_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        Path::new(&dir).to_path_buf()
+        let path = Path::new(&dir);
+        // Canonicalize to resolve symlinks
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical_str = canonical.to_string_lossy();
+
+        let allowed = PERMITTED_AGENTS_DIR_PARENTS
+            .iter()
+            .any(|parent| canonical_str.starts_with(parent));
+
+        if allowed {
+            path.to_path_buf()
+        } else {
+            warn!(
+                "LATTICE_AGENTS_DIR='{}' resolves to '{}' which is outside permitted directories {:?}. Falling back to default.",
+                dir, canonical_str, PERMITTED_AGENTS_DIR_PARENTS
+            );
+            dirs_override()
+        }
     } else {
         dirs_override()
     }

@@ -206,21 +206,29 @@ fn validate_base_url_empty_ok() {
 }
 
 #[test]
-fn validate_base_url_custom_scheme_ok() {
+fn validate_base_url_custom_scheme_rejected() {
     assert!(
-        router::validate_base_url("custom-scheme://host/path").is_ok(),
-        "custom scheme with valid host should pass"
+        router::validate_base_url("custom-scheme://host/path").is_err(),
+        "custom scheme should be rejected"
+    );
+    assert!(
+        router::validate_base_url("file:///etc/passwd").is_err(),
+        "file scheme should be rejected"
+    );
+    assert!(
+        router::validate_base_url("ftp://host/path").is_err(),
+        "ftp scheme should be rejected"
     );
 }
 
 #[test]
 fn validate_base_url_no_host_rejected() {
     assert!(
-        router::validate_base_url("https:///path-only").is_err(),
+        router::validate_base_url("http://").is_err(),
         "URL with no host should be rejected"
     );
     assert!(
-        router::validate_base_url("http://").is_err(),
+        router::validate_base_url("https://").is_err(),
         "URL with no host should be rejected"
     );
 }

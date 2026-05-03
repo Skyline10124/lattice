@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
@@ -91,6 +92,12 @@ fn handle_agent_error(
     }
 }
 
+/// Default maximum number of memory entries to store per pipeline run.
+const DEFAULT_MAX_MEMORY_ENTRIES: usize = 1000;
+
+/// Default maximum total bytes for memory entry content.
+const DEFAULT_MAX_MEMORY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+
 pub struct Pipeline {
     pub name: String,
     pub registry: Arc<AgentRegistry>,
@@ -98,6 +105,14 @@ pub struct Pipeline {
     pub event_bus: Option<Arc<EventBus>>,
     pub plugin_registry: Option<Arc<lattice_plugin::registry::PluginRegistry>>,
     pub tool_registry: Option<Arc<crate::tools::ToolRegistry>>,
+    /// Maximum number of memory entries (default: 1000).
+    pub max_memory_entries: usize,
+    /// Maximum total bytes for memory content (default: 10 MB).
+    pub max_memory_bytes: usize,
+    /// Current count of memory entries saved in this pipeline run.
+    memory_entry_count: Cell<usize>,
+    /// Current total bytes of memory entry content.
+    memory_entry_bytes: Cell<usize>,
 }
 
 pub struct PipelineRun {
@@ -138,6 +153,10 @@ impl Pipeline {
             event_bus,
             plugin_registry: None,
             tool_registry: None,
+            max_memory_entries: DEFAULT_MAX_MEMORY_ENTRIES,
+            max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
+            memory_entry_count: Cell::new(0),
+            memory_entry_bytes: Cell::new(0),
         }
     }
 
@@ -495,19 +514,46 @@ impl Pipeline {
     }
 
     /// Save a session log entry to shared memory.
+    /// Enforces `max_memory_entries` and `max_memory_bytes` limits.
     fn save_memory_entry(&self, profile: &AgentProfile, output: &serde_json::Value) {
         if let Some(ref mem) = self.shared_memory {
+            let output_str = output.to_string();
+            let entry_size = output_str.len();
+
+            // Enforce max_memory_entries
+            let count = self.memory_entry_count.get();
+            if count >= self.max_memory_entries {
+                tracing::warn!(
+                    "Pipeline '{}': memory entry count {} exceeds limit {}, skipping save",
+                    self.name,
+                    count,
+                    self.max_memory_entries
+                );
+                return;
+            }
+
+            // Enforce max_memory_bytes
+            let bytes = self.memory_entry_bytes.get();
+            if bytes + entry_size > self.max_memory_bytes {
+                tracing::warn!(
+                    "Pipeline '{}': memory bytes {} would exceed limit {}, skipping save",
+                    self.name,
+                    bytes + entry_size,
+                    self.max_memory_bytes
+                );
+                return;
+            }
+
+            self.memory_entry_count.set(count + 1);
+            self.memory_entry_bytes.set(bytes + entry_size);
+
             let ms = lattice_agent::memory::now_ms();
             let entry = lattice_agent::memory::MemoryEntry {
                 id: format!("{}-{}", profile.agent.name, ms),
                 kind: lattice_agent::memory::EntryKind::SessionLog,
                 session_id: profile.agent.name.clone(),
-                summary: format!(
-                    "{}: {} chars output",
-                    profile.agent.name,
-                    output.to_string().len()
-                ),
-                content: output.to_string(),
+                summary: format!("{}: {} chars output", profile.agent.name, output_str.len()),
+                content: output_str,
                 tags: profile.agent.tags.clone(),
                 created_at: ms.to_string(),
             };

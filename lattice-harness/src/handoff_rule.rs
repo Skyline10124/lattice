@@ -140,12 +140,24 @@ impl HandoffRule {
     }
 }
 
+/// Maximum recursion depth for nested JSON traversal in condition evaluation.
+const MAX_JSON_DEPTH: usize = 50;
+
 /// Resolve a dotted field path like `"confidence"` or `"issues[0].severity"`
 /// against a `serde_json::Value`.
 fn resolve_field<'a>(root: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let segments = parse_path(path);
     let mut current = root;
+    let mut depth = 0;
     for seg in &segments {
+        depth += 1;
+        if depth > MAX_JSON_DEPTH {
+            warn!(
+                "JSON path traversal depth {} exceeds limit {}, aborting",
+                depth, MAX_JSON_DEPTH
+            );
+            return None;
+        }
         current = match seg {
             PathSegment::Key(k) => current.get(k)?,
             PathSegment::Index(i) => current.get(*i)?,
