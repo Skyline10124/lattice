@@ -493,10 +493,7 @@ mod resolve_tests {
         let saved = save_and_clear_all();
         let result = resolve("sonnet");
         match result {
-            Ok(r) => panic!(
-                "unexpected Ok: provider={}, api_key redacted",
-                r.provider,
-            ),
+            Ok(r) => panic!("unexpected Ok: provider={}, api_key redacted", r.provider,),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
@@ -528,10 +525,7 @@ mod resolve_tests {
         let saved = save_and_clear_all();
         let result = resolve("gpt-4o");
         match result {
-            Ok(r) => panic!(
-                "unexpected Ok: provider={}, api_key redacted",
-                r.provider,
-            ),
+            Ok(r) => panic!("unexpected Ok: provider={}, api_key redacted", r.provider,),
             Err(e) => {
                 let msg = e.to_string();
                 assert!(

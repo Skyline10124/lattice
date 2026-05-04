@@ -100,10 +100,13 @@ mod tests {
 
     fn make_resolved(cl: u32) -> lattice_core::ResolvedModel {
         lattice_core::ResolvedModel {
-            canonical_id: "test".into(), provider: "test".into(),
-            api_key: None, base_url: "".into(),
+            canonical_id: "test".into(),
+            provider: "test".into(),
+            api_key: None,
+            base_url: "".into(),
             api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-            api_model_id: "test".into(), context_length: cl,
+            api_model_id: "test".into(),
+            context_length: cl,
             provider_specific: HashMap::new(),
             credential_status: lattice_core::CredentialStatus::Missing,
         }
@@ -119,12 +122,12 @@ mod tests {
 
     #[test]
     fn system_and_input_renders_with_markers() {
-        let sections = vec![
-            PromptSection {
-                content: "You are a bot.".into(),
-                layer: Layer::System, priority: 0, tokens: 5,
-            },
-        ];
+        let sections = vec![PromptSection {
+            content: "You are a bot.".into(),
+            layer: Layer::System,
+            priority: 0,
+            tokens: 5,
+        }];
         let result = compile(&sections, "hello", &make_resolved(8192));
         assert!(result.text.contains("=== System ==="));
         assert!(result.text.contains("=== Input ==="));
@@ -141,11 +144,15 @@ mod tests {
         let sections = vec![
             PromptSection {
                 content: "System prompt".into(),
-                layer: Layer::System, priority: 0, tokens: 20,
+                layer: Layer::System,
+                priority: 0,
+                tokens: 20,
             },
             PromptSection {
                 content: "Lots of events data...".into(),
-                layer: Layer::Events, priority: 5, tokens: 8000,
+                layer: Layer::Events,
+                priority: 5,
+                tokens: 8000,
             },
         ];
         // context_length 8192, safety margin 4096 → effective_budget = 4096
@@ -161,27 +168,34 @@ mod tests {
         let sections = vec![
             PromptSection {
                 content: "high".into(),
-                layer: Layer::Tools, priority: 1, tokens: 5,
+                layer: Layer::Tools,
+                priority: 1,
+                tokens: 5,
             },
             PromptSection {
                 content: "low".into(),
-                layer: Layer::Tools, priority: 10, tokens: 5,
+                layer: Layer::Tools,
+                priority: 10,
+                tokens: 5,
             },
         ];
         let result = compile(&sections, "input", &make_resolved(8192));
         let high_pos = result.text.find("high").unwrap();
         let low_pos = result.text.find("low").unwrap();
-        assert!(high_pos < low_pos, "higher priority content should appear first");
+        assert!(
+            high_pos < low_pos,
+            "higher priority content should appear first"
+        );
     }
 
     #[test]
     fn empty_input_still_produces_input_section() {
-        let sections = vec![
-            PromptSection {
-                content: "System".into(),
-                layer: Layer::System, priority: 0, tokens: 5,
-            },
-        ];
+        let sections = vec![PromptSection {
+            content: "System".into(),
+            layer: Layer::System,
+            priority: 0,
+            tokens: 5,
+        }];
         let result = compile(&sections, "", &make_resolved(8192));
         assert!(result.sections.iter().any(|s| s.layer == Layer::Input));
     }
@@ -190,10 +204,16 @@ mod tests {
     fn total_tokens_matches_sections_sum() {
         let sections = vec![
             PromptSection {
-                content: "S".into(), layer: Layer::System, priority: 0, tokens: 10,
+                content: "S".into(),
+                layer: Layer::System,
+                priority: 0,
+                tokens: 10,
             },
             PromptSection {
-                content: "T".into(), layer: Layer::Tools, priority: 5, tokens: 20,
+                content: "T".into(),
+                layer: Layer::Tools,
+                priority: 5,
+                tokens: 20,
             },
         ];
         let result = compile(&sections, "I", &make_resolved(8192));
@@ -206,11 +226,15 @@ mod tests {
         let sections = vec![
             PromptSection {
                 content: "You are code review AI.".into(),
-                layer: Layer::System, priority: 0, tokens: 8,
+                layer: Layer::System,
+                priority: 0,
+                tokens: 8,
             },
             PromptSection {
                 content: "curl file:///".into(),
-                layer: Layer::Tools, priority: 5, tokens: 4,
+                layer: Layer::Tools,
+                priority: 5,
+                tokens: 4,
             },
         ];
         let result = compile(&sections, "review this file", &make_resolved(8192));
@@ -226,10 +250,16 @@ mod tests {
     fn tiny_budget_only_system_and_input_survive() {
         let sections = vec![
             PromptSection {
-                content: "S".into(), layer: Layer::System, priority: 0, tokens: 5,
+                content: "S".into(),
+                layer: Layer::System,
+                priority: 0,
+                tokens: 5,
             },
             PromptSection {
-                content: "T".into(), layer: Layer::Tools, priority: 5, tokens: 1000,
+                content: "T".into(),
+                layer: Layer::Tools,
+                priority: 5,
+                tokens: 1000,
             },
         ];
         // SAFETY_MARGIN = 4096. context_length 5000 - 4096 = 904 effective
@@ -247,13 +277,22 @@ mod tests {
         // If Tools layer is dropped, ALL Tools sections dropped (same layer)
         let sections = vec![
             PromptSection {
-                content: "S".into(), layer: Layer::System, priority: 0, tokens: 5,
+                content: "S".into(),
+                layer: Layer::System,
+                priority: 0,
+                tokens: 5,
             },
             PromptSection {
-                content: "Tool A".into(), layer: Layer::Tools, priority: 1, tokens: 500,
+                content: "Tool A".into(),
+                layer: Layer::Tools,
+                priority: 1,
+                tokens: 500,
             },
             PromptSection {
-                content: "Tool B".into(), layer: Layer::Tools, priority: 2, tokens: 500,
+                content: "Tool B".into(),
+                layer: Layer::Tools,
+                priority: 2,
+                tokens: 500,
             },
         ];
         // context_length 5000 - 4096 = 904 effective

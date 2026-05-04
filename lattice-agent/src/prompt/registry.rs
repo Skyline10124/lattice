@@ -1,5 +1,5 @@
-use crate::prompt::types::*;
 use crate::prompt::provider::ContextProvider;
+use crate::prompt::types::*;
 
 /// Holds all registered context providers plus a dedicated system_prompt field.
 ///
@@ -72,9 +72,9 @@ impl PromptRegistry {
 
 #[cfg(test)]
 mod tests {
-    use async_trait::async_trait;
     use super::*;
     use crate::prompt::types::*;
+    use async_trait::async_trait;
 
     struct TestProvider {
         layer: Layer,
@@ -85,8 +85,12 @@ mod tests {
 
     #[async_trait]
     impl ContextProvider for TestProvider {
-        fn layer(&self) -> Layer { self.layer }
-        fn priority(&self) -> u8 { self.priority }
+        fn layer(&self) -> Layer {
+            self.layer
+        }
+        fn priority(&self) -> u8 {
+            self.priority
+        }
         async fn produce(&self, _ctx: &AssemblyContext<'_>) -> Option<PromptSection> {
             Some(PromptSection {
                 content: self.content.to_string(),
@@ -99,10 +103,13 @@ mod tests {
 
     fn make_resolved(cl: u32) -> lattice_core::ResolvedModel {
         lattice_core::ResolvedModel {
-            canonical_id: "test".into(), provider: "test".into(),
-            api_key: None, base_url: "".into(),
+            canonical_id: "test".into(),
+            provider: "test".into(),
+            api_key: None,
+            base_url: "".into(),
             api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-            api_model_id: "test".into(), context_length: cl,
+            api_model_id: "test".into(),
+            context_length: cl,
             provider_specific: std::collections::HashMap::new(),
             credential_status: lattice_core::CredentialStatus::Missing,
         }
@@ -112,7 +119,9 @@ mod tests {
     async fn empty_registry_returns_empty_vec() {
         let registry = PromptRegistry::new();
         let ctx = AssemblyContext {
-            request_id: "test", memory: None, metadata: None,
+            request_id: "test",
+            memory: None,
+            metadata: None,
             model: &make_resolved(8192),
         };
         assert!(registry.collect(&ctx).await.is_empty());
@@ -123,7 +132,9 @@ mod tests {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("You are a helpful assistant.");
         let ctx = AssemblyContext {
-            request_id: "test", memory: None, metadata: None,
+            request_id: "test",
+            memory: None,
+            metadata: None,
             model: &make_resolved(8192),
         };
         let sections = registry.collect(&ctx).await;
@@ -135,11 +146,15 @@ mod tests {
     async fn registered_provider_appears_in_collect() {
         let mut registry = PromptRegistry::new();
         registry.register(Box::new(TestProvider {
-            layer: Layer::Tools, priority: 5,
-            content: "tool definitions", tokens: 10,
+            layer: Layer::Tools,
+            priority: 5,
+            content: "tool definitions",
+            tokens: 10,
         }));
         let ctx = AssemblyContext {
-            request_id: "test", memory: None, metadata: None,
+            request_id: "test",
+            memory: None,
+            metadata: None,
             model: &make_resolved(8192),
         };
         assert_eq!(registry.collect(&ctx).await.len(), 1);
@@ -151,7 +166,9 @@ mod tests {
         registry.set_system_prompt("first");
         registry.set_system_prompt("second");
         let ctx = AssemblyContext {
-            request_id: "test", memory: None, metadata: None,
+            request_id: "test",
+            memory: None,
+            metadata: None,
             model: &make_resolved(8192),
         };
         let sections = registry.collect(&ctx).await;

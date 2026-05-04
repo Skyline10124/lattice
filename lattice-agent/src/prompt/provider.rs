@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::prompt::types::{AssemblyContext, Layer, PromptSection, TokenBudget};
+use async_trait::async_trait;
 
 /// A source of prompt content.
 ///

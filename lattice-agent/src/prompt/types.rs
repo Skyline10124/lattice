@@ -1,5 +1,5 @@
-use lattice_core::ResolvedModel;
 use crate::memory::Memory;
+use lattice_core::ResolvedModel;
 
 #[derive(Debug, Clone)]
 pub struct PromptSection {
