@@ -7,6 +7,9 @@ pub mod tool_definitions;
 pub mod tool_error;
 pub mod tools;
 
+#[cfg(feature = "blob-store")]
+pub mod blob;
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
