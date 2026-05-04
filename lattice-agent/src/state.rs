@@ -46,6 +46,17 @@ impl AgentState {
         });
     }
 
+    /// Replace the first Role::User message in-place.
+    /// Used by the prompt engine to refresh compiled context each tool iteration
+    /// without growing the message list.
+    pub fn replace_first_user_message(&mut self, content: &str) {
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::User) {
+            msg.content = content.to_string();
+        } else {
+            self.push_user_message(content);
+        }
+    }
+
     pub fn push_assistant_message(
         &mut self,
         content: &str,

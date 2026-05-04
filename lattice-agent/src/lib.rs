@@ -146,26 +146,30 @@ impl Agent {
     }
 
     pub async fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
-        // Compile prompt through engine
-        let ctx = prompt::AssemblyContext {
-            request_id: "run",
-            memory: self.memory.as_deref(),
-            model: &self.state.resolved,
-        };
-        let (sections, budgets) = self.registry.collect(&ctx).await;
-        let rendered =
-            prompt::compiler::compile(&sections, &budgets, content, &self.state.resolved);
-        // Push compiled messages with proper role assignments
-        for msg in &rendered.messages {
-            match msg.role {
-                Role::System => self.state.push_system_message(&msg.content),
-                Role::User => self.state.push_user_message(&msg.content),
-                _ => {}
-            }
-        }
         let mut all_events = Vec::new();
+        let user_input = content.to_string();
 
         for _ in 0..max_turns {
+            // Compile prompt fresh each iteration: events and memory
+            // accumulated from previous tool turns are re-evaluated by providers,
+            // and budget pressure from growing tool results naturally compresses
+            // lower-priority sections.
+            let ctx = prompt::AssemblyContext {
+                request_id: "run",
+                memory: self.memory.as_deref(),
+                model: &self.state.resolved,
+            };
+            let (sections, budgets) = self.registry.collect(&ctx).await;
+            let rendered =
+                prompt::compiler::compile(&sections, &budgets, &user_input, &self.state.resolved);
+            for msg in &rendered.messages {
+                match msg.role {
+                    Role::System => self.state.push_system_message(&msg.content),
+                    Role::User => self.state.replace_first_user_message(&msg.content),
+                    _ => {}
+                }
+            }
+
             let context_len = if self.state.resolved.context_length > 0 {
                 self.state.resolved.context_length
             } else {

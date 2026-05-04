@@ -8,11 +8,12 @@
     </linearGradient>
 
     <!-- 引入外部字体：Space Grotesk -->
+    <!-- GitHub README 渲染屏蔽外部资源，因此提供跨平台系统字体回退 -->
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500&amp;display=swap');
       
       .title-text {
-        font-family: 'Space Grotesk', system-ui, sans-serif;
+        font-family: 'Space Grotesk', 'Inter', 'SF Pro Display', 'Segoe UI', 'Ubuntu', 'DejaVu Sans', system-ui, sans-serif;
         font-size: 52px;
         font-weight: 500;
         letter-spacing: 16px;
