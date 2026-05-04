@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use lattice_core::retry::RetryPolicy;
 use lattice_core::streaming::StreamEvent;
-use lattice_core::types::ToolDefinition;
+use lattice_core::types::{Role, ToolDefinition};
 use lattice_core::ResolvedModel;
 
 /// Executes a tool call and returns the result string.
@@ -155,7 +155,14 @@ impl Agent {
         let (sections, budgets) = self.registry.collect(&ctx).await;
         let rendered =
             prompt::compiler::compile(&sections, &budgets, content, &self.state.resolved);
-        self.state.push_user_message(&rendered.text);
+        // Push compiled messages with proper role assignments
+        for msg in &rendered.messages {
+            match msg.role {
+                Role::System => self.state.push_system_message(&msg.content),
+                Role::User => self.state.push_user_message(&msg.content),
+                _ => {}
+            }
+        }
         let mut all_events = Vec::new();
 
         for _ in 0..max_turns {
@@ -453,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn test_agent_prompt_compilation_integration() {
         // Verify that set_system_prompt + registered provider produces
-        // correctly ordered, marker-delimited output through the engine.
+        // correctly ordered messages through the engine.
         let resolved = make_resolved(16384);
         let mut agent = Agent::new(resolved);
 
@@ -481,25 +488,40 @@ mod tests {
             &agent.state.resolved,
         );
 
-        // System layer appears first
-        assert!(rendered.text.starts_with("=== System ==="));
-        // All three layers present in order
-        let sys_pos = rendered.text.find("System").unwrap();
-        let tools_pos = rendered.text.find("Tools").unwrap();
-        let input_pos = rendered.text.find("Input").unwrap();
-        assert!(sys_pos < tools_pos, "System before Tools");
-        assert!(tools_pos < input_pos, "Tools before Input");
+        // System message with plain content
+        let sys = rendered
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .unwrap();
+        assert!(sys.content.contains("You are a code review assistant."));
 
-        // Content preserved
-        assert!(rendered.text.contains("You are a code review assistant."));
-        assert!(rendered.text.contains("read_file, grep, patch"));
-        assert!(rendered.text.contains("review this file"));
+        // User message with Tools + Input markers
+        let user = rendered
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert!(user.content.contains("=== Tools ==="));
+        assert!(user.content.contains("=== Input ==="));
+        assert!(user.content.contains("read_file, grep, patch"));
+        assert!(user.content.contains("review this file"));
 
         // Verify what gets pushed to state
-        agent.state.push_user_message(&rendered.text);
-        let last = agent.state.messages.last().unwrap();
-        assert_eq!(last.role, lattice_core::types::Role::User);
-        assert_eq!(last.content, rendered.text);
+        for msg in &rendered.messages {
+            match msg.role {
+                Role::System => agent.state.push_system_message(&msg.content),
+                Role::User => agent.state.push_user_message(&msg.content),
+                _ => {}
+            }
+        }
+        // System message at the front
+        assert_eq!(agent.state.messages[0].role, Role::System);
+        assert!(agent.state.messages[0]
+            .content
+            .contains("You are a code review assistant."));
+        // User message after
+        assert_eq!(agent.state.messages[1].role, Role::User);
     }
 
     #[tokio::test]
@@ -517,7 +539,12 @@ mod tests {
         let rendered =
             prompt::compiler::compile(&sections, &budgets, "hello", &agent.state.resolved);
 
-        assert_eq!(rendered.text, "hello", "empty registry → raw pass-through");
+        assert_eq!(rendered.messages.len(), 1);
+        assert_eq!(rendered.messages[0].role, Role::User);
+        assert_eq!(
+            rendered.messages[0].content, "hello",
+            "empty registry → raw pass-through"
+        );
     }
 
     #[tokio::test]
@@ -563,9 +590,18 @@ mod tests {
         let rendered = prompt::compiler::compile(&sections, &budgets, "hi", &agent.state.resolved);
 
         // Events (2000 tokens > 904 effective) should be dropped
-        assert!(!rendered.text.contains("=== Events ==="));
-        // System and Input survive
-        assert!(rendered.text.contains("=== System ==="));
-        assert!(rendered.text.contains("=== Input ==="));
+        let user = rendered
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert!(!user.content.contains("=== Events ==="));
+        // System message survives
+        let sys = rendered
+            .messages
+            .iter()
+            .find(|m| m.role == Role::System)
+            .unwrap();
+        assert_eq!(sys.content, "S");
     }
 }

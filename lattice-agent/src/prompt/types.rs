@@ -1,4 +1,5 @@
 use crate::memory::Memory;
+use lattice_core::types::{Message, Role};
 use lattice_core::ResolvedModel;
 
 #[derive(Debug, Clone)]
@@ -59,10 +60,26 @@ pub struct AssemblyContext<'a> {
 }
 
 /// Final compiled prompt ready to send to LLM.
+///
+/// System-layer content becomes a `Role::System` message (no markers — the role
+/// itself conveys system authority). All other layers become a single `Role::User`
+/// message with `=== Layer ===` markers for structural clarity.
 #[derive(Debug, Clone)]
 pub struct RenderedPrompt {
-    pub text: String,
+    /// Compiled messages with proper role assignments.
+    pub messages: Vec<Message>,
     /// Sections that survived budget trimming, in render order.
     pub sections: Vec<PromptSection>,
     pub total_tokens: u32,
+}
+
+impl RenderedPrompt {
+    /// Convenience: return the first User message content, or empty string.
+    pub fn user_content(&self) -> &str {
+        self.messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.as_str())
+            .unwrap_or("")
+    }
 }

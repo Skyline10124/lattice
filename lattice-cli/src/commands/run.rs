@@ -115,7 +115,7 @@ async fn dry_run_prompt(
     use std::collections::HashMap;
 
     // Build final input text with session context if present
-    let user_input = if let Some(ref session) = previous_session {
+    let user_input = if let Some(session) = previous_session {
         let mut ctx = String::from("Previous conversation:\n");
         for msg in &session.messages {
             let role = match msg.role.to_lowercase().as_str() {
@@ -176,8 +176,16 @@ async fn dry_run_prompt(
         );
     }
     println!();
-    println!("{}", "─ Rendered Output ─".dimmed());
-    println!("{}", rendered.text);
+    println!("{}", "─ Rendered Messages ─".dimmed());
+    for msg in &rendered.messages {
+        let role_label = match msg.role {
+            lattice_core::types::Role::System => "System".red(),
+            lattice_core::types::Role::User => "User".cyan(),
+            lattice_core::types::Role::Assistant => "Assistant".green(),
+            lattice_core::types::Role::Tool => "Tool".yellow(),
+        };
+        println!("  [{}] {}", role_label, msg.content);
+    }
     println!();
     println!("{}", "─ Stats ─".dimmed());
     println!(

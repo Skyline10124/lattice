@@ -1,4 +1,5 @@
 use crate::prompt::types::*;
+use lattice_core::types::{Message, Role};
 use lattice_core::ResolvedModel;
 
 /// Safety margin subtracted from context_length before budget allocation.
@@ -12,7 +13,7 @@ const SAFETY_MARGIN: u32 = 4096;
 /// 2. Sort: by layer → priority → stable
 /// 3. Budget: allocate per Fixed→Ratio→Dynamic, mark over-budget sections
 /// 4. Trim: drop sections that exceed their allocated budget
-/// 5. Render: plain text with === Layer === markers
+/// 5. Render: produce Vec<Message> with proper role assignments
 pub fn compile(
     sections: &[PromptSection],
     budgets: &[TokenBudget],
@@ -70,12 +71,12 @@ pub fn compile(
         .map(|(_, (s, _))| s)
         .collect();
 
-    // Phase 5: Render
+    // Phase 5: Render — produce Vec<Message> with proper role assignments
     let total_tokens: u32 = trimmed.iter().map(|s| s.tokens).sum();
-    let text = render(&trimmed, user_input);
+    let messages = render_messages(&trimmed, user_input);
 
     RenderedPrompt {
-        text,
+        messages,
         sections: trimmed,
         total_tokens,
     }
@@ -123,23 +124,63 @@ fn allocate_budgets(pairs: &[(PromptSection, TokenBudget)], effective_budget: u3
     allocated
 }
 
-/// Render sections to plain text with layer markers.
+/// Render trimmed sections into Vec<Message> with proper role assignments.
 ///
-/// If only one section (user input), render as raw text without markers.
-fn render(sections: &[PromptSection], raw_input: &str) -> String {
-    // If the only section is input, return raw text
-    if sections.len() == 1 && sections[0].layer == Layer::Input {
-        return raw_input.to_string();
+/// System-layer content becomes one Role::System message (plain text, no markers —
+/// the role itself conveys system authority). All other layers become one
+/// Role::User message with === Layer === markers for structural clarity.
+fn render_messages(sections: &[PromptSection], raw_input: &str) -> Vec<Message> {
+    let system_sections: Vec<&PromptSection> = sections
+        .iter()
+        .filter(|s| s.layer == Layer::System)
+        .collect();
+    let other_sections: Vec<&PromptSection> = sections
+        .iter()
+        .filter(|s| s.layer != Layer::System)
+        .collect();
+
+    let mut messages = Vec::new();
+
+    // System message: plain concatenated content (role conveys system authority)
+    if !system_sections.is_empty() {
+        let system_content = system_sections
+            .iter()
+            .filter(|s| !s.content.is_empty())
+            .map(|s| s.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !system_content.is_empty() {
+            messages.push(Message::new(Role::System, system_content, None, None, None));
+        }
     }
 
+    // User message: non-System sections with markers, or raw input if only Input
+    if !other_sections.is_empty() {
+        let user_content = if other_sections.len() == 1 && other_sections[0].layer == Layer::Input {
+            raw_input.to_string()
+        } else {
+            render_with_markers(&other_sections)
+        };
+        if !user_content.is_empty() {
+            messages.push(Message::new(Role::User, user_content, None, None, None));
+        }
+    }
+
+    messages
+}
+
+/// Render non-System sections with === Layer === markers.
+fn render_with_markers(sections: &[&PromptSection]) -> String {
     let mut output = String::new();
-    for (i, section) in sections.iter().enumerate() {
+    let mut first = true;
+    for section in sections {
         if section.content.is_empty() {
             continue;
         }
-        if i > 0 {
+        if !first {
             output.push('\n');
         }
+        first = false;
         output.push_str(&format!("=== {:?} ===\n", section.layer));
         output.push_str(&section.content);
     }
@@ -165,17 +206,25 @@ mod tests {
         }
     }
 
+    /// Helper: find the first message with a given role in a RenderedPrompt.
+    fn find_msg(result: &RenderedPrompt, role: Role) -> Option<&Message> {
+        result.messages.iter().find(|m| m.role == role)
+    }
+
     #[test]
     fn input_only_renders_as_raw_text() {
         let sections = vec![];
         let budgets = vec![];
         let result = compile(&sections, &budgets, "hello world", &make_resolved(8192));
-        assert_eq!(result.text, "hello world");
+        assert_eq!(result.messages.len(), 1);
+        let msg = &result.messages[0];
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.content, "hello world");
         assert_eq!(result.total_tokens, result.sections[0].tokens);
     }
 
     #[test]
-    fn system_and_input_renders_with_markers() {
+    fn system_and_input_produces_two_messages() {
         let sections = vec![PromptSection {
             content: "You are a bot.".into(),
             layer: Layer::System,
@@ -184,13 +233,13 @@ mod tests {
         }];
         let budgets = vec![TokenBudget::Fixed(5)];
         let result = compile(&sections, &budgets, "hello", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Input ==="));
-        assert!(result.text.contains("You are a bot."));
-        assert!(result.text.contains("hello"));
-        let sys_pos = result.text.find("System").unwrap();
-        let inp_pos = result.text.find("Input").unwrap();
-        assert!(sys_pos < inp_pos);
+        assert_eq!(result.messages.len(), 2);
+        // System message — plain content, no markers
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "You are a bot.");
+        // User message — raw input (only Input section)
+        let user = find_msg(&result, Role::User).unwrap();
+        assert_eq!(user.content, "hello");
     }
 
     #[test]
@@ -214,9 +263,10 @@ mod tests {
         // Fixed: System claims 20, remaining = 4076
         // Dynamic: Events needs 8000 > 4076 → grant = 4076 < tokens → dropped
         let result = compile(&sections, &budgets, "hi", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Input ==="));
-        assert!(!result.text.contains("=== Events ==="));
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "System prompt");
+        let user = find_msg(&result, Role::User).unwrap();
+        assert!(!user.content.contains("Events"));
     }
 
     #[test]
@@ -249,7 +299,9 @@ mod tests {
         // effective_budget = 4096 - 4096 = 0
         // All grants = 0 → all dropped; Input always survives
         let result = compile(&sections, &budgets, "hi", &make_resolved(4096));
-        assert_eq!(result.text, "hi");
+        assert_eq!(result.messages.len(), 1);
+        let user = find_msg(&result, Role::User).unwrap();
+        assert_eq!(user.content, "hi");
     }
 
     #[test]
@@ -273,9 +325,11 @@ mod tests {
         // Fixed: System claims 200, remaining = 3896
         // Dynamic: Tools gets min(500, 3896) = 500
         let result = compile(&sections, &budgets, "hi", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Tools ==="));
-        assert!(result.text.contains("=== Input ==="));
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "System");
+        let user = find_msg(&result, Role::User).unwrap();
+        assert!(user.content.contains("=== Tools ==="));
+        assert!(user.content.contains("=== Input ==="));
     }
 
     #[test]
@@ -309,9 +363,11 @@ mod tests {
         // Ratio: Memory=floor(4086*0.5)=2043, remaining=2043
         // Dynamic: Tools=min(2000, 2043)=2000
         let result = compile(&sections, &budgets, "hi", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Memory ==="));
-        assert!(result.text.contains("=== Tools ==="));
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "System");
+        let user = find_msg(&result, Role::User).unwrap();
+        assert!(user.content.contains("=== Memory ==="));
+        assert!(user.content.contains("=== Tools ==="));
     }
 
     #[test]
@@ -345,10 +401,11 @@ mod tests {
         // Ratio: Memory=floor(4086*0.9)=3677 < 5000 → dropped
         // Dynamic: Events remaining=409, grant=409 < 500 → dropped
         let result = compile(&sections, &budgets, "hi", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Input ==="));
-        assert!(!result.text.contains("=== Memory ==="));
-        assert!(!result.text.contains("=== Events ==="));
+        assert_eq!(result.messages.len(), 2);
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "System");
+        let user = find_msg(&result, Role::User).unwrap();
+        assert_eq!(user.content, "hi"); // Only Input survives
     }
 
     #[test]
@@ -369,8 +426,9 @@ mod tests {
         ];
         let budgets = vec![TokenBudget::Dynamic, TokenBudget::Dynamic];
         let result = compile(&sections, &budgets, "input", &make_resolved(8192));
-        let high_pos = result.text.find("high").unwrap();
-        let low_pos = result.text.find("low").unwrap();
+        let user = find_msg(&result, Role::User).unwrap();
+        let high_pos = user.content.find("high").unwrap();
+        let low_pos = user.content.find("low").unwrap();
         assert!(
             high_pos < low_pos,
             "higher priority content should appear first"
@@ -435,12 +493,18 @@ mod tests {
             "review this file",
             &make_resolved(8192),
         );
-        assert!(result.text.contains("=== System ==="));
-        assert!(result.text.contains("=== Tools ==="));
-        assert!(result.text.contains("=== Input ==="));
-        assert!(!result.text.contains("=== Memory ==="));
-        assert!(!result.text.contains("=== Events ==="));
-        assert!(!result.text.contains("=== Rules ==="));
+        // System message: plain content
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert!(sys.content.contains("You are code review AI."));
+        // User message: Tools + Input with markers
+        let user = find_msg(&result, Role::User).unwrap();
+        assert!(user.content.contains("=== Tools ==="));
+        assert!(user.content.contains("=== Input ==="));
+        assert!(!user.content.contains("=== Memory ==="));
+        assert!(!user.content.contains("=== Events ==="));
+        assert!(!user.content.contains("=== Rules ==="));
+        // No "=== System ===" in user message (role conveys that)
+        assert!(!user.content.contains("=== System ==="));
     }
 
     #[test]
@@ -464,8 +528,11 @@ mod tests {
         // Fixed: System claims min(5, 904) = 5, remaining = 899
         // Dynamic: Tools needs 1000 > 899 → grant = 899 < tokens → dropped
         let result = compile(&sections, &budgets, "I", &make_resolved(5000));
-        assert!(result.text.contains("=== System ==="));
-        assert!(!result.text.contains("=== Tools ==="));
+        assert_eq!(result.messages.len(), 2);
+        let sys = find_msg(&result, Role::System).unwrap();
+        assert_eq!(sys.content, "S");
+        let user = find_msg(&result, Role::User).unwrap();
+        assert_eq!(user.content, "I"); // Only Input
     }
 
     #[test]
@@ -479,7 +546,9 @@ mod tests {
         let budgets = vec![TokenBudget::Fixed(5)];
         // context_length < SAFETY_MARGIN → effective_budget = 0 → all non-Input dropped
         let result = compile(&sections, &budgets, "hello", &make_resolved(100));
-        assert_eq!(result.text, "hello");
+        assert_eq!(result.messages.len(), 1);
+        let user = find_msg(&result, Role::User).unwrap();
+        assert_eq!(user.content, "hello");
     }
 
     #[test]
@@ -728,7 +797,7 @@ mod tests {
     fn system_prompt_and_system_provider_coexist() {
         // set_system_prompt creates System(priority=0) with Fixed budget
         // A registered provider at System(priority=5) with Dynamic budget
-        // Both appear; set_system_prompt section comes first (lower priority)
+        // Both appear; content merged into one System message
         let sections = vec![
             PromptSection {
                 content: "You are an assistant.".into(),
@@ -745,10 +814,13 @@ mod tests {
         ];
         let budgets = vec![TokenBudget::Fixed(10), TokenBudget::Dynamic];
         let result = compile(&sections, &budgets, "hello", &make_resolved(8192));
-        assert!(result.text.contains("=== System ==="));
-        // Both sections under same layer marker; priority 0 before priority 5
-        let assistant_pos = result.text.find("You are an assistant.").unwrap();
-        let rules_pos = result.text.find("Additional system rules.").unwrap();
-        assert!(assistant_pos < rules_pos);
+        // Both System sections merged into one System message
+        let sys = find_msg(&result, Role::System).unwrap();
+        let assistant_pos = sys.content.find("You are an assistant.").unwrap();
+        let rules_pos = sys.content.find("Additional system rules.").unwrap();
+        assert!(
+            assistant_pos < rules_pos,
+            "priority 0 content before priority 5"
+        );
     }
 }
