@@ -140,9 +140,13 @@ mod tests {
     #[tokio::test]
     async fn empty_registry_returns_empty() {
         let registry = PromptRegistry::new();
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, budgets) = registry.collect(&ctx).await;
@@ -154,9 +158,13 @@ mod tests {
     async fn system_prompt_produces_section_with_fixed_budget() {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("You are a helpful assistant.");
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, budgets) = registry.collect(&ctx).await;
@@ -175,9 +183,13 @@ mod tests {
             tokens: 10,
             budget: TokenBudget::Dynamic,
         }));
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, budgets) = registry.collect(&ctx).await;
@@ -190,9 +202,13 @@ mod tests {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("first");
         registry.set_system_prompt("second");
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, _) = registry.collect(&ctx).await;
@@ -204,9 +220,13 @@ mod tests {
     async fn provider_returning_none_is_skipped() {
         let mut registry = PromptRegistry::new();
         registry.register(Box::new(NoneProvider));
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, budgets) = registry.collect(&ctx).await;
@@ -232,9 +252,13 @@ mod tests {
             tokens: 10,
             budget: TokenBudget::Ratio(0.3),
         }));
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
             model: &make_resolved(8192),
         };
         let (sections, budgets) = registry.collect(&ctx).await;

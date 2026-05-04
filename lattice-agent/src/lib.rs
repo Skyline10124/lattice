@@ -158,10 +158,14 @@ impl Agent {
             // accumulated from previous tool turns are re-evaluated by providers,
             // and budget pressure from growing tool results naturally compresses
             // lower-priority sections.
+            let bus_events: Vec<lattice_bus::BusEvent> = vec![];
             let ctx = prompt::AssemblyContext {
                 request_id: "run",
                 memory: self.memory.as_deref(),
                 model: &self.state.resolved,
+                #[cfg(feature = "blob-store")]
+                blob_store: None,
+                bus_events: &bus_events,
             };
             let (sections, budgets) = self.registry.collect(&ctx).await;
             let rendered =
@@ -483,10 +487,14 @@ mod tests {
         });
 
         // Simulate what Agent::run() does internally (no network call)
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
         };
         let (sections, budgets) = agent.registry.collect(&ctx).await;
         let rendered = prompt::compiler::compile(
@@ -538,10 +546,14 @@ mod tests {
         let resolved = make_resolved(16384);
         let agent = Agent::new(resolved);
 
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
         };
         let (sections, budgets) = agent.registry.collect(&ctx).await;
         let rendered =
@@ -589,10 +601,14 @@ mod tests {
         }
         agent = agent.with_provider(BigProvider);
 
+        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_events: &bus_events,
         };
         let (sections, budgets) = agent.registry.collect(&ctx).await;
         let rendered = prompt::compiler::compile(&sections, &budgets, "hi", &agent.state.resolved);
