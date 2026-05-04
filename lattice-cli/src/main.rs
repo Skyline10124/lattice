@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use colored::Colorize;
 
 mod commands;
 mod config;
@@ -187,7 +186,6 @@ async fn main() -> Result<()> {
 
     let config = Config::load(cli.config.as_deref())?;
     let creds = CredentialStore::from_config(&config)?;
-    // Credentials loaded explicitly; passed to ModelRouter::with_credentials()
 
     // Print mode (single-turn streaming)
     if let Some(prompt) = cli.print {
@@ -211,7 +209,7 @@ async fn main() -> Result<()> {
         .await;
     }
 
-    // Default: enter TUI (if no subcommand)
+    // Dispatch subcommand
     match cli.command {
         Some(Commands::Resolve {
             model,
@@ -302,23 +300,7 @@ async fn main() -> Result<()> {
             validate::run(dir)?;
         }
         Some(Commands::Tui { prompt, model }) => {
-            let mut cmd = std::process::Command::new("lattice-tui");
-            if let Some(p) = &prompt {
-                cmd.arg("--prompt").arg(p);
-            }
-            if let Some(m) = &model {
-                cmd.arg("--model").arg(m);
-            }
-            let status = cmd.status().map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to launch lattice-tui: {} (is it built and on $PATH?)",
-                    e
-                )
-            })?;
-            if !status.success() {
-                let code = status.code().unwrap_or(-1);
-                anyhow::bail!("lattice-tui exited with code {}", code);
-            }
+            launch_tui(prompt, model, &cli.model)?;
         }
         Some(Commands::New { action }) => match action {
             NewAction::Agent { name } => new_agent::run(name)?,
@@ -327,13 +309,37 @@ async fn main() -> Result<()> {
             ListCommands::Agents => list_agents::run()?,
         },
         None => {
-            // No command and no -p: launch TUI
-            eprintln!(
-                "{}",
-                "Launching TUI (not yet implemented in MVP). Use -p for single-turn mode.".dimmed()
-            );
+            // No subcommand — launch TUI like Claude Code
+            launch_tui(None, None, &cli.model)?;
         }
     }
 
+    Ok(())
+}
+
+/// Launch the lattice-tui binary as a child process.
+fn launch_tui(
+    prompt: Option<String>,
+    model: Option<String>,
+    cli_model: &Option<String>,
+) -> Result<()> {
+    let mut cmd = std::process::Command::new("lattice-tui");
+    if let Some(p) = &prompt {
+        cmd.arg("--prompt").arg(p);
+    }
+    if let Some(m) = &model {
+        cmd.arg("--model").arg(m);
+    } else if let Some(m) = cli_model {
+        cmd.arg("--model").arg(m);
+    }
+    let status = cmd.status().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to launch lattice-tui: {} (is it built and on $PATH?)",
+            e
+        )
+    })?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
     Ok(())
 }
