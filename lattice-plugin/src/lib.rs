@@ -16,6 +16,8 @@ pub mod registry;
 
 // Re-exports for backward compatibility
 pub use builtin::code_review::CodeReviewPlugin;
+pub use builtin::verification::VerificationPlugin;
+pub use builtin::plan_gen::PlanGenPlugin;
 pub(crate) use builtin::parse_utils::extract_confidence;
 
 use crate::erased::ErasedPlugin;

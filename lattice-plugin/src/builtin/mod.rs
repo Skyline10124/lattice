@@ -7,4 +7,6 @@ pub mod parse_utils;
 pub mod pptx_gen;
 pub mod refactor;
 pub mod security_audit;
+pub mod verification;
+pub mod plan_gen;
 pub mod test_gen;
