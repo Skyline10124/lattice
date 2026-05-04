@@ -1,7 +1,7 @@
+use crate::session::SessionManager;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use crate::session::SessionManager;
 
 #[derive(Subcommand)]
 pub enum SessionAction {
@@ -32,32 +32,31 @@ pub fn run(action: SessionAction) -> Result<()> {
                 );
             }
         }
-        SessionAction::Show { id } => {
-            match manager.load(&id)? {
-                None => println!("{} Session '{}' not found.", "\u{2717}".red(), id),
-                Some(session) => {
-                    println!("{}", format!("Session: {} ({})", session.id.bold(), session.model).cyan());
-                    println!("{}", format!("Provider: {}", session.provider).dimmed());
-                    println!("{}", format!("Created: {}", session.created_at).dimmed());
+        SessionAction::Show { id } => match manager.load(&id)? {
+            None => println!("{} Session '{}' not found.", "\u{2717}".red(), id),
+            Some(session) => {
+                println!(
+                    "{}",
+                    format!("Session: {} ({})", session.id.bold(), session.model).cyan()
+                );
+                println!("{}", format!("Provider: {}", session.provider).dimmed());
+                println!("{}", format!("Created: {}", session.created_at).dimmed());
+                println!();
+                for msg in &session.messages {
+                    let role_label = match msg.role.to_lowercase().as_str() {
+                        "user" => "You".green(),
+                        "assistant" => "AI".cyan(),
+                        _ => msg.role.dimmed(),
+                    };
+                    println!("{}: {}", role_label, msg.content);
                     println!();
-                    for msg in &session.messages {
-                        let role_label = match msg.role.to_lowercase().as_str() {
-                            "user" => "You".green(),
-                            "assistant" => "AI".cyan(),
-                            _ => msg.role.dimmed(),
-                        };
-                        println!("{}: {}", role_label, msg.content);
-                        println!();
-                    }
                 }
             }
-        }
-        SessionAction::Rm { id } => {
-            match manager.delete(&id)? {
-                true => println!("{} Session '{}' deleted.", "\u{2713}".green(), id),
-                false => println!("{} Session '{}' not found.", "\u{2717}".red(), id),
-            }
-        }
+        },
+        SessionAction::Rm { id } => match manager.delete(&id)? {
+            true => println!("{} Session '{}' deleted.", "\u{2713}".green(), id),
+            false => println!("{} Session '{}' not found.", "\u{2717}".red(), id),
+        },
     }
     Ok(())
 }

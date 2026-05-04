@@ -145,9 +145,7 @@ mod tests {
     use std::env;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = env::temp_dir()
-            .join("lattice-cli-tests")
-            .join(name);
+        let dir = env::temp_dir().join("lattice-cli-tests").join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -178,7 +176,9 @@ mod tests {
         let session = test_session("save-load-1");
         manager.save(&session)?;
 
-        let loaded = manager.load("save-load-1")?.expect("should load saved session");
+        let loaded = manager
+            .load("save-load-1")?
+            .expect("should load saved session");
         assert_eq!(loaded.id, session.id);
         assert_eq!(loaded.model, session.model);
         assert_eq!(loaded.provider, session.provider);
@@ -217,11 +217,11 @@ mod tests {
         manager.save(&test_session("delete-me"))?;
         assert!(manager.load("delete-me")?.is_some());
 
-            let deleted = manager.delete("delete-me")?;
-            assert!(deleted);
-            assert!(manager.load("delete-me")?.is_none());
+        let deleted = manager.delete("delete-me")?;
+        assert!(deleted);
+        assert!(manager.load("delete-me")?.is_none());
 
-            let deleted = manager.delete("does-not-exist")?;
+        let deleted = manager.delete("does-not-exist")?;
         assert!(!deleted);
 
         fs::remove_dir_all(&dir).ok();

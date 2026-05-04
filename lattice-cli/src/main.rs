@@ -26,7 +26,11 @@ struct Cli {
     #[arg(short, long, help = "Single-turn print mode (pipe-friendly)")]
     print: Option<String>,
 
-    #[arg(short, long, help = "Default model alias (can be overridden by subcommand --model)")]
+    #[arg(
+        short,
+        long,
+        help = "Default model alias (can be overridden by subcommand --model)"
+    )]
     model: Option<String>,
 
     #[arg(long, help = "Provider override")]
@@ -38,7 +42,12 @@ struct Cli {
     #[arg(long, global = true, help = "Do not save session")]
     no_save: bool,
 
-    #[arg(short, long, global = true, help = "Verbose output (show resolve trace)")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Verbose output (show resolve trace)"
+    )]
     verbose: bool,
 
     #[arg(short, long, global = true, help = "JSON output")]

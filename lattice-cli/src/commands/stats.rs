@@ -1,6 +1,6 @@
+use crate::session::SessionManager;
 use anyhow::Result;
 use colored::Colorize;
-use crate::session::SessionManager;
 
 pub fn run() -> Result<()> {
     let manager = SessionManager::new();
@@ -18,7 +18,8 @@ pub fn run() -> Result<()> {
     let total_messages: usize = sessions.iter().map(|s| s.message_count).sum();
 
     // Per-model breakdown
-    let mut model_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut model_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for s in &sessions {
         *model_counts.entry(s.model.clone()).or_insert(0) += 1;
     }
