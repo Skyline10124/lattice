@@ -11,6 +11,12 @@ pub struct PromptRegistry {
     providers: Vec<Box<dyn ContextProvider>>,
 }
 
+impl Default for PromptRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PromptRegistry {
     pub fn new() -> Self {
         Self {
