@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn budget_overflow_drops_lowest_priority_layer() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "System prompt".into(),
                 layer: Layer::System,
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn dynamic_sections_dropped_when_no_budget_remains() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "S".into(),
                 layer: Layer::System,
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn fixed_budget_reserved_first() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "System".into(),
                 layer: Layer::System,
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn ratio_budget_proportional_allocation() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "System".into(),
                 layer: Layer::System,
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn ratio_overclaimed_drops_underfunded_sections() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "System".into(),
                 layer: Layer::System,
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn same_layer_respects_priority() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "high".into(),
                 layer: Layer::Tools,
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn allocate_budgets_fixed_deducted_first() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "S".into(),
                 layer: Layer::System,
@@ -567,7 +567,7 @@ mod tests {
                 tokens: 200,
             },
         ];
-        let budgets = vec![TokenBudget::Fixed(100), TokenBudget::Dynamic];
+        let budgets = [TokenBudget::Fixed(100), TokenBudget::Dynamic];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn allocate_budgets_fixed_exhausts_budget() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "S".into(),
                 layer: Layer::System,
@@ -596,7 +596,7 @@ mod tests {
                 tokens: 500,
             },
         ];
-        let budgets = vec![TokenBudget::Fixed(600), TokenBudget::Fixed(500)];
+        let budgets = [TokenBudget::Fixed(600), TokenBudget::Fixed(500)];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn allocate_budgets_ratio_after_fixed() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "S".into(),
                 layer: Layer::System,
@@ -631,7 +631,7 @@ mod tests {
                 tokens: 300,
             },
         ];
-        let budgets = vec![
+        let budgets = [
             TokenBudget::Fixed(10),
             TokenBudget::Ratio(0.3),
             TokenBudget::Dynamic,
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn allocate_budgets_dynamic_priority_order() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "T1".into(),
                 layer: Layer::Tools,
@@ -665,7 +665,7 @@ mod tests {
                 tokens: 500,
             },
         ];
-        let budgets = vec![TokenBudget::Dynamic, TokenBudget::Dynamic];
+        let budgets = [TokenBudget::Dynamic, TokenBudget::Dynamic];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -680,13 +680,13 @@ mod tests {
 
     #[test]
     fn allocate_budgets_zero_budget() {
-        let sections = vec![PromptSection {
+        let sections = [PromptSection {
             content: "S".into(),
             layer: Layer::System,
             priority: 0,
             tokens: 100,
         }];
-        let budgets = vec![TokenBudget::Fixed(100)];
+        let budgets = [TokenBudget::Fixed(100)];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -700,13 +700,13 @@ mod tests {
 
     #[test]
     fn ratio_nan_clamped_to_zero() {
-        let sections = vec![PromptSection {
+        let sections = [PromptSection {
             content: "M".into(),
             layer: Layer::Memory,
             priority: 5,
             tokens: 500,
         }];
-        let budgets = vec![TokenBudget::Ratio(f64::NAN)];
+        let budgets = [TokenBudget::Ratio(f64::NAN)];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -720,13 +720,13 @@ mod tests {
 
     #[test]
     fn ratio_negative_clamped_to_zero() {
-        let sections = vec![PromptSection {
+        let sections = [PromptSection {
             content: "M".into(),
             layer: Layer::Memory,
             priority: 5,
             tokens: 500,
         }];
-        let budgets = vec![TokenBudget::Ratio(-0.5)];
+        let budgets = [TokenBudget::Ratio(-0.5)];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -740,13 +740,13 @@ mod tests {
 
     #[test]
     fn ratio_above_one_clamped() {
-        let sections = vec![PromptSection {
+        let sections = [PromptSection {
             content: "M".into(),
             layer: Layer::Memory,
             priority: 5,
             tokens: 500,
         }];
-        let budgets = vec![TokenBudget::Ratio(1.5)];
+        let budgets = [TokenBudget::Ratio(1.5)];
         let alloc = allocate_budgets(
             &sections
                 .iter()
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn multiple_ratio_providers_sequential() {
-        let sections = vec![
+        let sections = [
             PromptSection {
                 content: "M1".into(),
                 layer: Layer::Memory,
@@ -777,7 +777,7 @@ mod tests {
                 tokens: 500,
             },
         ];
-        let budgets = vec![TokenBudget::Ratio(0.5), TokenBudget::Ratio(0.5)];
+        let budgets = [TokenBudget::Ratio(0.5), TokenBudget::Ratio(0.5)];
         // remaining = 1000
         // M1: floor(1000*0.5) = 500, remaining = 500
         // M2: floor(500*0.5) = 250, remaining = 250

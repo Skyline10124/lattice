@@ -135,11 +135,7 @@ fn make_sse_response(text: &str) -> String {
     body
 }
 
-fn make_tool_sse(
-    first_chunk: &str,
-    tool_name: &str,
-    tool_args: &str,
-) -> String {
+fn make_tool_sse(first_chunk: &str, tool_name: &str, tool_args: &str) -> String {
     let mut body = String::new();
     body.push_str(&content_chunk(first_chunk));
     body.push_str(&tool_call_start_chunk("call_1", tool_name));
@@ -200,11 +196,12 @@ async fn test_context_e2e_inline_and_blob_with_tool_call() {
         .with_blob_store(store_arc.clone())
         .with_provider(EventsProvider::new("inspection-agent"))
         .with_tool_executor(Box::new(
-            DefaultToolExecutor::new_with_blob_store("/tmp", Some(store_arc.clone()))
-                .unwrap(),
+            DefaultToolExecutor::new_with_blob_store("/tmp", Some(store_arc.clone())).unwrap(),
         ));
 
-    agent.set_system_prompt("You are a code review assistant. Use bus:fetch to retrieve full reports.");
+    agent.set_system_prompt(
+        "You are a code review assistant. Use bus:fetch to retrieve full reports.",
+    );
 
     // --- Inject bus events ---
     // Small event (under 500 token threshold) — should inline
@@ -246,9 +243,7 @@ async fn test_context_e2e_inline_and_blob_with_tool_call() {
     assert!(has_tool_call, "Agent should have requested bus:fetch");
 
     // Should have completed
-    let has_done = events
-        .iter()
-        .any(|e| matches!(e, LoopEvent::Done { .. }));
+    let has_done = events.iter().any(|e| matches!(e, LoopEvent::Done { .. }));
     assert!(has_done, "Agent should complete execution");
 
     // --- Verify blob was fetchable ---
@@ -265,8 +260,7 @@ async fn test_context_e2e_no_blob_store_degradation() {
     let port = spawn_mock_server(sse_body).await;
     let resolved = make_resolved(&format!("http://127.0.0.1:{}", port));
 
-    let mut agent = Agent::new(resolved)
-        .with_provider(EventsProvider::new("test-source"));
+    let mut agent = Agent::new(resolved).with_provider(EventsProvider::new("test-source"));
 
     agent.set_system_prompt("You are a code review assistant.");
 
@@ -298,9 +292,7 @@ async fn test_context_e2e_no_blob_store_degradation() {
         tokens
     );
 
-    let has_done = events
-        .iter()
-        .any(|e| matches!(e, LoopEvent::Done { .. }));
+    let has_done = events.iter().any(|e| matches!(e, LoopEvent::Done { .. }));
     assert!(has_done, "Agent should complete without blob store");
 }
 
@@ -331,8 +323,6 @@ async fn test_context_e2e_no_bus_events() {
         .collect();
     assert!(!tokens.is_empty(), "Should still get LLM response");
 
-    let has_done = events
-        .iter()
-        .any(|e| matches!(e, LoopEvent::Done { .. }));
+    let has_done = events.iter().any(|e| matches!(e, LoopEvent::Done { .. }));
     assert!(has_done);
 }
