@@ -77,8 +77,9 @@ pub use tools::RegistryToolAccess;
 /// Do **not** call `block_on` from within a Tokio context — this will panic
 /// or deadlock.  The Python bindings in `lattice-python` handle this via a
 /// shared runtime and `tokio::task::block_in_place`.
-#[allow(dead_code)]
 pub struct Agent {
+    // Kept for future per-agent model re-resolution; state also holds a copy for chat().
+    #[allow(dead_code)]
     resolved: ResolvedModel,
     state: state::AgentState,
     tools: Vec<ToolDefinition>,
@@ -420,12 +421,23 @@ impl PluginAgent for Agent {
     ) -> Result<String, Box<dyn std::error::Error>> {
         let events = self.run(message, MAX_TOOL_TURNS).await;
         let mut content = String::new();
+        let mut has_error = false;
+        let mut error_messages = Vec::new();
         for event in &events {
-            if let LoopEvent::Token { text } = event {
-                content.push_str(text);
+            match event {
+                LoopEvent::Token { text } => content.push_str(text),
+                LoopEvent::Error { message } => {
+                    has_error = true;
+                    error_messages.push(message.clone());
+                }
+                _ => {}
             }
         }
-        Ok(content)
+        if has_error && content.is_empty() {
+            Err(format!("Agent errors: {}", error_messages.join("; ")).into())
+        } else {
+            Ok(content)
+        }
     }
 }
 

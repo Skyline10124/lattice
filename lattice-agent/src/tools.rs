@@ -109,8 +109,17 @@ impl DefaultToolExecutor {
 #[async_trait]
 impl ToolExecutor for DefaultToolExecutor {
     async fn execute(&self, call: &lattice_core::types::ToolCall) -> String {
-        let args: serde_json::Value =
-            serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+        let args: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return format!(
+                    "Error: invalid JSON arguments for tool '{}': {} — raw args: {:?}",
+                    call.function.name,
+                    e,
+                    &call.function.arguments[..call.function.arguments.len().min(200)]
+                );
+            }
+        };
 
         // Check registry for custom tools first
         if let Some(reg) = &self.registry {

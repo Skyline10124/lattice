@@ -37,11 +37,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_backoff_increases() {
+    fn test_backoff_increases_median() {
         let policy = RetryPolicy::default();
-        let d1 = policy.jittered_backoff(0);
-        let d2 = policy.jittered_backoff(2);
-        assert!(d2 > d1, "backoff should increase with attempts");
+        // With ±50% jitter, attempt=0 p50 ≈ 1s, attempt=2 p50 ≈ 4s.
+        // Take 1000 samples each and compare medians — medians should
+        // respect the exponential growth even with random jitter.
+        let mut d1_samples: Vec<u64> = Vec::new();
+        let mut d2_samples: Vec<u64> = Vec::new();
+        for _ in 0..1000 {
+            d1_samples.push(policy.jittered_backoff(0).as_millis() as u64);
+            d2_samples.push(policy.jittered_backoff(2).as_millis() as u64);
+        }
+        d1_samples.sort();
+        d2_samples.sort();
+        let median_d1 = d1_samples[500];
+        let median_d2 = d2_samples[500];
+        assert!(
+            median_d2 > median_d1,
+            "median backoff at attempt=2 ({:?}ms) should exceed attempt=0 ({:?}ms)",
+            median_d2,
+            median_d1
+        );
     }
 
     #[test]

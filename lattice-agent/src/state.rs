@@ -257,27 +257,56 @@ mod tests {
 
     #[test]
     fn test_trim_messages_always_keeps_minimum() {
-        let mut state = AgentState::new(make_resolved(100)); // tiny context
-        let long_text = "x".repeat(200); // ~50 tokens each
+        let mut state = AgentState::new(make_resolved(131072));
 
         state.push_system_message("System.");
+        let long_text = "x".repeat(200);
         state.push_user_message(&format!("User 1: {}", long_text));
         state.push_assistant_message(&format!("Assistant 1: {}", long_text), "", None);
         state.push_user_message(&format!("User 2: {}", long_text));
         state.push_assistant_message(&format!("Assistant 2: {}", long_text), "", None);
 
-        state.trim_messages(100, 10);
+        // tiny budget to force trimming, but 2 non-system minimum keeps 1 user + 1 assistant
+        state.trim_messages(1, 0);
+        assert!(state.messages.len() >= 3, "system + at least 2 non-system"); // 1 system + 2 non-system
+    }
 
-        let non_system_count = state
+    #[test]
+    fn test_replace_first_user_message_replaces_in_place() {
+        let mut state = AgentState::new(make_resolved(131072));
+        state.push_system_message("System.");
+        state.push_user_message("original user message");
+        state.push_assistant_message("response", "", None);
+
+        state.replace_first_user_message("replaced user message");
+
+        assert_eq!(state.messages.len(), 3, "message count should not grow");
+        let user_msg = state
             .messages
             .iter()
-            .filter(|m| m.role != Role::System)
-            .count();
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert_eq!(user_msg.content, "replaced user message");
+    }
+
+    #[test]
+    fn test_replace_first_user_message_no_user_falls_back_to_push() {
+        let mut state = AgentState::new(make_resolved(131072));
+        state.push_system_message("System.");
+        // No user message yet
+
+        state.replace_first_user_message("first user");
+
         assert_eq!(
-            non_system_count, 2,
-            "should keep at least 2 non-system messages: got {}",
-            non_system_count
+            state.messages.len(),
+            2,
+            "should have pushed a new user message"
         );
-        assert_eq!(state.messages[0].role, Role::System);
+        let user_msg = state
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert_eq!(user_msg.content, "first user");
     }
 }

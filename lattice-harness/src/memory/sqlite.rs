@@ -54,6 +54,28 @@ impl SqliteMemory {
             .replace('_', "\\_")
     }
 
+    /// Escape a query string for safe use in FTS5 MATCH expressions.
+    /// FTS5 treats AND, OR, NOT, NEAR as operators and *, ^, (, ) as
+    /// special characters. Wrapping in double-quotes makes the query a
+    /// phrase match, but internal quotes must be removed and other
+    /// special characters escaped to prevent semantic injection.
+    fn escape_fts5(query: &str) -> String {
+        // Remove internal double-quotes (would break phrase syntax)
+        let cleaned = query.replace('"', "");
+        // Remove FTS5 operators that could change query semantics
+        let cleaned = cleaned
+            .replace(" AND ", " ")
+            .replace(" OR ", " ")
+            .replace(" NOT ", " ")
+            .replace(" NEAR ", " ");
+        // Remove FTS5 special characters: * (prefix), ^ (initial), ( ) (grouping)
+        let cleaned: String = cleaned
+            .chars()
+            .filter(|c| !matches!(c, '*' | '^' | '(' | ')'))
+            .collect();
+        format!("\"{}\"", cleaned)
+    }
+
     fn recall_like(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
         let conn = match self.conn.lock() {
             Ok(c) => c,
@@ -156,7 +178,7 @@ impl Memory for SqliteMemory {
                 return vec![];
             }
         };
-        let fts_query = format!("\"{}\"", query.replace('"', ""));
+        let fts_query = Self::escape_fts5(query);
         let sql = "SELECT m.id, m.kind, m.session_id, m.summary, m.content, m.tags, m.created_at
                    FROM memory m
                    WHERE m.rowid IN (

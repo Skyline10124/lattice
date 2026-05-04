@@ -294,6 +294,17 @@ impl Pipeline {
                                     )
                                     .await;
 
+                                // All fork branches failed — treat as agent error
+                                if fork_results.is_empty() {
+                                    errors.push(AgentError {
+                                        agent_name: profile.agent.name.clone(),
+                                        message: "All fork branches failed".into(),
+                                        skippable: profile.agent.skippable,
+                                    });
+                                    completed = true;
+                                    break;
+                                }
+
                                 let merged = self.merge_fork_outputs(&fork_results);
 
                                 let fork_next = fork_results
@@ -307,10 +318,18 @@ impl Pipeline {
                                     Some(HandoffTarget::Single(n)) => {
                                         current_agent = n;
                                     }
-                                    Some(HandoffTarget::Fork(_)) => {
-                                        current_agent =
-                                            fork_results[0].next.clone().unwrap().agent_names()[0]
-                                                .to_string();
+                                    Some(HandoffTarget::Fork(fork_target)) => {
+                                        if let Some(first_name) = fork_target.first() {
+                                            current_agent = first_name.clone();
+                                        } else {
+                                            errors.push(AgentError {
+                                                agent_name: profile.agent.name.clone(),
+                                                message: "Fork target has no agent names".into(),
+                                                skippable: false,
+                                            });
+                                            completed = true;
+                                            break;
+                                        }
                                     }
                                     None => {
                                         completed = true;
@@ -419,6 +438,17 @@ impl Pipeline {
                                     )
                                     .await;
 
+                                // All fork branches failed — treat as agent error
+                                if fork_results.is_empty() {
+                                    errors.push(AgentError {
+                                        agent_name: profile.agent.name.clone(),
+                                        message: "All fork branches failed".into(),
+                                        skippable: profile.agent.skippable,
+                                    });
+                                    completed = true;
+                                    break;
+                                }
+
                                 let merged = self.merge_fork_outputs(&fork_results);
 
                                 let fork_next = fork_results
@@ -432,10 +462,18 @@ impl Pipeline {
                                     Some(HandoffTarget::Single(n)) => {
                                         current_agent = n;
                                     }
-                                    Some(HandoffTarget::Fork(_)) => {
-                                        current_agent =
-                                            fork_results[0].next.clone().unwrap().agent_names()[0]
-                                                .to_string();
+                                    Some(HandoffTarget::Fork(fork_target)) => {
+                                        if let Some(first_name) = fork_target.first() {
+                                            current_agent = first_name.clone();
+                                        } else {
+                                            errors.push(AgentError {
+                                                agent_name: profile.agent.name.clone(),
+                                                message: "Fork target has no agent names".into(),
+                                                skippable: false,
+                                            });
+                                            completed = true;
+                                            break;
+                                        }
                                     }
                                     None => {
                                         completed = true;

@@ -44,9 +44,6 @@ pub enum BusError {
     AgentNotFound(AgentId),
     #[error("agent already registered: {0}")]
     AlreadyRegistered(AgentId),
-    #[error("agent crashed: {0}")]
-    #[deprecated(note = "Not produced by any code path — remove or implement emission")]
-    AgentCrashed(AgentId),
     #[error("RPC timeout after {0:?}")]
     Timeout(Duration),
     #[error("channel closed")]
