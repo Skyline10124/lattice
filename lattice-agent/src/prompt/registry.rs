@@ -56,12 +56,14 @@ impl PromptRegistry {
                 layer: Layer::System,
                 priority: 0,
                 tokens,
+                budget: TokenBudget::Fixed(tokens),
             });
         }
 
         // Registered providers
         for provider in &self.providers {
-            if let Some(section) = provider.produce(ctx).await {
+            if let Some(mut section) = provider.produce(ctx).await {
+                section.budget = provider.budget();
                 sections.push(section);
             }
         }
@@ -81,6 +83,7 @@ mod tests {
         priority: u8,
         content: &'static str,
         tokens: u32,
+        budget: TokenBudget,
     }
 
     #[async_trait]
@@ -91,12 +94,16 @@ mod tests {
         fn priority(&self) -> u8 {
             self.priority
         }
+        fn budget(&self) -> TokenBudget {
+            self.budget
+        }
         async fn produce(&self, _ctx: &AssemblyContext<'_>) -> Option<PromptSection> {
             Some(PromptSection {
                 content: self.content.to_string(),
                 layer: self.layer,
                 priority: self.priority,
                 tokens: self.tokens,
+                budget: self.budget,
             })
         }
     }
@@ -150,6 +157,7 @@ mod tests {
             priority: 5,
             content: "tool definitions",
             tokens: 10,
+            budget: TokenBudget::Dynamic,
         }));
         let ctx = AssemblyContext {
             request_id: "test",

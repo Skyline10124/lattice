@@ -1,4 +1,4 @@
-use crate::prompt::types::{AssemblyContext, Layer, PromptSection};
+use crate::prompt::types::{AssemblyContext, Layer, PromptSection, TokenBudget};
 use async_trait::async_trait;
 
 /// A source of prompt content.
@@ -20,6 +20,19 @@ pub trait ContextProvider: Send + Sync {
         5
     }
 
+    /// Token budget declaration for this provider.
+    ///
+    /// Controls how the compiler allocates effective budget:
+    /// - `Fixed(n)`: Reserve exactly n tokens. Unused quota is NOT returned.
+    /// - `Ratio(f)`: Claim f proportion of remaining budget after Fixed deductions.
+    /// - `Dynamic`: Consume whatever remains after Fixed and Ratio allocations.
+    fn budget(&self) -> TokenBudget {
+        TokenBudget::Dynamic
+    }
+
     /// Produce a prompt section, or None if nothing to contribute.
+    ///
+    /// Note: the `budget` field on the returned PromptSection will be
+    /// overwritten by `self.budget()` during collection.
     async fn produce(&self, ctx: &AssemblyContext<'_>) -> Option<PromptSection>;
 }

@@ -7,6 +7,7 @@ pub struct PromptSection {
     pub layer: Layer,
     pub priority: u8,
     pub tokens: u32,
+    pub budget: TokenBudget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -32,6 +33,22 @@ impl Layer {
             Layer::Input,
         ]
     }
+}
+
+/// Token budget declaration for a context provider.
+///
+/// Controls how the compiler allocates the effective budget:
+/// - `Fixed(n)`: Reserve exactly n tokens. Unused quota is NOT returned to the pool.
+/// - `Ratio(f)`: Claim f proportion of the remaining budget after Fixed deductions.
+/// - `Dynamic`: Consume whatever remains after Fixed and Ratio allocations.
+///
+/// Dynamic providers are served in priority order; if earlier providers
+/// consume all remaining budget, later ones get zero allocation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TokenBudget {
+    Fixed(u32),
+    Ratio(f64),
+    Dynamic,
 }
 
 #[derive(Debug, Clone)]
