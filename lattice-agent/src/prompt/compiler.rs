@@ -200,4 +200,77 @@ mod tests {
         // System(10) + Tools(20) + Input(estimate_text("I")=1) = 31
         assert_eq!(result.total_tokens, 31);
     }
+
+    #[test]
+    fn compile_with_system_and_tools_and_input() {
+        let sections = vec![
+            PromptSection {
+                content: "You are code review AI.".into(),
+                layer: Layer::System, priority: 0, tokens: 8,
+            },
+            PromptSection {
+                content: "curl file:///".into(),
+                layer: Layer::Tools, priority: 5, tokens: 4,
+            },
+        ];
+        let result = compile(&sections, "review this file", &make_resolved(8192));
+        assert!(result.text.contains("=== System ==="));
+        assert!(result.text.contains("=== Tools ==="));
+        assert!(result.text.contains("=== Input ==="));
+        assert!(!result.text.contains("=== Memory ==="));
+        assert!(!result.text.contains("=== Events ==="));
+        assert!(!result.text.contains("=== Rules ==="));
+    }
+
+    #[test]
+    fn tiny_budget_only_system_and_input_survive() {
+        let sections = vec![
+            PromptSection {
+                content: "S".into(), layer: Layer::System, priority: 0, tokens: 5,
+            },
+            PromptSection {
+                content: "T".into(), layer: Layer::Tools, priority: 5, tokens: 1000,
+            },
+        ];
+        // SAFETY_MARGIN = 4096. context_length 5000 - 4096 = 904 effective
+        // Sorted: System(5), Tools(1000), Input(~1)
+        // Reverse: Input(1) acc=1; Tools(1000) → 1+1000=1001 > 904 → drop_from_layer=Tools
+        // Filter: layer < Tools (System, Rules) or Input → only System + Input survive
+        let result = compile(&sections, "I", &make_resolved(5000));
+        assert!(result.text.contains("=== System ==="));
+        assert!(!result.text.contains("=== Tools ==="));
+        assert!(!result.text.contains("=== Memory ==="));
+    }
+
+    #[test]
+    fn layer_integrity_on_boundary_drop() {
+        // If Tools layer is dropped, ALL Tools sections dropped (same layer)
+        let sections = vec![
+            PromptSection {
+                content: "S".into(), layer: Layer::System, priority: 0, tokens: 5,
+            },
+            PromptSection {
+                content: "Tool A".into(), layer: Layer::Tools, priority: 1, tokens: 500,
+            },
+            PromptSection {
+                content: "Tool B".into(), layer: Layer::Tools, priority: 2, tokens: 500,
+            },
+        ];
+        // context_length 5000 - 4096 = 904 effective
+        // System(5) + ToolA(500) = 505 < 904, but ToolA(500) + ToolB(500) = 1000 > 904
+        // From tail: Input(~1) + ToolB(500) + ToolA(500) = 1001 > 904 → drop_from_layer = Tools
+        // All Tools sections dropped, only System + Input survive
+        let result = compile(&sections, "I", &make_resolved(5000));
+        assert!(result.text.contains("=== System ==="));
+        assert!(!result.text.contains("Tool A"));
+        assert!(!result.text.contains("Tool B"));
+    }
+
+    #[test]
+    fn no_safety_margin_when_context_too_small() {
+        // context_length < SAFETY_MARGIN → effective_budget = 0
+        // All non-Input sections dropped; Input always survives
+        let result = compile(&[], "hello", &make_resolved(100));
+        assert_eq!(result.text, "hello");
+    }
 }
