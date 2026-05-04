@@ -28,7 +28,14 @@ pub async fn run(
     creds: &crate::credentials::CredentialStore,
     save: bool,
     previous_session: Option<crate::session::Session>,
+    dry_run: bool,
+    system_prompt: Option<&str>,
 ) -> Result<()> {
+    // Dry-run: compile prompt through engine and print, no LLM call, no credential needed
+    if dry_run {
+        return dry_run_prompt(&prompt, &model, system_prompt, previous_session.as_ref()).await;
+    }
+
     if verbose {
         eprintln!("{}", format!("resolve: {} ...", model).dimmed());
     }
@@ -93,6 +100,91 @@ pub async fn run(
             eprintln!("{}", format!("session saved: {}", session.id).dimmed());
         }
     }
+
+    Ok(())
+}
+
+/// Compile prompt through the engine and print the result without calling LLM.
+async fn dry_run_prompt(
+    prompt: &str,
+    model_name: &str,
+    system_prompt: Option<&str>,
+    previous_session: Option<&crate::session::Session>,
+) -> Result<()> {
+    use lattice_agent::prompt;
+    use std::collections::HashMap;
+
+    // Build final input text with session context if present
+    let user_input = if let Some(ref session) = previous_session {
+        let mut ctx = String::from("Previous conversation:\n");
+        for msg in &session.messages {
+            let role = match msg.role.to_lowercase().as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
+                _ => &msg.role,
+            };
+            ctx.push_str(&format!("{}: {}\n", role, msg.content));
+        }
+        ctx.push_str("---\n");
+        ctx.push_str(prompt);
+        ctx
+    } else {
+        prompt.to_string()
+    };
+
+    // Use a default 128K model for dry-run to exercise full budget logic
+    let resolved = lattice_core::ResolvedModel {
+        canonical_id: model_name.to_string(),
+        api_model_id: model_name.to_string(),
+        provider: "dry-run".into(),
+        base_url: String::new(),
+        api_key: None,
+        api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
+        context_length: 131072,
+        provider_specific: HashMap::new(),
+        credential_status: lattice_core::CredentialStatus::NotRequired,
+    };
+
+    let mut registry = prompt::PromptRegistry::new();
+    if let Some(sp) = system_prompt {
+        registry.set_system_prompt(sp);
+    }
+
+    let ctx = prompt::AssemblyContext {
+        request_id: "dry-run",
+        memory: None,
+        model: &resolved,
+    };
+    let (sections, budgets) = registry.collect(&ctx).await;
+    let rendered = prompt::compiler::compile(&sections, &budgets, &user_input, &resolved);
+
+    println!("{}", "═══ Compiled Prompt (dry-run) ═══".green());
+    println!("{}", "─ Input Sections ─".dimmed());
+    for (s, b) in sections.iter().zip(budgets.iter()) {
+        let label = format!("{:?}", s.layer);
+        let budget = match b {
+            prompt::TokenBudget::Fixed(n) => format!("Fixed({})", n),
+            prompt::TokenBudget::Ratio(r) => format!("Ratio({})", r),
+            prompt::TokenBudget::Dynamic => "Dynamic".into(),
+        };
+        println!(
+            "  {}  tokens={:<6} priority={:<3} budget={}",
+            label.cyan(),
+            s.tokens.to_string().yellow(),
+            s.priority.to_string().dimmed(),
+            budget.dimmed(),
+        );
+    }
+    println!();
+    println!("{}", "─ Rendered Output ─".dimmed());
+    println!("{}", rendered.text);
+    println!();
+    println!("{}", "─ Stats ─".dimmed());
+    println!(
+        "  total_tokens={:<6} context_length={}",
+        rendered.total_tokens.to_string().yellow(),
+        resolved.context_length.to_string().dimmed(),
+    );
 
     Ok(())
 }

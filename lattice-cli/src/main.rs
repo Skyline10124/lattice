@@ -111,6 +111,10 @@ enum Commands {
         plugins_dir: Option<String>,
         #[arg(long, help = "Tool definitions path (default: agent default tools)")]
         tools_dir: Option<String>,
+        #[arg(long, help = "Dry-run: compile prompt and print without calling LLM")]
+        dry_run: bool,
+        #[arg(long, help = "System prompt for prompt engine test")]
+        system_prompt: Option<String>,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
@@ -242,6 +246,8 @@ async fn main() -> Result<()> {
             agents_dir,
             plugins_dir,
             tools_dir,
+            dry_run,
+            system_prompt,
         }) => {
             if let Some(start_agent) = pipeline {
                 run::run_pipeline(
@@ -275,6 +281,8 @@ async fn main() -> Result<()> {
                     &creds,
                     !cli.no_save,
                     previous_session,
+                    dry_run,
+                    system_prompt.as_deref(),
                 )
                 .await?;
             }
