@@ -99,7 +99,23 @@ Full asyncification and elimination of C-isms across the stack:
 
 **Result**: Fully async stack. Zero blocking calls. Pure Rust tool execution. No global runtime.
 
-## Phase 6: Nix paradigm (next)
+## Phase 6: Prompt engine + Context assembly
+
+- [ ] `PromptSection`, `Layer`, `TokenBudget` data structures
+- [ ] `ContextProvider` trait + registry
+- [ ] `Compiler`: sort → budget → trim → render
+- [ ] `SystemProvider`, `InputProvider`, `MemoryProvider`, `EventsProvider`
+- [ ] `Agent::run()` 集成 compiler，将 prompt 构造下沉到 lattice-agent
+- [ ] Plugin system_prompt / to_prompt 转化为通过 ContextProvider 接入
+- [ ] LRU 事件老化策略
+- [ ] Bus 自动发现 context provider (`bus.discover("context-provider")`)
+- [ ] Token budget 固定配比可配置化
+
+**Target**: 声明式 prompt 组装，所有 LLM 输入都经过引擎统一编排。
+
+详见 [Prompt Engine Spec](docs/specs/2026-05-04-prompt-engine.md)。
+
+## Phase 7: Nix paradigm
 
 - [ ] `LATTICE.toml` + `LATTICE.lock` -- declarative config, reproducible builds
 - [ ] Content-addressed response cache: `sha256(prompt + model + params) -> response`
@@ -115,9 +131,10 @@ The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. DS-P0/P
 
 Current priorities:
 
-1. **Phase 6 (Nix paradigm)**: declarative config, response caching, derivation model
-2. **DS-P3 items**: remaining deep scan findings from `docs/review/active-issues.md`
-3. **iOS embedding**: verify `aarch64-apple-ios` cross-compilation, finalize runtime handle injection
+1. **Phase 6 (Prompt engine)**: 声明式 prompt 组装，ContextProvider → Compiler 链路落地
+2. **Phase 7 (Nix paradigm)**: 等 prompt 引擎稳定后再推进，避免设计冲突
+3. **DS-P3 items**: remaining deep scan findings from `docs/review/active-issues.md`
+4. **iOS embedding**: verify `aarch64-apple-ios` cross-compilation, finalize runtime handle injection
 
 ## Current workspace (8 crates)
 
@@ -141,6 +158,7 @@ Phase 3  ██████████  (complete)
 Phase 4  ██████████  (complete)
 Phase 5  ██████████  (complete)
 Phase 6  ░░░░░░░░░░
+Phase 7  ░░░░░░░░░░
 ```
 
 No dates. Phases are sequential but scope adjusts based on dogfooding feedback.
