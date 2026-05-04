@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+  <!-- 定义背景与外部字体 -->
+  <defs>
+    <!-- 柔和科技感渐变 (调整为对角线方向以适应正方形) -->
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E8F1F9" />
+      <stop offset="100%" stop-color="#C4D7EB" />
+    </linearGradient>
+
+    <!-- 引入外部字体：Space Grotesk -->
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500&amp;display=swap');
+      
+      .title-text {
+        font-family: 'Space Grotesk', system-ui, sans-serif;
+        font-size: 52px;
+        font-weight: 500;
+        letter-spacing: 16px;
+        fill: #08121E;
+        text-anchor: middle; /* 确保文本绝对居中对齐 */
+      }
+    </style>
+  </defs>
+  
+  <rect width="500" height="500" fill="url(#bg-gradient)" />
+
+  <!-- ================= 图形徽标组 ================= -->
+  <!-- 绝对居中于画布上半部分，X=250, Y=220，适当放大比例(scale=1.1) -->
+  <g id="logo-mark" transform="translate(250, 220) scale(1.1)">
+    
+    <!-- 白色网络连线 -->
+    <g id="grid-lines" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round">
+      <line x1="0" y1="-120" x2="51.96" y2="-90" />
+      <line x1="51.96" y1="-90" x2="103.92" y2="-60" />
+      <line x1="103.92" y1="-60" x2="103.92" y2="0" />
+      <line x1="103.92" y1="0" x2="103.92" y2="60" />
+      <line x1="103.92" y1="60" x2="51.96" y2="90" />
+      <line x1="51.96" y1="90" x2="0" y2="120" />
+      <line x1="0" y1="120" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="90" x2="-103.92" y2="60" />
+      <line x1="-103.92" y1="60" x2="-103.92" y2="0" />
+      <line x1="-103.92" y1="0" x2="-103.92" y2="-60" />
+      <line x1="-103.92" y1="-60" x2="-51.96" y2="-90" />
+      <line x1="-51.96" y1="-90" x2="0" y2="-120" />
+
+      <line x1="0" y1="-60" x2="51.96" y2="-30" />
+      <line x1="51.96" y1="-30" x2="51.96" y2="30" />
+      <line x1="51.96" y1="30" x2="0" y2="60" />
+      <line x1="0" y1="60" x2="-51.96" y2="30" />
+      <line x1="-51.96" y1="30" x2="-51.96" y2="-30" />
+      <line x1="-51.96" y1="-30" x2="0" y2="-60" />
+
+      <line x1="0" y1="-60" x2="0" y2="-120" />
+      <line x1="0" y1="-60" x2="51.96" y2="-90" />
+      <line x1="0" y1="-60" x2="-51.96" y2="-90" />
+      <line x1="51.96" y1="-30" x2="51.96" y2="-90" />
+      <line x1="51.96" y1="-30" x2="103.92" y2="-60" />
+      <line x1="51.96" y1="-30" x2="103.92" y2="0" />
+      <line x1="51.96" y1="30" x2="103.92" y2="0" />
+      <line x1="51.96" y1="30" x2="103.92" y2="60" />
+      <line x1="51.96" y1="30" x2="51.96" y2="90" />
+      <line x1="0" y1="60" x2="51.96" y2="90" />
+      <line x1="0" y1="60" x2="0" y2="120" />
+      <line x1="0" y1="60" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="30" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="30" x2="-103.92" y2="60" />
+      <line x1="-51.96" y1="30" x2="-103.92" y2="0" />
+      <line x1="-51.96" y1="-30" x2="-103.92" y2="0" />
+      <line x1="-51.96" y1="-30" x2="-103.92" y2="-60" />
+      <line x1="-51.96" y1="-30" x2="-51.96" y2="-90" />
+
+      <line x1="0" y1="-60" x2="0" y2="-30" /> 
+      <line x1="51.96" y1="-30" x2="25.98" y2="-15" /> 
+      <line x1="51.96" y1="30" x2="25.98" y2="15" /> 
+      <line x1="0" y1="60" x2="0" y2="30" /> 
+      <line x1="-51.96" y1="30" x2="-25.98" y2="15" /> 
+      <line x1="-51.96" y1="-30" x2="-25.98" y2="-15" /> 
+    </g>
+
+    <!-- 中心黑核 -->
+    <polygon points="0,-30 25.98,-15 25.98,15 0,30 -25.98,15 -25.98,-15" fill="#08121E" stroke="#FFFFFF" stroke-width="2.5" />
+
+    <!-- 节点组 -->
+    <g id="nodes">
+      <circle cx="0" cy="-120" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="-90" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="-60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="0" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="90" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="0" cy="120" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="90" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="0" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="-60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="-90" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+
+      <circle cx="0" cy="-60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="-30" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="30" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="0" cy="60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="30" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="-30" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+    </g>
+  </g>
+
+  <!-- ================= 主标题 ================= -->
+  <!-- 文本绝对居中，为抵消 letter-spacing 产生的右侧偏移，微微向右补偿 8px (X=258) -->
+  <text class="title-text" x="258" y="420">LATTICE</text>
+
+</svg>

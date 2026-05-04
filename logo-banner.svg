@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" width="100%" height="100%">
+  <!-- 定义背景与外部字体 -->
+  <defs>
+    <!-- 柔和科技感渐变 -->
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#E8F1F9" />
+      <stop offset="100%" stop-color="#C4D7EB" />
+    </linearGradient>
+
+    <!-- 引入外部字体：Space Grotesk (主标题, Medium字重) 和 JetBrains Mono (副标题) -->
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500&amp;family=Space+Grotesk:wght@500&amp;display=swap');
+      
+      .title-text {
+        font-family: 'Space Grotesk', system-ui, sans-serif;
+        font-size: 64px;
+        font-weight: 500;
+        letter-spacing: 14px;
+        fill: #08121E;
+      }
+      
+      .subtitle-text {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 16px;
+        font-weight: 500;
+        fill: #08121E;
+      }
+    </style>
+  </defs>
+  
+  <rect width="800" height="240" fill="url(#bg-gradient)" />
+
+  <!-- ================= LOGO 组 ================= -->
+  <!-- 左侧图形微微向左回调，减少一点点左侧留白，X=200 -->
+  <g id="logo" transform="translate(200, 120) scale(0.85)">
+    
+    <!-- 白色网络连线 -->
+    <g id="grid-lines" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round">
+      <line x1="0" y1="-120" x2="51.96" y2="-90" />
+      <line x1="51.96" y1="-90" x2="103.92" y2="-60" />
+      <line x1="103.92" y1="-60" x2="103.92" y2="0" />
+      <line x1="103.92" y1="0" x2="103.92" y2="60" />
+      <line x1="103.92" y1="60" x2="51.96" y2="90" />
+      <line x1="51.96" y1="90" x2="0" y2="120" />
+      <line x1="0" y1="120" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="90" x2="-103.92" y2="60" />
+      <line x1="-103.92" y1="60" x2="-103.92" y2="0" />
+      <line x1="-103.92" y1="0" x2="-103.92" y2="-60" />
+      <line x1="-103.92" y1="-60" x2="-51.96" y2="-90" />
+      <line x1="-51.96" y1="-90" x2="0" y2="-120" />
+
+      <line x1="0" y1="-60" x2="51.96" y2="-30" />
+      <line x1="51.96" y1="-30" x2="51.96" y2="30" />
+      <line x1="51.96" y1="30" x2="0" y2="60" />
+      <line x1="0" y1="60" x2="-51.96" y2="30" />
+      <line x1="-51.96" y1="30" x2="-51.96" y2="-30" />
+      <line x1="-51.96" y1="-30" x2="0" y2="-60" />
+
+      <line x1="0" y1="-60" x2="0" y2="-120" />
+      <line x1="0" y1="-60" x2="51.96" y2="-90" />
+      <line x1="0" y1="-60" x2="-51.96" y2="-90" />
+      <line x1="51.96" y1="-30" x2="51.96" y2="-90" />
+      <line x1="51.96" y1="-30" x2="103.92" y2="-60" />
+      <line x1="51.96" y1="-30" x2="103.92" y2="0" />
+      <line x1="51.96" y1="30" x2="103.92" y2="0" />
+      <line x1="51.96" y1="30" x2="103.92" y2="60" />
+      <line x1="51.96" y1="30" x2="51.96" y2="90" />
+      <line x1="0" y1="60" x2="51.96" y2="90" />
+      <line x1="0" y1="60" x2="0" y2="120" />
+      <line x1="0" y1="60" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="30" x2="-51.96" y2="90" />
+      <line x1="-51.96" y1="30" x2="-103.92" y2="60" />
+      <line x1="-51.96" y1="30" x2="-103.92" y2="0" />
+      <line x1="-51.96" y1="-30" x2="-103.92" y2="0" />
+      <line x1="-51.96" y1="-30" x2="-103.92" y2="-60" />
+      <line x1="-51.96" y1="-30" x2="-51.96" y2="-90" />
+
+      <line x1="0" y1="-60" x2="0" y2="-30" /> 
+      <line x1="51.96" y1="-30" x2="25.98" y2="-15" /> 
+      <line x1="51.96" y1="30" x2="25.98" y2="15" /> 
+      <line x1="0" y1="60" x2="0" y2="30" /> 
+      <line x1="-51.96" y1="30" x2="-25.98" y2="15" /> 
+      <line x1="-51.96" y1="-30" x2="-25.98" y2="-15" /> 
+    </g>
+
+    <!-- 中心黑核 -->
+    <polygon points="0,-30 25.98,-15 25.98,15 0,30 -25.98,15 -25.98,-15" fill="#08121E" stroke="#FFFFFF" stroke-width="2.5" />
+
+    <!-- 节点组 -->
+    <g id="nodes">
+      <circle cx="0" cy="-120" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="-90" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="-60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="0" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="103.92" cy="60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="90" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="0" cy="120" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="90" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="0" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-103.92" cy="-60" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="-90" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+
+      <circle cx="0" cy="-60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="-30" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="51.96" cy="30" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="0" cy="60" r="8" fill="#00C3FF" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="30" r="8" fill="#FF6B00" stroke="#FFFFFF" stroke-width="2" />
+      <circle cx="-51.96" cy="-30" r="8" fill="#0066FF" stroke="#FFFFFF" stroke-width="2" />
+    </g>
+  </g>
+
+  <!-- ================= 文本排版组 ================= -->
+  <!-- 文本区同步微微回调，X=360 -->
+  <g id="text-group" transform="translate(360, 102)">
+    
+    <text class="title-text" x="0" y="0">LATTICE</text>
+
+    <g id="subtitle">
+      <text class="subtitle-text" x="4" y="42">Let Agents Think —</text>
+      <text class="subtitle-text" x="4" y="70">Types Impose Control Everywhere</text>
+    </g>
+
+  </g>
+</svg>

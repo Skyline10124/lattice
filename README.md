@@ -1,6 +1,6 @@
 # LATTICE 
 
-![LATTICE banner](logo-banner.png)
+![LATTICE banner](logo-banner.svg)
 
 A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-agent harness.
 
