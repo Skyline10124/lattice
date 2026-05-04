@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod prompt;
 pub mod sandbox;
 pub mod state;
 pub mod tool_definitions;
