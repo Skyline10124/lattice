@@ -87,12 +87,10 @@ impl BlobStore {
     }
 
     pub async fn delete_older_than(&self, days: u32) -> Result<u64, BlobError> {
-        let result = sqlx::query(
-            "DELETE FROM context_blobs WHERE created_at < datetime('now', ?)",
-        )
-        .bind(format!("-{} days", days))
-        .execute(&self.pool)
-        .await?;
+        let result = sqlx::query("DELETE FROM context_blobs WHERE created_at < datetime('now', ?)")
+            .bind(format!("-{} days", days))
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected())
     }
 }

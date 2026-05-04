@@ -86,6 +86,9 @@ pub struct Agent {
     memory: Option<Box<dyn memory::Memory>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
     registry: prompt::PromptRegistry,
+    #[cfg(feature = "blob-store")]
+    blob_store: Option<std::sync::Arc<crate::blob::BlobStore>>,
+    bus_event_collector: crate::bus_event_collector::BusEventCollector,
 }
 
 impl Agent {
@@ -98,6 +101,9 @@ impl Agent {
             memory: None,
             tool_executor: None,
             registry: prompt::PromptRegistry::new(),
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+            bus_event_collector: crate::bus_event_collector::BusEventCollector::new(),
         }
     }
 
@@ -119,6 +125,18 @@ impl Agent {
     pub fn with_tool_executor(mut self, executor: Box<dyn ToolExecutor>) -> Self {
         self.tool_executor = Some(executor);
         self
+    }
+
+    /// Set the blob store for context persistence (feature-gated).
+    #[cfg(feature = "blob-store")]
+    pub fn with_blob_store(mut self, store: crate::blob::BlobStore) -> Self {
+        self.blob_store = Some(std::sync::Arc::new(store));
+        self
+    }
+
+    /// Inject bus events into the collector for prompt assembly.
+    pub fn inject_bus_events(&mut self, events: Vec<lattice_bus::BusEvent>) {
+        self.bus_event_collector.push_many(events);
     }
 
     /// Register a context provider with the prompt engine.
@@ -161,13 +179,13 @@ impl Agent {
             // accumulated from previous tool turns are re-evaluated by providers,
             // and budget pressure from growing tool results naturally compresses
             // lower-priority sections.
-            let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+            let bus_events = self.bus_event_collector.drain();
             let ctx = prompt::AssemblyContext {
                 request_id: "run",
                 memory: self.memory.as_deref(),
                 model: &self.state.resolved,
                 #[cfg(feature = "blob-store")]
-                blob_store: None,
+                blob_store: self.blob_store.as_deref(),
                 bus_events: &bus_events,
             };
             let (sections, budgets) = self.registry.collect(&ctx).await;

@@ -20,12 +20,16 @@ impl EventsProvider {
 }
 
 fn format_inline(event: &BusEvent) -> String {
-    let payload_str = serde_json::to_string_pretty(&event.payload).unwrap_or_else(|_| event.payload.to_string());
+    let payload_str =
+        serde_json::to_string_pretty(&event.payload).unwrap_or_else(|_| event.payload.to_string());
     format!("[topic: {}] {}", event.topic, payload_str)
 }
 
 fn format_ref(blob: &StoredBlob) -> String {
-    format!("[topic: {}] {} | {}B | {}", blob.topic, blob.key, blob.size, blob.summary)
+    format!(
+        "[topic: {}] {} | {}B | {}",
+        blob.topic, blob.key, blob.size, blob.summary
+    )
 }
 
 fn generate_key(source: &str, topic: &str, payload: &serde_json::Value) -> String {
