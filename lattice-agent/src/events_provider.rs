@@ -26,10 +26,7 @@ fn format_inline(event: &BusEvent) -> String {
 }
 
 fn format_ref(blob: &StoredBlob) -> String {
-    format!(
-        "[topic: {}] {} | {}B | {}",
-        blob.topic, blob.key, blob.size, blob.summary
-    )
+    format!("[topic: {}] {} | {}B", blob.topic, blob.key, blob.size)
 }
 
 fn generate_key(source: &str, topic: &str, payload: &serde_json::Value) -> String {

@@ -436,12 +436,19 @@ impl ToolExecutor for DefaultToolExecutor {
             #[cfg(feature = "blob-store")]
             "bus:fetch" => {
                 let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                match &self.blob_store {
-                    Some(store) => match store.get(key).await {
-                        Ok(blob) => blob.payload,
-                        Err(_) => format!("Error: blob '{}' not found", key),
-                    },
-                    None => "Error: blob storage not configured for this agent".to_string(),
+                if !key.starts_with("blob://") {
+                    format!(
+                        "Error: invalid blob key '{}', expected format blob://source/topic/hash",
+                        key
+                    )
+                } else {
+                    match &self.blob_store {
+                        Some(store) => match store.get(key).await {
+                            Ok(blob) => blob.payload,
+                            Err(_) => format!("Error: blob '{}' not found", key),
+                        },
+                        None => "Error: blob storage not configured for this agent".to_string(),
+                    }
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),

@@ -128,9 +128,11 @@ impl Agent {
     }
 
     /// Set the blob store for context persistence (feature-gated).
+    /// Takes an Arc<BlobStore> so the same instance can be shared with
+    /// DefaultToolExecutor for bus:fetch tool execution.
     #[cfg(feature = "blob-store")]
-    pub fn with_blob_store(mut self, store: crate::blob::BlobStore) -> Self {
-        self.blob_store = Some(std::sync::Arc::new(store));
+    pub fn with_blob_store(mut self, store: std::sync::Arc<crate::blob::BlobStore>) -> Self {
+        self.blob_store = Some(store);
         self
     }
 
@@ -663,7 +665,7 @@ mod tests {
             .unwrap();
 
         let mut agent = Agent::new(resolved)
-            .with_blob_store(store)
+            .with_blob_store(std::sync::Arc::new(store))
             .with_provider(crate::events_provider::EventsProvider::new("test-source"));
 
         // Inject a small event (should inline)
@@ -757,7 +759,7 @@ mod tests {
             id: "call-2".to_string(),
             function: lattice_core::types::FunctionCall {
                 name: "bus:fetch".to_string(),
-                arguments: "{\"key\": \"nonexistent\"}".to_string(),
+                arguments: "{\"key\": \"blob://test/nonexistent/abc\"}".to_string(),
             },
         };
         let result = executor.execute(&call).await;
@@ -772,7 +774,7 @@ mod tests {
             id: "call-3".to_string(),
             function: lattice_core::types::FunctionCall {
                 name: "bus:fetch".to_string(),
-                arguments: "{\"key\": \"any\"}".to_string(),
+                arguments: "{\"key\": \"blob://any/key/here\"}".to_string(),
             },
         };
         let result = executor.execute(&call).await;
