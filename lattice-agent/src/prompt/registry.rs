@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use crate::prompt::types::*;
 use crate::prompt::provider::ContextProvider;
 
@@ -67,6 +66,7 @@ impl PromptRegistry {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use super::*;
     use crate::prompt::types::*;
 

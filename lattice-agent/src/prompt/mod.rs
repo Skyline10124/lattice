@@ -4,4 +4,5 @@ pub mod registry;
 pub mod types;
 
 pub use provider::ContextProvider;
+pub use registry::PromptRegistry;
 pub use types::*;
