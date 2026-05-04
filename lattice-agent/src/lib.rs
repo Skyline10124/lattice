@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod prompt;
 pub mod sandbox;
 pub mod state;
 pub mod tool_definitions;
@@ -77,6 +78,7 @@ pub struct Agent {
     retry: RetryPolicy,
     memory: Option<Box<dyn memory::Memory>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
+    registry: prompt::PromptRegistry,
 }
 
 impl Agent {
@@ -88,6 +90,7 @@ impl Agent {
             retry: RetryPolicy::default(),
             memory: None,
             tool_executor: None,
+            registry: prompt::PromptRegistry::new(),
         }
     }
 
@@ -111,18 +114,15 @@ impl Agent {
         self
     }
 
-    /// Replace the current system message (not append).
+    /// Register a context provider with the prompt engine.
+    pub fn with_provider(mut self, provider: impl prompt::ContextProvider + 'static) -> Self {
+        self.registry.register(Box::new(provider));
+        self
+    }
+
+    /// Set or replace the system prompt (fed through prompt engine as System layer).
     pub fn set_system_prompt(&mut self, prompt: &str) {
-        use lattice_core::types::{Message, Role};
-        let msg = Message::new(Role::System, prompt.to_string(), None, None, None);
-        match self.state.messages.first() {
-            Some(m) if m.role == Role::System => {
-                self.state.messages[0] = msg;
-            }
-            _ => {
-                self.state.messages.insert(0, msg);
-            }
-        }
+        self.registry.set_system_prompt(prompt);
     }
 
     pub fn token_usage(&self) -> u64 {
@@ -146,7 +146,16 @@ impl Agent {
     }
 
     pub async fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
-        self.state.push_user_message(content);
+        // Compile prompt through engine
+        let ctx = prompt::AssemblyContext {
+            request_id: "run",
+            memory: self.memory.as_deref(),
+            metadata: None,
+            model: &self.state.resolved,
+        };
+        let sections = self.registry.collect(&ctx).await;
+        let rendered = prompt::compiler::compile(&sections, content, &self.state.resolved);
+        self.state.push_user_message(&rendered.text);
         let mut all_events = Vec::new();
 
         for _ in 0..max_turns {
@@ -342,7 +351,7 @@ struct ToolCallAccum {
 #[async_trait(?Send)]
 impl PluginAgent for Agent {
     fn set_system_prompt(&mut self, prompt: &str) {
-        self.state.push_system_message(prompt);
+        self.registry.set_system_prompt(prompt);
     }
 
     async fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
