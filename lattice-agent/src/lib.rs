@@ -649,4 +649,168 @@ mod tests {
             .unwrap();
         assert_eq!(sys.content, "S");
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests: context management layer with blob-store
+    // -----------------------------------------------------------------------
+
+    #[cfg(feature = "blob-store")]
+    #[tokio::test]
+    async fn test_agent_with_blob_store_and_bus_events() {
+        let resolved = make_resolved(16384);
+        let store = crate::blob::BlobStore::connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let mut agent = Agent::new(resolved)
+            .with_blob_store(store)
+            .with_provider(crate::events_provider::EventsProvider::new("test-source"));
+
+        // Inject a small event (should inline)
+        let small_event = lattice_bus::BusEvent {
+            topic: "audit-pass".to_string(),
+            source: lattice_bus::AgentId::new("auditor"),
+            payload: serde_json::json!({"status": "clean"}),
+        };
+        // Inject a large event (should go to blob)
+        let large_event = lattice_bus::BusEvent {
+            topic: "inspection".to_string(),
+            source: lattice_bus::AgentId::new("auditor"),
+            payload: serde_json::json!({"lines": vec![String::from("x").repeat(5000)]}),
+        };
+        agent.inject_bus_events(vec![small_event, large_event]);
+
+        // Simulate prompt compilation (no network call)
+        let bus_events = agent.bus_event_collector.drain();
+        let ctx = prompt::AssemblyContext {
+            request_id: "test",
+            memory: agent.memory.as_deref(),
+            model: &agent.state.resolved,
+            blob_store: agent.blob_store.as_deref(),
+            bus_events: &bus_events,
+        };
+        let (sections, budgets) = agent.registry.collect(&ctx).await;
+        let rendered = prompt::compiler::compile(
+            &sections,
+            &budgets,
+            "review these events",
+            &agent.state.resolved,
+        );
+
+        let user = rendered
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+
+        // Small event inlined
+        assert!(user.content.contains("[topic: audit-pass]"));
+        // Large event as blob reference
+        assert!(user.content.contains("blob://test-source/inspection/"));
+    }
+
+    #[cfg(feature = "blob-store")]
+    #[tokio::test]
+    async fn test_bus_fetch_tool_execution() {
+        let store = crate::blob::BlobStore::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let blob = crate::blob::StoredBlob {
+            key: "blob://test/data/abc123".to_string(),
+            source: "test".to_string(),
+            topic: "data".to_string(),
+            mime: "application/json".to_string(),
+            size: 100,
+            payload: "{\"result\": \"ok\"}".to_string(),
+            summary: "".to_string(),
+        };
+        store.insert(&blob).await.unwrap();
+
+        let executor = crate::tools::DefaultToolExecutor::new_with_blob_store(
+            "/tmp",
+            Some(std::sync::Arc::new(store)),
+        );
+
+        let call = lattice_core::types::ToolCall {
+            id: "call-1".to_string(),
+            function: lattice_core::types::FunctionCall {
+                name: "bus:fetch".to_string(),
+                arguments: "{\"key\": \"blob://test/data/abc123\"}".to_string(),
+            },
+        };
+        let result = executor.execute(&call).await;
+        assert_eq!(result, "{\"result\": \"ok\"}");
+    }
+
+    #[cfg(feature = "blob-store")]
+    #[tokio::test]
+    async fn test_bus_fetch_not_found() {
+        let store = crate::blob::BlobStore::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let executor = crate::tools::DefaultToolExecutor::new_with_blob_store(
+            "/tmp",
+            Some(std::sync::Arc::new(store)),
+        );
+
+        let call = lattice_core::types::ToolCall {
+            id: "call-2".to_string(),
+            function: lattice_core::types::FunctionCall {
+                name: "bus:fetch".to_string(),
+                arguments: "{\"key\": \"nonexistent\"}".to_string(),
+            },
+        };
+        let result = executor.execute(&call).await;
+        assert!(result.contains("not found"));
+    }
+
+    #[cfg(feature = "blob-store")]
+    #[tokio::test]
+    async fn test_bus_fetch_without_blob_store() {
+        let executor = crate::tools::DefaultToolExecutor::new_with_blob_store("/tmp", None);
+        let call = lattice_core::types::ToolCall {
+            id: "call-3".to_string(),
+            function: lattice_core::types::FunctionCall {
+                name: "bus:fetch".to_string(),
+                arguments: "{\"key\": \"any\"}".to_string(),
+            },
+        };
+        let result = executor.execute(&call).await;
+        assert!(result.contains("not configured"));
+    }
+
+    #[cfg(feature = "blob-store")]
+    #[tokio::test]
+    async fn test_degradation_without_blob_store() {
+        // Agent without blob_store: large events silently skipped
+        let resolved = make_resolved(16384);
+        let mut agent = Agent::new(resolved)
+            .with_provider(crate::events_provider::EventsProvider::new("test-source"));
+
+        // All events are large — will be skipped with no blob_store
+        let large_event = lattice_bus::BusEvent {
+            topic: "big-data".to_string(),
+            source: lattice_bus::AgentId::new("source"),
+            payload: serde_json::json!({"data": String::from("x").repeat(5000)}),
+        };
+        agent.inject_bus_events(vec![large_event]);
+
+        let bus_events = agent.bus_event_collector.drain();
+        let ctx = prompt::AssemblyContext {
+            request_id: "test",
+            memory: agent.memory.as_deref(),
+            model: &agent.state.resolved,
+            blob_store: None,
+            bus_events: &bus_events,
+        };
+        let (sections, budgets) = agent.registry.collect(&ctx).await;
+        let rendered =
+            prompt::compiler::compile(&sections, &budgets, "check", &agent.state.resolved);
+
+        // No Events section should appear (all events skipped)
+        let user = rendered.messages.iter().find(|m| m.role == Role::User);
+        if let Some(user_msg) = user {
+            assert!(!user_msg.content.contains("=== Events ==="));
+        }
+    }
 }
