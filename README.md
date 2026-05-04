@@ -169,8 +169,13 @@ cd lattice-python && maturin develop
 import lattice_core
 
 engine = lattice_core.LatticeEngine()
-engine.resolve_model("sonnet")
-# -> PyResolvedModel(provider="anthropic", api_model_id="claude-sonnet-4-6", ...)
+resolved = engine.resolve_model("sonnet")
+# -> PyResolvedModel(canonical_id='claude-sonnet-4-6', provider='anthropic', api_key='***', credential_status='present')
+
+result = engine.chat_complete(resolved, [
+    {"role": "user", "content": "Hello, respond with one word."},
+])
+print(result["content"])
 
 engine.list_authenticated_models()
 # -> lists all models with valid credentials in your environment
@@ -235,7 +240,7 @@ LATTICE/                 Git root (Cargo workspace)
 ## Requirements
 
 - Rust 1.80+
-- Python 3.12+ (optional, for Python bindings)
+- Python 3.9+ (optional, for Python bindings)
 - Credentials in environment variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.
 
 ## Configuration
