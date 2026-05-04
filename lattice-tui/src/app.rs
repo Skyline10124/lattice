@@ -243,7 +243,8 @@ impl App {
         let text_for_spawn = text;
 
         tokio::spawn(async move {
-            let executor = DefaultToolExecutor::new(".");
+            let executor =
+                DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor");
             let mut agent = agent_arc.lock().await;
             let mut events = agent.send_message(&text_for_spawn).await;
             let mut cumulative_tokens = 0u64;

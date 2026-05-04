@@ -47,37 +47,37 @@ pub struct DefaultToolExecutor {
 }
 
 impl DefaultToolExecutor {
-    pub fn new(project_root: &str) -> Self {
-        Self {
+    fn build_http_client() -> Result<reqwest::Client, String> {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("failed to build reqwest client: {e}"))
+    }
+
+    pub fn new(project_root: &str) -> Result<Self, String> {
+        Ok(Self {
             project_root: project_root.to_string(),
             sandbox: SandboxConfig::default(),
-            http_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
+            http_client: Self::build_http_client()?,
             registry: None,
             #[cfg(feature = "blob-store")]
             blob_store: None,
-        }
+        })
     }
 
     pub fn new_with_registry(
         project_root: &str,
         registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             project_root: project_root.to_string(),
             sandbox: SandboxConfig::default(),
-            http_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
+            http_client: Self::build_http_client()?,
             registry,
             #[cfg(feature = "blob-store")]
             blob_store: None,
-        }
+        })
     }
 
     /// Override the sandbox config (replaces the default).
@@ -91,18 +91,14 @@ impl DefaultToolExecutor {
     pub fn new_with_blob_store(
         project_root: &str,
         blob_store: Option<std::sync::Arc<crate::blob::BlobStore>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             project_root: project_root.to_string(),
             sandbox: SandboxConfig::default(),
-            http_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
+            http_client: Self::build_http_client()?,
             registry: None,
             blob_store,
-        }
+        })
     }
 }
 

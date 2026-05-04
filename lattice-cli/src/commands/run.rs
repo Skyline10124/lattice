@@ -74,7 +74,9 @@ pub async fn run(
     let tools = default_tool_definitions();
     let mut agent = Agent::new(resolved)
         .with_tools(tools)
-        .with_tool_executor(Box::new(DefaultToolExecutor::new(".")));
+        .with_tool_executor(Box::new(
+            DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor"),
+        ));
 
     if verbose {
         eprintln!("{}", "streaming...".dimmed());

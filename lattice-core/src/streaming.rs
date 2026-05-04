@@ -436,6 +436,7 @@ impl SseParser for GeminiSseParser {
         }
 
         let mut events = Vec::new();
+        let mut done_emitted = false;
 
         if let Some(cands) = root.get("candidates").and_then(|c| c.as_array()) {
             if let Some(cand) = cands.first() {
@@ -495,7 +496,9 @@ impl SseParser for GeminiSseParser {
                     }
                 }
 
-                // Finish reason
+                // Finish reason — primary Done emission point.
+                // Gemini final chunks typically contain both finishReason and
+                // usageMetadata; we emit a single Done that includes usage.
                 if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
                     let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
                     // Emit ToolCallEnd for all tracked tool calls
@@ -528,12 +531,14 @@ impl SseParser for GeminiSseParser {
                         finish_reason: mapped,
                         usage,
                     });
+                    done_emitted = true;
                 }
             }
         }
 
-        // Usage can arrive without finishReason (intermediate usage chunk)
-        if !events.iter().any(|e| matches!(e, StreamEvent::Done { .. })) {
+        // Fallback: usageMetadata without finishReason (intermediate usage chunk).
+        // Only fires if finishReason was absent — no double-Done risk.
+        if !done_emitted {
             if let Some(u) = root.get("usageMetadata") {
                 events.push(StreamEvent::Done {
                     finish_reason: "stop".to_string(),

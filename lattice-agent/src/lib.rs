@@ -743,7 +743,8 @@ mod tests {
         let executor = crate::tools::DefaultToolExecutor::new_with_blob_store(
             "/tmp",
             Some(std::sync::Arc::new(store)),
-        );
+        )
+        .unwrap();
 
         let call = lattice_core::types::ToolCall {
             id: "call-1".to_string(),
@@ -765,7 +766,8 @@ mod tests {
         let executor = crate::tools::DefaultToolExecutor::new_with_blob_store(
             "/tmp",
             Some(std::sync::Arc::new(store)),
-        );
+        )
+        .unwrap();
 
         let call = lattice_core::types::ToolCall {
             id: "call-2".to_string(),
@@ -781,7 +783,8 @@ mod tests {
     #[cfg(feature = "blob-store")]
     #[tokio::test]
     async fn test_bus_fetch_without_blob_store() {
-        let executor = crate::tools::DefaultToolExecutor::new_with_blob_store("/tmp", None);
+        let executor =
+            crate::tools::DefaultToolExecutor::new_with_blob_store("/tmp", None).unwrap();
         let call = lattice_core::types::ToolCall {
             id: "call-3".to_string(),
             function: lattice_core::types::FunctionCall {

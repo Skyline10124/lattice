@@ -64,14 +64,15 @@ pub fn assemble_agent(
             let exec = DefaultToolExecutor::new_with_registry(
                 ".",
                 Some(reg.clone() as Arc<dyn lattice_agent::RegistryToolAccess>),
-            );
+            )
+            .expect("failed to build DefaultToolExecutor");
             (merged, exec)
         } else {
-            let exec = DefaultToolExecutor::new(".");
+            let exec = DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor");
             (enabled_tools, exec)
         }
     } else {
-        let exec = DefaultToolExecutor::new(".");
+        let exec = DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor");
         (enabled_tools, exec)
     };
 
