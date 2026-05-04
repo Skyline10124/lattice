@@ -154,6 +154,9 @@ async fn dry_run_prompt(
         request_id: "dry-run",
         memory: None,
         model: &resolved,
+        #[cfg(feature = "blob-store")]
+        blob_store: None,
+        bus_events: &[],
     };
     let (sections, budgets) = registry.collect(&ctx).await;
     let rendered = prompt::compiler::compile(&sections, &budgets, &user_input, &resolved);

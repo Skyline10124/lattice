@@ -28,3 +28,6 @@ chrono = "0.4"
 dotenvy = "0.15"
 sha2 = "0.10"
 toml_edit = "0.22"
+
+[features]
+blob-store = []
