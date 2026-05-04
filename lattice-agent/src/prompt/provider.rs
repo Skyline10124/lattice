@@ -21,6 +21,9 @@ pub trait ContextProvider: Send + Sync {
     }
 
     /// Token budget declaration for this provider.
+    ///
+    /// Reserved for future use — the alpha compiler does not yet implement
+    /// Fixed/Ratio/Dynamic budget allocation. Overriding this has no effect.
     fn budget(&self) -> TokenBudget {
         TokenBudget::Dynamic
     }

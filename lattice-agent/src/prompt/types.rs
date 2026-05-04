@@ -21,6 +21,7 @@ pub enum Layer {
 }
 
 impl Layer {
+    /// All layer variants in ordinal order.
     pub fn all() -> &'static [Layer] {
         &[
             Layer::System,
@@ -33,6 +34,10 @@ impl Layer {
     }
 }
 
+/// Token budget declaration for a context provider.
+///
+/// Reserved for future use — the alpha compiler does not yet implement
+/// Fixed/Ratio/Dynamic budget allocation. All providers are treated as Dynamic.
 #[derive(Debug, Clone)]
 pub enum TokenBudget {
     Fixed(u32),
