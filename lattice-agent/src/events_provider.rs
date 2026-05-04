@@ -1,4 +1,4 @@
-use crate::blob::{BlobStore, StoredBlob};
+use crate::blob::StoredBlob;
 use crate::prompt::provider::ContextProvider;
 use crate::prompt::types::{AssemblyContext, Layer, PromptSection, TokenBudget};
 use async_trait::async_trait;
@@ -94,7 +94,7 @@ impl ContextProvider for EventsProvider {
         let mut content_parts = inline_parts;
         content_parts.extend(ref_parts);
         let content = content_parts.join("\n");
-        let tokens = TokenEstimator::estimate_text(&content) as u32;
+        let tokens = TokenEstimator::estimate_text(&content);
 
         Some(PromptSection {
             content,

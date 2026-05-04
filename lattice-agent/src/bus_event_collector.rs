@@ -1,12 +1,13 @@
 use lattice_bus::BusEvent;
 
+#[derive(Default)]
 pub struct BusEventCollector {
     pending: Vec<BusEvent>,
 }
 
 impl BusEventCollector {
     pub fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self::default()
     }
 
     pub fn push(&mut self, event: BusEvent) {
