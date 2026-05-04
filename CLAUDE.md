@@ -10,11 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 lattice-tui           Terminal UI (ratatui)
-  → lattice-cli         CLI: resolve, run, print, validate, debug, models, doctor
+  → lattice-cli         CLI: run, print, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
     → lattice-harness     Pipeline / AgentRunner / PluginDagRunner, TOML profiles, handoff, events
       → lattice-agent       Async Agent::run(), tool execution (tokio), conversation state
         → lattice-core       resolve() + chat() — model routing + streaming inference
-      → lattice-plugin       ErasedPlugin, PluginRegistry, PluginDagRunner, 9 builtin plugins
+      → lattice-plugin       ErasedPlugin, PluginRegistry, PluginDagRunner, 11 builtin plugins
   → lattice-python       PyO3 bindings (pip package: lattice-core)
 ```
 
@@ -76,8 +76,8 @@ User Code (Python / Rust / CLI)
 | `lattice-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
 | `lattice-agent` | `Agent` struct: async multi-turn conversation, tool execution (tokio), token budget, provider fallback, `Memory` trait + `InMemoryMemory` + `SharedMemory` types |
 | `lattice-harness` | `Pipeline`, `AgentRunner`, `PluginDagRunner`, `SqliteMemory`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events, `ToolRegistry` |
-| `lattice-plugin` | `Plugin` trait, `ErasedPlugin`, `PluginRegistry`, 9 builtin plugins (CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase), `Behavior` (Strict/Yolo), `PluginRunner`/`ErasedPluginRunner` |
-| `lattice-cli` | CLI binary: `resolve`, `models`, `doctor`, `run`, `print`, `debug`, `validate`, `new agent` |
+| `lattice-plugin` | `Plugin` trait, `ErasedPlugin`, `PluginRegistry`, 11 builtin plugins (CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase, PlanGen, Verification), `Behavior` (Strict/Yolo), `PluginRunner`/`ErasedPluginRunner` |
+| `lattice-cli` | CLI binary: `run`, `print`, `resolve`, `models`, `doctor`, `bus`, `config`, `sessions`, `stats`, `debug`, `validate`, `list`, `new`, `tui` |
 | `lattice-tui` | Terminal UI (ratatui-based — early stage) |
 | `lattice-python` | PyO3 bindings: `LatticeEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
 | `lattice-bus` | Pub/sub event bus for inter-agent communication |
@@ -120,7 +120,7 @@ User Code (Python / Rust / CLI)
 | `bundle` | `PluginBundle`, `PluginMeta`, `BehaviorMode`, `to_behavior()` |
 | `registry` | `PluginRegistry`: register/get/list plugins by name |
 | `erased_runner` | `run_plugin_loop()` shared loop + `ErasedPluginRunner` struct |
-| `builtin/` | 9 builtin plugins: code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base |
+| `builtin/` | 11 builtin plugins: code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification |
 | `lib.rs` | `Plugin` trait, `Behavior` trait (Strict/Yolo), `PluginRunner`, `PluginHooks`, `PluginConfig` |
 
 ### Model resolution flow

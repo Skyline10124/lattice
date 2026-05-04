@@ -940,6 +940,17 @@ fn inspect_model_uses_provider_defaults_for_gemini() {
     assert_eq!(model.api_protocol, ApiProtocol::OpenAiChat);
 }
 
+#[test]
+fn inspect_model_openai_codex_uses_callable_protocol() {
+    let router = ModelRouter::new();
+    let result = router.inspect_model("openai-codex/gpt-5-codex");
+    assert!(result.is_ok());
+    let model = result.unwrap();
+    assert_eq!(model.provider, "openai-codex");
+    assert_eq!(model.base_url, "https://api.openai.com/v1");
+    assert_eq!(model.api_protocol, ApiProtocol::OpenAiChat);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Wave 5: ToolDefinition serialization roundtrip
 // ════════════════════════════════════════════════════════════════════════════

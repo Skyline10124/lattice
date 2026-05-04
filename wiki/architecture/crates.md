@@ -4,7 +4,7 @@
 |-------|------|------|
 | **lattice-core** | 模型解析、HTTP 请求、SSE 解析、retry、token 估算 | tokio, reqwest, serde |
 | **lattice-agent** | Agent 状态、多轮对话、async tool execution（tokio）、context trimming、sandbox、7 tools | core |
-| **lattice-plugin** | `Plugin` trait (Input/Output) + `ErasedPlugin` + `PluginRegistry` + 9 个内置插件 + `Behavior` (Strict/Yolo) + `PluginRunner`/`ErasedPluginRunner` | core, agent (PluginAgent) |
+| **lattice-plugin** | `Plugin` trait (Input/Output) + `ErasedPlugin` + `PluginRegistry` + 11 个内置插件 + `Behavior` (Strict/Yolo) + `PluginRunner`/`ErasedPluginRunner` | core, agent (PluginAgent) |
 | **lattice-harness** | `Pipeline`（async）+ `AgentRunner` + `PluginDagRunner` + `ToolRegistry` + TOML profile + handoff + registry/watcher + SqliteMemory + WebSocket | agent, plugin, core |
 | **lattice-bus** | Pub/sub event bus for inter-agent communication | 无 |
 | **lattice-cli** | CLI: `run`/`resolve`/`models`/`doctor`/`bus`/`config`/`sessions`/`stats`/`debug`/`validate`/`list`/`new`/`tui`，session 自动持久化（SHA-256 ID），`--global` flags（`--json`/`--verbose`/`--continue-session`/`--no-save`） | agent, harness, plugin |
@@ -52,7 +52,7 @@
 | `bundle.rs` | `PluginBundle`、`PluginMeta`、`BehaviorMode` |
 | `registry.rs` | `PluginRegistry`：register/get/list |
 | `erased_runner.rs` | `run_plugin_loop()`、`ErasedPluginRunner` |
-| `builtin/` | 9 个内置插件 |
+| `builtin/` | 11 个内置插件：code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification |
 
 ## lattice-harness 模块
 

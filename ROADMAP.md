@@ -73,7 +73,7 @@ lattice-python      # PyO3 bindings (resolver only, for now)
 - [x] `ToolRegistry` + `merge_tool_definitions()`
 - [x] `PluginsConfig` / `PluginSlotConfig` / `AgentEdgeConfig` TOML deserialization
 - [x] Pipeline branching: `[plugins]` in profile → PluginDagRunner, else AgentRunner
-- [x] 9 builtin plugins: CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase
+- [x] 11 builtin plugins: CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase, PlanGen, Verification
 - [x] CLI integration: `--pipeline` auto-loads builtin plugins
 - [x] Integration tests for edge matching, error types, behavior roundtrip
 
@@ -143,7 +143,7 @@ lattice-core        Pure Rust: catalog, router, provider, transport, streaming, 
 lattice-agent       Agent state, tool boundary, memory (merged former lattice-memory + lattice-token-pool)
 lattice-bus         Micro-agent pub/sub + RPC communication bus
 lattice-harness     Pipeline, AgentRunner, PluginDagRunner, SqliteMemory, TOML profiles
-lattice-plugin      Plugin trait, 9 builtins, ErasedPluginRunner, PluginRegistry
+lattice-plugin      Plugin trait, 11 builtins, ErasedPluginRunner, PluginRegistry
 lattice-cli         CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
 lattice-tui         Terminal UI (ratatui)
 lattice-python      PyO3 bindings (pip: lattice-core)

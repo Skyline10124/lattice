@@ -14,7 +14,7 @@ LATTICE/ (Cargo workspace)
 ├── lattice-agent/      Agent struct, conversation state, tool boundary, memory (merged lattice-memory + lattice-token-pool)
 ├── lattice-bus/        Micro-agent pub/sub + RPC communication bus
 ├── lattice-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload, PluginDagRunner
-├── lattice-plugin/     Plugin trait (typed Input → LLM → Output), 9 builtin plugins
+├── lattice-plugin/     Plugin trait (typed Input → LLM → Output), PluginRegistry, 11 builtin plugins
 ├── lattice-cli/        CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
 ├── lattice-tui/        Terminal UI (ratatui)
 └── lattice-python/     PyO3 bindings (pip: lattice-core)
@@ -186,11 +186,12 @@ engine.list_authenticated_models()
 LATTICE is in **alpha / dogfooding** stage. What works:
 
 - **Model resolution**: 98 models, 37 aliases, 27 provider defaults (23 with base\_url)
-- **Rust inference**: `resolve()` + `chat()` for OpenAI and Anthropic protocols via unified Transport
-- **Streaming**: SSE parsers for both protocols, tool call tracking across chunks
+- **Rust inference**: `resolve()` + `chat()` for OpenAI chat-completions, Anthropic Messages, and Gemini GenerateContent via unified Transport
+- **Streaming**: SSE parsers for OpenAI/Anthropic, Gemini native non-streaming path, tool call tracking across chunks
 - **Thinking mode**: DeepSeek v4-pro (OpenAI reasoning\_content), MiniMax M2.7 (Anthropic thinking\_delta)
 - **Agent**: multi-turn conversation, tool execution boundary, memory, token budget
 - **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
+- **Plugins**: centralized builtin registry with 11 builtins; `--pipeline` auto-loads registry entries
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
 - **CLI**: run, resolve, models, debug, doctor, bus, config, sessions, stats, validate, list, new — session auto-save with SHA-256 IDs, `--continue-session`, `--provider` flag
 - **HTTPS enforced**: non-localhost HTTP base URLs rejected at the engine level
@@ -223,7 +224,7 @@ LATTICE/                 Git root (Cargo workspace)
 │   │   ├── runner.rs    AgentRunner (wraps Agent + profile)
 │   │   ├── tools.rs     ToolRegistry + ToolHandler + merge_tool_definitions()
 │   │   └── events.rs    EventBus + PipelineEvent
-├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), 9 builtin plugins
+├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), PluginRegistry, 11 builtin plugins
 ├── lattice-cli/         CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
 ├── lattice-tui/         Terminal UI (ratatui)
 └── lattice-python/      PyO3 bindings (pip: lattice-core)

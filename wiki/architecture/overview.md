@@ -10,7 +10,7 @@ lattice-harness       Pipeline / AgentRunner / PluginDagRunner, TOML profile, ha
 lattice-python        PyO3 绑定（pip: lattice-core）
     ↓
 lattice-agent         Async Agent + tool execution（tokio）+ 7 tools + sandbox
-lattice-plugin        类型化插件系统（ErasedPlugin + PluginRegistry + 9 builtin plugins）
+lattice-plugin        类型化插件系统（ErasedPlugin + PluginRegistry + 11 builtin plugins）
     ↓
 lattice-core          模型解析 + 推理（纯 Rust，无 PyO3）
 ```

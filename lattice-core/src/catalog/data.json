@@ -3616,7 +3616,7 @@
       "base_url": "https://api.openai.com/v1"
     },
     "openai-codex": {
-      "api_protocol": "codex_responses",
+      "api_protocol": "chat_completions",
       "credential_keys": {
         "api_key": "OPENAI_API_KEY"
       },
