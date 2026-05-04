@@ -25,14 +25,21 @@ impl AgentState {
     }
 
     pub fn push_system_message(&mut self, content: &str) {
-        self.messages.push(Message {
-            role: Role::System,
-            content: content.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        });
+        // Replace the first system message, or append if none exists.
+        // This prevents duplicate system messages when the prompt engine
+        // recompiles and re-pushes the system section each iteration.
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::System) {
+            msg.content = content.to_string();
+        } else {
+            self.messages.push(Message {
+                role: Role::System,
+                content: content.to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+        }
     }
 
     pub fn push_user_message(&mut self, content: &str) {
