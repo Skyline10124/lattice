@@ -1,4 +1,4 @@
-use crate::prompt::types::{AssemblyContext, Layer, PromptSection, TokenBudget};
+use crate::prompt::types::{AssemblyContext, Layer, PromptSection};
 use async_trait::async_trait;
 
 /// A source of prompt content.
@@ -18,14 +18,6 @@ pub trait ContextProvider: Send + Sync {
     /// Within-layer sort priority (0 = highest, 255 = lowest, default 5).
     fn priority(&self) -> u8 {
         5
-    }
-
-    /// Token budget declaration for this provider.
-    ///
-    /// Reserved for future use — the alpha compiler does not yet implement
-    /// Fixed/Ratio/Dynamic budget allocation. Overriding this has no effect.
-    fn budget(&self) -> TokenBudget {
-        TokenBudget::Dynamic
     }
 
     /// Produce a prompt section, or None if nothing to contribute.

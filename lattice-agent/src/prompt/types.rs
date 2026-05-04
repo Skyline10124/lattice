@@ -34,17 +34,6 @@ impl Layer {
     }
 }
 
-/// Token budget declaration for a context provider.
-///
-/// Reserved for future use — the alpha compiler does not yet implement
-/// Fixed/Ratio/Dynamic budget allocation. All providers are treated as Dynamic.
-#[derive(Debug, Clone)]
-pub enum TokenBudget {
-    Fixed(u32),
-    Ratio(f64),
-    Dynamic,
-}
-
 #[derive(Debug, Clone)]
 pub struct AgentMetadata {
     pub name: String,
