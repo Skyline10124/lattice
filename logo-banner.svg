@@ -8,12 +8,11 @@
     </linearGradient>
 
     <!-- 引入外部字体：Space Grotesk (主标题, Medium字重) 和 JetBrains Mono (副标题) -->
-    <!-- GitHub README 渲染屏蔽外部资源，因此提供跨平台系统字体回退 -->
     <style>
       @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500&amp;family=Space+Grotesk:wght@500&amp;display=swap');
       
       .title-text {
-        font-family: 'Space Grotesk', 'Inter', 'SF Pro Display', 'Segoe UI', 'Ubuntu', 'DejaVu Sans', system-ui, sans-serif;
+        font-family: 'Space Grotesk', system-ui, sans-serif;
         font-size: 64px;
         font-weight: 500;
         letter-spacing: 14px;
@@ -21,7 +20,7 @@
       }
       
       .subtitle-text {
-        font-family: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Ubuntu Mono', 'DejaVu Sans Mono', 'Courier New', monospace;
+        font-family: 'JetBrains Mono', monospace;
         font-size: 16px;
         font-weight: 500;
         fill: #08121E;
@@ -113,7 +112,7 @@
 
   <!-- ================= 文本排版组 ================= -->
   <!-- 文本区同步微微回调，X=360 -->
-  <g id="text-group" transform="translate(360, 135)">
+  <g id="text-group" transform="translate(360, 102)">
     
     <text class="title-text" x="0" y="0">LATTICE</text>
 
