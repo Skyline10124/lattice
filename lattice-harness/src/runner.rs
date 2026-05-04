@@ -191,7 +191,7 @@ impl AgentRunner {
         let events = self.agent.run(input, max_turns).await;
         // Propagate error events immediately
         for event in &events {
-            if let lattice_agent::LoopEvent::Error { message } = event {
+            if let lattice_agent::LoopEvent::Error { message, .. } = event {
                 return Err(format!("Agent error: {}", message).into());
             }
         }

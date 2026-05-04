@@ -10,37 +10,14 @@ use crate::handoff_rule::{eval_rules, HandoffTarget};
 use crate::profile::AgentProfile;
 use crate::registry::AgentRegistry;
 
-/// Decision after a skippable/non-skippable agent error in the main pipeline loop.
-enum LoopDecision {
-    /// Continue the pipeline with the next agent (fallback route).
-    Continue(String),
-    /// Break out of the pipeline loop.
-    Break,
-}
-
-/// Handle an agent error: if skippable, try the fallback route; otherwise break.
-///
-/// Eliminates the duplicated error-handling pattern in both the resolve-error
-/// and runner-error branches of `run()`.
-fn handle_agent_error(
-    err: AgentError,
-    profile: &AgentProfile,
-    registry: &AgentRegistry,
-    skipped: &mut Vec<String>,
-    errors: &mut Vec<AgentError>,
-) -> LoopDecision {
-    if profile.agent.skippable {
-        skipped.push(profile.agent.name.clone());
-        errors.push(err);
-        if let Some(next_name) = handle_fallback(profile, registry) {
-            LoopDecision::Continue(next_name)
-        } else {
-            LoopDecision::Break
-        }
-    } else {
-        errors.push(err);
-        LoopDecision::Break
-    }
+/// What the main pipeline loop should do after processing an agent result.
+enum LoopOutcome {
+    /// Advance to the next agent with updated context.
+    Advance { agent: String, input: String },
+    /// Pipeline reached the end of the chain (no next agent).
+    ChainEnd,
+    /// Pipeline halted due to an unhandled error.
+    Halted,
 }
 
 /// Default maximum number of memory entries to store per pipeline run.
@@ -147,9 +124,7 @@ impl Pipeline {
         let mut current_input = input.to_string();
         let mut completed = false;
 
-        let pipeline_max_agents = 20;
-
-        for _turn in 0..pipeline_max_agents {
+        for _turn in 0..20 {
             let profile = match self.registry.get(&current_agent) {
                 Some(p) => p.clone(),
                 None => {
@@ -179,30 +154,19 @@ impl Pipeline {
             let resolved = match router.resolve(&profile.agent.model, None) {
                 Ok(r) => r,
                 Err(e) => {
-                    let err = AgentError {
-                        agent_name: profile.agent.name.clone(),
-                        message: format!("Resolve failed: {}", e),
-                        skippable: profile.agent.skippable,
-                    };
-                    if let Some(ref bus) = self.event_bus {
-                        bus.send(PipelineEvent::PipelineError {
-                            agent: profile.agent.name.clone(),
-                            message: err.message.clone(),
-                            skippable: err.skippable,
-                        });
-                    }
-                    match handle_agent_error(
-                        err,
+                    match self.handle_error(
+                        format!("Resolve failed: {}", e),
                         &profile,
-                        &self.registry,
+                        &current_input,
                         &mut skipped,
                         &mut errors,
                     ) {
-                        LoopDecision::Continue(next) => {
-                            current_agent = next;
+                        LoopOutcome::Advance { agent, input } => {
+                            current_agent = agent;
+                            current_input = input;
                             continue;
                         }
-                        LoopDecision::Break => break,
+                        LoopOutcome::ChainEnd | LoopOutcome::Halted => break,
                     }
                 }
             };
@@ -210,309 +174,100 @@ impl Pipeline {
             // Plugin DAG delegation: when profile has plugins AND pipeline has plugin_registry,
             // delegate to PluginDagRunner instead of AgentRunner.
             if profile.plugins.is_some() && self.plugin_registry.is_none() {
-                errors.push(AgentError {
+                let err = AgentError {
                     agent_name: current_agent.clone(),
                     message:
                         "Agent profile declares plugins but Pipeline has no plugin_registry — \
-                     call Pipeline::with_plugin_registry() before run()"
+                         call Pipeline::with_plugin_registry() before run()"
                             .to_string(),
                     skippable: false,
-                });
+                };
+                if let Some(ref bus) = self.event_bus {
+                    bus.send(PipelineEvent::PipelineError {
+                        agent: err.agent_name.clone(),
+                        message: err.message.clone(),
+                        skippable: err.skippable,
+                    });
+                }
+                errors.push(err);
                 break;
             }
 
-            if let (Some(plugins_config), Some(pr)) = (&profile.plugins, &self.plugin_registry) {
-                let empty_tr = crate::tools::ToolRegistry::new();
-                let tr_ref: &crate::tools::ToolRegistry = match self.tool_registry.as_ref() {
-                    Some(arc) => arc.as_ref(),
-                    None => &empty_tr,
+            // Execute agent via DAG or standard runner
+            let output_result: Result<serde_json::Value, String> =
+                if let (Some(plugins_config), Some(pr)) = (&profile.plugins, &self.plugin_registry)
+                {
+                    let empty_tr = crate::tools::ToolRegistry::new();
+                    let tr_ref: &crate::tools::ToolRegistry = match self.tool_registry.as_ref() {
+                        Some(arc) => arc.as_ref(),
+                        None => &empty_tr,
+                    };
+
+                    let mut dag_runner = crate::dag_runner::PluginDagRunner::new(
+                        plugins_config,
+                        pr,
+                        tr_ref,
+                        lattice_core::retry::RetryPolicy::default(),
+                        self.shared_memory.clone(),
+                    );
+                    dag_runner
+                        .run(&current_input, &profile.agent.model)
+                        .await
+                        .map_err(|e| e.to_string())
+                } else {
+                    let mut runner = crate::assembly::assemble_agent(
+                        &profile,
+                        resolved,
+                        self.shared_memory.clone(),
+                        self.tool_registry.clone(),
+                    );
+                    runner
+                        .run(&current_input, agent_max_turns)
+                        .await
+                        .map_err(|e| e.to_string())
                 };
 
-                let mut dag_runner = crate::dag_runner::PluginDagRunner::new(
-                    plugins_config,
-                    pr,
-                    tr_ref,
-                    lattice_core::retry::RetryPolicy::default(),
-                    self.shared_memory.clone(),
-                );
+            let duration_ms = start.elapsed().as_millis() as u64;
 
-                match dag_runner.run(&current_input, &profile.agent.model).await {
-                    Ok(output) => {
-                        let duration_ms = start.elapsed().as_millis() as u64;
-
-                        let next = if profile.handoff.handoff_rules.is_empty() {
-                            profile.handoff.fallback.clone()
-                        } else {
-                            eval_rules(&profile.handoff.handoff_rules, &output)
-                        };
-
-                        self.save_memory_entry(&profile, &output);
-
-                        if let Some(ref bus) = self.event_bus {
-                            let preview: String = output.to_string().chars().take(500).collect();
-                            bus.send(PipelineEvent::AgentCompleted {
-                                agent: profile.agent.name.clone(),
-                                output_preview: preview,
-                                next: next.clone(),
-                                duration_ms,
-                            });
-                        }
-
-                        results.push(AgentResult {
-                            agent_name: profile.agent.name.clone(),
-                            output: output.clone(),
-                            next: next.clone(),
-                            duration_ms,
-                        });
-
-                        match next {
-                            Some(HandoffTarget::Single(n)) => {
-                                if let Some(ref bus) = self.event_bus {
-                                    bus.send(PipelineEvent::Handoff {
-                                        from: profile.agent.name.clone(),
-                                        to: HandoffTarget::Single(n.clone()),
-                                    });
-                                }
-                                current_input = output.to_string();
-                                current_agent = n;
-                            }
-                            Some(HandoffTarget::Fork(targets)) => {
-                                if let Some(ref bus) = self.event_bus {
-                                    bus.send(PipelineEvent::Fork {
-                                        from: profile.agent.name.clone(),
-                                        branches: targets.clone(),
-                                    });
-                                }
-
-                                let fork_results = self
-                                    .run_fork_async(
-                                        &targets,
-                                        &output.to_string(),
-                                        agent_max_turns,
-                                        &mut errors,
-                                        &mut skipped,
-                                    )
-                                    .await;
-
-                                // All fork branches failed — treat as agent error
-                                if fork_results.is_empty() {
-                                    errors.push(AgentError {
-                                        agent_name: profile.agent.name.clone(),
-                                        message: "All fork branches failed".into(),
-                                        skippable: profile.agent.skippable,
-                                    });
-                                    completed = true;
-                                    break;
-                                }
-
-                                let merged = self.merge_fork_outputs(&fork_results);
-
-                                let fork_next = fork_results
-                                    .iter()
-                                    .find_map(|r| r.next.clone())
-                                    .or_else(|| profile.handoff.fallback.clone());
-
-                                current_input = merged.to_string();
-
-                                match fork_next {
-                                    Some(HandoffTarget::Single(n)) => {
-                                        current_agent = n;
-                                    }
-                                    Some(HandoffTarget::Fork(fork_target)) => {
-                                        if let Some(first_name) = fork_target.first() {
-                                            current_agent = first_name.clone();
-                                        } else {
-                                            errors.push(AgentError {
-                                                agent_name: profile.agent.name.clone(),
-                                                message: "Fork target has no agent names".into(),
-                                                skippable: false,
-                                            });
-                                            completed = true;
-                                            break;
-                                        }
-                                    }
-                                    None => {
-                                        completed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            None => {
-                                completed = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let err = AgentError {
-                            agent_name: profile.agent.name.clone(),
-                            message: e.to_string(),
-                            skippable: profile.agent.skippable,
-                        };
-                        if let Some(ref bus) = self.event_bus {
-                            bus.send(PipelineEvent::PipelineError {
-                                agent: profile.agent.name.clone(),
-                                message: err.message.clone(),
-                                skippable: err.skippable,
-                            });
-                        }
-                        match handle_agent_error(
-                            err,
+            match output_result {
+                Ok(output) => {
+                    match self
+                        .route_after_success(
                             &profile,
-                            &self.registry,
-                            &mut skipped,
+                            &output,
+                            duration_ms,
+                            agent_max_turns,
+                            &mut results,
                             &mut errors,
-                        ) {
-                            LoopDecision::Continue(next) => {
-                                current_agent = next;
-                                continue;
-                            }
-                            LoopDecision::Break => break,
+                            &mut skipped,
+                        )
+                        .await
+                    {
+                        LoopOutcome::Advance { agent, input } => {
+                            current_agent = agent;
+                            current_input = input;
                         }
+                        LoopOutcome::ChainEnd => {
+                            completed = true;
+                            break;
+                        }
+                        LoopOutcome::Halted => break,
                     }
                 }
-            } else {
-                // Standard AgentRunner path
-                let mut runner = crate::assembly::assemble_agent(
-                    &profile,
-                    resolved,
-                    self.shared_memory.clone(),
-                    self.tool_registry.clone(),
-                );
-
-                match runner.run(&current_input, agent_max_turns).await {
-                    Ok(output) => {
-                        let duration_ms = start.elapsed().as_millis() as u64;
-
-                        let next = if profile.handoff.handoff_rules.is_empty() {
-                            profile.handoff.fallback.clone()
-                        } else {
-                            eval_rules(&profile.handoff.handoff_rules, &output)
-                        };
-
-                        self.save_memory_entry(&profile, &output);
-
-                        if let Some(ref bus) = self.event_bus {
-                            let preview: String = output.to_string().chars().take(500).collect();
-                            bus.send(PipelineEvent::AgentCompleted {
-                                agent: profile.agent.name.clone(),
-                                output_preview: preview,
-                                next: next.clone(),
-                                duration_ms,
-                            });
+                Err(message) => {
+                    match self.handle_error(
+                        message,
+                        &profile,
+                        &current_input,
+                        &mut skipped,
+                        &mut errors,
+                    ) {
+                        LoopOutcome::Advance { agent, input } => {
+                            current_agent = agent;
+                            current_input = input;
+                            continue;
                         }
-
-                        results.push(AgentResult {
-                            agent_name: profile.agent.name.clone(),
-                            output: output.clone(),
-                            next: next.clone(),
-                            duration_ms,
-                        });
-
-                        match next {
-                            Some(HandoffTarget::Single(n)) => {
-                                if let Some(ref bus) = self.event_bus {
-                                    bus.send(PipelineEvent::Handoff {
-                                        from: profile.agent.name.clone(),
-                                        to: HandoffTarget::Single(n.clone()),
-                                    });
-                                }
-                                current_input = output.to_string();
-                                current_agent = n;
-                            }
-                            Some(HandoffTarget::Fork(targets)) => {
-                                if let Some(ref bus) = self.event_bus {
-                                    bus.send(PipelineEvent::Fork {
-                                        from: profile.agent.name.clone(),
-                                        branches: targets.clone(),
-                                    });
-                                }
-
-                                let fork_results = self
-                                    .run_fork_async(
-                                        &targets,
-                                        &output.to_string(),
-                                        agent_max_turns,
-                                        &mut errors,
-                                        &mut skipped,
-                                    )
-                                    .await;
-
-                                // All fork branches failed — treat as agent error
-                                if fork_results.is_empty() {
-                                    errors.push(AgentError {
-                                        agent_name: profile.agent.name.clone(),
-                                        message: "All fork branches failed".into(),
-                                        skippable: profile.agent.skippable,
-                                    });
-                                    completed = true;
-                                    break;
-                                }
-
-                                let merged = self.merge_fork_outputs(&fork_results);
-
-                                let fork_next = fork_results
-                                    .iter()
-                                    .find_map(|r| r.next.clone())
-                                    .or_else(|| profile.handoff.fallback.clone());
-
-                                current_input = merged.to_string();
-
-                                match fork_next {
-                                    Some(HandoffTarget::Single(n)) => {
-                                        current_agent = n;
-                                    }
-                                    Some(HandoffTarget::Fork(fork_target)) => {
-                                        if let Some(first_name) = fork_target.first() {
-                                            current_agent = first_name.clone();
-                                        } else {
-                                            errors.push(AgentError {
-                                                agent_name: profile.agent.name.clone(),
-                                                message: "Fork target has no agent names".into(),
-                                                skippable: false,
-                                            });
-                                            completed = true;
-                                            break;
-                                        }
-                                    }
-                                    None => {
-                                        completed = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            None => {
-                                completed = true;
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let err = AgentError {
-                            agent_name: profile.agent.name.clone(),
-                            message: e.to_string(),
-                            skippable: profile.agent.skippable,
-                        };
-                        if let Some(ref bus) = self.event_bus {
-                            bus.send(PipelineEvent::PipelineError {
-                                agent: profile.agent.name.clone(),
-                                message: err.message.clone(),
-                                skippable: err.skippable,
-                            });
-                        }
-                        match handle_agent_error(
-                            err,
-                            &profile,
-                            &self.registry,
-                            &mut skipped,
-                            &mut errors,
-                        ) {
-                            LoopDecision::Continue(next) => {
-                                current_agent = next;
-                                continue;
-                            }
-                            LoopDecision::Break => break,
-                        }
+                        LoopOutcome::ChainEnd | LoopOutcome::Halted => break,
                     }
                 }
             }
@@ -532,6 +287,155 @@ impl Pipeline {
             completed,
             skipped,
             duration_ms,
+        }
+    }
+
+    /// Handle an agent error: emit event, decide whether to skip and continue or halt.
+    fn handle_error(
+        &self,
+        message: String,
+        profile: &AgentProfile,
+        current_input: &str,
+        skipped: &mut Vec<String>,
+        errors: &mut Vec<AgentError>,
+    ) -> LoopOutcome {
+        let err = AgentError {
+            agent_name: profile.agent.name.clone(),
+            message,
+            skippable: profile.agent.skippable,
+        };
+        if let Some(ref bus) = self.event_bus {
+            bus.send(PipelineEvent::PipelineError {
+                agent: err.agent_name.clone(),
+                message: err.message.clone(),
+                skippable: err.skippable,
+            });
+        }
+        if profile.agent.skippable {
+            skipped.push(profile.agent.name.clone());
+            errors.push(err);
+            if let Some(next_name) = handle_fallback(profile, &self.registry) {
+                LoopOutcome::Advance {
+                    agent: next_name,
+                    input: current_input.to_string(),
+                }
+            } else {
+                LoopOutcome::Halted
+            }
+        } else {
+            errors.push(err);
+            LoopOutcome::Halted
+        }
+    }
+
+    /// After a successful agent/DAG run, record the result and determine next step.
+    #[allow(clippy::too_many_arguments)]
+    async fn route_after_success(
+        &self,
+        profile: &AgentProfile,
+        output: &serde_json::Value,
+        duration_ms: u64,
+        agent_max_turns: u32,
+        results: &mut Vec<AgentResult>,
+        errors: &mut Vec<AgentError>,
+        skipped: &mut Vec<String>,
+    ) -> LoopOutcome {
+        let next = if profile.handoff.handoff_rules.is_empty() {
+            profile.handoff.fallback.clone()
+        } else {
+            eval_rules(&profile.handoff.handoff_rules, output)
+        };
+
+        self.save_memory_entry(profile, output);
+
+        if let Some(ref bus) = self.event_bus {
+            let preview: String = output.to_string().chars().take(500).collect();
+            bus.send(PipelineEvent::AgentCompleted {
+                agent: profile.agent.name.clone(),
+                output_preview: preview,
+                next: next.clone(),
+                duration_ms,
+            });
+        }
+
+        results.push(AgentResult {
+            agent_name: profile.agent.name.clone(),
+            output: output.clone(),
+            next: next.clone(),
+            duration_ms,
+        });
+
+        match next {
+            Some(HandoffTarget::Single(n)) => {
+                if let Some(ref bus) = self.event_bus {
+                    bus.send(PipelineEvent::Handoff {
+                        from: profile.agent.name.clone(),
+                        to: HandoffTarget::Single(n.clone()),
+                    });
+                }
+                LoopOutcome::Advance {
+                    agent: n,
+                    input: output.to_string(),
+                }
+            }
+            Some(HandoffTarget::Fork(targets)) => {
+                if let Some(ref bus) = self.event_bus {
+                    bus.send(PipelineEvent::Fork {
+                        from: profile.agent.name.clone(),
+                        branches: targets.clone(),
+                    });
+                }
+
+                let fork_results = self
+                    .run_fork_async(
+                        &targets,
+                        &output.to_string(),
+                        agent_max_turns,
+                        errors,
+                        skipped,
+                    )
+                    .await;
+
+                if fork_results.is_empty() {
+                    errors.push(AgentError {
+                        agent_name: profile.agent.name.clone(),
+                        message: "All fork branches failed".into(),
+                        skippable: profile.agent.skippable,
+                    });
+                    return LoopOutcome::ChainEnd;
+                }
+
+                let merged = self.merge_fork_outputs(&fork_results);
+
+                let fork_next = fork_results
+                    .iter()
+                    .find_map(|r| r.next.clone())
+                    .or_else(|| profile.handoff.fallback.clone());
+
+                match fork_next {
+                    Some(HandoffTarget::Single(n)) => LoopOutcome::Advance {
+                        agent: n,
+                        input: merged.to_string(),
+                    },
+                    Some(HandoffTarget::Fork(fork_target)) => {
+                        if let Some(first_name) = fork_target.first() {
+                            LoopOutcome::Advance {
+                                agent: first_name.clone(),
+                                input: merged.to_string(),
+                            }
+                        } else {
+                            errors.push(AgentError {
+                                agent_name: profile.agent.name.clone(),
+                                message: "Fork target has no agent names".into(),
+                                skippable: false,
+                            });
+                            LoopOutcome::ChainEnd
+                        }
+                    }
+                    None => LoopOutcome::ChainEnd,
+                }
+            }
+            None => LoopOutcome::ChainEnd,
         }
     }
 

@@ -292,7 +292,7 @@ impl App {
                                 });
                             }
                         }
-                        LoopEvent::Error { message } => {
+                        LoopEvent::Error { message, .. } => {
                             let _ = tx.send(Event::StreamToken {
                                 content: message.clone(),
                                 reasoning: None,

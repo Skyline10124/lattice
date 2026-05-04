@@ -140,7 +140,7 @@ async fn run_conversation(
                         }
                     }
                 }
-                LoopEvent::Error { message } => {
+                LoopEvent::Error { message, .. } => {
                     flush_reasoning(&reasoning_buf, verbose, json);
                     reasoning_buf.clear();
                     eprintln!("{} {}", "error:".red(), message);

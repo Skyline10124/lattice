@@ -135,7 +135,7 @@ pub async fn run(
                     total_tokens = u.total_tokens as u64;
                 }
             }
-            LoopEvent::Error { message } => {
+            LoopEvent::Error { message, .. } => {
                 flush_reasoning(&reasoning_buf);
                 reasoning_buf.clear();
                 tracing::error!(error = %message, "debug: stream error");

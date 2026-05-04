@@ -436,6 +436,7 @@ mod tests {
             LoopEvent::Done { usage: None },
             LoopEvent::Error {
                 message: "oops".into(),
+                retryable: false,
             },
         ];
         assert_eq!(extract_content(&events), "");

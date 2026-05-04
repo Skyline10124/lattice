@@ -30,6 +30,21 @@ pub trait ToolExecutor: Send + Sync {
 /// Max retries for mid-stream errors in Agent::run().
 const MAX_STREAM_RETRIES: u32 = 2;
 
+/// Classify a mid-stream SSE error message as retryable or not.
+/// Mid-stream errors lack HTTP status codes; we infer from known patterns.
+fn is_retryable_stream_message(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    lower.contains("rate_limit")
+        || lower.contains("overloaded")
+        || lower.contains("timeout")
+        || lower.contains("429")
+        || lower.contains("503")
+        || lower.contains("502")
+        || lower.contains("server_error")
+        || lower.contains("service unavailable")
+        || lower.contains("temporarily")
+}
+
 /// Tool loop max turns per Agent::run() call for send_message_with_tools.
 const MAX_TOOL_TURNS: u32 = 10;
 
@@ -213,8 +228,16 @@ impl Agent {
 
             let mut retry_count = 0u32;
             while retry_count < MAX_STREAM_RETRIES {
-                let has_error = events.iter().any(|e| matches!(e, LoopEvent::Error { .. }));
-                if !has_error {
+                let has_retryable_error = events.iter().any(|e| {
+                    matches!(
+                        e,
+                        LoopEvent::Error {
+                            retryable: true,
+                            ..
+                        }
+                    )
+                });
+                if !has_retryable_error {
                     break;
                 }
                 self.state.pop_last_assistant_message();
@@ -254,9 +277,11 @@ impl Agent {
         let mut stream = match self.chat_with_retry().await {
             Ok(s) => s,
             Err(e) => {
+                use lattice_core::errors::ErrorClassifier;
                 return vec![LoopEvent::Error {
                     message: e.to_string(),
-                }]
+                    retryable: ErrorClassifier::is_retryable(&e),
+                }];
             }
         };
 
@@ -313,7 +338,8 @@ impl Agent {
                     events.push(LoopEvent::Done { usage });
                 }
                 StreamEvent::Error { message } => {
-                    events.push(LoopEvent::Error { message });
+                    let retryable = is_retryable_stream_message(&message);
+                    events.push(LoopEvent::Error { message, retryable });
                 }
             }
         }
@@ -383,6 +409,7 @@ pub enum LoopEvent {
     },
     Error {
         message: String,
+        retryable: bool,
     },
 }
 
@@ -426,7 +453,7 @@ impl PluginAgent for Agent {
         for event in &events {
             match event {
                 LoopEvent::Token { text } => content.push_str(text),
-                LoopEvent::Error { message } => {
+                LoopEvent::Error { message, .. } => {
                     has_error = true;
                     error_messages.push(message.clone());
                 }

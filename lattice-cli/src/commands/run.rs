@@ -478,7 +478,7 @@ fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bo
                     }
                 }
             }
-            LoopEvent::Error { message } => {
+            LoopEvent::Error { message, .. } => {
                 flush_reasoning(&reasoning_buf, verbose, json);
                 reasoning_buf.clear();
                 eprintln!("{} {}", "error:".red(), message);
