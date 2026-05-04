@@ -1,3 +1,4 @@
+pub mod bus_event_collector;
 pub mod memory;
 pub mod prompt;
 pub mod sandbox;
