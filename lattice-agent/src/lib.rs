@@ -150,11 +150,11 @@ impl Agent {
         let ctx = prompt::AssemblyContext {
             request_id: "run",
             memory: self.memory.as_deref(),
-            metadata: None,
             model: &self.state.resolved,
         };
-        let sections = self.registry.collect(&ctx).await;
-        let rendered = prompt::compiler::compile(&sections, content, &self.state.resolved);
+        let (sections, budgets) = self.registry.collect(&ctx).await;
+        let rendered =
+            prompt::compiler::compile(&sections, &budgets, content, &self.state.resolved);
         self.state.push_user_message(&rendered.text);
         let mut all_events = Vec::new();
 
@@ -390,23 +390,182 @@ impl PluginAgent for Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use lattice_core::catalog::ApiProtocol;
+    use std::collections::HashMap;
 
-    #[test]
-    fn test_set_system_prompt_does_not_panic() {
-        let resolved = lattice_core::ResolvedModel {
+    fn make_resolved(context_length: u32) -> ResolvedModel {
+        ResolvedModel {
             canonical_id: "test".into(),
             api_model_id: "test".into(),
             provider: "test".into(),
             base_url: "http://localhost".to_string(),
             api_key: Some("sk-test".into()),
-            api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-            context_length: 4096,
-            credential_status: lattice_core::catalog::CredentialStatus::Present,
-            provider_specific: Default::default(),
-        };
+            api_protocol: ApiProtocol::OpenAiChat,
+            context_length,
+            credential_status: lattice_core::CredentialStatus::Present,
+            provider_specific: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_set_system_prompt_does_not_panic() {
+        let resolved = make_resolved(4096);
         let mut agent = Agent::new(resolved);
         agent.set_system_prompt("first");
         agent.set_system_prompt("second");
         // If we get here without panic, the inherent method resolved correctly
+    }
+
+    /// A test provider that produces a fixed section at a given layer/priority.
+    struct TestProvider {
+        layer: prompt::Layer,
+        priority: u8,
+        content: &'static str,
+        tokens: u32,
+        budget: prompt::TokenBudget,
+    }
+
+    #[async_trait]
+    impl prompt::ContextProvider for TestProvider {
+        fn layer(&self) -> prompt::Layer {
+            self.layer
+        }
+        fn priority(&self) -> u8 {
+            self.priority
+        }
+        fn budget(&self) -> prompt::TokenBudget {
+            self.budget
+        }
+        async fn produce(
+            &self,
+            _ctx: &prompt::AssemblyContext<'_>,
+        ) -> Option<prompt::PromptSection> {
+            Some(prompt::PromptSection {
+                content: self.content.to_string(),
+                layer: self.layer,
+                priority: self.priority,
+                tokens: self.tokens,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_prompt_compilation_integration() {
+        // Verify that set_system_prompt + registered provider produces
+        // correctly ordered, marker-delimited output through the engine.
+        let resolved = make_resolved(16384);
+        let mut agent = Agent::new(resolved);
+
+        agent.set_system_prompt("You are a code review assistant.");
+
+        agent = agent.with_provider(TestProvider {
+            layer: prompt::Layer::Tools,
+            priority: 5,
+            content: "read_file, grep, patch",
+            tokens: 8,
+            budget: prompt::TokenBudget::Dynamic,
+        });
+
+        // Simulate what Agent::run() does internally (no network call)
+        let ctx = prompt::AssemblyContext {
+            request_id: "test",
+            memory: agent.memory.as_deref(),
+            model: &agent.state.resolved,
+        };
+        let (sections, budgets) = agent.registry.collect(&ctx).await;
+        let rendered = prompt::compiler::compile(
+            &sections,
+            &budgets,
+            "review this file",
+            &agent.state.resolved,
+        );
+
+        // System layer appears first
+        assert!(rendered.text.starts_with("=== System ==="));
+        // All three layers present in order
+        let sys_pos = rendered.text.find("System").unwrap();
+        let tools_pos = rendered.text.find("Tools").unwrap();
+        let input_pos = rendered.text.find("Input").unwrap();
+        assert!(sys_pos < tools_pos, "System before Tools");
+        assert!(tools_pos < input_pos, "Tools before Input");
+
+        // Content preserved
+        assert!(rendered.text.contains("You are a code review assistant."));
+        assert!(rendered.text.contains("read_file, grep, patch"));
+        assert!(rendered.text.contains("review this file"));
+
+        // Verify what gets pushed to state
+        agent.state.push_user_message(&rendered.text);
+        let last = agent.state.messages.last().unwrap();
+        assert_eq!(last.role, lattice_core::types::Role::User);
+        assert_eq!(last.content, rendered.text);
+    }
+
+    #[tokio::test]
+    async fn test_empty_registry_falls_through_to_raw_input() {
+        // No system prompt, no providers → output should be raw user text.
+        let resolved = make_resolved(16384);
+        let agent = Agent::new(resolved);
+
+        let ctx = prompt::AssemblyContext {
+            request_id: "test",
+            memory: agent.memory.as_deref(),
+            model: &agent.state.resolved,
+        };
+        let (sections, budgets) = agent.registry.collect(&ctx).await;
+        let rendered =
+            prompt::compiler::compile(&sections, &budgets, "hello", &agent.state.resolved);
+
+        assert_eq!(rendered.text, "hello", "empty registry → raw pass-through");
+    }
+
+    #[tokio::test]
+    async fn test_budget_overflow_drops_low_priority_provider() {
+        // Tight budget should drop non-essential sections.
+        let resolved = make_resolved(5000); // effective: 5000 - 4096 = 904
+        let mut agent = Agent::new(resolved);
+
+        agent.set_system_prompt("S");
+        // Use a large-token provider at Events layer
+        struct BigProvider;
+        #[async_trait]
+        impl prompt::ContextProvider for BigProvider {
+            fn layer(&self) -> prompt::Layer {
+                prompt::Layer::Events
+            }
+            fn priority(&self) -> u8 {
+                5
+            }
+            fn budget(&self) -> prompt::TokenBudget {
+                prompt::TokenBudget::Dynamic
+            }
+            async fn produce(
+                &self,
+                _ctx: &prompt::AssemblyContext<'_>,
+            ) -> Option<prompt::PromptSection> {
+                Some(prompt::PromptSection {
+                    content: "x".repeat(2000),
+                    layer: prompt::Layer::Events,
+                    priority: 5,
+                    tokens: 2000,
+                })
+            }
+        }
+        agent = agent.with_provider(BigProvider);
+
+        let ctx = prompt::AssemblyContext {
+            request_id: "test",
+            memory: agent.memory.as_deref(),
+            model: &agent.state.resolved,
+        };
+        let (sections, budgets) = agent.registry.collect(&ctx).await;
+        let rendered = prompt::compiler::compile(&sections, &budgets, "hi", &agent.state.resolved);
+
+        // Events (2000 tokens > 904 effective) should be dropped
+        assert!(!rendered.text.contains("=== Events ==="));
+        // System and Input survive
+        assert!(rendered.text.contains("=== System ==="));
+        assert!(rendered.text.contains("=== Input ==="));
     }
 }

@@ -7,7 +7,6 @@ pub struct PromptSection {
     pub layer: Layer,
     pub priority: u8,
     pub tokens: u32,
-    pub budget: TokenBudget,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -22,7 +21,6 @@ pub enum Layer {
 }
 
 impl Layer {
-    /// All layer variants in ordinal order.
     pub fn all() -> &'static [Layer] {
         &[
             Layer::System,
@@ -40,6 +38,7 @@ impl Layer {
 /// Controls how the compiler allocates the effective budget:
 /// - `Fixed(n)`: Reserve exactly n tokens. Unused quota is NOT returned to the pool.
 /// - `Ratio(f)`: Claim f proportion of the remaining budget after Fixed deductions.
+///   Values outside [0.0, 1.0] are clamped; NaN is treated as 0.0.
 /// - `Dynamic`: Consume whatever remains after Fixed and Ratio allocations.
 ///
 /// Dynamic providers are served in priority order; if earlier providers
@@ -51,19 +50,11 @@ pub enum TokenBudget {
     Dynamic,
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentMetadata {
-    pub name: String,
-    pub enabled_plugins: Vec<String>,
-    pub handoff_targets: Vec<String>,
-}
-
 /// Context passed to each provider during produce().
 /// Borrows agent state — constructed fresh per compile() call.
 pub struct AssemblyContext<'a> {
     pub request_id: &'a str,
     pub memory: Option<&'a dyn Memory>,
-    pub metadata: Option<&'a AgentMetadata>,
     pub model: &'a ResolvedModel,
 }
 

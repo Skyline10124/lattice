@@ -40,13 +40,18 @@ impl PromptRegistry {
         self.providers.push(provider);
     }
 
-    /// Produce all PromptSections by iterating registered providers.
+    /// Produce all PromptSections with their corresponding budget declarations.
     ///
-    /// System section (from set_system_prompt) is generated first,
+    /// System section (from set_system_prompt) is generated first with Fixed budget,
     /// then each registered provider's produce() is called in order.
     /// Providers returning None are skipped.
-    pub async fn collect(&self, ctx: &AssemblyContext<'_>) -> Vec<PromptSection> {
+    /// Budget comes from the provider's budget() method — not from the section.
+    pub async fn collect(
+        &self,
+        ctx: &AssemblyContext<'_>,
+    ) -> (Vec<PromptSection>, Vec<TokenBudget>) {
         let mut sections = Vec::new();
+        let mut budgets = Vec::new();
 
         // System section from dedicated field
         if let Some(ref prompt) = self.system_prompt {
@@ -56,26 +61,25 @@ impl PromptRegistry {
                 layer: Layer::System,
                 priority: 0,
                 tokens,
-                budget: TokenBudget::Fixed(tokens),
             });
+            budgets.push(TokenBudget::Fixed(tokens));
         }
 
         // Registered providers
         for provider in &self.providers {
-            if let Some(mut section) = provider.produce(ctx).await {
-                section.budget = provider.budget();
+            if let Some(section) = provider.produce(ctx).await {
                 sections.push(section);
+                budgets.push(provider.budget());
             }
         }
 
-        sections
+        (sections, budgets)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prompt::types::*;
     use async_trait::async_trait;
 
     struct TestProvider {
@@ -103,8 +107,19 @@ mod tests {
                 layer: self.layer,
                 priority: self.priority,
                 tokens: self.tokens,
-                budget: self.budget,
             })
+        }
+    }
+
+    struct NoneProvider;
+
+    #[async_trait]
+    impl ContextProvider for NoneProvider {
+        fn layer(&self) -> Layer {
+            Layer::Events
+        }
+        async fn produce(&self, _ctx: &AssemblyContext<'_>) -> Option<PromptSection> {
+            None
         }
     }
 
@@ -123,30 +138,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_registry_returns_empty_vec() {
+    async fn empty_registry_returns_empty() {
         let registry = PromptRegistry::new();
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
-            metadata: None,
             model: &make_resolved(8192),
         };
-        assert!(registry.collect(&ctx).await.is_empty());
+        let (sections, budgets) = registry.collect(&ctx).await;
+        assert!(sections.is_empty());
+        assert!(budgets.is_empty());
     }
 
     #[tokio::test]
-    async fn system_prompt_produces_section() {
+    async fn system_prompt_produces_section_with_fixed_budget() {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("You are a helpful assistant.");
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
-            metadata: None,
             model: &make_resolved(8192),
         };
-        let sections = registry.collect(&ctx).await;
+        let (sections, budgets) = registry.collect(&ctx).await;
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].layer, Layer::System);
+        assert_eq!(budgets[0], TokenBudget::Fixed(sections[0].tokens));
     }
 
     #[tokio::test]
@@ -162,10 +178,11 @@ mod tests {
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
-            metadata: None,
             model: &make_resolved(8192),
         };
-        assert_eq!(registry.collect(&ctx).await.len(), 1);
+        let (sections, budgets) = registry.collect(&ctx).await;
+        assert_eq!(sections.len(), 1);
+        assert_eq!(budgets[0], TokenBudget::Dynamic);
     }
 
     #[tokio::test]
@@ -176,11 +193,54 @@ mod tests {
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
-            metadata: None,
             model: &make_resolved(8192),
         };
-        let sections = registry.collect(&ctx).await;
+        let (sections, _) = registry.collect(&ctx).await;
         assert_eq!(sections.len(), 1);
         assert_eq!(sections[0].content, "second");
+    }
+
+    #[tokio::test]
+    async fn provider_returning_none_is_skipped() {
+        let mut registry = PromptRegistry::new();
+        registry.register(Box::new(NoneProvider));
+        let ctx = AssemblyContext {
+            request_id: "test",
+            memory: None,
+            model: &make_resolved(8192),
+        };
+        let (sections, budgets) = registry.collect(&ctx).await;
+        assert!(sections.is_empty());
+        assert!(budgets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn none_provider_skipped_between_real_providers() {
+        let mut registry = PromptRegistry::new();
+        registry.register(Box::new(TestProvider {
+            layer: Layer::Tools,
+            priority: 1,
+            content: "real tool",
+            tokens: 5,
+            budget: TokenBudget::Dynamic,
+        }));
+        registry.register(Box::new(NoneProvider));
+        registry.register(Box::new(TestProvider {
+            layer: Layer::Memory,
+            priority: 5,
+            content: "memory recall",
+            tokens: 10,
+            budget: TokenBudget::Ratio(0.3),
+        }));
+        let ctx = AssemblyContext {
+            request_id: "test",
+            memory: None,
+            model: &make_resolved(8192),
+        };
+        let (sections, budgets) = registry.collect(&ctx).await;
+        assert_eq!(sections.len(), 2);
+        assert_eq!(budgets.len(), 2);
+        assert_eq!(sections[0].layer, Layer::Tools);
+        assert_eq!(sections[1].layer, Layer::Memory);
     }
 }

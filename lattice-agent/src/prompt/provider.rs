@@ -4,7 +4,7 @@ use async_trait::async_trait;
 /// A source of prompt content.
 ///
 /// Each provider is responsible for:
-/// - Declaring its layer and priority (registration-time, immutable)
+/// - Declaring its layer, priority, and budget (registration-time, immutable)
 /// - Producing content with an accurate token estimate
 /// - Returning None if it has nothing to contribute this round
 ///
@@ -31,8 +31,5 @@ pub trait ContextProvider: Send + Sync {
     }
 
     /// Produce a prompt section, or None if nothing to contribute.
-    ///
-    /// Note: the `budget` field on the returned PromptSection will be
-    /// overwritten by `self.budget()` during collection.
     async fn produce(&self, ctx: &AssemblyContext<'_>) -> Option<PromptSection>;
 }
