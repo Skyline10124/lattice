@@ -6,9 +6,11 @@
 use lattice_core::types::ToolDefinition;
 
 /// Returns the default set of tool definitions: read_file, grep, write_file,
-/// list_directory, bash, patch, web_search.
+/// list_directory, bash, patch, web_search, plus bus:fetch when the
+/// `blob-store` feature is enabled.
 pub fn default_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    #[allow(unused_mut)]
+    let mut defs = vec![
         ToolDefinition::new(
             "read_file".into(),
             "Read the contents of a file at the given absolute path.".into(),
@@ -124,5 +126,23 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["url"]
             }),
         ),
-    ]
+    ];
+
+    #[cfg(feature = "blob-store")]
+    defs.push(ToolDefinition::new(
+        "bus:fetch".into(),
+        "Retrieve the full content of a blob referenced in the current prompt.".into(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Blob key from the context (e.g. blob://events/code_review/a1b2c3d4)"
+                }
+            },
+            "required": ["key"]
+        }),
+    ));
+
+    defs
 }

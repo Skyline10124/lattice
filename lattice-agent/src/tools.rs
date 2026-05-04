@@ -27,7 +27,8 @@ pub trait RegistryToolAccess: Send + Sync {
 /// Executes tools using the local filesystem and shell.
 ///
 /// Supports: read_file, grep, write_file, list_directory, bash, patch,
-/// web_search. The `project_root` is used by `write_file` and `patch`
+/// web_search, plus bus:fetch when the `blob-store` feature is enabled.
+/// The `project_root` is used by `write_file` and `patch`
 /// to restrict writes to project source directories.
 ///
 /// All tool operations are gated by the `sandbox` configuration
@@ -41,6 +42,8 @@ pub struct DefaultToolExecutor {
     pub sandbox: SandboxConfig,
     pub http_client: reqwest::Client,
     pub registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
+    #[cfg(feature = "blob-store")]
+    pub blob_store: Option<std::sync::Arc<crate::blob::BlobStore>>,
 }
 
 impl DefaultToolExecutor {
@@ -54,6 +57,8 @@ impl DefaultToolExecutor {
                 .build()
                 .expect("reqwest client"),
             registry: None,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
         }
     }
 
@@ -70,6 +75,8 @@ impl DefaultToolExecutor {
                 .build()
                 .expect("reqwest client"),
             registry,
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
         }
     }
 
@@ -77,6 +84,25 @@ impl DefaultToolExecutor {
     pub fn with_sandbox(mut self, config: SandboxConfig) -> Self {
         self.sandbox = config;
         self
+    }
+
+    /// Create a executor with an optional BlobStore for bus:fetch support.
+    #[cfg(feature = "blob-store")]
+    pub fn new_with_blob_store(
+        project_root: &str,
+        blob_store: Option<std::sync::Arc<crate::blob::BlobStore>>,
+    ) -> Self {
+        Self {
+            project_root: project_root.to_string(),
+            sandbox: SandboxConfig::default(),
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("reqwest client"),
+            registry: None,
+            blob_store,
+        }
     }
 }
 
@@ -405,6 +431,17 @@ impl ToolExecutor for DefaultToolExecutor {
                         }
                     }
                     Err(e) => ToolError::HttpError(e.to_string()).to_string(),
+                }
+            }
+            #[cfg(feature = "blob-store")]
+            "bus:fetch" => {
+                let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                match &self.blob_store {
+                    Some(store) => match store.get(key).await {
+                        Ok(blob) => blob.payload,
+                        Err(_) => format!("Error: blob '{}' not found", key),
+                    },
+                    None => "Error: blob storage not configured for this agent".to_string(),
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),
