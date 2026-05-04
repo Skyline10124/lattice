@@ -16,9 +16,9 @@ pub mod registry;
 
 // Re-exports for backward compatibility
 pub use builtin::code_review::CodeReviewPlugin;
-pub use builtin::verification::VerificationPlugin;
-pub use builtin::plan_gen::PlanGenPlugin;
 pub(crate) use builtin::parse_utils::extract_confidence;
+pub use builtin::plan_gen::PlanGenPlugin;
+pub use builtin::verification::VerificationPlugin;
 
 use crate::erased::ErasedPlugin;
 
@@ -748,5 +748,33 @@ mod tests {
         };
         registry.register(make_bundle("dup")).unwrap();
         assert!(registry.register(make_bundle("dup")).is_err());
+    }
+
+    #[test]
+    fn test_builtin_registry_includes_all_builtin_plugins() {
+        use crate::builtin::register_builtin_plugins;
+        use crate::registry::PluginRegistry;
+
+        let mut registry = PluginRegistry::new();
+        register_builtin_plugins(&mut registry).unwrap();
+
+        let expected = [
+            "CodeReview",
+            "Refactor",
+            "TestGen",
+            "SecurityAudit",
+            "DocGen",
+            "PptxGen",
+            "DeepResearch",
+            "ImageGen",
+            "KnowledgeBase",
+            "PlanGen",
+            "Verification",
+        ];
+
+        assert_eq!(registry.len(), expected.len());
+        for name in expected {
+            assert!(registry.get(name).is_some(), "missing builtin {name}");
+        }
     }
 }
