@@ -10,6 +10,9 @@ pub mod tools;
 #[cfg(feature = "blob-store")]
 pub mod blob;
 
+#[cfg(feature = "blob-store")]
+pub mod events_provider;
+
 use std::collections::HashMap;
 
 use async_trait::async_trait;
