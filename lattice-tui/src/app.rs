@@ -352,20 +352,24 @@ impl App {
                         None => last.reasoning = Some(r),
                     }
                 }
-                // If there's an error but no content accumulated, show the error as visible text
                 if let Some(ref msg) = error {
+                    let error_text = format!("Error: {}", msg);
                     if last.content.is_empty() {
-                        last.content = format!("Error: {}", msg);
+                        last.content = error_text.clone();
+                    } else if !last.content.contains(&error_text) {
+                        if !last.content.ends_with('\n') && !last.content.is_empty() {
+                            last.content.push('\n');
+                        }
+                        last.content.push_str(&error_text);
                     }
                 }
             }
         }
 
-        if done {
-            self.status = match error {
-                Some(msg) => AppStatus::Error(msg),
-                None => AppStatus::Ready,
-            };
+        if let Some(msg) = error {
+            self.status = AppStatus::Error(msg);
+        } else if done {
+            self.status = AppStatus::Ready;
         }
     }
 }
@@ -373,5 +377,29 @@ impl App {
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_error_sets_status_and_appends_visible_error() {
+        let mut app = App::new();
+        app.status = AppStatus::Streaming;
+        app.messages.push(ChatMessage {
+            role: Role::Assistant,
+            content: "partial response".into(),
+            reasoning: None,
+        });
+
+        app.apply_stream_token(String::new(), None, false, Some("provider failed".into()));
+
+        assert_eq!(app.status, AppStatus::Error("provider failed".into()));
+        assert_eq!(
+            app.messages.last().unwrap().content,
+            "partial response\nError: provider failed"
+        );
     }
 }

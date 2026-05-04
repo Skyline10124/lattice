@@ -4,15 +4,7 @@ use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEv
 use lattice_core::router::ModelRouter;
 use lattice_harness::tools::{ToolHandler, ToolRegistry};
 use lattice_harness::{AgentRegistry, Pipeline};
-use lattice_plugin::{
-    builtin::{
-        code_review::CodeReviewPlugin, deep_research::DeepResearchPlugin, doc_gen::DocGenPlugin,
-        image_gen::ImageGenPlugin, knowledge_base::KnowledgeBasePlugin, pptx_gen::PptxGenPlugin,
-        refactor::RefactorPlugin, security_audit::SecurityAuditPlugin, test_gen::TestGenPlugin,
-    },
-    bundle::{BehaviorMode, PluginBundle, PluginMeta},
-    registry::PluginRegistry,
-};
+use lattice_plugin::registry::PluginRegistry;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -256,72 +248,13 @@ pub async fn run_pipeline(
     }
     let tool_registry = Arc::new(tool_registry);
 
-    // Build PluginRegistry with all 9 builtin plugins
+    // Build PluginRegistry with all builtin plugins exposed by lattice-plugin.
     let mut plugin_registry = PluginRegistry::new();
-    let builtins: Vec<(&str, Box<dyn lattice_plugin::erased::ErasedPlugin>, &str)> = vec![
-        (
-            "CodeReview",
-            Box::new(CodeReviewPlugin::new()),
-            "Code review plugin",
-        ),
-        (
-            "Refactor",
-            Box::new(RefactorPlugin::new()),
-            "Code refactoring plugin",
-        ),
-        (
-            "TestGen",
-            Box::new(TestGenPlugin::new()),
-            "Test generation plugin",
-        ),
-        (
-            "SecurityAudit",
-            Box::new(SecurityAuditPlugin::new()),
-            "Security audit plugin",
-        ),
-        (
-            "DocGen",
-            Box::new(DocGenPlugin::new()),
-            "Documentation generation plugin",
-        ),
-        (
-            "PptxGen",
-            Box::new(PptxGenPlugin::new()),
-            "PPTX generation plugin",
-        ),
-        (
-            "DeepResearch",
-            Box::new(DeepResearchPlugin::new()),
-            "Deep research plugin",
-        ),
-        (
-            "ImageGen",
-            Box::new(ImageGenPlugin::new()),
-            "Image generation plugin",
-        ),
-        (
-            "KnowledgeBase",
-            Box::new(KnowledgeBasePlugin::new()),
-            "Knowledge base plugin",
-        ),
-    ];
-    for (name, plugin, desc) in builtins {
-        let bundle = PluginBundle {
-            meta: PluginMeta {
-                name: name.to_string(),
-                version: "0.1".into(),
-                description: desc.to_string(),
-                author: "lattice".into(),
-            },
-            plugin,
-            default_behavior: BehaviorMode::Yolo,
-            default_tools: vec![],
-        };
-        plugin_registry
-            .register(bundle)
-            .map_err(|e| anyhow::anyhow!("Failed to register plugin '{}': {}", name, e))?;
-        if verbose {
-            eprintln!("  plugin: {} — {}", name, desc);
+    lattice_plugin::builtin::register_builtin_plugins(&mut plugin_registry)
+        .map_err(|e| anyhow::anyhow!("Failed to register builtin plugins: {}", e))?;
+    if verbose {
+        for meta in plugin_registry.list() {
+            eprintln!("  plugin: {} — {}", meta.name, meta.description);
         }
     }
     let plugin_registry = Arc::new(plugin_registry);
