@@ -776,6 +776,7 @@ impl ModelRouter {
 /// - Only http:// and https:// schemes are allowed (reject file://, ftp://, data://)
 /// - HTTP is only allowed for localhost/127.0.0.1/::1
 /// - URLs with userinfo (user:pass@host) are rejected (SSRF protection)
+///
 /// Check if an IP address is private, loopback, or link-local — the ranges
 /// that definitively indicate an internal network. Uses manual checks since
 /// `IpAddr::is_private()` / `is_link_local()` are not stable on all Rust versions.

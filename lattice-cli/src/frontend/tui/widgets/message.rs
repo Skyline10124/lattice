@@ -39,7 +39,7 @@ pub fn message_lines(
     rows
 }
 
-fn role_styles<'a>(msg: &ChatMessage, theme: &'a Theme) -> (&'static str, Style, Style) {
+fn role_styles(msg: &ChatMessage, theme: &Theme) -> (&'static str, Style, Style) {
     match msg.role {
         lattice_core::types::Role::User => (
             "You",

@@ -261,7 +261,7 @@ fn validate_session_id(id: &str) -> Result<()> {
     if valid {
         Ok(())
     } else {
-        anyhow::bail!("Invalid session id: {}", id)
+        anyhow::bail!("Invalid session id: format or length violation")
     }
 }
 

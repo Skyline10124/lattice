@@ -402,6 +402,7 @@ fn load_run_prompt(prompt: Option<String>, file: Option<&str>) -> Result<String>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn launch_tui(
     prompt: Option<String>,
     model: Option<String>,
