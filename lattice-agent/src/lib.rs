@@ -63,6 +63,7 @@ pub trait PluginAgent {
         self.send(message).await
     }
     fn set_system_prompt(&mut self, _prompt: &str) {}
+    fn add_tools(&mut self, _tools: Vec<lattice_core::types::ToolDefinition>) {}
     fn token_usage(&self) -> u64 {
         0
     }
@@ -101,7 +102,7 @@ pub struct Agent {
     state: state::AgentState,
     tools: Vec<ToolDefinition>,
     retry: RetryPolicy,
-    memory: Option<Box<dyn memory::Memory>>,
+    memory: Option<std::sync::Arc<dyn memory::Memory>>,
     tool_executor: Option<Box<dyn ToolExecutor>>,
     registry: prompt::PromptRegistry,
     #[cfg(feature = "blob-store")]
@@ -111,9 +112,11 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(resolved: ResolvedModel) -> Self {
+        let resolved_clone = resolved.clone();
+        let state = state::AgentState::new(resolved);
         Self {
-            resolved: resolved.clone(),
-            state: state::AgentState::new(resolved),
+            resolved: resolved_clone,
+            state,
             tools: vec![],
             retry: RetryPolicy::default(),
             memory: None,
@@ -135,7 +138,7 @@ impl Agent {
         self
     }
 
-    pub fn with_memory(mut self, memory: Box<dyn memory::Memory>) -> Self {
+    pub fn with_memory(mut self, memory: std::sync::Arc<dyn memory::Memory>) -> Self {
         self.memory = Some(memory);
         self
     }
@@ -168,6 +171,16 @@ impl Agent {
     /// Set or replace the system prompt (fed through prompt engine as System layer).
     pub fn set_system_prompt(&mut self, prompt: &str) {
         self.registry.set_system_prompt(prompt);
+    }
+
+    /// Append tool definitions to the agent's tool list.
+    pub fn add_tools(&mut self, tools: Vec<lattice_core::types::ToolDefinition>) {
+        self.tools.extend(tools);
+    }
+
+    /// Return the conversation history accumulated by this agent.
+    pub fn messages(&self) -> &[lattice_core::types::Message] {
+        &self.state.messages
     }
 
     pub fn token_usage(&self) -> u64 {

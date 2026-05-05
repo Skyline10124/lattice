@@ -219,11 +219,13 @@ impl ToolExecutor for DefaultToolExecutor {
                             canonical
                         }
                         Err(_) => {
-                            // Parent doesn't exist — check original path
-                            if let Err(e) = self.sandbox.check_write(path) {
-                                return e;
-                            }
-                            abs.clone()
+                            // Parent doesn't exist — reject write rather than
+                            // bypass canonicalize (TOCTOU: symlink could redirect
+                            // a non-canonical path after the check)
+                            return format!(
+                                "Sandbox: cannot write to '{}' — parent directory does not exist or cannot be resolved",
+                                path
+                            );
                         }
                     }
                 } else {
@@ -251,10 +253,22 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "list_directory" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-                if let Err(e) = self.sandbox.check_read(path) {
+                // Canonicalize path to resolve symlinks (TOCTOU prevention)
+                let canonical = match tokio::fs::canonicalize(path).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return ToolError::IoError {
+                            path: path.to_string(),
+                            error: e,
+                        }
+                        .to_string()
+                    }
+                };
+                let path_str = canonical.to_string_lossy();
+                if let Err(e) = self.sandbox.check_read(&path_str) {
                     return e;
                 }
-                let mut entries = match tokio::fs::read_dir(path).await {
+                let mut entries = match tokio::fs::read_dir(&canonical).await {
                     Ok(dir) => dir,
                     Err(e) => {
                         return ToolError::IoError {
@@ -337,10 +351,31 @@ impl ToolExecutor for DefaultToolExecutor {
                         canonical
                     }
                     Err(_) => {
-                        if let Err(e) = self.sandbox.check_write(path) {
-                            return e;
+                        // File doesn't exist yet — check parent directory instead
+                        // to avoid bypassing canonicalize on a non-existent path
+                        if let Some(parent) = abs.parent() {
+                            match tokio::fs::canonicalize(parent).await {
+                                Ok(canonical_parent) => {
+                                    let canonical = canonical_parent.join(abs.file_name().unwrap());
+                                    let path_str = canonical.to_string_lossy();
+                                    if let Err(e) = self.sandbox.check_write(&path_str) {
+                                        return e;
+                                    }
+                                    canonical
+                                }
+                                Err(_) => {
+                                    return format!(
+                                        "Sandbox: cannot patch '{}' — path cannot be resolved",
+                                        path
+                                    );
+                                }
+                            }
+                        } else {
+                            return format!(
+                                "Sandbox: cannot patch '{}' — invalid path",
+                                path
+                            );
                         }
-                        abs
                     }
                 };
                 match tokio::fs::read_to_string(&abs).await {

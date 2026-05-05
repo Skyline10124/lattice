@@ -30,22 +30,48 @@ impl Default for SandboxConfig {
             read_allowlist: vec![],
             write_allowlist: vec![],
             sensitive_files: vec![
+                // .env variants
                 ".env".into(),
                 ".env.local".into(),
+                ".env.development".into(),
                 ".env.production".into(),
+                ".env.staging".into(),
+                ".env.test".into(),
+                ".env.*".into(),  // wildcard: matches .env.anything
+                // Cloud credentials
                 "credentials.json".into(),
-                "secrets".into(),
-                ".git/credentials".into(),
-                ".git/config".into(),
+                ".aws/credentials".into(),
+                ".aws/config".into(),
+                ".kube/config".into(),
+                ".gcp/service-account.json".into(),
+                ".azure/credentials".into(),
+                // SSH keys and config
                 ".ssh/id_rsa".into(),
                 ".ssh/id_ed25519".into(),
+                ".ssh/id_ecdsa".into(),
+                ".ssh/id_*".into(),       // wildcard: matches id_rsa, id_ed25519, id_ecdsa, etc.
                 ".ssh/authorized_keys".into(),
-                ".aws/credentials".into(),
+                ".ssh/config".into(),
+                // PGP/GPG
+                ".gnupg".into(),
+                // Package manager tokens
                 ".npmrc".into(),
                 ".dockercfg".into(),
+                ".pypirc".into(),
+                ".gem/credentials".into(),
+                ".netrc".into(),
+                // Git
+                ".git/config".into(),
+                ".git/credentials".into(),
+                // TLS/crypto files (wildcards)
+                "*.pem".into(),
+                "*.key".into(),
+                "*.p12".into(),
+                "*.pfx".into(),
+                // Generic
+                "secrets".into(),
                 "id_rsa".into(),
                 "id_ed25519".into(),
-                ".kube/config".into(),
             ],
             max_read_size: 10 * 1024 * 1024,          // 10 MB
             max_write_size: 1024 * 1024,              // 1 MB
@@ -87,22 +113,42 @@ impl SandboxConfig {
     }
 
     /// Check if a canonical path matches any allowlist prefix using
-    /// secure starts_with component matching.
+    /// component-boundary matching. This prevents byte-prefix attacks
+    /// (e.g., "/home/user/src-hack/" matching allowlist entry "/home/user/src").
     fn matches_allowlist(check_path: &std::path::Path, allowlist: &[String]) -> bool {
         let cwd = std::env::current_dir().ok();
         allowlist.iter().any(|prefix| {
-            // Direct starts_with (works for relative paths like "lattice-core/")
-            check_path.starts_with(prefix)
-            // Resolve prefix relative to cwd (works for absolute canonical paths)
-            || cwd.as_ref()
-                .map(|cwd| check_path.starts_with(cwd.join(prefix)))
-                .unwrap_or(false)
+            let prefix_path = std::path::Path::new(prefix);
+            // Exact match
+            if check_path == prefix_path {
+                return true;
+            }
+            // Component-boundary prefix: check_path must start with prefix AND
+            // the next character after the prefix is a separator (or check_path
+            // equals the prefix exactly — handled above). This prevents
+            // "/home/user/src-hack/" from matching "/home/user/src".
+            if is_path_prefix(check_path, prefix_path) {
+                return true;
+            }
+            // Try resolving prefix relative to cwd
+            if let Some(ref cwd) = cwd {
+                let full = cwd.join(prefix);
+                if check_path == full || is_path_prefix(check_path, &full) {
+                    return true;
+                }
+            }
+            false
         })
     }
 
     /// Check if a file path is safe to read.
     pub fn check_read(&self, path: &str) -> Result<(), String> {
         let check_path = self.resolve_path(path);
+
+        // Block path traversal
+        if path.contains("..") {
+            return Err(format!("Sandbox: path '{}' contains '..'", path));
+        }
 
         // Block sensitive files using path component matching
         for sensitive in &self.sensitive_files {
@@ -114,12 +160,7 @@ impl SandboxConfig {
             }
         }
 
-        // Block path traversal
-        if path.contains("..") {
-            return Err(format!("Sandbox: path '{}' contains '..'", path));
-        }
-
-        // Enforce read allowlist with starts_with matching
+        // Enforce read allowlist with component-boundary matching
         if !self.read_allowlist.is_empty() {
             let allowed = Self::matches_allowlist(&check_path, &self.read_allowlist);
             if !allowed {
@@ -134,10 +175,25 @@ impl SandboxConfig {
 
     /// Check if a file path is safe to write.
     pub fn check_write(&self, path: &str) -> Result<(), String> {
-        self.check_read(path)?; // Same basic safety checks + write allowlist
+        let check_path = self.resolve_path(path);
 
+        // Block path traversal
+        if path.contains("..") {
+            return Err(format!("Sandbox: path '{}' contains '..'", path));
+        }
+
+        // Block sensitive files
+        for sensitive in &self.sensitive_files {
+            if path_matches_sensitive(&check_path, sensitive) {
+                return Err(format!(
+                    "Sandbox: writing '{}' is blocked (matches sensitive pattern '{}')",
+                    path, sensitive
+                ));
+            }
+        }
+
+        // Enforce write allowlist with component-boundary matching
         if !self.write_allowlist.is_empty() {
-            let check_path = self.resolve_path(path);
             let allowed = Self::matches_allowlist(&check_path, &self.write_allowlist);
             if !allowed {
                 return Err(format!(
@@ -258,6 +314,31 @@ impl SandboxConfig {
     }
 }
 
+/// Check if `check_path` starts with `prefix` at a component boundary.
+///
+/// Returns true if `check_path` is a descendant of `prefix` (i.e., prefix is a
+/// directory containing check_path). This prevents byte-prefix attacks where
+/// "/home/user/src-hack/" would incorrectly match allowlist entry "/home/user/src".
+///
+/// Examples:
+/// - is_path_prefix("/home/user/src/main.rs", "/home/user/src") → true
+/// - is_path_prefix("/home/user/src-hack/foo.rs", "/home/user/src") → false
+/// - is_path_prefix("/home/user/src", "/home/user/src") → false (exact match, use ==)
+fn is_path_prefix(check_path: &std::path::Path, prefix: &std::path::Path) -> bool {
+    let check_comps: Vec<_> = check_path.components().collect();
+    let prefix_comps: Vec<_> = prefix.components().collect();
+    if prefix_comps.len() >= check_comps.len() {
+        return false;
+    }
+    // All prefix components must match
+    for (a, b) in check_comps.iter().take(prefix_comps.len()).zip(prefix_comps.iter()) {
+        if a != b {
+            return false;
+        }
+    }
+    true
+}
+
 /// Check if a command matches an allowlist entry using token-prefix matching.
 ///
 /// Single-word entries (e.g. "grep") match by program name only.
@@ -335,6 +416,12 @@ fn is_private_ip(host: &str) -> bool {
 /// "some.env.file.txt" matching ".env"), this checks actual path components.
 /// For simple patterns like ".env", it matches any path component equal to ".env".
 /// For compound patterns like ".git/config", it matches consecutive components.
+///
+/// Supports glob-style wildcards:
+/// - `*` matches any sequence of characters within a single path component
+/// - `.env.*` matches `.env.local`, `.env.production`, etc.
+/// - `*.pem` matches `cert.pem`, `key.pem`, etc.
+/// - `id_*` matches `id_rsa`, `id_ed25519`, etc.
 fn path_matches_sensitive(path: &std::path::Path, pattern: &str) -> bool {
     let parts: Vec<&str> = pattern.split('/').collect();
     let comps: Vec<_> = path
@@ -350,15 +437,55 @@ fn path_matches_sensitive(path: &std::path::Path, pattern: &str) -> bool {
     }
 
     if parts.len() == 1 {
-        comps.iter().any(|c| c.as_ref() == parts[0])
+        comps.iter().any(|c| component_matches_pattern(c.as_ref(), parts[0]))
     } else {
         comps.windows(parts.len()).any(|window| {
             window
                 .iter()
                 .zip(parts.iter())
-                .all(|(a, b)| a.as_ref() == *b)
+                .all(|(a, b)| component_matches_pattern(a.as_ref(), b))
         })
     }
+}
+
+/// Check if a single path component matches a pattern with optional `*` wildcards.
+///
+/// `*` matches zero or more characters (but not `/` — this is single-component only).
+/// No other glob syntax is supported.
+fn component_matches_pattern(component: &str, pattern: &str) -> bool {
+    if !pattern.contains('*') {
+        return component == pattern;
+    }
+    // Simple glob: split pattern by `*` and verify component matches
+    // e.g., "*.pem" → ["", ".pem"] → component must end with ".pem"
+    // e.g., "id_*" → ["id_", ""] → component must start with "id_" (trailing empty = match rest)
+    // e.g., ".env.*" → [".env.", ""] → component must start with ".env."
+    let segments: Vec<&str> = pattern.split('*').collect();
+    if segments.is_empty() {
+        return true;
+    }
+    // First segment must match the start
+    if !segments[0].is_empty() && !component.starts_with(segments[0]) {
+        return false;
+    }
+    // Last segment must match the end
+    if segments.len() > 1 && !segments.last().unwrap().is_empty()
+        && !component.ends_with(segments.last().unwrap())
+    {
+        return false;
+    }
+    // All middle segments must appear in order
+    let mut search_from = 0;
+    for seg in &segments[1..segments.len() - 1] {
+        if seg.is_empty() {
+            continue;
+        }
+        match component[search_from..].find(*seg) {
+            Some(pos) => search_from += pos + seg.len(),
+            None => return false,
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -764,6 +891,52 @@ mod tests {
     }
 
     #[test]
+    fn test_path_matches_sensitive_wildcards() {
+        use std::path::Path;
+        // .env.* wildcard
+        assert!(path_matches_sensitive(Path::new("/home/user/.env.local"), ".env.*"));
+        assert!(path_matches_sensitive(Path::new("/home/user/.env.production"), ".env.*"));
+        assert!(path_matches_sensitive(Path::new("/home/user/.env.staging"), ".env.*"));
+        assert!(!path_matches_sensitive(Path::new("/home/user/.env"), ".env.*"));
+        // *.pem wildcard
+        assert!(path_matches_sensitive(Path::new("/home/user/cert.pem"), "*.pem"));
+        assert!(path_matches_sensitive(Path::new("/home/user/key.pem"), "*.pem"));
+        assert!(!path_matches_sensitive(Path::new("/home/user/cert.txt"), "*.pem"));
+        // *.key wildcard
+        assert!(path_matches_sensitive(Path::new("/etc/ssl/server.key"), "*.key"));
+        // id_* wildcard
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), "id_*"));
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ed25519"), "id_*"));
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ecdsa"), "id_*"));
+        assert!(!path_matches_sensitive(Path::new("/home/user/.ssh/identity"), "id_*"));
+        // .ssh/id_* wildcard (compound with wildcard)
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), ".ssh/id_*"));
+        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ecdsa"), ".ssh/id_*"));
+    }
+
+    #[test]
+    fn test_component_matches_pattern() {
+        use super::component_matches_pattern;
+        // Exact match (no wildcard)
+        assert!(component_matches_pattern(".env", ".env"));
+        assert!(!component_matches_pattern(".env.local", ".env"));
+        // Prefix wildcard
+        assert!(component_matches_pattern("cert.pem", "*.pem"));
+        assert!(component_matches_pattern("key.pem", "*.pem"));
+        assert!(!component_matches_pattern("cert.txt", "*.pem"));
+        // Suffix wildcard
+        assert!(component_matches_pattern("id_rsa", "id_*"));
+        assert!(component_matches_pattern("id_ed25519", "id_*"));
+        assert!(!component_matches_pattern("identity", "id_*"));
+        // Middle wildcard
+        assert!(component_matches_pattern(".env.local", ".env.*"));
+        assert!(component_matches_pattern(".env.production", ".env.*"));
+        // Multiple wildcards: "id_*" matches "id_rsa" but not "other_id_rsa"
+        assert!(component_matches_pattern("id_rsa", "id_*"));
+        assert!(!component_matches_pattern("other_id_rsa", "id_*"));
+    }
+
+    #[test]
     fn test_command_matches_allowlist_token_prefix() {
         let s = dev_sandbox();
         // Dev allowlist: "cargo test", "cargo clippy", "cargo build", "cargo fmt", "grep", "find", "ls", "ps"
@@ -786,6 +959,33 @@ mod tests {
         assert!(s.check_command("grep -rn 'TODO' src/").is_ok());
         assert!(s.check_command("ls -la").is_ok());
         assert!(s.check_command("find . -name '*.rs'").is_ok());
+    }
+
+    #[test]
+    fn test_allowlist_component_boundary_not_byte_prefix() {
+        let mut s = default_sandbox();
+        s.write_allowlist = vec!["src/".into()];
+        // "src-hack/" should NOT match "src/" allowlist entry
+        assert!(
+            s.check_write("src-hack/foo.rs").is_err(),
+            "src-hack should not match src/ allowlist (byte-prefix attack)"
+        );
+        // "src/main.rs" SHOULD match
+        assert!(
+            s.check_write("src/main.rs").is_ok(),
+            "src/main.rs should match src/ allowlist"
+        );
+    }
+
+    #[test]
+    fn test_is_path_prefix_component_boundary() {
+        use super::is_path_prefix;
+        use std::path::Path;
+        assert!(is_path_prefix(Path::new("/home/user/src/main.rs"), Path::new("/home/user/src")));
+        assert!(!is_path_prefix(Path::new("/home/user/src-hack/foo.rs"), Path::new("/home/user/src")));
+        assert!(!is_path_prefix(Path::new("/home/user/src"), Path::new("/home/user/src")));
+        assert!(is_path_prefix(Path::new("/a/b/c"), Path::new("/a/b")));
+        assert!(!is_path_prefix(Path::new("/a/bc"), Path::new("/a/b")));
     }
 
     #[test]

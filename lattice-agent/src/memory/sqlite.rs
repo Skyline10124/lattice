@@ -231,14 +231,11 @@ impl Memory for SqliteMemory {
     fn clone_box(&self) -> Box<dyn Memory> {
         match SqliteMemory::open(&self.db_path) {
             Ok(clone) => Box::new(clone),
-            Err(e) => {
-                tracing::error!(
-                    "SqliteMemory::clone_box: failed to reopen '{}': {} — falling back to empty InMemoryMemory",
-                    self.db_path,
-                    e,
-                );
-                Box::new(InMemoryMemory::new())
-            }
+            Err(e) => panic!(
+                "SqliteMemory::clone_box: failed to reopen '{}': {}. \
+                 Use Arc<dyn Memory> for shared ownership instead of clone_box().",
+                self.db_path, e,
+            ),
         }
     }
 }

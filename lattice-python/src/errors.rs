@@ -19,6 +19,7 @@ create_exception!(lattice_core, NetworkError, LatticeError);
 /// Uses `Python::try_attach` because this crate is always loaded as a
 /// Python extension module, so the GIL is held whenever this is called.
 pub fn convert_core_error(err: CoreError) -> PyErr {
+    let fallback_msg = err.to_string();
     Python::try_attach(|py| match err {
         CoreError::RateLimit {
             retry_after,
@@ -88,5 +89,5 @@ pub fn convert_core_error(err: CoreError) -> PyErr {
             e
         }
     })
-    .expect("GIL should be held when converting LatticeError in extension module")
+    .unwrap_or_else(|| PyErr::new::<LatticeError, _>(fallback_msg))
 }

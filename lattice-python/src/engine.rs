@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use lattice_core::catalog::{CredentialStatus, ResolvedModel};
 use lattice_core::provider::ChatResponse;
 use lattice_core::router::ModelRouter;
 use lattice_core::types::{Message, Role, ToolDefinition};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use pyo3::Py;
@@ -45,7 +45,7 @@ static SHARED_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 /// single-threaded tokio runtime, and avoids `block_on` which panics
 /// when called from within any tokio context ("Cannot start a runtime
 /// from within a runtime").
-fn run_async<F, T>(f: F) -> T
+fn run_async<F, T>(f: F) -> PyResult<T>
 where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
@@ -55,8 +55,9 @@ where
         let result = f.await;
         tx.send(result).ok();
     });
-    rx.blocking_recv()
-        .expect("SHARED_RUNTIME task panicked or was cancelled")
+    rx.blocking_recv().map_err(|_| {
+        PyRuntimeError::new_err("Async task was cancelled or panicked before completion")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -176,37 +177,39 @@ fn chat_response_to_py(py: Python<'_>, response: ChatResponse) -> PyResult<Py<Py
 /// Python-facing model resolver.
 #[pyclass]
 pub struct LatticeEngine {
-    router: Mutex<ModelRouter>,
+    router: RwLock<ModelRouter>,
 }
 
 #[pymethods]
 impl LatticeEngine {
     #[new]
-    pub fn new() -> Self {
+    #[pyo3(signature = (credentials=None))]
+    pub fn new(credentials: Option<HashMap<String, String>>) -> Self {
+        let router = match credentials {
+            Some(map) => ModelRouter::with_credentials(map),
+            None => ModelRouter::new(),
+        };
         Self {
-            router: Mutex::new(ModelRouter::new()),
+            router: RwLock::new(router),
         }
     }
 
     /// Resolve a model name to connection details.
     /// Rejects non-localhost HTTP base URLs for security.
-    pub fn resolve_model(&self, model: &str) -> PyResult<PyResolvedModel> {
-        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.router.lock().unwrap_or_else(|e| {
-                // Mutex was poisoned — recover by replacing the lock
-                tracing::warn!("Mutex poisoned in LatticeEngine::resolve_model, replacing lock");
-                e.into_inner()
-            })
-        })) {
-            Ok(guard) => guard,
-            Err(_) => {
-                return Err(PyValueError::new_err(
-                    "Internal error: mutex lock panicked".to_string(),
-                ));
-            }
-        };
+    #[pyo3(signature = (model, provider_override=None))]
+    pub fn resolve_model(
+        &self,
+        model: &str,
+        provider_override: Option<&str>,
+    ) -> PyResult<PyResolvedModel> {
+        let router = self.router.read().unwrap_or_else(|e| {
+            tracing::warn!("RwLock poisoned in LatticeEngine::resolve_model, recovering");
+            e.into_inner()
+        });
 
-        let resolved = router.resolve(model, None).map_err(convert_core_error)?;
+        let resolved = router
+            .resolve(model, provider_override)
+            .map_err(convert_core_error)?;
 
         // Security: reject non-localhost HTTP
         lattice_core::router::validate_base_url(&resolved.base_url).map_err(convert_core_error)?;
@@ -216,31 +219,19 @@ impl LatticeEngine {
 
     /// List all canonical model IDs.
     pub fn list_models(&self) -> Vec<String> {
-        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.router.lock().unwrap_or_else(|e| {
-                tracing::warn!("Mutex poisoned in LatticeEngine::list_models, replacing lock");
-                e.into_inner()
-            })
-        })) {
-            Ok(guard) => guard,
-            Err(_) => return Vec::new(),
-        };
+        let router = self.router.read().unwrap_or_else(|e| {
+            tracing::warn!("RwLock poisoned in LatticeEngine::list_models, recovering");
+            e.into_inner()
+        });
         router.list_models()
     }
 
     /// List models with valid credentials.
     pub fn list_authenticated_models(&self) -> Vec<String> {
-        let router = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.router.lock().unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Mutex poisoned in LatticeEngine::list_authenticated_models, replacing lock"
-                );
-                e.into_inner()
-            })
-        })) {
-            Ok(guard) => guard,
-            Err(_) => return Vec::new(),
-        };
+        let router = self.router.read().unwrap_or_else(|e| {
+            tracing::warn!("RwLock poisoned in LatticeEngine::list_authenticated_models, recovering");
+            e.into_inner()
+        });
         router.list_authenticated_models()
     }
 
@@ -272,7 +263,7 @@ impl LatticeEngine {
 
         let response = run_async(async move {
             lattice_core::chat_complete(&resolved_inner, &msgs, &tool_defs).await
-        })
+        })?
         .map_err(convert_core_error)?;
 
         chat_response_to_py(py, response)
@@ -361,7 +352,7 @@ impl LatticeEngine {
                 buf.push(json_val);
             }
             buf
-        });
+        })?;
 
         // Convert JSON values to Python dicts (GIL held here)
         let json_mod = py
