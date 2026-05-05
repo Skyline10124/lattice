@@ -22,6 +22,8 @@ use lattice_core::streaming::StreamEvent;
 use lattice_core::types::{Role, ToolDefinition};
 use lattice_core::ResolvedModel;
 
+use prompt::MemoryProvider;
+
 /// Executes a tool call and returns the result string.
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -63,6 +65,8 @@ pub trait PluginAgent {
         self.send(message).await
     }
     fn set_system_prompt(&mut self, _prompt: &str) {}
+    fn set_system_prompt_delta(&mut self, _delta: Option<crate::prompt::SystemPromptDelta>) {}
+    fn set_output_contract_delta(&mut self, _delta: Option<crate::prompt::SystemPromptDelta>) {}
     fn add_tools(&mut self, _tools: Vec<lattice_core::types::ToolDefinition>) {}
     fn token_usage(&self) -> u64 {
         0
@@ -108,6 +112,7 @@ pub struct Agent {
     #[cfg(feature = "blob-store")]
     blob_store: Option<std::sync::Arc<crate::blob::BlobStore>>,
     bus_event_collector: crate::bus_event_collector::BusEventCollector,
+    thinking_effort: Option<String>,
 }
 
 impl Agent {
@@ -125,7 +130,13 @@ impl Agent {
             #[cfg(feature = "blob-store")]
             blob_store: None,
             bus_event_collector: crate::bus_event_collector::BusEventCollector::new(),
+            thinking_effort: None,
         }
+    }
+
+    pub fn with_thinking_effort(mut self, effort: Option<String>) -> Self {
+        self.thinking_effort = effort;
+        self
     }
 
     pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
@@ -140,6 +151,7 @@ impl Agent {
 
     pub fn with_memory(mut self, memory: std::sync::Arc<dyn memory::Memory>) -> Self {
         self.memory = Some(memory);
+        self.registry.register(Box::new(MemoryProvider::default()));
         self
     }
 
@@ -171,6 +183,14 @@ impl Agent {
     /// Set or replace the system prompt (fed through prompt engine as System layer).
     pub fn set_system_prompt(&mut self, prompt: &str) {
         self.registry.set_system_prompt(prompt);
+    }
+
+    pub fn set_system_prompt_delta(&mut self, delta: Option<prompt::SystemPromptDelta>) {
+        self.registry.set_system_prompt_delta(delta);
+    }
+
+    pub fn set_output_contract_delta(&mut self, delta: Option<prompt::SystemPromptDelta>) {
+        self.registry.set_output_contract_delta(delta);
     }
 
     /// Append tool definitions to the agent's tool list.
@@ -250,6 +270,7 @@ impl Agent {
                 request_id: "run",
                 memory: self.memory.as_deref(),
                 model: &self.state.resolved,
+                user_input: &user_input,
                 #[cfg(feature = "blob-store")]
                 blob_store: self.blob_store.as_deref(),
                 bus_events: &bus_events,
@@ -459,7 +480,13 @@ impl Agent {
         let mut attempt = 0u32;
 
         loop {
-            match lattice_core::chat(&self.state.resolved, &self.state.messages, &self.tools).await
+            match lattice_core::chat_with_effort(
+                &self.state.resolved,
+                &self.state.messages,
+                &self.tools,
+                self.thinking_effort.as_deref(),
+            )
+            .await
             {
                 Ok(stream) => return Ok(stream),
                 Err(ref e) => {
@@ -508,6 +535,14 @@ struct ToolCallAccum {
 impl PluginAgent for Agent {
     fn set_system_prompt(&mut self, prompt: &str) {
         self.registry.set_system_prompt(prompt);
+    }
+
+    fn set_system_prompt_delta(&mut self, delta: Option<prompt::SystemPromptDelta>) {
+        self.registry.set_system_prompt_delta(delta);
+    }
+
+    fn set_output_contract_delta(&mut self, delta: Option<prompt::SystemPromptDelta>) {
+        self.registry.set_output_contract_delta(delta);
     }
 
     async fn send(&mut self, message: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -640,6 +675,7 @@ mod tests {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            user_input: "test",
             #[cfg(feature = "blob-store")]
             blob_store: None,
             bus_events: &bus_events,
@@ -690,7 +726,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_registry_falls_through_to_raw_input() {
-        // No system prompt, no providers → output should be raw user text.
+        // No agent prompt and no providers should still include the base system
+        // prompt, while keeping the user input unwrapped.
         let resolved = make_resolved(16384);
         let agent = Agent::new(resolved);
 
@@ -699,6 +736,7 @@ mod tests {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            user_input: "test",
             #[cfg(feature = "blob-store")]
             blob_store: None,
             bus_events: &bus_events,
@@ -707,12 +745,13 @@ mod tests {
         let rendered =
             prompt::compiler::compile(&sections, &budgets, "hello", &agent.state.resolved);
 
-        assert_eq!(rendered.messages.len(), 1);
-        assert_eq!(rendered.messages[0].role, Role::User);
-        assert_eq!(
-            rendered.messages[0].content, "hello",
-            "empty registry → raw pass-through"
-        );
+        assert_eq!(rendered.messages.len(), 2);
+        assert_eq!(rendered.messages[0].role, Role::System);
+        assert!(rendered.messages[0]
+            .content
+            .contains("You are a LATTICE agent."));
+        assert_eq!(rendered.messages[1].role, Role::User);
+        assert_eq!(rendered.messages[1].content, "hello");
     }
 
     #[tokio::test]
@@ -754,6 +793,7 @@ mod tests {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            user_input: "test",
             #[cfg(feature = "blob-store")]
             blob_store: None,
             bus_events: &bus_events,
@@ -774,7 +814,8 @@ mod tests {
             .iter()
             .find(|m| m.role == Role::System)
             .unwrap();
-        assert_eq!(sys.content, "S");
+        assert!(sys.content.contains("You are a LATTICE agent."));
+        assert!(sys.content.contains("S"));
     }
 
     // -----------------------------------------------------------------------
@@ -813,6 +854,7 @@ mod tests {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            user_input: "test",
             blob_store: agent.blob_store.as_deref(),
             bus_events: &bus_events,
         };
@@ -930,6 +972,7 @@ mod tests {
             request_id: "test",
             memory: agent.memory.as_deref(),
             model: &agent.state.resolved,
+            user_input: "test",
             blob_store: None,
             bus_events: &bus_events,
         };

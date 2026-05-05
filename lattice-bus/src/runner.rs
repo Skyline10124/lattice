@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use lattice_agent::memory::{EntryKind, Memory};
+use lattice_agent::memory::Memory;
 use lattice_agent::Agent;
 use tracing::warn;
 
@@ -80,8 +80,7 @@ impl AgentRunner {
             None => None,
         };
 
-        let enriched_input = self.enrich_input(input);
-        let mut output = self.run_once(&enriched_input, max_turns).await?;
+        let mut output = self.run_once(input, max_turns).await?;
 
         // JSON Schema validation + retry loop
         if let Some((ref schema_json, ref validator)) = schema {
@@ -113,7 +112,7 @@ impl AgentRunner {
                     "{}\n\nYour previous response did not match the required JSON format. \
                      Errors:\n{}\n\nExpected schema:\n{}\n\nPlease correct your response. \
                      Return ONLY valid JSON that matches the schema, no markdown.",
-                    enriched_input,
+                    input,
                     error_messages.join("\n"),
                     serde_json::to_string_pretty(schema_json).unwrap_or_default()
                 );
@@ -131,37 +130,6 @@ impl AgentRunner {
         }
 
         Ok(output)
-    }
-
-    /// Enrich input with memory recall context.
-    fn enrich_input(&self, input: &str) -> String {
-        if let Some(ref mem) = self.shared_memory {
-            let recall = mem.recall(input, 5);
-
-            if !recall.is_empty() {
-                let context: String = recall
-                    .iter()
-                    .map(|e| {
-                        format!(
-                            "- {}: {} (session: {})",
-                            match e.kind {
-                                EntryKind::Fact => "Fact",
-                                EntryKind::Decision => "Decision",
-                                _ => "Log",
-                            },
-                            e.summary,
-                            e.session_id
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return format!(
-                    "[Relevant past context from memory:]\n{}\n\n[Current task:]\n{}",
-                    context, input
-                );
-            }
-        }
-        input.to_string()
     }
 
     /// Check if agent output content looks like an error message rather than

@@ -33,3 +33,7 @@ pub trait ContextProvider: Send + Sync {
     /// Produce a prompt section, or None if nothing to contribute.
     async fn produce(&self, ctx: &AssemblyContext<'_>) -> Option<PromptSection>;
 }
+
+pub trait SystemPromptProvider: Send + Sync {
+    fn build_delta(&self) -> Option<crate::prompt::system_stack::SystemPromptDelta>;
+}

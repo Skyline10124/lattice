@@ -58,6 +58,7 @@ pub struct AssemblyContext<'a> {
     pub request_id: &'a str,
     pub memory: Option<&'a dyn Memory>,
     pub model: &'a ResolvedModel,
+    pub user_input: &'a str,
     #[cfg(feature = "blob-store")]
     pub blob_store: Option<&'a crate::blob::BlobStore>,
     pub bus_events: &'a [ContextEvent],

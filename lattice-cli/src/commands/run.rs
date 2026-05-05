@@ -141,6 +141,7 @@ async fn dry_run_prompt(
         request_id: "dry-run",
         memory: None,
         model: &resolved,
+        user_input: prompt,
         #[cfg(feature = "blob-store")]
         blob_store: None,
         bus_events: &[],
@@ -225,7 +226,7 @@ pub async fn run_pipeline(
     prompt: &str,
     start_agent: &str,
     agents_dir: Option<&str>,
-    _plugins_dir: Option<&str>,
+    plugins_dir: Option<&str>,
     _tools_dir: Option<&str>,
     verbose: bool,
     json: bool,
@@ -273,16 +274,41 @@ pub async fn run_pipeline(
     }
     let tool_registry = Arc::new(tool_registry);
 
-    // Build PluginRegistry with all builtin plugins exposed by lattice-plugin.
-    let plugin_registry = PluginRegistry::new();
-    lattice_plugin::builtin::register_builtin_plugins(&plugin_registry)
-        .map_err(|e| anyhow::anyhow!("Failed to register builtin plugins: {}", e))?;
+    // Build PluginRegistry with builtin plugins plus optional local manifests.
+    let plugin_registry = Arc::new(PluginRegistry::new());
+    let mut _plugin_watcher = None;
+    if let Some(dir) = plugins_dir {
+        let plugin_dir = std::path::PathBuf::from(dir);
+        let bundles = lattice_plugin::watcher::load_registry_bundles(&plugin_dir, true)
+            .map_err(|e| anyhow::anyhow!("Failed to load plugins from '{}': {}", dir, e))?;
+        plugin_registry
+            .replace_all(bundles)
+            .map_err(|e| anyhow::anyhow!("Failed to register plugins: {}", e))?;
+        if plugin_dir.exists() {
+            _plugin_watcher = Some(
+                lattice_plugin::watcher::PluginWatcher::spawn(
+                    plugin_dir.clone(),
+                    plugin_registry.clone(),
+                    true,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to watch plugin directory '{}': {}",
+                        plugin_dir.display(),
+                        e
+                    )
+                })?,
+            );
+        }
+    } else {
+        lattice_plugin::builtin::register_builtin_plugins(&plugin_registry)
+            .map_err(|e| anyhow::anyhow!("Failed to register builtin plugins: {}", e))?;
+    }
     if verbose {
         for meta in plugin_registry.list() {
             eprintln!("  plugin: {} — {}", meta.name, meta.description);
         }
     }
-    let plugin_registry = Arc::new(plugin_registry);
 
     // Validate pipeline chain before running
     let pipeline_check =

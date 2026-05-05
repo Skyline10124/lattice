@@ -143,6 +143,7 @@ mod tests {
             request_id: "test",
             memory: None,
             model: &resolved,
+            user_input: "test",
             blob_store: Some(&BlobStore::connect("sqlite::memory:").await.unwrap()),
             bus_events: &bus_events,
         };
@@ -167,6 +168,7 @@ mod tests {
             request_id: "test",
             memory: None,
             model: &resolved,
+            user_input: "test",
             blob_store: Some(&store),
             bus_events: &bus_events,
         };
@@ -190,6 +192,7 @@ mod tests {
             request_id: "test",
             memory: None,
             model: &resolved,
+            user_input: "test",
             blob_store: None,
             bus_events: &bus_events,
         };
@@ -205,6 +208,7 @@ mod tests {
             request_id: "test",
             memory: None,
             model: &resolved,
+            user_input: "test",
             blob_store: None,
             bus_events: &[],
         };
@@ -223,6 +227,7 @@ mod tests {
             request_id: "test",
             memory: None,
             model: &resolved,
+            user_input: "test",
             blob_store: Some(&store),
             bus_events: &bus_events,
         };
