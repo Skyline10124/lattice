@@ -9,7 +9,7 @@ mod frontend;
 mod session;
 
 use commands::{
-    bus_status, config_cmd, debug, doctor, list_agents, models, new_agent, print, resolve, run,
+    bus_status, config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run,
     sessions, stats, validate,
 };
 use config::Config;
@@ -23,8 +23,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, help = "Single-turn print mode (pipe-friendly)")]
-    print: Option<String>,
+    #[arg(short, long, help = "Quick single-turn query (no tool execution)")]
+    quick: Option<String>,
 
     #[arg(
         short,
@@ -209,20 +209,24 @@ async fn main() -> Result<()> {
     let creds = CredentialStore::from_config(&config)?;
     let save_sessions = config.core.save_sessions && !cli.no_save;
 
-    // Print mode (single-turn streaming)
-    if let Some(prompt) = cli.print {
+    // Quick mode (single-turn, no tool execution, pipe-friendly)
+    if let Some(prompt) = cli.quick {
         let model = cli.model.unwrap_or_else(|| config.default_model());
         let previous_session =
             load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-        return print::run(
-            &model,
-            &prompt,
+        return run::run(
+            prompt,
+            model,
             cli.provider.as_deref(),
             cli.verbose,
             cli.json,
             &creds,
             save_sessions,
             previous_session,
+            false,
+            None,
+            1,
+            !cli.json,
         )
         .await;
     }

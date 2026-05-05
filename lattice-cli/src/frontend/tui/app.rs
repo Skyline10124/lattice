@@ -296,6 +296,15 @@ impl App {
         let needs_rebuild = self.agent.is_none() || self.current_model != self.previous_model;
 
         if needs_rebuild {
+            // Preserve conversation history from the old agent on rebuild
+            // (e.g. model switch) so the new model sees prior turns.
+            let prior_messages = if let Some(arc) = self.agent.as_ref() {
+                let agent = arc.lock().await;
+                agent.messages().to_vec()
+            } else {
+                vec![]
+            };
+
             let model = self.current_model.clone();
             let provider_override = self.provider_override.clone();
             let credentials = self.credentials.clone();
@@ -336,7 +345,11 @@ impl App {
                 .with_tools(default_tool_definitions())
                 .with_tool_executor(Box::new(executor));
             agent.set_system_prompt("You are a helpful assistant.");
-            if let Some(session) = self.session.as_ref() {
+            // Prefer full agent history over lossy session messages.
+            // prior_messages includes tool calls/results that session omits.
+            if !prior_messages.is_empty() {
+                agent.seed_messages(prior_messages);
+            } else if let Some(session) = self.session.as_ref() {
                 agent.seed_messages(crate::session::messages_for_agent(session));
             }
             self.agent = Some(Arc::new(Mutex::new(agent)));

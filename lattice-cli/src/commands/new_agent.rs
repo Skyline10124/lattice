@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use anyhow::{bail, Result};
 
 use crate::config::Config;
@@ -38,7 +36,7 @@ max_retries = 2
 "#;
 
 pub fn run(name: String) -> Result<()> {
-    let dir = agents_dir().join(&name);
+    let dir = super::safe_agents_dir(None).join(&name);
 
     if dir.exists() {
         bail!("Agent '{}' already exists at '{}'", name, dir.display());
@@ -61,18 +59,8 @@ pub fn run(name: String) -> Result<()> {
     println!("  {}", toml_path.display());
     println!();
     println!("Edit the file to configure your agent, then run:");
-    println!("  lattice validate {}", agents_dir().display());
+    println!("  lattice validate {}", super::safe_agents_dir(None).display());
     println!();
 
     Ok(())
-}
-
-fn agents_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        Path::new(&dir).to_path_buf()
-    } else if let Ok(home) = std::env::var("HOME") {
-        Path::new(&home).join(".lattice").join("agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
 }

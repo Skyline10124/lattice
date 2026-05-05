@@ -1,10 +1,8 @@
-use std::path::{Path, PathBuf};
-
 use anyhow::Result;
 use colored::Colorize;
 
 pub fn run() -> Result<()> {
-    let dir = agents_dir();
+    let dir = super::safe_agents_dir(None);
 
     if !dir.exists() {
         println!("{}", "No agents found.".yellow());
@@ -127,14 +125,4 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn agents_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        Path::new(&dir).to_path_buf()
-    } else if let Ok(home) = std::env::var("HOME") {
-        Path::new(&home).join(".lattice").join("agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
 }

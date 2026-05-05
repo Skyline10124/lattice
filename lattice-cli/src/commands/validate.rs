@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -9,7 +9,7 @@ use lattice_bus::{AgentRegistry, Pipeline};
 pub fn run(dir: Option<String>) -> Result<()> {
     let path = match dir {
         Some(ref d) => Path::new(d).to_path_buf(),
-        None => default_agents_dir(),
+        None => super::safe_agents_dir(None),
     };
 
     if !path.exists() {
@@ -98,14 +98,4 @@ pub fn run(dir: Option<String>) -> Result<()> {
 
     println!("\nAll agents valid.");
     Ok(())
-}
-
-fn default_agents_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        Path::new(&dir).to_path_buf()
-    } else if let Ok(home) = std::env::var("HOME") {
-        Path::new(&home).join(".lattice").join("agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
 }

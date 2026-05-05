@@ -757,8 +757,8 @@ mod tests {
         use crate::builtin::register_builtin_plugins;
         use crate::registry::PluginRegistry;
 
-        let mut registry = PluginRegistry::new();
-        register_builtin_plugins(&mut registry).unwrap();
+        let registry = PluginRegistry::new();
+        register_builtin_plugins(&registry).unwrap();
 
         let expected = [
             "CodeReview",

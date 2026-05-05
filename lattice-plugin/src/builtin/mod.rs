@@ -89,7 +89,7 @@ pub fn builtin_plugin_bundles() -> Vec<PluginBundle> {
     ]
 }
 
-pub fn register_builtin_plugins(registry: &mut PluginRegistry) -> Result<(), RegistryError> {
+pub fn register_builtin_plugins(registry: &PluginRegistry) -> Result<(), RegistryError> {
     for bundle in builtin_plugin_bundles() {
         registry.register(bundle)?;
     }

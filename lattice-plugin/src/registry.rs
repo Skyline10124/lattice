@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use crate::bundle::{PluginBundle, PluginMeta};
 
@@ -9,39 +10,44 @@ pub enum RegistryError {
 }
 
 pub struct PluginRegistry {
-    plugins: HashMap<String, PluginBundle>,
+    plugins: RwLock<HashMap<String, Arc<PluginBundle>>>,
 }
 
 impl PluginRegistry {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            plugins: HashMap::new(),
+            plugins: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn register(&mut self, bundle: PluginBundle) -> Result<(), RegistryError> {
+    pub fn register(&self, bundle: PluginBundle) -> Result<(), RegistryError> {
         let name = bundle.meta.name.clone();
-        if self.plugins.contains_key(&name) {
+        let mut plugins = self.plugins.write().unwrap_or_else(|e| e.into_inner());
+        if plugins.contains_key(&name) {
             return Err(RegistryError::DuplicateName(name));
         }
-        self.plugins.insert(name, bundle);
+        plugins.insert(name, Arc::new(bundle));
         Ok(())
     }
 
-    pub fn get(&self, name: &str) -> Option<&PluginBundle> {
-        self.plugins.get(name)
+    pub fn get(&self, name: &str) -> Option<Arc<PluginBundle>> {
+        let plugins = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+        plugins.get(name).cloned()
     }
 
-    pub fn list(&self) -> Vec<&PluginMeta> {
-        self.plugins.values().map(|b| &b.meta).collect()
+    pub fn list(&self) -> Vec<PluginMeta> {
+        let plugins = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+        plugins.values().map(|b| b.meta.clone()).collect()
     }
 
     pub fn len(&self) -> usize {
-        self.plugins.len()
+        let plugins = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+        plugins.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.plugins.is_empty()
+        let plugins = self.plugins.read().unwrap_or_else(|e| e.into_inner());
+        plugins.is_empty()
     }
 }

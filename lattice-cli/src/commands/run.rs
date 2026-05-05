@@ -11,7 +11,6 @@ use lattice_core::types::{Message, Role};
 use lattice_plugin::registry::PluginRegistry;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -232,7 +231,7 @@ pub async fn run_pipeline(
     json: bool,
     creds: HashMap<String, String>,
 ) -> Result<()> {
-    let dir = agents_dir_path(agents_dir);
+    let dir = super::safe_agents_dir(agents_dir);
 
     if verbose {
         eprintln!(
@@ -275,8 +274,8 @@ pub async fn run_pipeline(
     let tool_registry = Arc::new(tool_registry);
 
     // Build PluginRegistry with all builtin plugins exposed by lattice-plugin.
-    let mut plugin_registry = PluginRegistry::new();
-    lattice_plugin::builtin::register_builtin_plugins(&mut plugin_registry)
+    let plugin_registry = PluginRegistry::new();
+    lattice_plugin::builtin::register_builtin_plugins(&plugin_registry)
         .map_err(|e| anyhow::anyhow!("Failed to register builtin plugins: {}", e))?;
     if verbose {
         for meta in plugin_registry.list() {
@@ -324,7 +323,7 @@ pub async fn run_pipeline(
             "duration_ms": result.duration_ms,
             "agents": result.results.iter().map(|r| serde_json::json!({
                 "agent": r.agent_name,
-                "output_preview": r.output.to_string().chars().take(200).collect::<String>(),
+                "output": r.output,
                 "next": r.next,
                 "duration_ms": r.duration_ms,
             })).collect::<Vec<_>>(),
@@ -379,18 +378,6 @@ pub async fn run_pipeline(
     }
 
     Ok(())
-}
-
-fn agents_dir_path(override_path: Option<&str>) -> PathBuf {
-    if let Some(p) = override_path {
-        PathBuf::from(p)
-    } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".lattice").join("agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
 }
 
 fn flush_reasoning(buf: &str, verbose: bool, json: bool) {

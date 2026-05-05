@@ -27,6 +27,12 @@ pub async fn run_plugin_loop(
         agent.set_system_prompt(system_prompt);
     }
 
+    // Inject plugin-specific tool definitions
+    let plugin_tools = plugin.tools().to_vec();
+    if !plugin_tools.is_empty() {
+        agent.add_tools(plugin_tools);
+    }
+
     // Log preferred model hint (the caller decides whether to honour it)
     let preferred = plugin.preferred_model();
     if !preferred.is_empty() {
