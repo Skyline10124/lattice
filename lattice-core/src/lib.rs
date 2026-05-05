@@ -613,7 +613,14 @@ mod send_streaming_request_tests {
         body: &'static str,
         expected_variant: &str,
     ) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping mock server test: loopback bind denied");
+                return;
+            }
+            Err(e) => panic!("failed to bind mock server: {e}"),
+        };
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
 

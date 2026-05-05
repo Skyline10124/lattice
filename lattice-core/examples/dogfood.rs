@@ -12,8 +12,8 @@ fn main() {
     let mut code = String::new();
     for path in &[
         "lattice-cli/src/main.rs",
-        "lattice-tui/src/app.rs",
-        "lattice-tui/src/main.rs",
+        "lattice-cli/src/frontend/tui/app.rs",
+        "lattice-cli/src/frontend/tui/mod.rs",
     ] {
         if let Ok(content) = fs::read_to_string(format!("/home/astrin/lattice/{}", path)) {
             code.push_str(&format!(
