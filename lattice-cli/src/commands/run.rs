@@ -1,9 +1,12 @@
 use anyhow::Result;
 use colored::Colorize;
-use lattice_agent::{default_tool_definitions, Agent, DefaultToolExecutor, LoopEvent};
+use lattice_agent::{
+    default_tool_definitions,
+    tool_registry::{ToolHandler, ToolRegistry},
+    Agent, DefaultToolExecutor, LoopEvent,
+};
+use lattice_bus::{AgentRegistry, Pipeline};
 use lattice_core::router::ModelRouter;
-use lattice_harness::tools::{ToolHandler, ToolRegistry};
-use lattice_harness::{AgentRegistry, Pipeline};
 use lattice_plugin::registry::PluginRegistry;
 use std::collections::HashMap;
 use std::io::Write;

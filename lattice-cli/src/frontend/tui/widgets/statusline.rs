@@ -5,8 +5,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use crate::app::{App, AppStatus};
-use crate::theme::Theme;
+use super::super::app::{App, AppStatus};
+use super::super::theme::Theme;
 
 pub struct Statusline {
     theme: Theme,

@@ -17,7 +17,6 @@ mod widgets;
 use app::App;
 use event::EventHandler;
 
-/// Drop guard that restores terminal state on panic or early exit.
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
@@ -28,12 +27,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Load .env from working directory (API keys, etc.)
-    let _ = dotenvy::dotenv();
-
-    // Setup terminal
+pub async fn run(prompt: Option<String>, model: Option<String>) -> Result<()> {
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -46,14 +40,19 @@ async fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Create app and event handler
     let mut app = App::new();
+    if let Some(prompt) = prompt {
+        app.input = prompt;
+        app.input_cursor = app.input.len();
+    }
+    if let Some(model) = model {
+        app.current_model = model;
+    }
     let mut events = EventHandler::new(250);
     app.event_tx = Some(events.sender());
 
     let res = run_app(&mut terminal, &mut app, &mut events).await;
 
-    // Restore terminal
     terminal::disable_raw_mode()?;
     crossterm::execute!(
         terminal.backend_mut(),

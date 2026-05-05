@@ -5,6 +5,7 @@ mod commands;
 mod config;
 mod credentials;
 mod display;
+mod frontend;
 mod session;
 
 use commands::{
@@ -300,7 +301,7 @@ async fn main() -> Result<()> {
             validate::run(dir)?;
         }
         Some(Commands::Tui { prompt, model }) => {
-            launch_tui(prompt, model, &cli.model)?;
+            launch_tui(prompt, model, &cli.model).await?;
         }
         Some(Commands::New { action }) => match action {
             NewAction::Agent { name } => new_agent::run(name)?,
@@ -310,36 +311,18 @@ async fn main() -> Result<()> {
         },
         None => {
             // No subcommand — launch TUI like Claude Code
-            launch_tui(None, None, &cli.model)?;
+            launch_tui(None, None, &cli.model).await?;
         }
     }
 
     Ok(())
 }
 
-/// Launch the lattice-tui binary as a child process.
-fn launch_tui(
+async fn launch_tui(
     prompt: Option<String>,
     model: Option<String>,
     cli_model: &Option<String>,
 ) -> Result<()> {
-    let mut cmd = std::process::Command::new("lattice-tui");
-    if let Some(p) = &prompt {
-        cmd.arg("--prompt").arg(p);
-    }
-    if let Some(m) = &model {
-        cmd.arg("--model").arg(m);
-    } else if let Some(m) = cli_model {
-        cmd.arg("--model").arg(m);
-    }
-    let status = cmd.status().map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to launch lattice-tui: {} (is it built and on $PATH?)",
-            e
-        )
-    })?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+    let model = model.or_else(|| cli_model.clone());
+    frontend::tui::run(prompt, model).await
 }

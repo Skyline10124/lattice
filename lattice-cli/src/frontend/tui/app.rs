@@ -9,7 +9,7 @@ use lattice_core::types::Role;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
-use crate::event::Event;
+use super::event::Event;
 
 /// Helper: find byte index of the character just before `cursor`.
 fn prev_char_boundary(s: &str, cursor: usize) -> usize {

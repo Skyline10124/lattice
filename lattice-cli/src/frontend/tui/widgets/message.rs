@@ -4,8 +4,8 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::app::ChatMessage;
-use crate::theme::Theme;
+use super::super::app::ChatMessage;
+use super::super::theme::Theme;
 
 pub struct MessageWidget<'a> {
     msg: &'a ChatMessage,

@@ -11,7 +11,7 @@ path = "src/main.rs"
 [dependencies]
 lattice-core = { path = "../lattice-core" }
 lattice-agent = { path = "../lattice-agent" }
-lattice-harness = { path = "../lattice-harness" }
+lattice-bus = { path = "../lattice-bus" }
 lattice-plugin = { path = "../lattice-plugin" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing = "0.1"
@@ -28,6 +28,9 @@ chrono = "0.4"
 dotenvy = "0.15"
 sha2 = "0.10"
 toml_edit = "0.22"
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
 
 [features]
 blob-store = ["lattice-agent/blob-store"]

@@ -7,9 +7,9 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::App;
-use crate::theme::Theme;
-use crate::widgets::{message::MessageWidget, statusline::Statusline};
+use super::app::App;
+use super::theme::Theme;
+use super::widgets::{message::MessageWidget, statusline::Statusline};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let theme = Theme::catppuccin_mocha();

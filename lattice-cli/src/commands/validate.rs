@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use lattice_harness::{AgentRegistry, Pipeline};
+use lattice_bus::{AgentRegistry, Pipeline};
 
 /// Validate all agent profiles in the default agents directory or a given path.
 pub fn run(dir: Option<String>) -> Result<()> {
