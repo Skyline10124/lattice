@@ -10,4 +10,5 @@ Cargo.lock
 .lattice/
 .claude/
 .cursor/
+.hermes/
 docs/

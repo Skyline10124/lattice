@@ -6,8 +6,6 @@ members = [
     "lattice-plugin",
     "lattice-python",
     "lattice-cli",
-    "lattice-tui",
-    "lattice-harness",
     "lattice-bus",
 ]
 
