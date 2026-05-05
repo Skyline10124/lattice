@@ -57,35 +57,39 @@ impl AgentRunner {
         input: &str,
         max_turns: u32,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-        let schema = self.profile.handoff.output_schema.as_ref().and_then(|s| {
-            match serde_json::from_str::<serde_json::Value>(s) {
+        let schema = match self.profile.handoff.output_schema.as_ref() {
+            Some(s) => match serde_json::from_str::<serde_json::Value>(s) {
                 Ok(schema_json) => match jsonschema::validator_for(&schema_json) {
                     Ok(validator) => Some((schema_json, validator)),
                     Err(e) => {
-                        warn!("Invalid output_schema for {}: {e}", self.profile.agent.name);
-                        None
+                        return Err(format!(
+                            "output_schema is not a valid JSON Schema for {}: {e}",
+                            self.profile.agent.name
+                        ).into());
                     }
                 },
                 Err(e) => {
-                    warn!(
+                    return Err(format!(
                         "output_schema is not valid JSON for {}: {e}",
                         self.profile.agent.name
-                    );
-                    None
+                    ).into());
                 }
-            }
-        });
+            },
+            None => None,
+        };
 
         let enriched_input = self.enrich_input(input);
         let mut output = self.run_once(&enriched_input, max_turns).await?;
 
         // JSON Schema validation + retry loop
         if let Some((ref schema_json, ref validator)) = schema {
+            let mut schema_valid = false;
             for retry in 0..MAX_SCHEMA_RETRIES {
                 let mut errors = validator.iter_errors(&output);
                 let first_error = errors.next();
 
                 if first_error.is_none() {
+                    schema_valid = true;
                     break; // Valid ✓
                 }
 
@@ -113,6 +117,13 @@ impl AgentRunner {
                 );
 
                 output = self.run_once(&correction_hint, max_turns).await?;
+            }
+
+            if !schema_valid {
+                return Err(format!(
+                    "Agent '{}' output still fails schema validation after {} retries",
+                    self.profile.agent.name, MAX_SCHEMA_RETRIES
+                ).into());
             }
         }
 
@@ -256,7 +267,7 @@ impl AgentRunner {
                         .into(),
                 );
             }
-            Err(_) => serde_json::json!({"content": content}),
+            Err(_) => serde_json::json!({"_raw_text": true, "content": content}),
         };
 
         Ok(output)

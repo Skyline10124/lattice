@@ -218,16 +218,18 @@ impl Pipeline {
                         .await
                         .map_err(|e| e.to_string())
                 } else {
-                    let mut runner = crate::assembly::assemble_agent(
+                    match crate::assembly::assemble_agent(
                         &profile,
                         resolved,
                         self.shared_memory.clone(),
                         self.tool_registry.clone(),
-                    );
-                    runner
-                        .run(&current_input, agent_max_turns)
-                        .await
-                        .map_err(|e| e.to_string())
+                    ) {
+                        Ok(mut runner) => runner
+                            .run(&current_input, agent_max_turns)
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    }
                 };
 
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -509,12 +511,22 @@ impl Pipeline {
                             }
                         };
 
-                        let mut runner = crate::assembly::assemble_agent(
+                        let mut runner = match crate::assembly::assemble_agent(
                             &profile,
                             resolved,
                             memory_box.clone(),
                             tool_registry.clone(),
-                        );
+                        ) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let err = AgentError {
+                                    agent_name: an.clone(),
+                                    message: format!("Assembly failed: {e}"),
+                                    skippable: profile.agent.skippable,
+                                };
+                                return (an, Err(err));
+                            }
+                        };
 
                         let max_turns = profile.handoff.max_turns.unwrap_or(max_turns);
 
@@ -660,19 +672,21 @@ impl Pipeline {
     }
 
     /// Dry-run: validate the pipeline chain without calling any LLM.
+    ///
+    /// Traverses **all possible routes** (conditional + default + fallback)
+    /// using BFS, so every target referenced in handoff rules is verified
+    /// against the registry — not just the default path.
     pub fn dry_run(&self, start_agent: &str) -> DryRunReport {
         let mut report = DryRunReport::default();
         let mut visited = std::collections::HashSet::new();
-        let mut current = start_agent.to_string();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(start_agent.to_string());
 
-        for _step in 0..100 {
+        while let Some(current) = queue.pop_front() {
             if visited.contains(&current) {
-                report.circular = true;
-                report.issues.push(format!(
-                    "Circular reference detected: '{}' visited twice",
-                    current
-                ));
-                break;
+                // Already visited via another path — DAG merge, not a cycle.
+                // True cycles are detected by the post-traversal check below.
+                continue;
             }
             visited.insert(current.clone());
 
@@ -682,12 +696,15 @@ impl Pipeline {
                     report
                         .issues
                         .push(format!("Agent '{}' not found in registry", current));
-                    break;
+                    continue;
                 }
             };
 
-            report.agents_in_chain.push(profile.agent.name.clone());
+            if !report.agents_in_chain.contains(&profile.agent.name) {
+                report.agents_in_chain.push(profile.agent.name.clone());
+            }
 
+            // Validate every rule target (conditional + default)
             for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
                 if let Some(ref target) = rule.target {
                     for name in target.agent_names() {
@@ -696,6 +713,8 @@ impl Pipeline {
                                 "Agent '{}' rule[{}] targets '{}' which is not registered",
                                 profile.agent.name, i, name
                             ));
+                        } else if !visited.contains(name) {
+                            queue.push_back(name.to_string());
                         }
                     }
                 }
@@ -708,68 +727,73 @@ impl Pipeline {
                             "Agent '{}' fallback '{}' is not registered",
                             profile.agent.name, name
                         ));
+                    } else if !visited.contains(name) {
+                        queue.push_back(name.to_string());
                     }
                 }
             }
 
-            // Determine next agent (first unconditional/default rule)
-            let next = if profile.handoff.handoff_rules.is_empty() {
-                profile.handoff.fallback.clone()
-            } else {
-                profile
-                    .handoff
-                    .handoff_rules
-                    .iter()
-                    .find(|r| r.default)
-                    .and_then(|r| r.target.clone())
-                    .or_else(|| profile.handoff.fallback.clone())
-            };
+            // A terminal agent (no reachable targets from any rule or fallback)
+            // is a reachable end of the pipeline.
+            let has_outgoing = profile
+                .handoff
+                .handoff_rules
+                .iter()
+                .any(|r| r.target.is_some())
+                || profile.handoff.fallback.is_some();
+            if !has_outgoing {
+                report.reachable_end = true;
+            }
+        }
 
-            match &next {
-                Some(HandoffTarget::Single(n)) => {
-                    if self.registry.get(n).is_none() {
-                        report.issues.push(format!(
-                            "Default route from '{}' -> '{}' targets unregistered agent",
-                            profile.agent.name, n
-                        ));
-                        break;
-                    }
-                    current = n.clone();
-                }
-                Some(HandoffTarget::Fork(targets)) => {
-                    // Validate each fork branch, then follow the first one for chain analysis
-                    for name in targets {
-                        if self.registry.get(name).is_none() {
-                            report.issues.push(format!(
-                                "Fork from '{}' -> '{}' targets unregistered agent",
-                                profile.agent.name, name
-                            ));
-                        }
-                    }
-                    // For chain analysis, follow the first fork target
-                    if let Some(first) = targets.first() {
-                        if self.registry.get(first).is_some() {
-                            current = first.clone();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                None => {
-                    report.reachable_end = true;
-                    break;
-                }
+        // Cycle detection: DFS from each agent to see if it can reach itself.
+        // This catches A→B→A patterns that BFS alone treats as DAG merges.
+        for name in &report.agents_in_chain {
+            if self.can_reach_self(name, &mut std::collections::HashSet::new()) {
+                report.circular = true;
+                report.issues.push(format!(
+                    "Circular routing: '{}' can reach itself through handoff chain",
+                    name
+                ));
             }
         }
 
         if report.agents_in_chain.len() >= 100 {
             report
                 .issues
-                .push("Chain exceeded 100 steps (infinite loop?)".into());
+                .push("Chain exceeded 100 agents (infinite loop?)".into());
         }
 
         report.valid = report.issues.is_empty() && report.reachable_end && !report.circular;
         report
+    }
+
+    /// Check if an agent can reach itself through handoff rules (cycle detection).
+    fn can_reach_self(&self, agent: &str, visited: &mut std::collections::HashSet<String>) -> bool {
+        if visited.contains(agent) {
+            return true;
+        }
+        visited.insert(agent.to_string());
+        let profile = match self.registry.get(agent) {
+            Some(p) => p,
+            None => return false,
+        };
+        let mut targets = Vec::new();
+        for rule in &profile.handoff.handoff_rules {
+            if let Some(ref target) = rule.target {
+                targets.extend(target.agent_names().into_iter().map(|n| n.to_string()));
+            }
+        }
+        if let Some(ref fallback) = profile.handoff.fallback {
+            targets.extend(fallback.agent_names().into_iter().map(|n| n.to_string()));
+        }
+        for target in targets {
+            if self.can_reach_self(&target, visited) {
+                return true;
+            }
+        }
+        visited.remove(agent);
+        false
     }
 }
 

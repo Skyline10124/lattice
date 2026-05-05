@@ -50,20 +50,22 @@ pub struct MicroAgent {
 pub struct MicroAgentHandle {
     pub id: AgentId,
     join_handle: tokio::task::JoinHandle<()>,
+    bus: Arc<dyn Bus>,
 }
 
 impl MicroAgentHandle {
     /// Watch the agent task. On panic or normal exit, deregister from Bus.
     /// Call this after spawn() to enable crash recovery (D5).
-    pub async fn watch_and_deregister(self, bus: Arc<dyn Bus>) {
+    /// Consumes self — the handle is no longer needed after watching.
+    pub async fn watch_and_deregister(self) {
         match self.join_handle.await {
             Ok(()) => {
                 info!("MicroAgent '{}' exited normally, deregistering", self.id);
-                bus.deregister(&self.id).await.ok();
+                self.bus.deregister(&self.id).await.ok();
             }
             Err(e) => {
                 warn!("MicroAgent '{}' panicked: {}, deregistering", self.id, e);
-                bus.deregister(&self.id).await.ok();
+                self.bus.deregister(&self.id).await.ok();
             }
         }
     }
@@ -125,7 +127,8 @@ impl MicroAgent {
             .map_err(|e| BusError::Resolve(e.to_string()))?;
 
         let runner =
-            crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone(), None);
+            crate::assembly::assemble_agent(&self.profile, resolved, self.memory.clone(), None)
+                .map_err(|e| BusError::Config(e.to_string()))?;
 
         let max_turns = self.profile.handoff.max_turns.unwrap_or(10);
         let ctx = AgentLoopContext {
@@ -169,7 +172,7 @@ impl MicroAgent {
             micro_agent_loop(runner, ctx, max_turns, request_rx).await;
         });
 
-        Ok(MicroAgentHandle { id, join_handle })
+        Ok(MicroAgentHandle { id, join_handle, bus: self.bus.clone() })
     }
 }
 

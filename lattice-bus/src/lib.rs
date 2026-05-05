@@ -79,8 +79,14 @@ pub enum BusError {
     Serialize(String),
     #[error("model resolution error: {0}")]
     Resolve(String),
+    #[error("agent configuration error: {0}")]
+    Config(String),
     #[error("unauthorized: agent {0} not in caller's rpc whitelist")]
     Unauthorized(AgentId),
+    #[error("unauthorized: agent {0} not allowed to subscribe to topic {1}")]
+    SubscribeUnauthorized(AgentId, String),
+    #[error("unauthorized: agent {0} not allowed to publish to topic {1}")]
+    PublishUnauthorized(AgentId, String),
 }
 
 // ---------------------------------------------------------------------------
@@ -149,10 +155,11 @@ pub struct BusConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryPolicy {
     /// Fire-and-forget: the publisher does not wait for delivery confirmation.
-    /// This is the only variant currently implemented.
+    /// Handler errors are silently discarded.
     AtMostOnce,
-    /// **Not yet implemented.**  Will retry delivery on handler failure.
-    /// For the alpha, `AtLeastOnce` behaves identically to `AtMostOnce`.
+    /// Best-effort retry: handler errors are logged. Does NOT guarantee
+    /// persistent retry or redelivery — use for observability, not for
+    /// transactional correctness.
     AtLeastOnce,
 }
 
@@ -278,7 +285,9 @@ pub async fn echo_agent_loop(mut rx: mpsc::Receiver<BusRequest>) {
         let resp = BusResponse {
             payload: req.payload.clone(),
         };
-        let _ = req.reply_to.send(Ok(resp));
+        if req.reply_to.send(Ok(resp)).is_err() {
+            tracing::warn!("echo_agent_loop: reply channel closed, caller timed out");
+        }
     }
 }
 
@@ -351,6 +360,17 @@ impl Bus for InMemoryBus {
         agent_id: Option<AgentId>,
         handler: BusHandlerFn,
     ) -> Result<(), BusError> {
+        // Enforce subscribe capability: agent_id is required and must be
+        // listed in its bus_config.subscribe for the requested topic.
+        if let Some(ref aid) = agent_id {
+            let agents = self.agents.read().await;
+            if let Some(entry) = agents.get(aid) {
+                let allowed = &entry.descriptor.bus_config.subscribe;
+                if !allowed.is_empty() && !allowed.iter().any(|t| t == topic) {
+                    return Err(BusError::SubscribeUnauthorized(aid.clone(), topic.to_string()));
+                }
+            }
+        }
         self.subscriptions
             .write()
             .await
@@ -366,14 +386,32 @@ impl Bus for InMemoryBus {
     }
 
     async fn publish(&self, topic: &str, event: BusEvent) -> Result<(), BusError> {
+        // Enforce publish capability: source agent must be registered and
+        // the topic must appear in its bus_config.publish list.
+        {
+            let agents = self.agents.read().await;
+            if let Some(entry) = agents.get(&event.source) {
+                let allowed = &entry.descriptor.bus_config.publish;
+                if !allowed.is_empty() && !allowed.iter().any(|t| t == topic) {
+                    return Err(BusError::PublishUnauthorized(event.source.clone(), topic.to_string()));
+                }
+            }
+        }
         if let Some(entries) = self.subscriptions.read().await.get(topic) {
+            let policy = self.config.delivery_policy;
             for entry in entries {
                 let h = entry.handler.clone();
                 let evt = event.clone();
                 tokio::spawn(async move {
-                    // Handler errors are intentionally swallowed — bus must not
-                    // crash on bad handlers. Upgrade to tracing when available.
-                    h(evt).await.ok();
+                    match h(evt).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            if policy == DeliveryPolicy::AtLeastOnce {
+                                tracing::warn!("bus handler error (AtLeastOnce policy): {}", e);
+                            }
+                            // AtMostOnce: silently discard as before.
+                        }
+                    }
                 });
             }
         }
@@ -823,5 +861,106 @@ mod tests {
             Err(other) => panic!("expected AlreadyRegistered, got {:?}", other),
             Ok(_) => panic!("expected error for duplicate registration"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_capability_enforced() {
+        let bus = InMemoryBus::with_defaults();
+        bus.register(AgentDescriptor {
+            id: AgentId::new("sub-agent"),
+            name: "Sub".into(),
+            capabilities: vec![],
+            bus_config: AgentBusConfig {
+                subscribe: vec!["allowed-topic".into()],
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+
+        // Allowed topic
+        bus.subscribe(
+            "allowed-topic",
+            Some(AgentId::new("sub-agent")),
+            bus_handler(|_evt| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .unwrap();
+
+        // Disallowed topic
+        let r = bus
+            .subscribe(
+                "forbidden-topic",
+                Some(AgentId::new("sub-agent")),
+                bus_handler(|_evt| Box::pin(async { Ok(()) })),
+            )
+            .await;
+        assert!(matches!(r, Err(BusError::SubscribeUnauthorized(_, _))));
+    }
+
+    #[tokio::test]
+    async fn test_publish_capability_enforced() {
+        let bus = InMemoryBus::with_defaults();
+        bus.register(AgentDescriptor {
+            id: AgentId::new("pub-agent"),
+            name: "Pub".into(),
+            capabilities: vec![],
+            bus_config: AgentBusConfig {
+                publish: vec!["allowed-topic".into()],
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+
+        // Allowed topic
+        bus.publish(
+            "allowed-topic",
+            BusEvent {
+                topic: "allowed-topic".into(),
+                source: AgentId::new("pub-agent"),
+                payload: serde_json::json!({}),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Disallowed topic
+        let r = bus
+            .publish(
+                "forbidden-topic",
+                BusEvent {
+                    topic: "forbidden-topic".into(),
+                    source: AgentId::new("pub-agent"),
+                    payload: serde_json::json!({}),
+                },
+            )
+            .await;
+        assert!(matches!(r, Err(BusError::PublishUnauthorized(_, _))));
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_capability_empty_means_all() {
+        let bus = InMemoryBus::with_defaults();
+        bus.register(AgentDescriptor {
+            id: AgentId::new("open-agent"),
+            name: "Open".into(),
+            capabilities: vec![],
+            bus_config: AgentBusConfig {
+                subscribe: vec![], // empty = no restriction
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+
+        // Any topic allowed when subscribe list is empty
+        bus.subscribe(
+            "any-topic",
+            Some(AgentId::new("open-agent")),
+            bus_handler(|_evt| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .unwrap();
     }
 }

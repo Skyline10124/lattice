@@ -31,12 +31,17 @@ impl Watcher {
         let mut watcher =
             notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
                 if let Ok(event) = res {
-                    // Only react to agent.toml file changes
-                    let is_agent_toml = event
+                    // React to agent.toml or .toml.sha256 file changes
+                    // (sha256 sidecar deletion/modification can indicate tampering)
+                    let is_relevant = event
                         .paths
                         .iter()
-                        .any(|p| p.file_name().map(|n| n == "agent.toml").unwrap_or(false));
-                    if is_agent_toml {
+                        .any(|p| {
+                            p.file_name()
+                                .map(|n| n == "agent.toml" || n == "agent.toml.sha256")
+                                .unwrap_or(false)
+                        });
+                    if is_relevant {
                         match event.kind {
                             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                                 let _ = tx.send(());

@@ -208,26 +208,29 @@ struct AgentProfileRaw {
 // AgentProfile — loading
 // ---------------------------------------------------------------------------
 
-/// Verify the integrity of a TOML config file against its `.agent.toml.sha256`
-/// sidecar file. If no sidecar exists, the check is skipped (graceful degradation).
+/// Verify the integrity of a TOML config file against its `.toml.sha256`
+/// sidecar file.
+///
+/// If no sidecar exists and strict mode is on, one is auto-generated so
+/// subsequent loads can detect tampering. If the sidecar exists but
+/// mismatches, loading fails regardless of strict mode.
 fn verify_config_integrity(
     path: &Path,
     content: &str,
     strict: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let hash_path = path.with_extension("toml.sha256");
+    let actual = format!("{:x}", Sha256::digest(content.as_bytes()));
     if !hash_path.exists() {
+        // Auto-generate the sidecar on first load so future loads are
+        // protected. Skip only in non-strict mode for backward compat.
         if strict {
-            return Err(format!(
-                "Config integrity hash not found at {}; set LATTICE_STRICT_CONFIG=0 to allow unverified configs",
-                hash_path.display()
-            )
-            .into());
+            std::fs::write(&hash_path, &actual)?;
+            tracing::info!("auto-generated integrity hash at {}", hash_path.display());
         }
-        return Ok(()); // Graceful: no hash file = no integrity check
+        return Ok(());
     }
     let expected = std::fs::read_to_string(&hash_path)?.trim().to_string();
-    let actual = format!("{:x}", Sha256::digest(content.as_bytes()));
     if actual != expected {
         return Err(format!(
             "Config integrity mismatch: {} (expected sha256 {}, got {})",
@@ -244,7 +247,7 @@ impl AgentProfile {
     /// Load a profile from a TOML file.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let strict = std::env::var("LATTICE_STRICT_CONFIG").unwrap_or_default() == "1";
+        let strict = std::env::var("LATTICE_STRICT_CONFIG").unwrap_or_default() != "0";
         verify_config_integrity(path, &content, strict)?;
         let raw: AgentProfileRaw = toml::from_str(&content)?;
         let mut profile = AgentProfile {
@@ -276,46 +279,41 @@ impl AgentProfile {
 
     /// Resolve the effective system prompt (file content or inline).
     ///
+    /// When `system.file` is set, the file MUST exist and be readable —
+    /// errors are propagated rather than silently falling back to the inline
+    /// prompt.  This prevents misconfigured agents from running with a
+    /// generic prompt when the operator explicitly requested a file-based one.
+    ///
     /// Security: resolves symlinks via canonicalize and verifies the resolved
-    /// path is within the base directory to prevent symlink traversal attacks.
-    /// Only allows relative paths — absolute paths and paths containing `..`
-    /// are rejected.
-    pub fn system_prompt(&self) -> String {
+    /// path is within the current working directory to prevent traversal attacks.
+    /// Absolute paths and paths containing `..` are rejected as hard errors.
+    pub fn system_prompt(&self) -> Result<String, Box<dyn std::error::Error>> {
         if let Some(ref file) = self.system.file {
             let path = Path::new(file);
-            // Reject absolute paths and path traversal
             if path.is_absolute() || file.contains("..") {
-                tracing::warn!(
+                return Err(format!(
                     "system.file '{}' rejected: must be a relative path without '..'",
                     file
-                );
-                return self.system.prompt.clone();
+                ).into());
             }
-            // Resolve symlinks and verify the canonical path is safe
-            match std::fs::canonicalize(path) {
-                Ok(canonical) => {
-                    let canonical_str = canonical.to_string_lossy();
-                    // Verify canonical path doesn't escape into sensitive areas.
-                    // The base directory is the current working directory.
-                    if let Ok(cwd) = std::env::current_dir() {
-                        if !canonical.starts_with(&cwd) {
-                            tracing::warn!(
-                                "system.file '{}' resolved to '{}' which is outside the working directory",
-                                file, canonical_str
-                            );
-                            return self.system.prompt.clone();
-                        }
-                    }
-                    return std::fs::read_to_string(&canonical)
-                        .unwrap_or_else(|_| self.system.prompt.clone());
-                }
-                Err(_) => {
-                    // File doesn't exist yet — fall back to inline prompt
-                    return self.system.prompt.clone();
+            let canonical = std::fs::canonicalize(path).map_err(|e| {
+                format!("system.file '{}' not found: {e}", file)
+            })?;
+            if let Ok(cwd) = std::env::current_dir() {
+                if !canonical.starts_with(&cwd) {
+                    return Err(format!(
+                        "system.file '{}' resolved to '{}' which is outside the working directory",
+                        file,
+                        canonical.to_string_lossy()
+                    ).into());
                 }
             }
+            let content = std::fs::read_to_string(&canonical).map_err(|e| {
+                format!("system.file '{}' read failed: {e}", file)
+            })?;
+            return Ok(content);
         }
-        self.system.prompt.clone()
+        Ok(self.system.prompt.clone())
     }
 }
 
@@ -499,8 +497,8 @@ mod tests {
             memory: MemoryConfigProfile::default(),
             plugins: None,
         };
-        // Absolute path is rejected, falls back to inline prompt
-        assert_eq!(profile.system_prompt(), "inline prompt");
+        // Absolute path is rejected as a hard error
+        assert!(profile.system_prompt().is_err());
     }
 
     #[test]
@@ -524,8 +522,8 @@ mod tests {
             memory: MemoryConfigProfile::default(),
             plugins: None,
         };
-        // Path containing ".." is rejected, falls back to inline prompt
-        assert_eq!(profile.system_prompt(), "inline prompt");
+        // Path containing ".." is rejected as a hard error
+        assert!(profile.system_prompt().is_err());
     }
 
     #[test]
@@ -631,22 +629,19 @@ rule = { default = true }
     }
 
     #[test]
-    fn test_strict_config_rejects_missing_hash() {
+    fn test_strict_config_auto_generates_hash() {
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
-        std::fs::write(
-            &toml_path,
-            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
-        )
-        .unwrap();
-        let result = verify_config_integrity(
-            &toml_path,
-            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n",
-            true,
-        );
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("integrity hash not found"));
+        let content = "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n";
+        std::fs::write(&toml_path, content).unwrap();
+        let result = verify_config_integrity(&toml_path, content, true);
+        assert!(result.is_ok());
+        // Sidecar should have been auto-generated
+        let hash_path = toml_path.with_extension("toml.sha256");
+        assert!(hash_path.exists(), "sha256 sidecar should be auto-generated");
+        // Second load should pass (hash matches)
+        let result2 = verify_config_integrity(&toml_path, content, true);
+        assert!(result2.is_ok());
     }
 
     #[test]

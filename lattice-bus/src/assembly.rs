@@ -27,11 +27,11 @@ pub fn assemble_agent(
     resolved: lattice_core::ResolvedModel,
     memory: Option<Arc<dyn Memory>>,
     tool_registry: Option<Arc<ToolRegistry>>,
-) -> AgentRunner {
+) -> Result<AgentRunner, Box<dyn std::error::Error>> {
     let mut agent = Agent::new(resolved);
 
     // Apply system prompt from profile
-    let system_prompt = profile.system_prompt();
+    let system_prompt = profile.system_prompt()?;
     agent.set_system_prompt(&system_prompt);
 
     // Apply tools from profile — filter default tool definitions by enabled names
@@ -84,12 +84,12 @@ pub fn assemble_agent(
     }
 
     if let Some(ref mem) = memory {
-        agent = agent.with_memory(mem.clone_box());
+        agent = agent.with_memory(Arc::clone(mem));
     }
 
     let mut runner = AgentRunner::from_profile(profile.clone(), agent);
     if let Some(ref mem) = memory {
         runner = runner.with_memory(Arc::clone(mem));
     }
-    runner
+    Ok(runner)
 }
