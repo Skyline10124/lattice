@@ -1,8 +1,7 @@
-//! LATTICE Micro-Agent Bus — async RPC + pub/sub hybrid communication layer.
+//! LATTICE micro-agent bus and TOML pipeline orchestration.
 //!
-//! Bus does routing only. Agent execution (agent loop, LLM inference) is owned
-//! by the caller. register() returns a Registration with the request
-//! channel receiver — the caller spawns their own tokio task to process requests.
+//! This crate owns Pipeline/AgentRunner/profile assembly for inter-agent
+//! orchestration, plus the async RPC + pub/sub bus types used by micro-agents.
 
 pub mod assembly;
 pub mod events;

@@ -1,8 +1,7 @@
-//! Shared orchestration types used by both lattice-plugin (dag_runner) and
-//! lattice-bus (pipeline, profile, handoff_rule).
+//! Plugin DAG configuration types and the canonical handoff rule language.
 //!
-//! These live in lattice-plugin so lattice-bus can depend on them without
-//! creating a circular dependency (bus → plugin → bus).
+//! `lattice-bus` re-exports these routing types so inter-agent pipelines and
+//! intra-agent plugin DAG edges share one parser and evaluator.
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -355,4 +354,124 @@ fn string_contains(a: &serde_json::Value, b: &serde_json::Value) -> bool {
         other => &other.to_string(),
     };
     sa.contains(sb)
+}
+
+/// Evaluate a list of rules in order; return the target of the first match.
+pub fn eval_rules(rules: &[HandoffRule], output: &serde_json::Value) -> Option<HandoffTarget> {
+    rules
+        .iter()
+        .find(|r| r.eval(output))
+        .and_then(|r| r.target.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_output() -> serde_json::Value {
+        serde_json::json!({
+            "confidence": 0.85,
+            "issues": [
+                {"severity": "minor", "file": "src/a.rs"},
+                {"severity": "critical", "file": "src/b.rs"}
+            ],
+            "summary": "Code looks good overall"
+        })
+    }
+
+    #[test]
+    fn parses_single_condition() {
+        let rule: HandoffRule = toml::from_str(
+            r#"
+condition = { field = "confidence", op = ">", value = "0.5" }
+target = "next-agent"
+"#,
+        )
+        .unwrap();
+
+        assert!(rule.condition.is_some());
+        assert!(rule.all.is_none());
+        assert!(rule.any.is_none());
+        assert_eq!(
+            rule.target,
+            Some(HandoffTarget::Single("next-agent".into()))
+        );
+    }
+
+    #[test]
+    fn evals_numeric_and_contains_conditions() {
+        let output = json_output();
+        let confidence: HandoffRule = toml::from_str(
+            r#"
+condition = { field = "confidence", op = ">", value = "0.5" }
+target = "next"
+"#,
+        )
+        .unwrap();
+        let summary: HandoffRule = toml::from_str(
+            r#"
+condition = { field = "summary", op = "contains", value = "good" }
+target = "next"
+"#,
+        )
+        .unwrap();
+
+        assert!(confidence.eval(&output));
+        assert!(summary.eval(&output));
+    }
+
+    #[test]
+    fn evals_any_array_path() {
+        let output = json_output();
+        let rule: HandoffRule = toml::from_str(
+            r#"
+condition = { field = "issues[any].severity", op = "==", value = "critical" }
+target = "security"
+"#,
+        )
+        .unwrap();
+
+        assert!(rule.eval(&output));
+    }
+
+    #[test]
+    fn first_matching_rule_wins() {
+        let output = json_output();
+        let list: RuleList = toml::from_str(
+            r#"
+[[rules]]
+condition = { field = "confidence", op = ">", value = "0.9" }
+target = "agent-a"
+
+[[rules]]
+condition = { field = "confidence", op = ">", value = "0.5" }
+target = "agent-b"
+
+[[rules]]
+default = true
+target = "fallback"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            eval_rules(&list.rules, &output),
+            Some(HandoffTarget::Single("agent-b".into()))
+        );
+    }
+
+    #[test]
+    fn fork_target_round_trips() {
+        let target = HandoffTarget::Fork(vec!["security".into(), "performance".into()]);
+        let serialized = serde_json::to_string(&target).unwrap();
+        let deserialized: HandoffTarget = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(serialized, "\"fork:security,performance\"");
+        assert_eq!(deserialized, target);
+    }
+
+    #[derive(Deserialize)]
+    struct RuleList {
+        rules: Vec<HandoffRule>,
+    }
 }
