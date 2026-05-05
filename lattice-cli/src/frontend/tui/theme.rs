@@ -1,6 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
 /// Catppuccin Mocha-inspired dark theme.
+#[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub bg: Color,
     pub surface: Color,

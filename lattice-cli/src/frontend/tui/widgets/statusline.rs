@@ -2,8 +2,9 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::super::app::{App, AppStatus};
 use super::super::theme::Theme;
@@ -18,56 +19,137 @@ impl Statusline {
     }
 
     pub fn render(&self, area: Rect, buf: &mut ratatui::buffer::Buffer, app: &App) {
-        let status_icon = match app.status {
-            AppStatus::Ready => "\u{2713}",
-            AppStatus::Streaming => "\u{21BB}",
-            AppStatus::Error(_) => "\u{2717}",
-        };
+        if area.height == 0 {
+            return;
+        }
 
-        let status_color = match app.status {
+        let provider = if app.current_provider.is_empty() {
+            "unresolved"
+        } else {
+            app.current_provider.as_str()
+        };
+        let status_text = match &app.status {
+            AppStatus::Ready => "ready".to_string(),
+            AppStatus::Streaming => format!("{} streaming", app.spinner()),
+            AppStatus::Error(err) => format!("error: {err}"),
+        };
+        let status_color = match &app.status {
             AppStatus::Ready => self.theme.success,
             AppStatus::Streaming => self.theme.assistant_accent,
             AppStatus::Error(_) => self.theme.error,
         };
+        let trace = if app.transcript_mode {
+            "trace on"
+        } else {
+            "trace off"
+        };
 
-        let model_provider = format!("{}@{}", app.current_model, app.current_provider);
-        let tokens = format!("{} tok", app.token_count);
-
-        let left = vec![
+        let left = Line::from(vec![
             Span::styled(
-                model_provider.clone(),
-                self.theme.statusline_style().add_modifier(Modifier::BOLD),
+                format!(" {} ", app.mode_label()),
+                Style::default()
+                    .fg(self.theme.bg)
+                    .bg(self.theme.highlight)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(app.current_model.as_str(), self.theme.statusline_style()),
+            Span::styled(
+                "@",
+                Style::default()
+                    .fg(self.theme.subtext)
+                    .bg(self.theme.surface),
+            ),
+            Span::styled(provider, self.theme.statusline_style()),
+            Span::raw("  "),
+            Span::styled(
+                status_text,
+                Style::default().fg(status_color).bg(self.theme.surface),
             ),
             Span::raw("  "),
-            Span::styled(status_icon.to_string(), Style::default().fg(status_color)),
-            Span::raw("  "),
-            Span::styled(tokens.clone(), Style::default().fg(self.theme.subtext)),
-        ];
-
-        let right = vec![
-            Span::styled("/help".to_string(), Style::default().fg(self.theme.subtext)),
+            Span::styled(
+                format!("{} tok", app.token_count),
+                Style::default()
+                    .fg(self.theme.subtext)
+                    .bg(self.theme.surface),
+            ),
             Span::raw("  "),
             Span::styled(
-                "\u{F06A9}".to_string(),
-                Style::default().fg(self.theme.highlight),
+                trace,
+                Style::default()
+                    .fg(self.theme.subtext)
+                    .bg(self.theme.surface),
             ),
-        ];
+        ]);
 
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_style(self.theme.border_style());
+        let right = if area.width >= 78 {
+            Line::from(vec![
+                Span::styled(
+                    "? help",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "/ commands",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Ctrl+N new",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Ctrl+C quit ",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    "? help",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Ctrl+C quit ",
+                    Style::default()
+                        .fg(self.theme.subtext)
+                        .bg(self.theme.surface),
+                ),
+            ])
+        };
 
-        let inner = block.inner(area);
-        block.render(area, buf);
+        let left_width = line_width(&left);
+        let right_width = line_width(&right);
+        let show_right =
+            left_width.saturating_add(right_width).saturating_add(2) < area.width as usize;
 
-        // Render left part
-        let left_para = Paragraph::new(Line::from(left));
-        left_para.render(inner, buf);
-
-        // Render right part (overlaid via alignment trick)
-        let right_para = Paragraph::new(Line::from(right))
+        Paragraph::new(left)
             .style(self.theme.statusline_style())
-            .alignment(Alignment::Right);
-        right_para.render(inner, buf);
+            .render(area, buf);
+        if show_right {
+            Paragraph::new(right)
+                .style(self.theme.statusline_style())
+                .alignment(Alignment::Right)
+                .render(area, buf);
+        }
     }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
