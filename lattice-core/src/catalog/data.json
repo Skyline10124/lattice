@@ -2320,7 +2320,7 @@
       "canonical_id": "gpt-oss-120b",
       "display_name": "Gpt Oss 120B",
       "description": "",
-      "context_length": 0,
+      "context_length": 131072,
       "capabilities": [],
       "providers": [
         {

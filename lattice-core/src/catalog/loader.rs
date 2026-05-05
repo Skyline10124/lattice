@@ -121,6 +121,16 @@ mod tests {
     }
 
     #[test]
+    fn test_gpt_oss_120b_has_context_length() {
+        let catalog = Catalog::get().expect("catalog should load from embedded data.json");
+        let model = catalog
+            .get_model("gpt-oss-120b")
+            .expect("gpt-oss-120b should exist in catalog");
+
+        assert_eq!(model.context_length, 131072);
+    }
+
+    #[test]
     fn test_api_protocol_from_str() {
         assert_eq!(
             "chat_completions".parse::<ApiProtocol>().unwrap(),

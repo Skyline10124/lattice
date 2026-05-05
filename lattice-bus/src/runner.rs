@@ -166,20 +166,36 @@ impl AgentRunner {
             || trimmed.starts_with("403")
             || trimmed.starts_with("429")
             || trimmed.starts_with("500")
+            || trimmed.starts_with("502")
+            || trimmed.starts_with("503")
+            || trimmed.starts_with("504")
         // Provider error patterns — case-insensitive
             || lower.starts_with("rate limit")
             || lower.starts_with("authentication")
+            || lower.starts_with("unauthorized")
+            || lower.starts_with("forbidden")
             || lower.starts_with("api key")
+            || lower.starts_with("invalid api key")
             || lower.starts_with("invalid request")
+            || lower.starts_with("bad request")
             || lower.starts_with("server error")
+            || lower.starts_with("internal server error")
             || lower.starts_with("service unavailable")
+            || lower.starts_with("temporarily unavailable")
         // Transport error patterns — case-insensitive
             || lower.starts_with("timeout")
+            || lower.starts_with("request timeout")
             || lower.starts_with("connection refused")
             || lower.starts_with("connection reset")
+            || lower.starts_with("connection closed")
+            || lower.starts_with("network error")
             || lower.starts_with("dns")
             || lower.starts_with("tls")
             || lower.starts_with("certificate")
+            || lower.contains("\"error\"")
+            || lower.contains("context_length_exceeded")
+            || lower.contains("rate_limit")
+            || lower.contains("invalid_api_key")
     }
 
     /// Run the agent once and parse the output as JSON.
@@ -244,5 +260,33 @@ impl AgentRunner {
         };
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRunner;
+
+    #[test]
+    fn detects_provider_and_transport_error_text() {
+        assert!(AgentRunner::looks_like_error(
+            r#"{"error":{"message":"invalid_api_key"}}"#
+        ));
+        assert!(AgentRunner::looks_like_error(
+            "503 service unavailable: upstream overloaded"
+        ));
+        assert!(AgentRunner::looks_like_error(
+            "Network error: connection reset by peer"
+        ));
+        assert!(AgentRunner::looks_like_error(
+            "context_length_exceeded: prompt too long"
+        ));
+    }
+
+    #[test]
+    fn does_not_treat_normal_text_as_error() {
+        assert!(!AgentRunner::looks_like_error(
+            "Here is the requested implementation summary."
+        ));
     }
 }

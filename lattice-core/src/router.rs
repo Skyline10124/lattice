@@ -398,7 +398,10 @@ impl ModelRouter {
         let cache_key = Self::credential_cache_key(entry);
 
         {
-            let cache = self.credential_cache.lock().unwrap();
+            let cache = self
+                .credential_cache
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
             if let Some(cached) = cache.get(&cache_key) {
                 return cached.clone();
             }
@@ -412,7 +415,7 @@ impl ModelRouter {
                     let result = Some(trimmed);
                     self.credential_cache
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|err| err.into_inner())
                         .insert(cache_key, result.clone());
                     return result;
                 }
@@ -423,7 +426,7 @@ impl ModelRouter {
                     let result = Some(trimmed);
                     self.credential_cache
                         .lock()
-                        .unwrap()
+                        .unwrap_or_else(|err| err.into_inner())
                         .insert(cache_key, result.clone());
                     return result;
                 }
@@ -440,7 +443,7 @@ impl ModelRouter {
                         let result = Some(trimmed);
                         self.credential_cache
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|err| err.into_inner())
                             .insert(cache_key, result.clone());
                         return result;
                     }
@@ -451,7 +454,7 @@ impl ModelRouter {
                         let result = Some(trimmed);
                         self.credential_cache
                             .lock()
-                            .unwrap()
+                            .unwrap_or_else(|err| err.into_inner())
                             .insert(cache_key, result.clone());
                         return result;
                     }
@@ -461,7 +464,7 @@ impl ModelRouter {
 
         self.credential_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|err| err.into_inner())
             .insert(cache_key, None);
         None
     }
