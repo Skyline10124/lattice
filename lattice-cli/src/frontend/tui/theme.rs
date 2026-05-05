@@ -64,6 +64,51 @@ impl Theme {
     pub fn border_style(&self) -> Style {
         Style::default().fg(self.border)
     }
+
+    // -- markdown styles --
+
+    pub fn heading_style(&self, level: u8) -> Style {
+        let base = Style::default().add_modifier(Modifier::BOLD);
+        match level {
+            1 => base.fg(self.highlight),
+            2 => base.fg(self.user_accent),
+            _ => base.fg(self.assistant_accent),
+        }
+    }
+
+    pub fn bold_style(&self) -> Style {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
+
+    pub fn italic_style(&self) -> Style {
+        Style::default().add_modifier(Modifier::ITALIC)
+    }
+
+    pub fn inline_code_style(&self) -> Style {
+        Style::default().fg(self.tool_accent).bg(self.surface)
+    }
+
+    pub fn code_block_style(&self) -> Style {
+        Style::default().bg(self.surface)
+    }
+
+    pub fn blockquote_style(&self) -> Style {
+        Style::default().fg(self.subtext)
+    }
+
+    pub fn link_style(&self) -> Style {
+        Style::default()
+            .fg(self.assistant_accent)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+
+    pub fn list_marker_style(&self) -> Style {
+        Style::default().fg(self.tool_accent)
+    }
+
+    pub fn code_block_border_style(&self) -> Style {
+        Style::default().fg(self.border)
+    }
 }
 
 impl Default for Theme {

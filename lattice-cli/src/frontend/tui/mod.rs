@@ -13,6 +13,7 @@ use crate::credentials::CredentialStore;
 
 mod app;
 mod event;
+mod markdown;
 mod theme;
 mod ui;
 mod widgets;
@@ -26,7 +27,12 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = std::io::stdout().flush();
         let _ = terminal::disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture,
+            crossterm::event::DisableBracketedPaste
+        );
     }
 }
 
@@ -73,7 +79,8 @@ pub async fn run(options: TuiOptions) -> Result<()> {
     crossterm::execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -125,23 +132,31 @@ async fn run_app<B: ratatui::backend::Backend>(
                 event::Event::Key(key) => app.handle_key(key).await?,
                 event::Event::Mouse(mouse) => app.handle_mouse(mouse).await?,
                 event::Event::StreamToken {
+                    turn_id,
                     content,
                     reasoning,
                     done,
                     error,
                 } => {
-                    app.apply_stream_token(content, reasoning, done, error);
+                    app.apply_stream_token(turn_id, content, reasoning, done, error);
                 }
                 event::Event::ToolOutput {
+                    turn_id,
                     name,
                     arguments,
                     result,
                 } => {
-                    app.apply_tool_output(name, arguments, result);
+                    app.apply_tool_output(turn_id, name, arguments, result);
                 }
-                event::Event::ModelInfo { model, provider } => {
-                    app.current_model = model;
-                    app.current_provider = provider;
+                event::Event::ModelInfo {
+                    turn_id,
+                    model,
+                    provider,
+                } => {
+                    if app.accepts_turn(turn_id) {
+                        app.current_model = model;
+                        app.current_provider = provider;
+                    }
                 }
                 event::Event::Paste(text) => {
                     app.insert_text(&text);

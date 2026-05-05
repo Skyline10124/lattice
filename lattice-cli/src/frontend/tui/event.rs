@@ -10,6 +10,7 @@ pub enum Event {
     Paste(String),
     /// LLM streaming token delivered from background task.
     StreamToken {
+        turn_id: u64,
         content: String,
         reasoning: Option<String>,
         done: bool,
@@ -17,12 +18,14 @@ pub enum Event {
     },
     /// Tool execution progress and output delivered from the background task.
     ToolOutput {
+        turn_id: u64,
         name: String,
         arguments: String,
         result: Option<String>,
     },
     /// Resolved model + provider info from the background task.
     ModelInfo {
+        turn_id: u64,
         model: String,
         provider: String,
     },

@@ -31,6 +31,8 @@ toml_edit = "0.22"
 ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.12", default-features = false }
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
 
 [features]
 blob-store = ["lattice-agent/blob-store"]
