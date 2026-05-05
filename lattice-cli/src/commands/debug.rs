@@ -128,6 +128,13 @@ pub async fn run(
                     tool_call_names.push(c.function.name.clone());
                 }
             }
+            LoopEvent::ToolResult { call, result } => {
+                tracing::info!(
+                    tool = %call.function.name,
+                    result_len = result.len(),
+                    "debug: tool result"
+                );
+            }
             LoopEvent::Done { ref usage } => {
                 flush_reasoning(&reasoning_buf);
                 reasoning_buf.clear();

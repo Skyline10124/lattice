@@ -15,6 +15,12 @@ pub enum Event {
         done: bool,
         error: Option<String>,
     },
+    /// Tool execution progress and output delivered from the background task.
+    ToolOutput {
+        name: String,
+        arguments: String,
+        result: Option<String>,
+    },
     /// Resolved model + provider info from the background task.
     ModelInfo {
         model: String,

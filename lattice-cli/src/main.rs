@@ -297,7 +297,19 @@ async fn main() -> Result<()> {
             validate::run(dir)?;
         }
         Some(Commands::Tui { prompt, model }) => {
-            launch_tui(prompt, model, &cli.model).await?;
+            let previous_session =
+                load_requested_session(cli.session.as_deref(), cli.continue_session)?;
+            launch_tui(
+                prompt,
+                model,
+                &cli.model,
+                cli.provider.clone(),
+                &config,
+                &creds,
+                save_sessions,
+                previous_session,
+            )
+            .await?;
         }
         Some(Commands::New { action }) => match action {
             NewAction::Agent { name } => new_agent::run(name)?,
@@ -307,7 +319,19 @@ async fn main() -> Result<()> {
         },
         None => {
             // No subcommand — launch TUI like Claude Code
-            launch_tui(None, None, &cli.model).await?;
+            let previous_session =
+                load_requested_session(cli.session.as_deref(), cli.continue_session)?;
+            launch_tui(
+                None,
+                None,
+                &cli.model,
+                cli.provider.clone(),
+                &config,
+                &creds,
+                save_sessions,
+                previous_session,
+            )
+            .await?;
         }
     }
 
@@ -335,7 +359,21 @@ async fn launch_tui(
     prompt: Option<String>,
     model: Option<String>,
     cli_model: &Option<String>,
+    provider_override: Option<String>,
+    config: &Config,
+    creds: &CredentialStore,
+    save_sessions: bool,
+    previous_session: Option<crate::session::Session>,
 ) -> Result<()> {
     let model = model.or_else(|| cli_model.clone());
-    frontend::tui::run(prompt, model).await
+    let options = frontend::tui::options_from_config(
+        prompt,
+        model,
+        provider_override,
+        config,
+        creds,
+        save_sessions,
+        previous_session,
+    );
+    frontend::tui::run(options).await
 }

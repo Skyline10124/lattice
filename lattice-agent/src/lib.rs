@@ -174,6 +174,10 @@ impl Agent {
         self.state.token_usage
     }
 
+    pub fn seed_messages(&mut self, messages: Vec<lattice_core::types::Message>) {
+        self.state.seed_messages(messages);
+    }
+
     pub async fn send_message(&mut self, content: &str) -> Vec<LoopEvent> {
         self.state.push_user_message(content);
         self.run_chat().await
@@ -193,6 +197,7 @@ impl Agent {
     pub async fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
         let mut all_events = Vec::new();
         let user_input = content.to_string();
+        let user_message_start = self.state.messages.len();
 
         for _ in 0..max_turns {
             // Compile prompt fresh each iteration: events and memory
@@ -214,7 +219,9 @@ impl Agent {
             for msg in &rendered.messages {
                 match msg.role {
                     Role::System => self.state.push_system_message(&msg.content),
-                    Role::User => self.state.replace_first_user_message(&msg.content),
+                    Role::User => self
+                        .state
+                        .upsert_user_message_from(user_message_start, &msg.content),
                     _ => {}
                 }
             }
@@ -254,17 +261,26 @@ impl Agent {
                 }
             }
 
-            all_events.extend(events);
-
             if tool_calls.is_empty() {
+                all_events.extend(events);
                 break;
             }
             if self.tool_executor.is_none() {
+                all_events.extend(events);
                 break;
             }
+            all_events.extend(
+                events
+                    .into_iter()
+                    .filter(|event| !matches!(event, LoopEvent::Done { .. })),
+            );
             if let Some(ref executor) = self.tool_executor {
                 for call in &tool_calls {
                     let result = executor.execute(call).await;
+                    all_events.push(LoopEvent::ToolResult {
+                        call: call.clone(),
+                        result: result.clone(),
+                    });
                     self.state.push_tool_result(&call.id, &result, None);
                 }
             }
@@ -405,6 +421,10 @@ pub enum LoopEvent {
     },
     ToolCallRequired {
         calls: Vec<lattice_core::types::ToolCall>,
+    },
+    ToolResult {
+        call: lattice_core::types::ToolCall,
+        result: String,
     },
     Done {
         usage: Option<lattice_core::streaming::TokenUsage>,

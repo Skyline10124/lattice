@@ -37,16 +37,17 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
-    let final_prompt = crate::session::build_prompt_with_history(previous_session.as_ref(), prompt);
-
     let tools = tool_definitions();
     let mut agent = Agent::new(resolved.clone()).with_tools(tools);
+    if let Some(session) = previous_session.as_ref() {
+        agent.seed_messages(crate::session::messages_for_agent(session));
+    }
 
     if verbose {
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.send_message(&final_prompt).await;
+    let events = agent.send_message(prompt).await;
     let content = run_conversation(&mut agent, events, verbose, json).await?;
 
     let elapsed = start.elapsed().as_millis();
@@ -106,6 +107,16 @@ async fn run_conversation(
                     flush_reasoning(&reasoning_buf, verbose, json);
                     reasoning_buf.clear();
                     tool_calls = calls;
+                }
+                LoopEvent::ToolResult { call, result } => {
+                    if verbose && !json {
+                        eprintln!(
+                            "\n{} {} -> {}",
+                            "tool:".dimmed(),
+                            call.function.name,
+                            result.chars().take(200).collect::<String>()
+                        );
+                    }
                 }
                 LoopEvent::Done { usage } => {
                     flush_reasoning(&reasoning_buf, verbose, json);

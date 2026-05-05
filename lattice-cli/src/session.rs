@@ -212,25 +212,27 @@ impl SessionManager {
     }
 }
 
-pub fn build_prompt_with_history(session: Option<&Session>, prompt: &str) -> String {
-    let Some(session) = session else {
-        return prompt.to_string();
-    };
-
-    let mut ctx = String::from("Previous conversation:\n");
-    for msg in &session.messages {
-        let role = match msg.role.to_lowercase().as_str() {
-            "user" => "User",
-            "assistant" => "Assistant",
-            "system" => "System",
-            "tool" => "Tool",
-            _ => &msg.role,
-        };
-        ctx.push_str(&format!("{}: {}\n", role, msg.content));
-    }
-    ctx.push_str("---\n");
-    ctx.push_str(prompt);
-    ctx
+pub fn messages_for_agent(session: &Session) -> Vec<lattice_core::types::Message> {
+    session
+        .messages
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.role.to_ascii_lowercase().as_str() {
+                "assistant" => lattice_core::types::Role::Assistant,
+                "system" => lattice_core::types::Role::System,
+                "tool" => return None,
+                _ => lattice_core::types::Role::User,
+            };
+            Some(lattice_core::types::Message {
+                role,
+                content: msg.content.clone(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+        })
+        .collect()
 }
 
 pub fn finalize_session_turn(
@@ -461,13 +463,19 @@ mod tests {
     }
 
     #[test]
-    fn test_build_prompt_with_history() {
-        let session = test_session("history");
-        let prompt = build_prompt_with_history(Some(&session), "again");
-        assert!(prompt.contains("Previous conversation:"));
-        assert!(prompt.contains("User: hello"));
-        assert!(prompt.contains("Assistant: hi"));
-        assert!(prompt.ends_with("again"));
-        assert_eq!(build_prompt_with_history(None, "plain"), "plain");
+    fn test_messages_for_agent_filters_tool_messages() {
+        let mut session = test_session("agent-history");
+        session.push_message("tool", "tool result".into());
+        session.push_message("system", "system prompt".into());
+
+        let messages = messages_for_agent(&session);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, lattice_core::types::Role::User);
+        assert_eq!(messages[0].content, "hello");
+        assert_eq!(messages[1].role, lattice_core::types::Role::Assistant);
+        assert_eq!(messages[1].content, "hi");
+        assert_eq!(messages[2].role, lattice_core::types::Role::System);
+        assert_eq!(messages[2].content, "system prompt");
     }
 }

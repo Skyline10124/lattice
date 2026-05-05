@@ -31,14 +31,17 @@ impl AgentState {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::System) {
             msg.content = content.to_string();
         } else {
-            self.messages.push(Message {
-                role: Role::System,
-                content: content.to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+            self.messages.insert(
+                0,
+                Message {
+                    role: Role::System,
+                    content: content.to_string(),
+                    reasoning_content: None,
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                },
+            );
         }
     }
 
@@ -53,11 +56,32 @@ impl AgentState {
         });
     }
 
+    pub fn seed_messages(&mut self, messages: Vec<Message>) {
+        self.tool_names.clear();
+        self.messages = messages;
+    }
+
     /// Replace the first Role::User message in-place.
     /// Used by the prompt engine to refresh compiled context each tool iteration
     /// without growing the message list.
     pub fn replace_first_user_message(&mut self, content: &str) {
         if let Some(msg) = self.messages.iter_mut().find(|m| m.role == Role::User) {
+            msg.content = content.to_string();
+        } else {
+            self.push_user_message(content);
+        }
+    }
+
+    /// Replace the user message for the active turn without rewriting older
+    /// conversation turns. If the active turn has not inserted a user message
+    /// yet, append one.
+    pub fn upsert_user_message_from(&mut self, start: usize, content: &str) {
+        if let Some(msg) = self
+            .messages
+            .iter_mut()
+            .skip(start)
+            .find(|m| m.role == Role::User)
+        {
             msg.content = content.to_string();
         } else {
             self.push_user_message(content);
@@ -315,5 +339,37 @@ mod tests {
             .find(|m| m.role == Role::User)
             .unwrap();
         assert_eq!(user_msg.content, "first user");
+    }
+
+    #[test]
+    fn test_upsert_user_message_from_preserves_older_user_messages() {
+        let mut state = AgentState::new(make_resolved(131072));
+        state.push_user_message("older user");
+        state.push_assistant_message("older assistant", "", None);
+        let active_start = state.messages.len();
+
+        state.upsert_user_message_from(active_start, "compiled active turn");
+
+        assert_eq!(state.messages[0].content, "older user");
+        assert_eq!(state.messages[2].content, "compiled active turn");
+
+        state.upsert_user_message_from(active_start, "recompiled active turn");
+
+        assert_eq!(state.messages[0].content, "older user");
+        assert_eq!(state.messages.len(), 3);
+        assert_eq!(state.messages[2].content, "recompiled active turn");
+    }
+
+    #[test]
+    fn test_push_system_message_inserts_before_seeded_history() {
+        let mut state = AgentState::new(make_resolved(131072));
+        state.push_user_message("older user");
+        state.push_assistant_message("older assistant", "", None);
+
+        state.push_system_message("system");
+
+        assert_eq!(state.messages[0].role, Role::System);
+        assert_eq!(state.messages[0].content, "system");
+        assert_eq!(state.messages[1].content, "older user");
     }
 }

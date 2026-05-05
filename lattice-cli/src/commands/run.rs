@@ -7,6 +7,7 @@ use lattice_agent::{
 };
 use lattice_bus::{AgentRegistry, Pipeline};
 use lattice_core::router::ModelRouter;
+use lattice_core::types::{Message, Role};
 use lattice_plugin::registry::PluginRegistry;
 use std::collections::HashMap;
 use std::io::Write;
@@ -48,21 +49,24 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
-    let final_prompt =
-        crate::session::build_prompt_with_history(previous_session.as_ref(), &prompt);
-
     let tools = default_tool_definitions();
     let mut agent = Agent::new(resolved)
         .with_tools(tools)
         .with_tool_executor(Box::new(
             DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor"),
         ));
+    if let Some(session) = previous_session.as_ref() {
+        agent.seed_messages(crate::session::messages_for_agent(session));
+    }
+    if let Some(system_prompt) = system_prompt {
+        agent.set_system_prompt(system_prompt);
+    }
 
     if verbose {
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.run(&final_prompt, 10).await;
+    let events = agent.run(&prompt, 10).await;
     let content = extract_content(&events);
     display_events(&agent, events, verbose, json)?;
 
@@ -94,8 +98,6 @@ async fn dry_run_prompt(
     use lattice_agent::prompt;
     use std::collections::HashMap;
 
-    let user_input = crate::session::build_prompt_with_history(previous_session, prompt);
-
     // Use a default 128K model for dry-run to exercise full budget logic
     let resolved = lattice_core::ResolvedModel {
         canonical_id: model_name.to_string(),
@@ -123,7 +125,11 @@ async fn dry_run_prompt(
         bus_events: &[],
     };
     let (sections, budgets) = registry.collect(&ctx).await;
-    let rendered = prompt::compiler::compile(&sections, &budgets, &user_input, &resolved);
+    let rendered = prompt::compiler::compile(&sections, &budgets, prompt, &resolved);
+    let history = previous_session
+        .map(crate::session::messages_for_agent)
+        .unwrap_or_default();
+    let agent_messages = merge_rendered_into_history(history, &rendered.messages);
 
     println!("{}", "═══ Compiled Prompt (dry-run) ═══".green());
     println!("{}", "─ Input Sections ─".dimmed());
@@ -144,12 +150,12 @@ async fn dry_run_prompt(
     }
     println!();
     println!("{}", "─ Rendered Messages ─".dimmed());
-    for msg in &rendered.messages {
+    for msg in &agent_messages {
         let role_label = match msg.role {
-            lattice_core::types::Role::System => "System".red(),
-            lattice_core::types::Role::User => "User".cyan(),
-            lattice_core::types::Role::Assistant => "Assistant".green(),
-            lattice_core::types::Role::Tool => "Tool".yellow(),
+            Role::System => "System".red(),
+            Role::User => "User".cyan(),
+            Role::Assistant => "Assistant".green(),
+            Role::Tool => "Tool".yellow(),
         };
         println!("  [{}] {}", role_label, msg.content);
     }
@@ -162,6 +168,34 @@ async fn dry_run_prompt(
     );
 
     Ok(())
+}
+
+fn merge_rendered_into_history(mut messages: Vec<Message>, rendered: &[Message]) -> Vec<Message> {
+    let user_message_start = messages.len();
+    for msg in rendered {
+        match msg.role {
+            Role::System => {
+                if let Some(existing) = messages.iter_mut().find(|m| m.role == Role::System) {
+                    existing.content = msg.content.clone();
+                } else {
+                    messages.push(msg.clone());
+                }
+            }
+            Role::User => {
+                if let Some(existing) = messages
+                    .iter_mut()
+                    .skip(user_message_start)
+                    .find(|m| m.role == Role::User)
+                {
+                    existing.content = msg.content.clone();
+                } else {
+                    messages.push(msg.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    messages
 }
 
 /// Run a pipeline: load agent registry, create registries, and execute.
@@ -364,6 +398,16 @@ fn display_events(agent: &Agent, events: Vec<LoopEvent>, verbose: bool, json: bo
                 reasoning_buf.clear();
                 if verbose && !json {
                     eprintln!("\n{} {} tool call(s)...", "executing".dimmed(), calls.len());
+                }
+            }
+            LoopEvent::ToolResult { call, result } => {
+                if verbose && !json {
+                    eprintln!(
+                        "\n{} {} -> {}",
+                        "tool".dimmed(),
+                        call.function.name,
+                        result.chars().take(200).collect::<String>()
+                    );
                 }
             }
             LoopEvent::Done { usage } => {

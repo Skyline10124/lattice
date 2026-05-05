@@ -8,6 +8,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Write};
 
+use crate::config::Config;
+use crate::credentials::CredentialStore;
+
 mod app;
 mod event;
 mod theme;
@@ -27,7 +30,16 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(prompt: Option<String>, model: Option<String>) -> Result<()> {
+pub struct TuiOptions {
+    pub prompt: Option<String>,
+    pub model: String,
+    pub provider_override: Option<String>,
+    pub credentials: std::collections::HashMap<String, String>,
+    pub save_sessions: bool,
+    pub previous_session: Option<crate::session::Session>,
+}
+
+pub async fn run(options: TuiOptions) -> Result<()> {
     terminal::enable_raw_mode()?;
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
@@ -41,12 +53,16 @@ pub async fn run(prompt: Option<String>, model: Option<String>) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    if let Some(prompt) = prompt {
+    app.current_model = options.model;
+    app.provider_override = options.provider_override;
+    app.credentials = options.credentials;
+    app.save_sessions = options.save_sessions;
+    if let Some(session) = options.previous_session {
+        app.load_session(session);
+    }
+    if let Some(prompt) = options.prompt {
         app.input = prompt;
         app.input_cursor = app.input.len();
-    }
-    if let Some(model) = model {
-        app.current_model = model;
     }
     let mut events = EventHandler::new(250);
     app.event_tx = Some(events.sender());
@@ -66,6 +82,33 @@ pub async fn run(prompt: Option<String>, model: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn options_from_config(
+    prompt: Option<String>,
+    model: Option<String>,
+    provider_override: Option<String>,
+    config: &Config,
+    creds: &CredentialStore,
+    save_sessions: bool,
+    previous_session: Option<crate::session::Session>,
+) -> TuiOptions {
+    let model = model
+        .or_else(|| {
+            previous_session
+                .as_ref()
+                .map(|session| session.model.clone())
+        })
+        .unwrap_or_else(|| config.default_model());
+
+    TuiOptions {
+        prompt,
+        model,
+        provider_override,
+        credentials: creds.to_hashmap(),
+        save_sessions,
+        previous_session,
+    }
 }
 
 async fn run_app<B: ratatui::backend::Backend>(
@@ -88,6 +131,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                     error,
                 } => {
                     app.apply_stream_token(content, reasoning, done, error);
+                }
+                event::Event::ToolOutput {
+                    name,
+                    arguments,
+                    result,
+                } => {
+                    app.apply_tool_output(name, arguments, result);
                 }
                 event::Event::ModelInfo { model, provider } => {
                     app.current_model = model;
