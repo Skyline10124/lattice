@@ -201,10 +201,11 @@ impl Pipeline {
                 if let (Some(plugins_config), Some(pr)) = (&profile.plugins, &self.plugin_registry)
                 {
                     let empty_tr = ToolRegistry::new();
-                    let tr_ref: &ToolRegistry = match self.tool_registry.as_ref() {
-                        Some(arc) => arc.as_ref(),
-                        None => &empty_tr,
-                    };
+                    let (tr_ref, registry_access): (&ToolRegistry, Option<Arc<ToolRegistry>>) =
+                        match self.tool_registry.as_ref() {
+                            Some(arc) => (arc.as_ref(), Some(Arc::clone(arc))),
+                            None => (&empty_tr, None),
+                        };
 
                     let mut dag_runner = PluginDagRunner::new(
                         plugins_config,
@@ -213,6 +214,12 @@ impl Pipeline {
                         lattice_core::retry::RetryPolicy::default(),
                         self.shared_memory.clone(),
                     );
+                    if let Some(registry) = registry_access {
+                        dag_runner = dag_runner.with_registry_tool_access(registry);
+                    }
+                    if let Some(creds) = &self.credentials {
+                        dag_runner = dag_runner.with_credentials(creds.clone());
+                    }
                     dag_runner
                         .run(&current_input, &profile.agent.model)
                         .await

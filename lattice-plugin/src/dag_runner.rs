@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lattice_agent::memory::Memory;
@@ -6,6 +7,7 @@ use lattice_agent::{
     Agent, DefaultToolExecutor,
 };
 use lattice_core::retry::RetryPolicy;
+use lattice_core::router::ModelRouter;
 
 use crate::erased_runner::run_plugin_loop;
 use crate::orchestration::{HandoffTarget, PluginsConfig};
@@ -54,6 +56,9 @@ pub enum DAGError {
 
     #[error("tool registry not configured")]
     MissingToolRegistry,
+
+    #[error("tool executor setup failed: {0}")]
+    ToolExecutor(String),
 }
 
 impl DAGError {
@@ -73,8 +78,10 @@ pub struct PluginDagRunner<'a> {
     config: &'a PluginsConfig,
     plugin_registry: &'a crate::registry::PluginRegistry,
     tool_registry: &'a ToolRegistry,
+    registry_tool_access: Option<Arc<ToolRegistry>>,
     retry_policy: RetryPolicy,
     shared_memory: Option<Arc<dyn Memory>>,
+    credentials: Option<HashMap<String, String>>,
 }
 
 impl<'a> PluginDagRunner<'a> {
@@ -89,9 +96,24 @@ impl<'a> PluginDagRunner<'a> {
             config,
             plugin_registry,
             tool_registry,
+            registry_tool_access: None,
             retry_policy,
             shared_memory,
+            credentials: None,
         }
+    }
+
+    /// Attach registry-backed tool handlers so DAG slot tools can execute the
+    /// same handlers advertised in their tool definitions.
+    pub fn with_registry_tool_access(mut self, registry: Arc<ToolRegistry>) -> Self {
+        self.registry_tool_access = Some(registry);
+        self
+    }
+
+    /// Set externally supplied credentials for model resolution.
+    pub fn with_credentials(mut self, credentials: HashMap<String, String>) -> Self {
+        self.credentials = Some(credentials);
+        self
     }
 
     /// Traverse edges in TOML definition order.
@@ -135,9 +157,11 @@ impl<'a> PluginDagRunner<'a> {
                 .ok_or_else(|| DAGError::PluginNotFound(slot.plugin.clone()))?;
 
             let model = slot.model_override.as_deref().unwrap_or(default_model);
-            let resolved = lattice_core::resolve(model)?;
+            let resolved = self.resolve_model(model)?;
             let mut agent = Agent::new(resolved);
-            agent.set_system_prompt(bundle.plugin.system_prompt());
+            if let Some(ref mem) = self.shared_memory {
+                agent = agent.with_memory(Arc::clone(mem));
+            }
 
             let tools = merge_tool_definitions(
                 self.tool_registry,
@@ -146,9 +170,8 @@ impl<'a> PluginDagRunner<'a> {
                 bundle.plugin.tools(),
             );
             agent = agent.with_tools(tools);
-            agent = agent.with_tool_executor(Box::new(
-                DefaultToolExecutor::new(".").expect("failed to build DefaultToolExecutor"),
-            ));
+            let executor = self.default_tool_executor()?;
+            agent = agent.with_tool_executor(Box::new(executor));
 
             let behavior = slot
                 .behavior
@@ -206,6 +229,25 @@ impl<'a> PluginDagRunner<'a> {
                 Some(HandoffTarget::Fork(_)) => return Err(DAGError::ForkNotSupportedInDag),
                 None => return Ok(output_json),
             }
+        }
+    }
+
+    fn resolve_model(&self, model: &str) -> Result<lattice_core::ResolvedModel, DAGError> {
+        let router = match &self.credentials {
+            Some(creds) => ModelRouter::with_credentials(creds.clone()),
+            None => ModelRouter::new(),
+        };
+        Ok(router.resolve(model, None)?)
+    }
+
+    fn default_tool_executor(&self) -> Result<DefaultToolExecutor, DAGError> {
+        match &self.registry_tool_access {
+            Some(registry) if !registry.is_empty() => DefaultToolExecutor::new_with_registry(
+                ".",
+                Some(Arc::clone(registry) as Arc<dyn lattice_agent::RegistryToolAccess>),
+            )
+            .map_err(DAGError::ToolExecutor),
+            _ => DefaultToolExecutor::new(".").map_err(DAGError::ToolExecutor),
         }
     }
 }

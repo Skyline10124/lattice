@@ -1,4 +1,5 @@
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::HashMap;
 
 use lattice_core::types::ToolDefinition;
 
@@ -10,6 +11,17 @@ use crate::PluginError;
 pub trait ErasedPlugin: Send + Sync {
     fn name(&self) -> &str;
     fn system_prompt(&self) -> &str;
+    fn system_prompt_delta(&self) -> Option<lattice_agent::prompt::SystemPromptDelta> {
+        let prompt = self.system_prompt();
+        if prompt.trim().is_empty() {
+            None
+        } else {
+            Some(lattice_agent::prompt::SystemPromptDelta::agent(
+                prompt,
+                HashMap::new(),
+            ))
+        }
+    }
     fn to_prompt_json(&self, context: &serde_json::Value) -> Result<String, PluginError>;
     fn parse_output_json(&self, raw: &str) -> Result<serde_json::Value, PluginError>;
     fn tools(&self) -> &[ToolDefinition];
@@ -28,6 +40,10 @@ where
 
     fn system_prompt(&self) -> &str {
         Plugin::system_prompt(self)
+    }
+
+    fn system_prompt_delta(&self) -> Option<lattice_agent::prompt::SystemPromptDelta> {
+        Plugin::system_prompt_delta(self)
     }
 
     fn to_prompt_json(&self, context: &serde_json::Value) -> Result<String, PluginError> {

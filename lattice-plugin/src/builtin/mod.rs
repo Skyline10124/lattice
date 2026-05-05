@@ -12,6 +12,7 @@ pub mod plan_gen;
 pub mod pptx_gen;
 pub mod refactor;
 pub mod security_audit;
+pub mod superpowers;
 pub mod test_gen;
 pub mod verification;
 
@@ -29,8 +30,16 @@ fn bundle(name: &str, description: &str, plugin: Box<dyn ErasedPlugin>) -> Plugi
     }
 }
 
+fn superpowers_bundle(skill: &'static superpowers::SuperpowerSkill) -> PluginBundle {
+    bundle(
+        &format!("superpowers:{}", skill.key),
+        skill.description,
+        Box::new(superpowers::SuperpowerSkillPlugin::new(skill)),
+    )
+}
+
 pub fn builtin_plugin_bundles() -> Vec<PluginBundle> {
-    vec![
+    let mut bundles = vec![
         bundle(
             "CodeReview",
             "Code review plugin",
@@ -86,7 +95,20 @@ pub fn builtin_plugin_bundles() -> Vec<PluginBundle> {
             "Verification plugin",
             Box::new(verification::VerificationPlugin::new()),
         ),
-    ]
+    ];
+
+    bundles.extend(
+        superpowers::SUPERPOWER_SKILLS
+            .iter()
+            .map(superpowers_bundle),
+    );
+    bundles.push(bundle(
+        "superpowers:workflow",
+        "Superpowers workflow router",
+        Box::new(superpowers::SuperpowersWorkflowPlugin::new()),
+    ));
+
+    bundles
 }
 
 pub fn register_builtin_plugins(registry: &PluginRegistry) -> Result<(), RegistryError> {

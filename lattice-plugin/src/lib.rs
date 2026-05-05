@@ -5,6 +5,7 @@ use lattice_core::streaming::TokenUsage;
 use lattice_core::types::ToolDefinition;
 
 use serde::{de::DeserializeOwned, Serialize};
+use std::collections::HashMap;
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -13,13 +14,20 @@ pub mod bundle;
 pub mod dag_runner;
 pub mod erased;
 pub mod erased_runner;
+pub mod loader;
+pub mod manifest;
 pub mod orchestration;
 pub mod registry;
+pub mod watcher;
 
 // Re-exports for backward compatibility
 pub use builtin::code_review::CodeReviewPlugin;
 pub(crate) use builtin::parse_utils::extract_confidence;
 pub use builtin::plan_gen::PlanGenPlugin;
+pub use builtin::superpowers::{
+    all_skill_keys, find_skill, SuperpowerSkillInput, SuperpowerSkillOutput, SuperpowerSkillPlugin,
+    SuperpowersWorkflowInput, SuperpowersWorkflowOutput, SuperpowersWorkflowPlugin,
+};
 pub use builtin::verification::VerificationPlugin;
 
 use crate::erased::ErasedPlugin;
@@ -43,6 +51,22 @@ pub trait Plugin: Send + Sync {
 
     /// System prompt that defines the agent's identity and task.
     fn system_prompt(&self) -> &str;
+
+    /// Optional structured system prompt delta.
+    ///
+    /// Plugins can override this to provide a template plus trusted variables.
+    /// The default preserves the legacy `system_prompt()` behavior.
+    fn system_prompt_delta(&self) -> Option<lattice_agent::prompt::SystemPromptDelta> {
+        let prompt = self.system_prompt();
+        if prompt.trim().is_empty() {
+            None
+        } else {
+            Some(lattice_agent::prompt::SystemPromptDelta::agent(
+                prompt,
+                HashMap::new(),
+            ))
+        }
+    }
 
     /// Format the typed input into a prompt string for the LLM.
     fn to_prompt(&self, input: &Self::Input) -> String;
@@ -218,6 +242,9 @@ impl<P: Plugin + ?Sized> ErasedPlugin for ErasedPluginAdapter<'_, P> {
     }
     fn system_prompt(&self) -> &str {
         Plugin::system_prompt(self.0)
+    }
+    fn system_prompt_delta(&self) -> Option<lattice_agent::prompt::SystemPromptDelta> {
+        Plugin::system_prompt_delta(self.0)
     }
     fn to_prompt_json(&self, context: &serde_json::Value) -> Result<String, PluginError> {
         let typed: P::Input = serde_json::from_value(context.clone())
@@ -714,7 +741,7 @@ mod tests {
         use crate::bundle::{BehaviorMode, PluginBundle, PluginMeta};
         use crate::registry::PluginRegistry;
 
-        let mut registry = PluginRegistry::new();
+        let registry = PluginRegistry::new();
         let bundle = PluginBundle {
             meta: PluginMeta {
                 name: "test".into(),
@@ -736,7 +763,7 @@ mod tests {
         use crate::bundle::{BehaviorMode, PluginBundle, PluginMeta};
         use crate::registry::PluginRegistry;
 
-        let mut registry = PluginRegistry::new();
+        let registry = PluginRegistry::new();
         let make_bundle = |name: &str| PluginBundle {
             meta: PluginMeta {
                 name: name.into(),
@@ -772,11 +799,44 @@ mod tests {
             "KnowledgeBase",
             "PlanGen",
             "Verification",
+            "superpowers:workflow",
+            "superpowers:using-superpowers",
+            "superpowers:brainstorming",
+            "superpowers:using-git-worktrees",
+            "superpowers:writing-plans",
+            "superpowers:subagent-driven-development",
+            "superpowers:executing-plans",
+            "superpowers:dispatching-parallel-agents",
+            "superpowers:test-driven-development",
+            "superpowers:requesting-code-review",
+            "superpowers:receiving-code-review",
+            "superpowers:systematic-debugging",
+            "superpowers:verification-before-completion",
+            "superpowers:finishing-a-development-branch",
+            "superpowers:writing-skills",
         ];
 
         assert_eq!(registry.len(), expected.len());
         for name in expected {
             assert!(registry.get(name).is_some(), "missing builtin {name}");
         }
+    }
+
+    #[test]
+    fn test_superpowers_skill_resources_are_registered() {
+        use crate::builtin::superpowers::{all_skill_keys, find_skill, SUPERPOWER_SKILLS};
+
+        assert_eq!(SUPERPOWER_SKILLS.len(), 14);
+        assert!(all_skill_keys().contains(&"brainstorming"));
+
+        let brainstorming = find_skill("brainstorming").expect("brainstorming skill");
+        assert!(brainstorming
+            .skill
+            .contains("Brainstorming Ideas Into Designs"));
+        assert_eq!(brainstorming.references.len(), 2);
+
+        let tdd = find_skill("test-driven-development").expect("tdd skill");
+        assert!(tdd.skill.contains("Red-Green-Refactor"));
+        assert_eq!(tdd.references.len(), 1);
     }
 }

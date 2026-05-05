@@ -1,4 +1,5 @@
 use lattice_core::retry::RetryPolicy;
+use std::collections::HashMap;
 
 use crate::erased::ErasedPlugin;
 use crate::{
@@ -21,11 +22,7 @@ pub async fn run_plugin_loop(
     retry_policy: Option<&RetryPolicy>,
     memory: Option<&dyn lattice_agent::memory::Memory>,
 ) -> Result<RunResult, PluginError> {
-    // Apply plugin system prompt to the agent
-    let system_prompt = plugin.system_prompt();
-    if !system_prompt.is_empty() {
-        agent.set_system_prompt(system_prompt);
-    }
+    agent.set_system_prompt_delta(plugin.system_prompt_delta());
 
     // Inject plugin-specific tool definitions
     let plugin_tools = plugin.tools().to_vec();
@@ -43,8 +40,17 @@ pub async fn run_plugin_loop(
         );
     }
 
-    let mut prompt = plugin.to_prompt_json(context)?;
     let schema = plugin.output_schema();
+    agent.set_output_contract_delta(schema.as_ref().map(|schema_json| {
+        let output_schema =
+            serde_json::to_string_pretty(schema_json).unwrap_or_else(|_| schema_json.to_string());
+        lattice_agent::prompt::SystemPromptDelta::contract(
+            "Output contract:\nReturn only valid JSON matching this schema:\n{{output_schema}}",
+            HashMap::from([("output_schema".to_string(), output_schema)]),
+        )
+    }));
+
+    let mut prompt = plugin.to_prompt_json(context)?;
     let mut attempt = 0u32;
 
     if let Some(h) = hooks {
