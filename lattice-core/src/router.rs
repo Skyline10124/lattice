@@ -776,6 +776,61 @@ impl ModelRouter {
 /// - Only http:// and https:// schemes are allowed (reject file://, ftp://, data://)
 /// - HTTP is only allowed for localhost/127.0.0.1/::1
 /// - URLs with userinfo (user:pass@host) are rejected (SSRF protection)
+/// Check if an IP address is private, loopback, or link-local — the ranges
+/// that definitively indicate an internal network. Uses manual checks since
+/// `IpAddr::is_private()` / `is_link_local()` are not stable on all Rust versions.
+///
+/// Intentionally conservative: 100.64/10 (CGNAT) and 198.18/15 (benchmarking)
+/// are NOT rejected because cloud/CDN/VPN environments may legitimately use them.
+fn is_private_or_reserved(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                // 10.0.0.0/8
+                || octets[0] == 10
+                // 172.16.0.0/12
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                // 192.168.0.0/16
+                || (octets[0] == 192 && octets[1] == 168)
+                // 169.254.0.0/16 (link-local)
+                || (octets[0] == 169 && octets[1] == 254)
+                // 127.0.0.0/8 (loopback — redundant but explicit)
+                || octets[0] == 127
+                // 0.0.0.0/8 (current network)
+                || octets[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // fc00::/7 (unique local / private)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10 (link-local)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // ::ffff:0:0/96 (IPv4-mapped — check the embedded v4)
+                || is_ipv4_mapped_private(&v6)
+        }
+    }
+}
+
+fn is_ipv4_mapped_private(v6: &std::net::Ipv6Addr) -> bool {
+    let segments = v6.segments();
+    if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+        let v4 = std::net::Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            (segments[6] & 0xff) as u8,
+            (segments[7] >> 8) as u8,
+            (segments[7] & 0xff) as u8,
+        );
+        return is_private_or_reserved(std::net::IpAddr::V4(v4));
+    }
+    false
+}
+
 pub fn validate_base_url(url: &str) -> Result<(), LatticeError> {
     if url.is_empty() {
         return Ok(());
@@ -823,6 +878,26 @@ pub fn validate_base_url(url: &str) -> Result<(), LatticeError> {
                 url
             ),
         });
+    }
+
+    // DNS rebinding protection: resolve the hostname and reject private/reserved IPs.
+    // This prevents attacks where a DNS rebinding service (e.g., nip.io, xip.io)
+    // resolves to an internal IP, bypassing host-based checks.
+    if !host.ends_with(".local") && host != "localhost" && host != "127.0.0.1" && host != "::1" {
+        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&format!("{host}:443")) {
+            for addr in addrs {
+                if is_private_or_reserved(addr.ip()) {
+                    return Err(LatticeError::Config {
+                        message: format!(
+                            "Insecure base_url '{}': hostname '{}' resolves to private/reserved IP {}. Use a public endpoint.",
+                            url, host, addr.ip()
+                        ),
+                    });
+                }
+            }
+        }
+        // DNS resolution failure is not an error here — the request will fail later
+        // if the host is truly unreachable. We only reject *known* private IPs.
     }
 
     Ok(())
@@ -1186,6 +1261,50 @@ mod tests {
         assert!(validate_base_url("api.openai.com").is_err());
         assert!(validate_base_url("localhost:8080").is_err());
         assert!(validate_base_url("not-a-url").is_err());
+    }
+
+    #[test]
+    fn test_is_private_or_reserved_ipv4() {
+        use std::net::IpAddr;
+        let private: Vec<&str> = vec![
+            "10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1",
+            "127.0.0.1", "0.0.0.1", "169.254.1.1",
+        ];
+        for ip in private {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(is_private_or_reserved(addr), "{} should be private", ip);
+        }
+        let public: Vec<&str> = vec![
+            "1.1.1.1", "8.8.8.8", "104.18.0.1", "151.101.1.1",
+            "198.18.0.202", // benchmarking — not rejected (CDN/VPN use)
+        ];
+        for ip in public {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!is_private_or_reserved(addr), "{} should NOT be private", ip);
+        }
+    }
+
+    #[test]
+    fn test_is_private_or_reserved_ipv6() {
+        use std::net::IpAddr;
+        let private: Vec<&str> = vec![
+            "::1",           // loopback
+            "fc00::1",       // unique local
+            "fe80::1",       // link-local
+            "::ffff:192.168.1.1", // IPv4-mapped private
+        ];
+        for ip in private {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(is_private_or_reserved(addr), "{} should be private", ip);
+        }
+        let public: Vec<&str> = vec![
+            "2606:4700::1",  // Cloudflare
+            "2001:4860::1",  // Google
+        ];
+        for ip in public {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(!is_private_or_reserved(addr), "{} should NOT be private", ip);
+        }
     }
 
     #[test]

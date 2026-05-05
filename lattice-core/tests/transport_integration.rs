@@ -11,7 +11,6 @@ use lattice_core::transport::anthropic::AnthropicTransport;
 use lattice_core::transport::chat_completions::ChatCompletionsTransport;
 use lattice_core::transport::dispatcher::TransportDispatcher;
 use lattice_core::transport::gemini::GeminiTransport;
-use lattice_core::transport::openai_compat::OpenAICompatTransport;
 use lattice_core::transport::Transport;
 use lattice_core::types::{FunctionCall, Message, Role, ToolCall, ToolDefinition};
 use serde_json::{json, Value};
@@ -813,116 +812,6 @@ mod gemini {
         let tcs = result.tool_calls.unwrap();
         assert_eq!(tcs[0].function.name, "get_weather");
         assert_eq!(result.finish_reason, "tool_calls");
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// OpenAI-compat tests
-// ═══════════════════════════════════════════════════════════════════════════
-
-mod openai_compat {
-    use super::*;
-
-    #[test]
-    fn custom_base_url_configuration() {
-        let custom_url = "https://my-llm.internal.corp/v1";
-        let transport = OpenAICompatTransport::new(custom_url, HashMap::new());
-        assert_eq!(transport.base_url(), custom_url);
-
-        let transport_with_headers = OpenAICompatTransport::new(
-            "https://custom.api.com/v1",
-            HashMap::from([("X-Custom".to_string(), "value".to_string())]),
-        );
-        assert_eq!(
-            transport_with_headers.base_url(),
-            "https://custom.api.com/v1"
-        );
-        assert_eq!(
-            transport_with_headers
-                .extra_headers()
-                .get("X-Custom")
-                .unwrap(),
-            "value"
-        );
-    }
-
-    #[test]
-    fn delegates_normalize_to_chat_completions() {
-        let transport = OpenAICompatTransport::new("http://localhost:11434/v1", HashMap::new());
-        let mut request = make_chat_request(sample_messages(), sample_tools());
-        request.model = "llama3".to_string();
-
-        let body = transport.normalize_request(&request).unwrap();
-
-        // Should produce identical format to ChatCompletionsTransport
-        assert_eq!(body["model"], "llama3");
-        assert!(body["messages"].is_array());
-        assert!(body["tools"].is_array());
-
-        let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-        assert_eq!(messages[2]["role"], "assistant");
-        assert_eq!(messages[3]["role"], "tool");
-    }
-
-    #[test]
-    fn delegates_denormalize_to_chat_completions() {
-        let transport =
-            OpenAICompatTransport::new("https://api.groq.com/openai/v1", HashMap::new());
-
-        let response = json!({
-            "id": "chatcmpl-compat",
-            "model": "llama-3-70b",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello from Groq!",
-                    "tool_calls": [{
-                        "id": "call_groq1",
-                        "type": "function",
-                        "function": {"name": "search", "arguments": "{\"q\": \"test\"}"}
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23}
-        });
-
-        let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("Hello from Groq!"));
-        let tcs = result.tool_calls.unwrap();
-        assert_eq!(tcs[0].id, "call_groq1");
-        assert_eq!(tcs[0].function.name, "search");
-        assert_eq!(result.model, "llama-3-70b");
-        assert_eq!(result.finish_reason, "tool_calls");
-    }
-
-    #[test]
-    fn full_pipeline_compat_roundtrip() {
-        let transport = OpenAICompatTransport::new("https://api.deepseek.com/v1", HashMap::new());
-        let mut request = make_chat_request(sample_messages(), sample_tools());
-        request.model = "deepseek-chat".to_string();
-
-        let body = transport.normalize_request(&request).unwrap();
-        assert_eq!(body["model"], "deepseek-chat");
-
-        let response = json!({
-            "id": "chatcmpl-deepseek",
-            "model": "deepseek-chat",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "Weather: sunny"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 35, "completion_tokens": 5, "total_tokens": 40}
-        });
-
-        let result = transport.denormalize_response(&response).unwrap();
-        assert_eq!(result.content.as_deref(), Some("Weather: sunny"));
-        assert_eq!(result.finish_reason, "stop");
     }
 }
 

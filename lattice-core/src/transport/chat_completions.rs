@@ -2,10 +2,9 @@
 //!
 //! This module provides [`ChatCompletionsTransport`], which handles
 //! normalization/denormalization for the OpenAI Chat Completions API format.
-//!
-//! Other OpenAI-compatible providers (Ollama, Groq, xAI, DeepSeek, Mistral, OpenRouter)
-//! wrap this transport via [`crate::transport::openai_compat::OpenAICompatTransport`],
-//! delegating all format logic here and only overriding the base URL and extra headers.
+//! OpenAI-compatible providers (Ollama, Groq, xAI, DeepSeek, Mistral, OpenRouter)
+//! share the same wire format — base URL and extra headers are configured per
+//! provider via catalog defaults, not through a separate transport type.
 
 use std::collections::HashMap;
 
@@ -49,9 +48,9 @@ pub enum TransportError {
 /// providers. It handles converting between internal types and the
 /// `chat.completions` / `chat.completions.chunk` JSON format.
 ///
-/// OpenAI-compatible providers (Ollama, Groq, etc.) wrap this transport via
-/// [`crate::transport::openai_compat::OpenAICompatTransport`] to override
-/// the base URL and extra headers while reusing the same format logic.
+/// Base URL and extra headers are configured per provider via catalog defaults;
+/// use [`ChatCompletionsTransport::with_base_url`] or
+/// [`ChatCompletionsTransport::with_extra_headers`] for custom endpoints.
 pub struct ChatCompletionsTransport {
     base: TransportBase,
 }

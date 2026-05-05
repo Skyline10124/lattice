@@ -23,6 +23,7 @@ urlencoding = "2"
 indexmap = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time", "local-time"] }
+chrono = "0.4"
 
 [dev-dependencies]
 lattice-agent = { path = "../lattice-agent" }

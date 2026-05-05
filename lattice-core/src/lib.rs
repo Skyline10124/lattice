@@ -89,27 +89,32 @@ fn is_private_ip(host: &str) -> bool {
     false
 }
 
-/// Sensitive HTTP header names that must not be overridden via provider_specific.
-const SENSITIVE_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "host",
-    "cookie",
-    "set-cookie",
-    "x-api-key",
-    "x-goog-api-key",
-    "origin",
-    "referer",
-    "proxy-authorization",
-    "connection",
-    "upgrade",
+/// HTTP header names that are explicitly allowed to be injected via provider_specific.
+/// All other headers are rejected — whitelist approach prevents injection of
+/// sensitive headers (authorization, cookie, etc.) that a denylist might miss.
+const ALLOWED_INJECTED_HEADERS: &[&str] = &[
+    "x-request-id",
+    "x-correlation-id",
+    "x-trace-id",
+    "x-custom-header",
+    "content-type",
+    "accept",
+    "accept-language",
+    "user-agent",
+    "x-organization",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-beta",
+    "x-goog-project-id",
 ];
 
 fn validate_injected_header(header_name: &str) -> Result<(), LatticeError> {
     let lower = header_name.to_lowercase();
-    if SENSITIVE_HEADER_NAMES.contains(&lower.as_str()) {
+    if !ALLOWED_INJECTED_HEADERS.contains(&lower.as_str()) {
         return Err(LatticeError::Config {
             message: format!(
-                "provider_specific header '{}' is a protected header and cannot be injected",
+                "provider_specific header '{}' is not in the allowed header whitelist and cannot be injected",
                 header_name
             ),
         });
@@ -192,23 +197,18 @@ async fn send_streaming_request(
 
     let status = response.status();
     if !status.is_success() {
-        // Read Retry-After header (RFC 7231) and inject it into the body
-        // text so the existing body-based extract_retry_after can find it.
+        // Read Retry-After header (RFC 7231) — passed directly to classifier.
         let retry_after_header = response
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let mut body_text = response.text().await.unwrap_or_default();
-        if let Some(ref ra) = retry_after_header {
-            // Append as a synthetic field so classify / extract_retry_after
-            // can pick it up alongside any body-based retry_after.
-            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
-        }
-        return Err(crate::errors::ErrorClassifier::classify(
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(crate::errors::ErrorClassifier::classify_with_retry_header(
             status.as_u16(),
             &body_text,
             &resolved.provider,
+            retry_after_header.as_deref(),
         ));
     }
 
@@ -765,6 +765,8 @@ mod validate_header_tests {
             "cookie",
             "x-api-key",
             "x-goog-api-key",
+            "set-cookie",
+            "proxy-authorization",
         ] {
             let result = validate_injected_header(sensitive);
             assert!(result.is_err(), "should reject '{}'", sensitive);
@@ -772,8 +774,16 @@ mod validate_header_tests {
     }
 
     #[test]
-    fn test_validate_injected_header_accepts_non_sensitive() {
-        for ok in &["x-custom-id", "x-request-source", "content-type"] {
+    fn test_validate_injected_header_rejects_unknown() {
+        for unknown in &["x-evil-header", "x-inject", "x-anything-goes"] {
+            let result = validate_injected_header(unknown);
+            assert!(result.is_err(), "should reject unknown '{}'", unknown);
+        }
+    }
+
+    #[test]
+    fn test_validate_injected_header_accepts_whitelisted() {
+        for ok in &["x-request-id", "content-type", "anthropic-version", "openai-beta"] {
             let result = validate_injected_header(ok);
             assert!(result.is_ok(), "should accept '{}'", ok);
         }

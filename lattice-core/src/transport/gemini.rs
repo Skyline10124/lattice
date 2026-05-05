@@ -467,6 +467,7 @@ pub async fn send_gemini_streaming_request(
 
     for (key, value) in &resolved.provider_specific {
         if let Some(header_name) = key.strip_prefix("header:") {
+            crate::validate_injected_header(header_name)?;
             req = req.header(header_name, value);
         }
     }
@@ -483,14 +484,12 @@ pub async fn send_gemini_streaming_request(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let mut body_text = response.text().await.unwrap_or_default();
-        if let Some(ref ra) = retry_after_header {
-            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
-        }
-        return Err(crate::errors::ErrorClassifier::classify(
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(crate::errors::ErrorClassifier::classify_with_retry_header(
             status.as_u16(),
             &body_text,
             &resolved.provider,
+            retry_after_header.as_deref(),
         ));
     }
 
@@ -561,14 +560,12 @@ pub async fn send_gemini_nonstreaming_request(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let mut body_text = response.text().await.unwrap_or_default();
-        if let Some(ref ra) = retry_after_header {
-            body_text.push_str(&format!("\n\"retry_after\": {}", ra));
-        }
-        return Err(crate::errors::ErrorClassifier::classify(
+        let body_text = response.text().await.unwrap_or_default();
+        return Err(crate::errors::ErrorClassifier::classify_with_retry_header(
             status.as_u16(),
             &body_text,
             &resolved.provider,
+            retry_after_header.as_deref(),
         ));
     }
 

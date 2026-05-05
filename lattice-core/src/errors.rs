@@ -128,12 +128,25 @@ impl ErrorClassifier {
     /// * `response_body` — Raw response body text, used for pattern matching.
     /// * `provider` — Provider name (e.g. `"openai"`, `"anthropic"`).
     pub fn classify(status_code: u16, response_body: &str, provider: &str) -> LatticeError {
+        Self::classify_with_retry_header(status_code, response_body, provider, None)
+    }
+
+    /// Classify with an explicit `Retry-After` header value.
+    ///
+    /// The header value (if present) takes priority over body-based extraction.
+    pub fn classify_with_retry_header(
+        status_code: u16,
+        response_body: &str,
+        provider: &str,
+        retry_after_header: Option<&str>,
+    ) -> LatticeError {
         let body_lower = response_body.to_lowercase();
 
         match status_code {
             // 429: Rate limit
             429 => {
-                let retry_after = extract_retry_after(response_body);
+                let retry_after = parse_retry_after_header(retry_after_header)
+                    .or_else(|| extract_retry_after(response_body));
                 LatticeError::RateLimit {
                     retry_after,
                     provider: provider.to_string(),
@@ -170,7 +183,8 @@ impl ErrorClassifier {
                             reason: truncate_body(response_body),
                         }
                     } else if body_lower.contains("rate_limit_error") {
-                        let retry_after = extract_retry_after(response_body);
+                        let retry_after = parse_retry_after_header(retry_after_header)
+                            .or_else(|| extract_retry_after(response_body));
                         LatticeError::RateLimit {
                             retry_after,
                             provider: provider.to_string(),
@@ -198,23 +212,50 @@ impl ErrorClassifier {
 /// Bodies longer than this are truncated to prevent memory exhaustion.
 const MAX_ERROR_BODY_LENGTH: usize = 8192;
 
+/// Scrub potential credentials from an error response body before storage.
+///
+/// API providers may echo request parameters (including API keys) in error
+/// responses. This function replaces common credential patterns with
+/// `[REDACTED]` to prevent leakage through error messages.
+fn scrub_credentials(s: &str) -> String {
+    // Common API key prefixes
+    let mut out = s.to_string();
+    let patterns = [
+        // Anthropic keys: sk-ant-... (match first, longer prefix)
+        (r"sk-ant-[A-Za-z0-9\-_]{20,}", "[REDACTED]"),
+        // OpenAI keys: sk-proj-..., sk-... (includes hyphens in key body)
+        (r"sk-[A-Za-z0-9\-_]{20,}", "[REDACTED]"),
+        // Generic Bearer tokens in headers/JSON
+        (r#"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"#, "Bearer [REDACTED]"),
+        // JSON key/value patterns for common credential field names
+        (r#"(?i)"(?:api[_-]?key|token|secret|password|credential|auth[_-]?token)"\s*:\s*"[^"]{8,}""#, "\"[CREDENTIAL_FIELD]\": \"[REDACTED]\""),
+    ];
+    for (pattern, replacement) in patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            out = re.replace_all(&out, replacement).to_string();
+        }
+    }
+    out
+}
+
 /// Truncate a string to `MAX_ERROR_BODY_LENGTH` bytes, appending
 /// `... (truncated)` if it was cut short.
 ///
 /// Classification (pattern matching) should be done on the full body
 /// *before* calling this — this is purely a storage/display limit.
 fn truncate_body(s: &str) -> String {
-    if s.len() <= MAX_ERROR_BODY_LENGTH {
-        return s.to_string();
+    let scrubbed = scrub_credentials(s);
+    if scrubbed.len() <= MAX_ERROR_BODY_LENGTH {
+        return scrubbed;
     }
-    let end = s
+    let end = scrubbed
         .char_indices()
         .take_while(|&(i, ch)| i + ch.len_utf8() <= MAX_ERROR_BODY_LENGTH)
         .map(|(i, ch)| i + ch.len_utf8())
         .last()
         .unwrap_or(0);
     let mut truncated = String::with_capacity(MAX_ERROR_BODY_LENGTH + 16);
-    truncated.push_str(&s[..end]);
+    truncated.push_str(&scrubbed[..end]);
     truncated.push_str("... (truncated)");
     truncated
 }
@@ -256,6 +297,33 @@ fn scan_first_number(s: &str) -> Option<u32> {
     } else {
         num_str.parse().ok()
     }
+}
+
+/// Parse the HTTP `Retry-After` header value (RFC 7231).
+///
+/// Two formats:
+/// - Seconds: `"30"` → 30.0
+/// - HTTP-date: `"Fri, 05 May 2026 18:00:00 GMT"` → seconds from now
+fn parse_retry_after_header(value: Option<&str>) -> Option<f64> {
+    let val = value?.trim();
+    if val.is_empty() {
+        return None;
+    }
+    // Try seconds (integer or float)
+    if let Ok(secs) = val.parse::<f64>() {
+        if secs >= 0.0 {
+            return Some(secs);
+        }
+    }
+    // Try HTTP-date (RFC 1123)
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(val) {
+        let now = chrono::Utc::now();
+        let secs = (dt.to_utc() - now).num_seconds();
+        if secs > 0 {
+            return Some(secs as f64);
+        }
+    }
+    None
 }
 
 /// Extract `retry_after` seconds from a response body.
@@ -605,5 +673,44 @@ mod tests {
     fn test_extract_model_from_body_no_model() {
         let body = r#"{"error": "not found"}"#;
         assert_eq!(extract_model_from_body(body), None);
+    }
+
+    #[test]
+    fn test_scrub_credentials_openai_key() {
+        let body = r#"{"error": "invalid api_key: sk-proj-abc123def456ghi789jkl012mno345"}"#;
+        let scrubbed = scrub_credentials(body);
+        assert!(!scrubbed.contains("sk-proj-abc123"));
+        assert!(scrubbed.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_credentials_anthropic_key() {
+        let body = r#"{"error": "key sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx invalid"}"#;
+        let scrubbed = scrub_credentials(body);
+        assert!(!scrubbed.contains("sk-ant-api03"));
+        assert!(scrubbed.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_credentials_bearer_token() {
+        let body = r#"Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc.def"#;
+        let scrubbed = scrub_credentials(body);
+        assert!(!scrubbed.contains("eyJhbGci"));
+        assert!(scrubbed.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_credentials_json_field() {
+        let body = r#"{"api_key": "sk-longsecretkey123456789012", "model": "gpt-4"}"#;
+        let scrubbed = scrub_credentials(body);
+        assert!(!scrubbed.contains("sk-longsecretkey"));
+        assert!(scrubbed.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_scrub_credentials_preserves_safe_body() {
+        let body = r#"{"error": {"message": "Model not found", "type": "invalid_request_error"}}"#;
+        let scrubbed = scrub_credentials(body);
+        assert_eq!(scrubbed, body);
     }
 }

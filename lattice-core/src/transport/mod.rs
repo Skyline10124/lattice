@@ -13,7 +13,6 @@ pub mod anthropic;
 pub mod chat_completions;
 pub mod dispatcher;
 pub mod gemini;
-pub mod openai_compat;
 
 use std::collections::HashMap;
 
@@ -89,8 +88,7 @@ pub fn chat_response_to_stream(
 /// Common base for all transport implementations: base URL + extra headers.
 ///
 /// Eliminates the `{base_url, extra_headers}` field duplication across
-/// ChatCompletionsTransport, AnthropicTransport, GeminiTransport, and
-/// OpenAICompatTransport.
+/// ChatCompletionsTransport, AnthropicTransport, and GeminiTransport.
 pub struct TransportBase {
     base_url: String,
     extra_headers: HashMap<String, String>,
@@ -301,4 +299,3 @@ pub trait Transport: Send + Sync {
 pub use chat_completions::ChatCompletionsTransport;
 pub use dispatcher::TransportDispatcher;
 pub use gemini::GeminiTransport;
-pub use openai_compat::OpenAICompatTransport;
