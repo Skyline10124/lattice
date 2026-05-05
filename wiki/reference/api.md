@@ -93,38 +93,41 @@ read_file, grep, write_file, list_directory, bash, patch, web_search
 
 `AgentState::trim_messages` 在 token 超限时自动裁剪最早的消息，保留 system prompt 和最近的消息。
 
-## lattice-harness
+## lattice-bus（编排层）
 
 ```rust
 /// 从 TOML 文件加载 Agent 配置
 pub struct AgentProfile {
-    pub name: String,
-    pub model: String,
-    pub system_prompt: String,
-    pub tools: Vec<String>,
+    pub agent: AgentConfig,
+    pub system: SystemConfig,
+    pub tools: ToolsConfig,
+    pub plugins: Option<PluginsConfig>,
 }
 
 pub struct AgentRegistry {
-    pub fn load(path: &str) -> Result<Self>;
+    pub fn load_dir(dir: &Path) -> Result<Self>;
     pub fn get(&self, name: &str) -> Option<&AgentProfile>;
 }
 
 pub struct AgentRunner {
-    /// 创建 AgentRunner（自动加载 SQLite 记忆并回放历史）
-    pub fn new(profile: &AgentProfile) -> Result<Self>;
-    pub async fn run(&mut self, input: &str) -> Result<String>;
+    pub fn from_profile(profile: AgentProfile, agent: Agent) -> Self;
+    pub async fn run(&mut self, input: &str, max_turns: u32) -> Result<Value>;
 }
 
-/// 顺序链式编排
+/// 顺序链式编排 + handoff 规则引擎
 pub struct Pipeline {
-    pub fn new(stages: Vec<PipelineStage>) -> Self;
-    /// skip: 条件跳过 stage
-    /// fallback: stage 失败时回退到指定 stage
-    pub async fn run(&mut self, input: &str) -> Result<String>;
+    pub fn new(name: &str, registry: Arc<AgentRegistry>, memory: Option<Arc<dyn Memory>>, event_bus: Option<Arc<EventBus>>) -> Self;
+    pub async fn run(&mut self, start_agent: &str, input: &str) -> PipelineRun;
 }
 
+/// 插件 DAG 编排
+pub struct PluginDagRunner {
+    pub fn new(config: &PluginsConfig, plugin_registry: &PluginRegistry, tool_registry: &ToolRegistry, retry_policy: RetryPolicy, shared_memory: Option<Arc<dyn Memory>>) -> Self;
+    pub async fn run(&mut self, initial_input: &str, default_model: &str) -> Result<Value, DAGError>;
 }
 ```
+
+位置：`lattice-bus/src/pipeline.rs`（Pipeline）、`lattice-bus/src/runner.rs`（AgentRunner）、`lattice-plugin/src/dag_runner.rs`（PluginDagRunner）、`lattice-plugin/src/orchestration.rs`（handoff 规则与 DAG 配置类型）。
 
 ## lattice-python
 

@@ -32,5 +32,5 @@
 |----|--------|--------|
 | lattice-core | 是 | 不可（通过 trait，非任意代码） |
 | lattice-agent | 否 | 不可 |
-| lattice-plugin | 否 | 可（Plugin: to_prompt, from_output; Behavior: Strict/Yolo） |
-| lattice-harness | 否 | 可（AgentProfile TOML, Pipeline 编排） |
+| lattice-bus | 否 | 可（AgentProfile TOML, Pipeline 编排, dry-run, hot reload） |
+| lattice-plugin | 否 | 可（Plugin: to_prompt, from_output; Behavior: Strict/Yolo; PluginDagRunner, handoff 规则） |

@@ -3,21 +3,21 @@
 ## Crate 结构
 
 ```
-lattice-cli          命令行（run/print/resolve/models）
-lattice-tui          Ratatui TUI + Agent streaming
-    ↓
-lattice-harness       Pipeline / AgentRunner / PluginDagRunner, TOML profile, handoff, ToolRegistry
+lattice-cli          CLI + TUI（ratatui 终端界面）
 lattice-python        PyO3 绑定（pip: lattice-core）
     ↓
-lattice-agent         Async Agent + tool execution（tokio）+ 7 tools + sandbox
-lattice-plugin        类型化插件系统（ErasedPlugin + PluginRegistry + 11 builtin plugins）
+lattice-bus           Pipeline / AgentRunner / TOML profile / Pub-sub event bus
+    ↓
+lattice-plugin        PluginDagRunner, handoff 规则语言, ErasedPlugin, PluginRegistry, 11 builtin plugins
+    ↓
+lattice-agent         Async Agent + tool execution（tokio）+ 7 tools + sandbox + SqliteMemory
     ↓
 lattice-core          模型解析 + 推理（纯 Rust，无 PyO3）
 ```
 
-依赖单向：上层依赖下层，下层不知道上层存在。
+依赖单向：上层依赖下层，下层不知道上层存在。无独立 `lattice-tui` 或 `lattice-harness` crate——TUI 在 `lattice-cli/src/frontend/tui/`，Pipeline/AgentRunner/profile 在 `lattice-bus`，PluginDagRunner 和 handoff 规则语言在 `lattice-plugin`。
 
-> `lattice-memory` 和 `lattice-token-pool` 已合并到 `lattice-agent` 和 `lattice-harness`，不再作为独立 crate。
+> `lattice-memory` 和 `lattice-token-pool` 已合并到 `lattice-agent`，不再作为独立 crate。
 
 ## 核心流程
 

@@ -1,0 +1,11 @@
+[plugin]
+name = "local:hello"
+description = "Local hot-plug example"
+author = "lattice"
+
+[prompt]
+system = "You are a local hot-plug demo plugin."
+template = "Say hello to {{input}}"
+
+[output]
+parse = "text"

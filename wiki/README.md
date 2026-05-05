@@ -9,6 +9,7 @@
 | 快速开始 | [getting-started/quickstart](getting-started/quickstart.md) |
 | 了解架构 | [architecture/overview](architecture/overview.md) |
 | 添加模型 | [reference/catalog](reference/catalog.md) |
+| 开发插件 | [development/plugin-development](development/plugin-development.md) |
 | 开发指南 | [development/setup](development/setup.md) |
 | 设计理念 | [design/why](design/why.md) |
 
@@ -33,6 +34,7 @@ alpha / dogfooding。Rust 侧 resolve + chat + chat_complete 可用，CLI 完整
 ### 开发
 - [环境搭建](development/setup.md)
 - [运行测试](development/testing.md)
+- [插件开发](development/plugin-development.md)
 - [代码审查历史](development/code-review.md)
 - [路线图](development/roadmap.md)
 

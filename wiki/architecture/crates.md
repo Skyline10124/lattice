@@ -3,17 +3,17 @@
 | Crate | 职责 | 依赖 |
 |-------|------|------|
 | **lattice-core** | 模型解析、HTTP 请求、SSE 解析、retry、token 估算 | tokio, reqwest, serde |
-| **lattice-agent** | Agent 状态、多轮对话、async tool execution（tokio）、context trimming、sandbox、7 tools | core |
-| **lattice-plugin** | `Plugin` trait (Input/Output) + `ErasedPlugin` + `PluginRegistry` + 11 个内置插件 + `Behavior` (Strict/Yolo) + `PluginRunner`/`ErasedPluginRunner` | core, agent (PluginAgent) |
-| **lattice-harness** | `Pipeline`（async）+ `AgentRunner` + `PluginDagRunner` + `ToolRegistry` + TOML profile + handoff + registry/watcher + SqliteMemory + WebSocket | agent, plugin, core |
-| **lattice-bus** | Pub/sub event bus for inter-agent communication | 无 |
-| **lattice-cli** | CLI: `run`/`resolve`/`models`/`doctor`/`bus`/`config`/`sessions`/`stats`/`debug`/`validate`/`list`/`new`/`tui`，session 自动持久化（SHA-256 ID），`--global` flags（`--json`/`--verbose`/`--continue-session`/`--session`/`--no-save`） | agent, harness, plugin |
-| **lattice-tui** | Ratatui TUI + Agent streaming | agent |
+| **lattice-agent** | Agent 状态、多轮对话、async tool execution（tokio）、context trimming、sandbox、7 tools、SqliteMemory (FTS5)、ToolRegistry | core |
+| **lattice-plugin** | `Plugin` trait (Input/Output) + `ErasedPlugin` + `PluginRegistry` + 11 个内置插件 + `Behavior` (Strict/Yolo) + `PluginDagRunner` + handoff 规则语言 | agent, core |
+| **lattice-bus** | `Pipeline` + `AgentRunner` + TOML profile + JSON schema 校验 + fork 编排 + hot reload + Pub/sub event bus + microagent 通信 | core, agent, plugin |
+| **lattice-cli** | CLI + TUI（ratatui）: `run`/`resolve`/`models`/`doctor`/`bus`/`config`/`sessions`/`stats`/`debug`/`validate`/`list`/`new`/`tui`，session 自动持久化（SHA-256 ID），流式聊天，slash 命令 | core, agent, bus, plugin |
 | **lattice-python** | PyO3 绑定（resolver only），pip 包 `lattice-core` | core |
 
 ## 历史变迁
 
-- `lattice-memory` 和 `lattice-token-pool` 在 Phase 3 合并回 `lattice-agent` 和 `lattice-harness`，不再作为独立 crate
+- `lattice-memory` 和 `lattice-token-pool` 已合并到 `lattice-agent`，不再作为独立 crate
+- `lattice-harness` 不再作为独立 crate：Pipeline/AgentRunner/profile 在 `lattice-bus`，PluginDagRunner 和 handoff 规则语言在 `lattice-plugin`
+- `lattice-tui` 未建成独立 crate——代码在 `lattice-cli/src/frontend/tui/`
 - Phase 5（全 async 改造）删除了 `SHARED_RUNTIME`、`MEMORY_RT`、所有 `block_on` 桥接代码
 - grep 工具从 `Command::new("grep")` 改为纯 Rust `regex` 搜索
 
@@ -41,31 +41,28 @@
 | `tool_definitions.rs` | 工具 JSON schema 定义 |
 | `tool_error.rs` | `ToolError` 枚举（thiserror） |
 | `sandbox.rs` | `SandboxConfig`：路径/命令/URL 校验 |
-| `memory/` | `Memory` trait + `InMemoryMemory` + `SqliteMemory`（已迁移至 harness） |
+| `memory/` | `Memory` trait + `InMemoryMemory` + `SqliteMemory`（FTS5） |
 
 ## lattice-plugin 模块
 
 | 模块 | 作用 |
 |------|------|
 | `lib.rs` | `Plugin` trait、`Behavior`/`StrictBehavior`/`YoloBehavior`、`PluginRunner`、`PluginConfig` |
-| `erased.rs` | `ErasedPlugin` trait + blanket impl |
+| `erased.rs` / `erased_runner.rs` | `ErasedPlugin` trait + blanket impl、`ErasedPluginRunner`、`run_plugin_loop()` |
 | `bundle.rs` | `PluginBundle`、`PluginMeta`、`BehaviorMode` |
 | `registry.rs` | `PluginRegistry`：register/get/list |
-| `erased_runner.rs` | `run_plugin_loop()`、`ErasedPluginRunner` |
-| `builtin/` | 11 个内置插件：code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification |
+| `orchestration.rs` | Plugin DAG 配置类型 + canonical handoff 规则解析/求值 |
+| `dag_runner.rs` | `PluginDagRunner`：intra-agent DAG 编排 |
+| `builtin/` | 11 个内置插件：code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification, superpowers |
 
-## lattice-harness 模块
+## lattice-bus 模块
 
 | 模块 | 作用 |
 |------|------|
-| `pipeline.rs` | `Pipeline`：async 多 agent 链式/分支执行、handoff 评估 |
-| `runner.rs` | `AgentRunner`：async 单 agent 执行 + JSON schema 校验 + retry |
-| `dag_runner.rs` | `PluginDagRunner`：intra-agent DAG 编排 |
-| `profile.rs` | `AgentProfile` + `PluginsConfig` / `PluginSlotConfig` / `AgentEdgeConfig` TOML 反序列化 |
-| `tools.rs` | `ToolRegistry`、`ToolHandler`、`merge_tool_definitions()` |
-| `handoff_rule.rs` | 手递规则引擎 |
-| `registry.rs` | Agent 目录加载 + hot reload |
-| `events.rs` | 事件总线 |
-| `memory/` | SqliteMemory（FTS5）+ 共享分区访问控制 |
-| `watcher.rs` | 文件变更监听 |
-| `ws.rs` | WebSocket 事件推送（feature: axum） |
+| `pipeline.rs` | `Pipeline`、`PipelineRun`、dry-run 校验、handoff/fork 控制流 |
+| `runner.rs` | `AgentRunner`：按 `AgentProfile` 执行 `lattice_agent::Agent` |
+| `profile.rs` | TOML-backed `AgentProfile`、`PluginsConfig`、handoff/memory/bus 配置 |
+| `assembly.rs` | 从 profile、tool registry、system prompt、credentials 装配 `Agent` |
+| `handoff_rule.rs` | 从 `lattice-plugin` 兼容导出 canonical handoff 规则语言 |
+| `registry.rs` / `watcher.rs` | Agent profile 加载和 hot reload |
+| `events.rs` / `micro_agent.rs` / `lib.rs` | Pipeline events、microagent RPC/pub-sub、bus 类型 |

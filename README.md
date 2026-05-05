@@ -2,7 +2,7 @@
 
 ![LATTICE banner](logo-banner.svg)
 
-A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-agent harness.
+A fast, model-centric LLM inference engine. Rust core, Python bindings, agent orchestration.
 
 **Not** a SaaS. Not a visual workflow builder. Model routing + inference + agent orchestration via TOML-defined pipelines.
 
@@ -12,11 +12,9 @@ A fast, model-centric LLM inference engine. Rust core, Python bindings, micro-ag
 LATTICE/ (Cargo workspace)
 ├── lattice-core/       Pure Rust: resolve + chat + streaming + retry
 ├── lattice-agent/      Agent struct, conversation state, tool boundary, memory (merged lattice-memory + lattice-token-pool)
-├── lattice-bus/        Micro-agent pub/sub + RPC communication bus
-├── lattice-harness/    Pipeline orchestrator, TOML rule engine, fork parallelism, hot reload, PluginDagRunner
-├── lattice-plugin/     Plugin trait (typed Input → LLM → Output), PluginRegistry, 11 builtin plugins
+├── lattice-bus/        Event bus plus TOML agent pipeline/profile orchestration
+├── lattice-plugin/     Plugin trait, PluginRegistry, PluginDagRunner, 11 builtin plugins, handoff rule language
 ├── lattice-cli/        CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
-├── lattice-tui/        Terminal UI (ratatui)
 └── lattice-python/     PyO3 bindings (pip: lattice-core)
 ```
 
@@ -43,9 +41,9 @@ class CodeReviewPlugin(Plugin):
     def should_handoff(self, output): ... # deterministic routing
 ```
 
-### Agent pipeline (harness)
+### Agent pipeline
 
-Agents are defined as TOML files in `~/.LATTICE/agents/`. The harness runs them in sequence, using TOML handoff rules to route between agents. Fork targets run multiple agents in parallel:
+Agents are defined as TOML files in `~/.LATTICE/agents/`. The `lattice-bus` pipeline runs them in sequence, using TOML handoff rules to route between agents. Fork targets run multiple agents in parallel:
 
 ```toml
 [agent]
@@ -191,7 +189,7 @@ LATTICE is in **alpha / dogfooding** stage. What works:
 - **Streaming**: SSE parsers for OpenAI/Anthropic, Gemini native non-streaming path, tool call tracking across chunks
 - **Thinking mode**: DeepSeek v4-pro (OpenAI reasoning\_content), MiniMax M2.7 (Anthropic thinking\_delta)
 - **Agent**: multi-turn conversation, tool execution boundary, memory, token budget
-- **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
+- **Pipeline**: TOML-defined agent profiles, handoff rule engine, fork parallel execution, dry-run validation, hot reload
 - **Plugins**: centralized builtin registry with 11 builtins; `--pipeline` auto-loads registry entries
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
 - **CLI**: run, resolve, models, debug, doctor, bus, config, sessions, stats, validate, list, new — session auto-save with SHA-256 IDs, `--continue-session`, `--session`, `--provider` flag
@@ -214,20 +212,23 @@ LATTICE/                 Git root (Cargo workspace)
 │   │   └── types.rs     Role, Message, ToolDefinition, ToolCall, FunctionCall
 │   └── tests/e2e/       End-to-end + regression tests
 ├── lattice-agent/       Agent struct, conversation state, tool boundary, memory (merged lattice-memory + lattice-token-pool)
-├── lattice-bus/         Micro-agent pub/sub + RPC communication bus
-├── lattice-harness/     Pipeline orchestrator, TOML rule engine, hot reload, PluginDagRunner
+├── lattice-bus/         Event bus plus TOML agent pipeline/profile orchestration
 │   ├── src/
 │   │   ├── pipeline.rs  Pipeline + PipelineRun + DryRunReport (sequential + fork)
-│   │   ├── dag_runner.rs PluginDagRunner: intra-agent DAG slot/edge orchestration
-│   │   ├── handoff_rule.rs  HandoffTarget (Single/Fork) + TOML rule parsing + evaluation
+│   │   ├── assembly.rs  Agent assembly from profile + tool registry
+│   │   ├── handoff_rule.rs  Compatibility re-export of plugin handoff rules
 │   │   ├── profile.rs   AgentProfile + PluginsConfig TOML parsing
 │   │   ├── registry.rs  AgentRegistry loading + hot reload
 │   │   ├── runner.rs    AgentRunner (wraps Agent + profile)
-│   │   ├── tools.rs     ToolRegistry + ToolHandler + merge_tool_definitions()
 │   │   └── events.rs    EventBus + PipelineEvent
-├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), PluginRegistry, 11 builtin plugins
+├── lattice-plugin/      Plugin trait (typed Input → LLM → Output), PluginRegistry, PluginDagRunner, 11 builtin plugins
+│   ├── src/
+│   │   ├── orchestration.rs  Plugin DAG config + canonical handoff rule language
+│   │   ├── dag_runner.rs     PluginDagRunner: intra-agent DAG slot/edge orchestration
+│   │   ├── registry.rs       PluginRegistry
+│   │   └── builtin/          Builtin plugins
 ├── lattice-cli/         CLI: run, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
-├── lattice-tui/         Terminal UI (ratatui)
+│   └── src/frontend/tui/ Terminal UI (ratatui)
 └── lattice-python/      PyO3 bindings (pip: lattice-core)
 ```
 

@@ -4,19 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-**LATTICE** is a model-centric LLM engine split into eight Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
+**LATTICE** is a model-centric LLM engine split into six Rust crates. The user specifies a model name or alias (e.g., `"sonnet"`), and the engine resolves which provider serves it, picks the best credential, formats the request for the correct API protocol, and handles streaming, tool calls, and retries. There is no `set_provider()` call — provider selection is automatic.
 
 **Crate architecture** (one-way deps):
 
 ```
-lattice-tui           Terminal UI (ratatui)
-  → lattice-cli         CLI: run, print, resolve, models, doctor, bus, config, sessions, stats, debug, validate, list, new, tui
-    → lattice-harness     Pipeline / AgentRunner / PluginDagRunner, TOML profiles, handoff, events
-      → lattice-agent       Async Agent::run(), tool execution (tokio), conversation state
-        → lattice-core       resolve() + chat() — model routing + streaming inference
-      → lattice-plugin       ErasedPlugin, PluginRegistry, PluginDagRunner, 11 builtin plugins
+lattice-cli           CLI + TUI (ratatui)
+  → lattice-bus           Pipeline, AgentRunner, AgentProfile, event bus, registry, watcher
+    → lattice-plugin       ErasedPlugin, PluginRegistry, PluginDagRunner, handoff rules, 11 builtin plugins
+    → lattice-agent       Async Agent::run(), tool execution (tokio), SqliteMemory, ToolRegistry, conversation state
+      → lattice-core       resolve() + chat() — model routing + streaming inference
   → lattice-python       PyO3 bindings (pip package: lattice-core)
 ```
+
+Note: There is no separate `lattice-tui` or `lattice-harness` crate. The TUI lives in `lattice-cli/src/frontend/tui/`. Pipeline/AgentRunner/profile code lives in `lattice-bus`; PluginDagRunner and the canonical handoff rule language live in `lattice-plugin`.
 
 - **Rust workspace**: Cargo workspace at repo root, all crates under `lattice-*/`
 - **Python package**: `lattice-core` (from `lattice-python/`) via [maturin](https://github.com/PyO3/maturin)
@@ -63,10 +64,10 @@ cargo fmt --all
 
 ```
 User Code (Python / Rust / CLI)
-  → lattice_core::resolve("sonnet")           → ResolvedModel
-  → lattice_core::chat(resolved, msgs)         → impl Stream<Item = StreamEvent>
-  → lattice_agent::Agent::new(resolved)        → agent.run("prompt", 10).await (async, with tool loop)
-  → lattice_harness::Pipeline::new()           → pipeline.run("start", "input").await (async, plugin DAG or agent runner)
+  → lattice_core::resolve("sonnet")              → ResolvedModel
+  → lattice_core::chat(resolved, msgs)            → impl Stream<Item = StreamEvent>
+  → lattice_agent::Agent::new(resolved)           → agent.run("prompt", 10).await (async, with tool loop)
+  → lattice_bus::Pipeline::new(...)               → pipeline.run("start", "input").await (async, plugin DAG or agent runner)
 ```
 
 ### Crate map
@@ -74,13 +75,11 @@ User Code (Python / Rust / CLI)
 | Crate | Purpose |
 |-------|---------|
 | `lattice-core` | Model resolution, streaming inference, retry, token estimation. **No PyO3.** |
-| `lattice-agent` | `Agent` struct: async multi-turn conversation, tool execution (tokio), token budget, provider fallback, `Memory` trait + `InMemoryMemory` + `SharedMemory` types |
-| `lattice-harness` | `Pipeline`, `AgentRunner`, `PluginDagRunner`, `SqliteMemory`, TOML-based agent profiles, handoff rule engine with fork parallelism, hot reload, JSON schema validation, WebSocket events, `ToolRegistry` |
-| `lattice-plugin` | `Plugin` trait, `ErasedPlugin`, `PluginRegistry`, 11 builtin plugins (CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase, PlanGen, Verification), `Behavior` (Strict/Yolo), `PluginRunner`/`ErasedPluginRunner` |
-| `lattice-cli` | CLI binary: `run`, `print`, `resolve`, `models`, `doctor`, `bus`, `config`, `sessions`, `stats`, `debug`, `validate`, `list`, `new`, `tui` |
-| `lattice-tui` | Terminal UI (ratatui-based — early stage) |
+| `lattice-agent` | `Agent` struct: async multi-turn conversation, tool execution (tokio), token budget, provider fallback, `Memory` trait + `InMemoryMemory` + `SqliteMemory` (FTS5), `ToolRegistry`, `DefaultToolExecutor` |
+| `lattice-plugin` | `Plugin` trait, `ErasedPlugin`, `PluginRegistry`, `PluginDagRunner`, canonical handoff rule language for pipelines and DAG edges, 11 builtin plugins (CodeReview, Refactor, TestGen, SecurityAudit, DocGen, PptxGen, DeepResearch, ImageGen, KnowledgeBase, PlanGen, Verification), `Behavior` (Strict/Yolo) |
+| `lattice-cli` | CLI binary: `run`, `print`, `resolve`, `models`, `doctor`, `bus`, `config`, `sessions`, `stats`, `debug`, `validate`, `list`, `new`, `tui`. TUI in `src/frontend/tui/` (ratatui): streaming chat, slash commands, session persistence |
 | `lattice-python` | PyO3 bindings: `LatticeEngine`, exceptions, `StreamIterator` (pip: `lattice-core`) |
-| `lattice-bus` | Pub/sub event bus for inter-agent communication |
+| `lattice-bus` | TOML-based agent profiles, `Pipeline`, `AgentRunner`, JSON schema validation, fork execution, dry-run validation, hot reload, pub/sub event bus, microagent communication, inter-agent messaging |
 
 ### lattice-core module map
 
@@ -96,32 +95,41 @@ User Code (Python / Rust / CLI)
 | `errors` | `LatticeError` enum (pure Rust, no PyO3), `ErrorClassifier` |
 | `types` | `Role`, `Message`, `ToolDefinition`, `ToolCall`, `FunctionCall` |
 
-### lattice-harness module map
+### lattice-agent module map
 
 | Module | Purpose |
 |--------|---------|
-| `pipeline` | `Pipeline`: multi-agent chain/fork execution, handoff rule evaluation, dry_run validation (async) |
-| `runner` | `AgentRunner`: single-agent run loop with JSON schema validation + retry |
-| `dag_runner` | `PluginDagRunner`: intra-agent DAG orchestration with slot/edge navigation |
-| `profile` | `AgentProfile` + `PluginsConfig`: TOML-deserialized agent configuration, plugin slots/edges |
-| `tools` | `ToolRegistry`, `ToolHandler`, `merge_tool_definitions()` |
-| `handoff_rule` | `HandoffTarget` (Single/Fork), `HandoffRule`, `HandoffCondition`: TOML routing with AND/OR/default |
-| `registry` | `AgentRegistry`: load agent profiles from directory, hot reload via `notify` |
-| `events` | `PipelineEvent` + `EventBus`: broadcast channel for pipeline status events |
-| `watcher` | File watcher for agent directory changes, triggers registry reload |
-| `ws` | WebSocket endpoint for live pipeline events (feature-gated behind `axum`) |
-| `memory` | `SharedMemory` trait + `SqliteMemory` (FTS5), re-exports agent memory types |
+| `lib.rs` / `state.rs` | `Agent` struct: async multi-turn conversation loop, conversation state |
+| `tools.rs` / `tool_definitions.rs` / `tool_registry.rs` / `tool_error.rs` | `DefaultToolExecutor`, tool definitions, `ToolRegistry`, tool error types |
+| `memory/` | `Memory` trait, `InMemoryMemory`, `SharedMemory` trait, `SqliteMemory` (FTS5) |
+| `prompt/` | Prompt compilation, provider-specific formatting, template registry |
+| `sandbox.rs` | Sandboxed execution environment for tool calls |
+| `blob.rs` | Blob store for large tool outputs |
+| `events_provider.rs` / `bus_event_collector.rs` | Event provider trait and bus-based event collection |
 
 ### lattice-plugin module map
 
 | Module | Purpose |
 |--------|---------|
-| `erased` | `ErasedPlugin` trait + blanket impl over `Plugin` |
-| `bundle` | `PluginBundle`, `PluginMeta`, `BehaviorMode`, `to_behavior()` |
-| `registry` | `PluginRegistry`: register/get/list plugins by name |
-| `erased_runner` | `run_plugin_loop()` shared loop + `ErasedPluginRunner` struct |
-| `builtin/` | 11 builtin plugins: code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification |
 | `lib.rs` | `Plugin` trait, `Behavior` trait (Strict/Yolo), `PluginRunner`, `PluginHooks`, `PluginConfig` |
+| `erased.rs` / `erased_runner.rs` | `ErasedPlugin` trait + blanket impl, `ErasedPluginRunner`, `run_plugin_loop()` |
+| `bundle.rs` | `PluginBundle`, `PluginMeta`, `BehaviorMode`, `to_behavior()` |
+| `registry.rs` | `PluginRegistry`: register/get/list plugins by name |
+| `orchestration.rs` | Plugin DAG config types plus canonical handoff rule parsing/evaluation |
+| `dag_runner.rs` | `PluginDagRunner`: intra-agent DAG orchestration with slot/edge navigation |
+| `builtin/` | 11 builtin plugins: code_review, refactor, test_gen, security_audit, doc_gen, pptx_gen, deep_research, image_gen, knowledge_base, plan_gen, verification, superpowers |
+
+### lattice-bus module map
+
+| Module | Purpose |
+|--------|---------|
+| `pipeline.rs` | `Pipeline`, `PipelineRun`, dry-run validation, handoff/fork control flow |
+| `runner.rs` | `AgentRunner`: executes an `AgentProfile` through `lattice_agent::Agent` |
+| `profile.rs` | TOML-backed `AgentProfile`, `PluginsConfig`, handoff config, memory/bus config |
+| `assembly.rs` | Builds `Agent` instances from profiles, tool registry, system prompt, and credentials |
+| `handoff_rule.rs` | Compatibility re-export of the canonical rule language from `lattice-plugin` |
+| `registry.rs` / `watcher.rs` | Agent profile loading and hot reload |
+| `events.rs` / `micro_agent.rs` / `lib.rs` | Pipeline events, microagent RPC/pub-sub, bus types |
 
 ### Model resolution flow
 
@@ -156,7 +164,7 @@ default = true
 
 Evaluation: rules checked in order, first match wins. Supports `condition` (single), `all` (AND), `any` (OR), `default` (unconditional). `[any]` iterates array elements. Operators: `==`, `!=`, `<`, `>`, `<=`, `>=`, `contains`.
 
-Targets can be a single agent (`"refactor"`) or a fork (`"fork:security,performance"`). Fork runs multiple agents in parallel via `std::thread::spawn`, merges outputs as `{agent_name: output}` JSON, and feeds the merged result to the next agent in the chain. TOML syntax: `target = "fork:A,B"` → `HandoffTarget::Fork(["A","B"])`.
+Targets can be a single agent (`"refactor"`) or a fork (`"fork:security,performance"`). Fork runs multiple agents in parallel via `tokio::spawn`, merges outputs as `{agent_name: output}` JSON, and feeds the merged result to the next agent in the chain. TOML syntax: `target = "fork:A,B"` → `HandoffTarget::Fork(["A","B"])`.
 
 ### Plugin DAG orchestration
 
@@ -226,7 +234,7 @@ Additional error types in higher crates:
 ```
 lattice-agent: ToolError (Execution, NotFound, InvalidArgs, McpUnreachable, Timeout)
 lattice-plugin: PluginError (Parse, Validation, MissingTool, ContextExceeded, MaxTurnsExceeded, OutputTooLarge, Escalated)
-lattice-harness: DAGError (SlotNotFound, PluginNotFound, MaxSlotTransitionsExceeded, ForkNotSupportedInDag, etc.)
+lattice-plugin: DAGError (SlotNotFound, PluginNotFound, MaxSlotTransitionsExceeded, ForkNotSupportedInDag, etc.)
 ```
 
 Retryable errors: `RateLimit` and `ProviderUnavailable`. Default policy: 3 retries, 1s base delay, 60s max, jittered exponential backoff.
