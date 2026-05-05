@@ -1,5 +1,4 @@
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
@@ -137,7 +136,11 @@ impl InMemoryMemory {
     }
 
     pub fn clear(&self) {
-        self.store.lock().unwrap().clear();
+        self.entries().clear();
+    }
+
+    fn entries(&self) -> MutexGuard<'_, Vec<MemoryEntry>> {
+        self.store.lock().unwrap_or_else(|err| err.into_inner())
     }
 }
 
@@ -149,13 +152,14 @@ impl Default for InMemoryMemory {
 
 impl Memory for InMemoryMemory {
     fn save_entry(&self, entry: MemoryEntry) {
-        self.store.lock().unwrap().push(entry);
+        let mut entries = self.entries();
+        let idx = entries
+            .partition_point(|existing| existing.created_at.as_str() >= entry.created_at.as_str());
+        entries.insert(idx, entry);
     }
 
     fn recall(&self, query: &str, limit: usize) -> Vec<MemoryEntry> {
-        self.store
-            .lock()
-            .unwrap()
+        self.entries()
             .iter()
             .filter(|e| e.summary.contains(query) || e.content.contains(query))
             .take(limit)
@@ -164,9 +168,7 @@ impl Memory for InMemoryMemory {
     }
 
     fn entries_by_kind(&self, kind: &EntryKind, limit: usize) -> Vec<MemoryEntry> {
-        self.store
-            .lock()
-            .unwrap()
+        self.entries()
             .iter()
             .filter(|e| {
                 matches!(
@@ -238,6 +240,59 @@ mod tests {
         let results = mem.recall("Rust", 10);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].summary, "Project uses Rust");
+    }
+
+    #[test]
+    fn test_recall_sorts_matching_entries_by_created_at_desc() {
+        let mem = InMemoryMemory::new();
+        for (id, created_at) in [
+            ("oldest", "2026-05-01T00:00:00Z"),
+            ("newest", "2026-05-03T00:00:00Z"),
+            ("middle", "2026-05-02T00:00:00Z"),
+        ] {
+            mem.save_entry(MemoryEntry {
+                id: id.into(),
+                kind: EntryKind::Fact,
+                session_id: "s1".into(),
+                summary: format!("Rust fact {id}"),
+                content: "lattice uses Rust".into(),
+                tags: vec![],
+                created_at: created_at.into(),
+            });
+        }
+
+        let results = mem.recall("Rust", 2);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "newest");
+        assert_eq!(results[1].id, "middle");
+    }
+
+    #[test]
+    fn test_entries_by_kind_sorts_by_created_at_desc() {
+        let mem = InMemoryMemory::new();
+        for (id, kind, created_at) in [
+            ("old_fact", EntryKind::Fact, "2026-05-01T00:00:00Z"),
+            ("decision", EntryKind::Decision, "2026-05-04T00:00:00Z"),
+            ("new_fact", EntryKind::Fact, "2026-05-03T00:00:00Z"),
+            ("mid_fact", EntryKind::Fact, "2026-05-02T00:00:00Z"),
+        ] {
+            mem.save_entry(MemoryEntry {
+                id: id.into(),
+                kind,
+                session_id: "s1".into(),
+                summary: id.into(),
+                content: id.into(),
+                tags: vec![],
+                created_at: created_at.into(),
+            });
+        }
+
+        let results = mem.entries_by_kind(&EntryKind::Fact, 2);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "new_fact");
+        assert_eq!(results[1].id, "mid_fact");
     }
 
     #[test]

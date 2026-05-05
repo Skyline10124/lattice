@@ -195,6 +195,34 @@ impl Agent {
     }
 
     pub async fn run(&mut self, content: &str, max_turns: u32) -> Vec<LoopEvent> {
+        let mut ignore_event = |_| {};
+        self.run_with_observer(content, max_turns, &mut ignore_event, true)
+            .await
+    }
+
+    pub async fn run_streaming<F>(
+        &mut self,
+        content: &str,
+        max_turns: u32,
+        mut emit: F,
+    ) -> Vec<LoopEvent>
+    where
+        F: FnMut(LoopEvent),
+    {
+        self.run_with_observer(content, max_turns, &mut emit, false)
+            .await
+    }
+
+    async fn run_with_observer<F>(
+        &mut self,
+        content: &str,
+        max_turns: u32,
+        emit: &mut F,
+        retry_stream_errors: bool,
+    ) -> Vec<LoopEvent>
+    where
+        F: FnMut(LoopEvent),
+    {
         let mut all_events = Vec::new();
         let user_input = content.to_string();
         let user_message_start = self.state.messages.len();
@@ -233,10 +261,11 @@ impl Agent {
             };
             self.state.trim_messages(context_len, 15);
 
-            let mut events = self.run_chat().await;
+            let chat_snapshot = self.state.snapshot();
+            let mut events = self.run_chat_with_observer(emit).await;
 
             let mut retry_count = 0u32;
-            while retry_count < MAX_STREAM_RETRIES {
+            while retry_stream_errors && retry_count < MAX_STREAM_RETRIES {
                 let has_retryable_error = events.iter().any(|e| {
                     matches!(
                         e,
@@ -249,9 +278,9 @@ impl Agent {
                 if !has_retryable_error {
                     break;
                 }
-                self.state.pop_last_assistant_message();
+                self.state.restore(chat_snapshot.clone());
                 retry_count += 1;
-                events = self.run_chat().await;
+                events = self.run_chat_with_observer(emit).await;
             }
 
             let mut tool_calls = Vec::new();
@@ -277,10 +306,12 @@ impl Agent {
             if let Some(ref executor) = self.tool_executor {
                 for call in &tool_calls {
                     let result = executor.execute(call).await;
-                    all_events.push(LoopEvent::ToolResult {
+                    let event = LoopEvent::ToolResult {
                         call: call.clone(),
                         result: result.clone(),
-                    });
+                    };
+                    emit(event.clone());
+                    all_events.push(event);
                     self.state.push_tool_result(&call.id, &result, None);
                 }
             }
@@ -290,16 +321,26 @@ impl Agent {
     }
 
     async fn run_chat(&mut self) -> Vec<LoopEvent> {
+        let mut ignore_event = |_| {};
+        self.run_chat_with_observer(&mut ignore_event).await
+    }
+
+    async fn run_chat_with_observer<F>(&mut self, emit: &mut F) -> Vec<LoopEvent>
+    where
+        F: FnMut(LoopEvent),
+    {
         use futures::StreamExt;
 
         let mut stream = match self.chat_with_retry().await {
             Ok(s) => s,
             Err(e) => {
                 use lattice_core::errors::ErrorClassifier;
-                return vec![LoopEvent::Error {
+                let event = LoopEvent::Error {
                     message: e.to_string(),
                     retryable: ErrorClassifier::is_retryable(&e),
-                }];
+                };
+                emit(event.clone());
+                return vec![event];
             }
         };
 
@@ -312,11 +353,15 @@ impl Agent {
             match event {
                 StreamEvent::Token { content: c } => {
                     content_buf.push_str(&c);
-                    events.push(LoopEvent::Token { text: c });
+                    let event = LoopEvent::Token { text: c };
+                    emit(event.clone());
+                    events.push(event);
                 }
                 StreamEvent::Reasoning { content: r } => {
                     reasoning_buf.push_str(&r);
-                    events.push(LoopEvent::Reasoning { text: r });
+                    let event = LoopEvent::Reasoning { text: r };
+                    emit(event.clone());
+                    events.push(event);
                 }
                 StreamEvent::ToolCallStart { id, name } => {
                     tool_builders.insert(
@@ -351,13 +396,19 @@ impl Agent {
                                 },
                             })
                             .collect();
-                        events.push(LoopEvent::ToolCallRequired { calls });
+                        let event = LoopEvent::ToolCallRequired { calls };
+                        emit(event.clone());
+                        events.push(event);
                     }
-                    events.push(LoopEvent::Done { usage });
+                    let event = LoopEvent::Done { usage };
+                    emit(event.clone());
+                    events.push(event);
                 }
                 StreamEvent::Error { message } => {
                     let retryable = is_retryable_stream_message(&message);
-                    events.push(LoopEvent::Error { message, retryable });
+                    let event = LoopEvent::Error { message, retryable };
+                    emit(event.clone());
+                    events.push(event);
                 }
             }
         }

@@ -198,6 +198,37 @@ fn test_agent_run_basic() {
     assert!(has_done, "run() should produce Done event");
 }
 
+/// Test that `run_streaming()` emits tokens through the observer as they arrive.
+#[test]
+fn test_agent_run_streaming_observer_receives_tokens() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let sse_body = make_sse_response(&["stream", " now"]);
+    let Some(port) = rt.block_on(spawn_mock_server(sse_body)) else {
+        eprintln!("skipping mock server test: loopback bind denied");
+        return;
+    };
+    let resolved = make_resolved(&format!("http://127.0.0.1:{port}"));
+
+    let mut agent = Agent::new(resolved);
+    let mut observed = String::new();
+    let events = rt.block_on(agent.run_streaming("Test stream", 3, |event| {
+        if let lattice_agent::LoopEvent::Token { text } = event {
+            observed.push_str(&text);
+        }
+    }));
+
+    let returned: String = events
+        .iter()
+        .filter_map(|e| match e {
+            lattice_agent::LoopEvent::Token { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(observed, "stream now");
+    assert_eq!(returned, observed);
+}
+
 /// Test that `run()` handles a tool call response without a tool executor.
 /// Without an executor, Agent stops after one turn (doesn't spin).
 #[test]

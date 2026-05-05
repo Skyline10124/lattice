@@ -14,6 +14,13 @@ pub struct AgentState {
     tool_names: HashMap<String, String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AgentStateSnapshot {
+    messages: Vec<Message>,
+    token_usage: u64,
+    tool_names: HashMap<String, String>,
+}
+
 impl AgentState {
     pub fn new(resolved: ResolvedModel) -> Self {
         Self {
@@ -59,6 +66,20 @@ impl AgentState {
     pub fn seed_messages(&mut self, messages: Vec<Message>) {
         self.tool_names.clear();
         self.messages = messages;
+    }
+
+    pub(crate) fn snapshot(&self) -> AgentStateSnapshot {
+        AgentStateSnapshot {
+            messages: self.messages.clone(),
+            token_usage: self.token_usage,
+            tool_names: self.tool_names.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, snapshot: AgentStateSnapshot) {
+        self.messages = snapshot.messages;
+        self.token_usage = snapshot.token_usage;
+        self.tool_names = snapshot.tool_names;
     }
 
     /// Replace the first Role::User message in-place.
@@ -181,26 +202,24 @@ impl AgentState {
             return;
         }
 
-        let estimate = |msgs: &[lattice_core::types::Message]| -> u32 {
-            msgs.iter()
-                .map(|m| {
-                    lattice_core::tokens::TokenEstimator::estimate_text_for_model(
-                        &m.content,
-                        &self.resolved.api_model_id,
-                    )
-                })
-                .sum()
+        let estimate_msg = |msg: &lattice_core::types::Message| -> u32 {
+            lattice_core::tokens::TokenEstimator::estimate_text_for_model(
+                &msg.content,
+                &self.resolved.api_model_id,
+            )
         };
 
-        let sys_tokens = estimate(&system_msgs);
+        let sys_tokens: u32 = system_msgs.iter().map(estimate_msg).sum();
+        let mut non_system_tokens: u32 = non_system.iter().map(estimate_msg).sum();
 
-        // Remove oldest non-system messages until we fit
+        // Remove oldest non-system messages until we fit. Keep a running token
+        // total so large histories do not re-estimate the full window per loop.
         while non_system.len() > 2 {
-            let current = estimate(&non_system);
-            if current + sys_tokens <= budget {
+            if non_system_tokens + sys_tokens <= budget {
                 break;
             }
-            non_system.remove(0);
+            let removed = non_system.remove(0);
+            non_system_tokens = non_system_tokens.saturating_sub(estimate_msg(&removed));
         }
 
         // Rebuild: system first, then trimmed non-system
@@ -371,5 +390,21 @@ mod tests {
         assert_eq!(state.messages[0].role, Role::System);
         assert_eq!(state.messages[0].content, "system");
         assert_eq!(state.messages[1].content, "older user");
+    }
+
+    #[test]
+    fn test_snapshot_restore_recovers_messages_and_usage() {
+        let mut state = AgentState::new(make_resolved(131072));
+        state.push_user_message("original");
+        state.add_token_usage(42);
+        let snapshot = state.snapshot();
+
+        state.push_assistant_message("assistant", "", None);
+        state.add_token_usage(9);
+        state.restore(snapshot);
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "original");
+        assert_eq!(state.token_usage, 42);
     }
 }
