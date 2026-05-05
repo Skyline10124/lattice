@@ -1,8 +1,8 @@
 use crate::blob::StoredBlob;
+use crate::bus_event_collector::ContextEvent;
 use crate::prompt::provider::ContextProvider;
 use crate::prompt::types::{AssemblyContext, Layer, PromptSection, TokenBudget};
 use async_trait::async_trait;
-use lattice_bus::BusEvent;
 use lattice_core::tokens::TokenEstimator;
 
 const INLINE_THRESHOLD: u32 = 500;
@@ -19,7 +19,7 @@ impl EventsProvider {
     }
 }
 
-fn format_inline(event: &BusEvent) -> String {
+fn format_inline(event: &ContextEvent) -> String {
     let payload_str =
         serde_json::to_string_pretty(&event.payload).unwrap_or_else(|_| event.payload.to_string());
     format!("[topic: {}] {}", event.topic, payload_str)
@@ -73,7 +73,7 @@ impl ContextProvider for EventsProvider {
                     .unwrap_or_else(|_| event.payload.to_string());
                 let blob = StoredBlob {
                     key: key.clone(),
-                    source: event.source.as_str().to_string(),
+                    source: event.source.clone(),
                     topic: event.topic.clone(),
                     mime: "application/json".to_string(),
                     size: payload_str.len() as u64,
@@ -111,7 +111,6 @@ mod tests {
     use super::*;
     use crate::blob::BlobStore;
     use crate::prompt::types::AssemblyContext;
-    use lattice_bus::AgentId;
     use lattice_core::catalog::ApiProtocol;
     use lattice_core::ResolvedModel;
     use std::collections::HashMap;
@@ -130,12 +129,8 @@ mod tests {
         }
     }
 
-    fn make_event(topic: &str, payload: serde_json::Value) -> BusEvent {
-        BusEvent {
-            topic: topic.to_string(),
-            source: AgentId::new("test-source"),
-            payload,
-        }
+    fn make_event(topic: &str, payload: serde_json::Value) -> ContextEvent {
+        ContextEvent::new(topic, "test-source", payload)
     }
 
     #[tokio::test]

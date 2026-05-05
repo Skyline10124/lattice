@@ -10,8 +10,10 @@ use thiserror::Error;
 
 pub mod builtin;
 pub mod bundle;
+pub mod dag_runner;
 pub mod erased;
 pub mod erased_runner;
+pub mod orchestration;
 pub mod registry;
 
 // Re-exports for backward compatibility

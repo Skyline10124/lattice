@@ -1,5 +1,5 @@
+use crate::bus_event_collector::ContextEvent;
 use crate::memory::Memory;
-use lattice_bus::BusEvent;
 use lattice_core::types::{Message, Role};
 use lattice_core::ResolvedModel;
 
@@ -60,7 +60,7 @@ pub struct AssemblyContext<'a> {
     pub model: &'a ResolvedModel,
     #[cfg(feature = "blob-store")]
     pub blob_store: Option<&'a crate::blob::BlobStore>,
-    pub bus_events: &'a [BusEvent],
+    pub bus_events: &'a [ContextEvent],
 }
 
 /// Final compiled prompt ready to send to LLM.

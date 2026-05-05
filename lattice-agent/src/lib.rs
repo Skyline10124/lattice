@@ -5,6 +5,7 @@ pub mod sandbox;
 pub mod state;
 pub mod tool_definitions;
 pub mod tool_error;
+pub mod tool_registry;
 pub mod tools;
 
 #[cfg(feature = "blob-store")]
@@ -68,6 +69,7 @@ pub trait PluginAgent {
 }
 
 // Re-export shared default tools and sandbox for convenience.
+pub use bus_event_collector::ContextEvent;
 pub use sandbox::SandboxConfig;
 pub use tool_definitions::default_tool_definitions;
 pub use tools::DefaultToolExecutor;
@@ -153,7 +155,7 @@ impl Agent {
     }
 
     /// Inject bus events into the collector for prompt assembly.
-    pub fn inject_bus_events(&mut self, events: Vec<lattice_bus::BusEvent>) {
+    pub fn inject_bus_events(&mut self, events: Vec<ContextEvent>) {
         self.bus_event_collector.push_many(events);
     }
 
@@ -549,7 +551,7 @@ mod tests {
         });
 
         // Simulate what Agent::run() does internally (no network call)
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
@@ -608,7 +610,7 @@ mod tests {
         let resolved = make_resolved(16384);
         let agent = Agent::new(resolved);
 
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
@@ -663,7 +665,7 @@ mod tests {
         }
         agent = agent.with_provider(BigProvider);
 
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = prompt::AssemblyContext {
             request_id: "test",
             memory: agent.memory.as_deref(),
@@ -708,17 +710,17 @@ mod tests {
             .with_provider(crate::events_provider::EventsProvider::new("test-source"));
 
         // Inject a small event (should inline)
-        let small_event = lattice_bus::BusEvent {
-            topic: "audit-pass".to_string(),
-            source: lattice_bus::AgentId::new("auditor"),
-            payload: serde_json::json!({"status": "clean"}),
-        };
+        let small_event = ContextEvent::new(
+            "audit-pass",
+            "auditor",
+            serde_json::json!({"status": "clean"}),
+        );
         // Inject a large event (should go to blob)
-        let large_event = lattice_bus::BusEvent {
-            topic: "inspection".to_string(),
-            source: lattice_bus::AgentId::new("auditor"),
-            payload: serde_json::json!({"lines": vec![String::from("x").repeat(5000)]}),
-        };
+        let large_event = ContextEvent::new(
+            "inspection",
+            "auditor",
+            serde_json::json!({"lines": vec![String::from("x").repeat(5000)]}),
+        );
         agent.inject_bus_events(vec![small_event, large_event]);
 
         // Simulate prompt compilation (no network call)
@@ -832,11 +834,11 @@ mod tests {
             .with_provider(crate::events_provider::EventsProvider::new("test-source"));
 
         // All events are large — will be skipped with no blob_store
-        let large_event = lattice_bus::BusEvent {
-            topic: "big-data".to_string(),
-            source: lattice_bus::AgentId::new("source"),
-            payload: serde_json::json!({"data": String::from("x").repeat(5000)}),
-        };
+        let large_event = ContextEvent::new(
+            "big-data",
+            "source",
+            serde_json::json!({"data": String::from("x").repeat(5000)}),
+        );
         agent.inject_bus_events(vec![large_event]);
 
         let bus_events = agent.bus_event_collector.drain();

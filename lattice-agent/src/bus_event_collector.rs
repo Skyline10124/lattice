@@ -1,8 +1,27 @@
-use lattice_bus::BusEvent;
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextEvent {
+    pub topic: String,
+    pub source: String,
+    pub payload: serde_json::Value,
+}
+
+impl ContextEvent {
+    pub fn new(
+        topic: impl Into<String>,
+        source: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            source: source.into(),
+            payload,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct BusEventCollector {
-    pending: Vec<BusEvent>,
+    pending: Vec<ContextEvent>,
 }
 
 impl BusEventCollector {
@@ -10,15 +29,15 @@ impl BusEventCollector {
         Self::default()
     }
 
-    pub fn push(&mut self, event: BusEvent) {
+    pub fn push(&mut self, event: ContextEvent) {
         self.pending.push(event);
     }
 
-    pub fn push_many(&mut self, events: Vec<BusEvent>) {
+    pub fn push_many(&mut self, events: Vec<ContextEvent>) {
         self.pending.extend(events);
     }
 
-    pub fn drain(&mut self) -> Vec<BusEvent> {
+    pub fn drain(&mut self) -> Vec<ContextEvent> {
         std::mem::take(&mut self.pending)
     }
 }
@@ -26,14 +45,9 @@ impl BusEventCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_bus::AgentId;
 
-    fn make_event(topic: &str) -> BusEvent {
-        BusEvent {
-            topic: topic.to_string(),
-            source: AgentId::new("test"),
-            payload: serde_json::json!({"topic": topic}),
-        }
+    fn make_event(topic: &str) -> ContextEvent {
+        ContextEvent::new(topic, "test", serde_json::json!({"topic": topic}))
     }
 
     #[test]

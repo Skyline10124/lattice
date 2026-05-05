@@ -1,8 +1,35 @@
 //! LATTICE Micro-Agent Bus — async RPC + pub/sub hybrid communication layer.
 //!
 //! Bus does routing only. Agent execution (agent loop, LLM inference) is owned
-//! by the caller (harness). register() returns a Registration with the request
+//! by the caller. register() returns a Registration with the request
 //! channel receiver — the caller spawns their own tokio task to process requests.
+
+pub mod assembly;
+pub mod events;
+pub mod handoff_rule;
+pub mod lattice_dir;
+pub mod micro_agent;
+pub mod pipeline;
+pub mod profile;
+pub mod registry;
+pub mod runner;
+pub mod watcher;
+
+#[cfg(feature = "axum")]
+pub mod ws;
+
+pub use events::{EventBus, PipelineEvent};
+pub use handoff_rule::{HandoffCondition, HandoffRule, HandoffTarget};
+pub use lattice_dir::{BusToml, LatticeDir};
+pub use micro_agent::{MicroAgent, MicroAgentHandle};
+pub use pipeline::{AgentError, AgentResult, DryRunReport, Pipeline, PipelineRun};
+pub use profile::{
+    AgentConfig, AgentEdgeConfig, AgentProfile, BehaviorConfig, BusConfigProfile, HandoffConfig,
+    MemoryConfigProfile, PluginSlotConfig, PluginsConfig, SystemConfig, ToolsConfig,
+};
+pub use registry::AgentRegistry;
+pub use runner::AgentRunner;
+pub use watcher::Watcher;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

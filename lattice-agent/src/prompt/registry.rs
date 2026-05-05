@@ -80,6 +80,7 @@ impl PromptRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ContextEvent;
     use async_trait::async_trait;
 
     struct TestProvider {
@@ -140,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn empty_registry_returns_empty() {
         let registry = PromptRegistry::new();
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
@@ -158,7 +159,7 @@ mod tests {
     async fn system_prompt_produces_section_with_fixed_budget() {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("You are a helpful assistant.");
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
@@ -183,7 +184,7 @@ mod tests {
             tokens: 10,
             budget: TokenBudget::Dynamic,
         }));
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
@@ -202,7 +203,7 @@ mod tests {
         let mut registry = PromptRegistry::new();
         registry.set_system_prompt("first");
         registry.set_system_prompt("second");
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
@@ -220,7 +221,7 @@ mod tests {
     async fn provider_returning_none_is_skipped() {
         let mut registry = PromptRegistry::new();
         registry.register(Box::new(NoneProvider));
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,
@@ -252,7 +253,7 @@ mod tests {
             tokens: 10,
             budget: TokenBudget::Ratio(0.3),
         }));
-        let bus_events: Vec<lattice_bus::BusEvent> = vec![];
+        let bus_events: Vec<ContextEvent> = vec![];
         let ctx = AssemblyContext {
             request_id: "test",
             memory: None,

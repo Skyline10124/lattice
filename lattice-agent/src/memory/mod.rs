@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
+
 /// Current time as milliseconds since UNIX epoch.
 /// Used for MemoryEntry IDs and created_at timestamps.
 pub fn now_ms() -> u128 {
@@ -192,6 +194,30 @@ impl Memory for InMemoryMemory {
 }
 
 pub mod reflect;
+
+/// Cross-agent shared memory with partition-based access control.
+/// Separate trait from Memory — agents use Memory for private state,
+/// SharedMemory for cross-agent collaboration.
+#[async_trait]
+pub trait SharedMemory: Send + Sync {
+    async fn save_shared(
+        &self,
+        entry: MemoryEntry,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+    ) -> Result<(), MemoryError>;
+
+    async fn read_shared(
+        &self,
+        query: &str,
+        partition: SharedPartition,
+        access: &PartitionAccess,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError>;
+}
+
+#[cfg(feature = "sqlite-memory")]
+pub mod sqlite;
 
 #[cfg(test)]
 mod tests {
