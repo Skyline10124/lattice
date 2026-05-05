@@ -1268,20 +1268,32 @@ mod tests {
     fn test_is_private_or_reserved_ipv4() {
         use std::net::IpAddr;
         let private: Vec<&str> = vec![
-            "10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.1.1",
-            "127.0.0.1", "0.0.0.1", "169.254.1.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.1",
+            "127.0.0.1",
+            "0.0.0.1",
+            "169.254.1.1",
         ];
         for ip in private {
             let addr: IpAddr = ip.parse().unwrap();
             assert!(is_private_or_reserved(addr), "{} should be private", ip);
         }
         let public: Vec<&str> = vec![
-            "1.1.1.1", "8.8.8.8", "104.18.0.1", "151.101.1.1",
+            "1.1.1.1",
+            "8.8.8.8",
+            "104.18.0.1",
+            "151.101.1.1",
             "198.18.0.202", // benchmarking — not rejected (CDN/VPN use)
         ];
         for ip in public {
             let addr: IpAddr = ip.parse().unwrap();
-            assert!(!is_private_or_reserved(addr), "{} should NOT be private", ip);
+            assert!(
+                !is_private_or_reserved(addr),
+                "{} should NOT be private",
+                ip
+            );
         }
     }
 
@@ -1289,9 +1301,9 @@ mod tests {
     fn test_is_private_or_reserved_ipv6() {
         use std::net::IpAddr;
         let private: Vec<&str> = vec![
-            "::1",           // loopback
-            "fc00::1",       // unique local
-            "fe80::1",       // link-local
+            "::1",                // loopback
+            "fc00::1",            // unique local
+            "fe80::1",            // link-local
             "::ffff:192.168.1.1", // IPv4-mapped private
         ];
         for ip in private {
@@ -1299,12 +1311,16 @@ mod tests {
             assert!(is_private_or_reserved(addr), "{} should be private", ip);
         }
         let public: Vec<&str> = vec![
-            "2606:4700::1",  // Cloudflare
-            "2001:4860::1",  // Google
+            "2606:4700::1", // Cloudflare
+            "2001:4860::1", // Google
         ];
         for ip in public {
             let addr: IpAddr = ip.parse().unwrap();
-            assert!(!is_private_or_reserved(addr), "{} should NOT be private", ip);
+            assert!(
+                !is_private_or_reserved(addr),
+                "{} should NOT be private",
+                ip
+            );
         }
     }
 

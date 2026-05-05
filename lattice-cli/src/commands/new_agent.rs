@@ -59,7 +59,10 @@ pub fn run(name: String) -> Result<()> {
     println!("  {}", toml_path.display());
     println!();
     println!("Edit the file to configure your agent, then run:");
-    println!("  lattice validate {}", super::safe_agents_dir(None).display());
+    println!(
+        "  lattice validate {}",
+        super::safe_agents_dir(None).display()
+    );
     println!();
 
     Ok(())

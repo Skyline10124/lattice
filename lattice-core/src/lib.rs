@@ -783,7 +783,12 @@ mod validate_header_tests {
 
     #[test]
     fn test_validate_injected_header_accepts_whitelisted() {
-        for ok in &["x-request-id", "content-type", "anthropic-version", "openai-beta"] {
+        for ok in &[
+            "x-request-id",
+            "content-type",
+            "anthropic-version",
+            "openai-beta",
+        ] {
             let result = validate_injected_header(ok);
             assert!(result.is_ok(), "should accept '{}'", ok);
         }

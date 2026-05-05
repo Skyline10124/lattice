@@ -229,7 +229,9 @@ impl LatticeEngine {
     /// List models with valid credentials.
     pub fn list_authenticated_models(&self) -> Vec<String> {
         let router = self.router.read().unwrap_or_else(|e| {
-            tracing::warn!("RwLock poisoned in LatticeEngine::list_authenticated_models, recovering");
+            tracing::warn!(
+                "RwLock poisoned in LatticeEngine::list_authenticated_models, recovering"
+            );
             e.into_inner()
         });
         router.list_authenticated_models()

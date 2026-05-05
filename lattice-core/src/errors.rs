@@ -228,7 +228,10 @@ fn scrub_credentials(s: &str) -> String {
         // Generic Bearer tokens in headers/JSON
         (r#"(?i)bearer\s+[A-Za-z0-9\-._~+/]+=*"#, "Bearer [REDACTED]"),
         // JSON key/value patterns for common credential field names
-        (r#"(?i)"(?:api[_-]?key|token|secret|password|credential|auth[_-]?token)"\s*:\s*"[^"]{8,}""#, "\"[CREDENTIAL_FIELD]\": \"[REDACTED]\""),
+        (
+            r#"(?i)"(?:api[_-]?key|token|secret|password|credential|auth[_-]?token)"\s*:\s*"[^"]{8,}""#,
+            "\"[CREDENTIAL_FIELD]\": \"[REDACTED]\"",
+        ),
     ];
     for (pattern, replacement) in patterns {
         if let Ok(re) = regex::Regex::new(pattern) {

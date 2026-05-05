@@ -294,23 +294,23 @@ impl AgentProfile {
                 return Err(format!(
                     "system.file '{}' rejected: must be a relative path without '..'",
                     file
-                ).into());
+                )
+                .into());
             }
-            let canonical = std::fs::canonicalize(path).map_err(|e| {
-                format!("system.file '{}' not found: {e}", file)
-            })?;
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|e| format!("system.file '{}' not found: {e}", file))?;
             if let Ok(cwd) = std::env::current_dir() {
                 if !canonical.starts_with(&cwd) {
                     return Err(format!(
                         "system.file '{}' resolved to '{}' which is outside the working directory",
                         file,
                         canonical.to_string_lossy()
-                    ).into());
+                    )
+                    .into());
                 }
             }
-            let content = std::fs::read_to_string(&canonical).map_err(|e| {
-                format!("system.file '{}' read failed: {e}", file)
-            })?;
+            let content = std::fs::read_to_string(&canonical)
+                .map_err(|e| format!("system.file '{}' read failed: {e}", file))?;
             return Ok(content);
         }
         Ok(self.system.prompt.clone())
@@ -632,13 +632,17 @@ rule = { default = true }
     fn test_strict_config_auto_generates_hash() {
         let dir = tempfile::tempdir().unwrap();
         let toml_path = dir.path().join("test_agent.toml");
-        let content = "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n";
+        let content =
+            "[agent]\nname = \"test\"\nmodel = \"sonnet\"\n\n[system]\nprompt = \"test\"\n";
         std::fs::write(&toml_path, content).unwrap();
         let result = verify_config_integrity(&toml_path, content, true);
         assert!(result.is_ok());
         // Sidecar should have been auto-generated
         let hash_path = toml_path.with_extension("toml.sha256");
-        assert!(hash_path.exists(), "sha256 sidecar should be auto-generated");
+        assert!(
+            hash_path.exists(),
+            "sha256 sidecar should be auto-generated"
+        );
         // Second load should pass (hash matches)
         let result2 = verify_config_integrity(&toml_path, content, true);
         assert!(result2.is_ok());

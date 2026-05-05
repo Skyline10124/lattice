@@ -46,7 +46,8 @@ pub fn validate_agents_dir(path: &Path) -> Result<(), String> {
             return Err(format!(
                 "Agents directory '{}' is inside a system path ({}). \
                  Set LATTICE_AGENTS_DIR to a safe location (e.g., under $HOME or your project).",
-                path.display(), prefix
+                path.display(),
+                prefix
             ));
         }
     }

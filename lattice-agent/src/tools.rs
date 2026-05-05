@@ -371,10 +371,7 @@ impl ToolExecutor for DefaultToolExecutor {
                                 }
                             }
                         } else {
-                            return format!(
-                                "Sandbox: cannot patch '{}' — invalid path",
-                                path
-                            );
+                            return format!("Sandbox: cannot patch '{}' — invalid path", path);
                         }
                     }
                 };

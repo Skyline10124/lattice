@@ -9,8 +9,8 @@ mod frontend;
 mod session;
 
 use commands::{
-    bus_status, config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run,
-    sessions, stats, validate,
+    bus_status, config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run, sessions,
+    stats, validate,
 };
 use config::Config;
 use credentials::CredentialStore;

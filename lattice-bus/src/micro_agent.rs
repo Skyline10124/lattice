@@ -172,7 +172,11 @@ impl MicroAgent {
             micro_agent_loop(runner, ctx, max_turns, request_rx).await;
         });
 
-        Ok(MicroAgentHandle { id, join_handle, bus: self.bus.clone() })
+        Ok(MicroAgentHandle {
+            id,
+            join_handle,
+            bus: self.bus.clone(),
+        })
     }
 }
 

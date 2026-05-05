@@ -37,7 +37,7 @@ impl Default for SandboxConfig {
                 ".env.production".into(),
                 ".env.staging".into(),
                 ".env.test".into(),
-                ".env.*".into(),  // wildcard: matches .env.anything
+                ".env.*".into(), // wildcard: matches .env.anything
                 // Cloud credentials
                 "credentials.json".into(),
                 ".aws/credentials".into(),
@@ -49,7 +49,7 @@ impl Default for SandboxConfig {
                 ".ssh/id_rsa".into(),
                 ".ssh/id_ed25519".into(),
                 ".ssh/id_ecdsa".into(),
-                ".ssh/id_*".into(),       // wildcard: matches id_rsa, id_ed25519, id_ecdsa, etc.
+                ".ssh/id_*".into(), // wildcard: matches id_rsa, id_ed25519, id_ecdsa, etc.
                 ".ssh/authorized_keys".into(),
                 ".ssh/config".into(),
                 // PGP/GPG
@@ -331,7 +331,11 @@ fn is_path_prefix(check_path: &std::path::Path, prefix: &std::path::Path) -> boo
         return false;
     }
     // All prefix components must match
-    for (a, b) in check_comps.iter().take(prefix_comps.len()).zip(prefix_comps.iter()) {
+    for (a, b) in check_comps
+        .iter()
+        .take(prefix_comps.len())
+        .zip(prefix_comps.iter())
+    {
         if a != b {
             return false;
         }
@@ -437,7 +441,9 @@ fn path_matches_sensitive(path: &std::path::Path, pattern: &str) -> bool {
     }
 
     if parts.len() == 1 {
-        comps.iter().any(|c| component_matches_pattern(c.as_ref(), parts[0]))
+        comps
+            .iter()
+            .any(|c| component_matches_pattern(c.as_ref(), parts[0]))
     } else {
         comps.windows(parts.len()).any(|window| {
             window
@@ -469,7 +475,8 @@ fn component_matches_pattern(component: &str, pattern: &str) -> bool {
         return false;
     }
     // Last segment must match the end
-    if segments.len() > 1 && !segments.last().unwrap().is_empty()
+    if segments.len() > 1
+        && !segments.last().unwrap().is_empty()
         && !component.ends_with(segments.last().unwrap())
     {
         return false;
@@ -894,24 +901,66 @@ mod tests {
     fn test_path_matches_sensitive_wildcards() {
         use std::path::Path;
         // .env.* wildcard
-        assert!(path_matches_sensitive(Path::new("/home/user/.env.local"), ".env.*"));
-        assert!(path_matches_sensitive(Path::new("/home/user/.env.production"), ".env.*"));
-        assert!(path_matches_sensitive(Path::new("/home/user/.env.staging"), ".env.*"));
-        assert!(!path_matches_sensitive(Path::new("/home/user/.env"), ".env.*"));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.env.local"),
+            ".env.*"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.env.production"),
+            ".env.*"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.env.staging"),
+            ".env.*"
+        ));
+        assert!(!path_matches_sensitive(
+            Path::new("/home/user/.env"),
+            ".env.*"
+        ));
         // *.pem wildcard
-        assert!(path_matches_sensitive(Path::new("/home/user/cert.pem"), "*.pem"));
-        assert!(path_matches_sensitive(Path::new("/home/user/key.pem"), "*.pem"));
-        assert!(!path_matches_sensitive(Path::new("/home/user/cert.txt"), "*.pem"));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/cert.pem"),
+            "*.pem"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/key.pem"),
+            "*.pem"
+        ));
+        assert!(!path_matches_sensitive(
+            Path::new("/home/user/cert.txt"),
+            "*.pem"
+        ));
         // *.key wildcard
-        assert!(path_matches_sensitive(Path::new("/etc/ssl/server.key"), "*.key"));
+        assert!(path_matches_sensitive(
+            Path::new("/etc/ssl/server.key"),
+            "*.key"
+        ));
         // id_* wildcard
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), "id_*"));
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ed25519"), "id_*"));
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ecdsa"), "id_*"));
-        assert!(!path_matches_sensitive(Path::new("/home/user/.ssh/identity"), "id_*"));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_rsa"),
+            "id_*"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_ed25519"),
+            "id_*"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_ecdsa"),
+            "id_*"
+        ));
+        assert!(!path_matches_sensitive(
+            Path::new("/home/user/.ssh/identity"),
+            "id_*"
+        ));
         // .ssh/id_* wildcard (compound with wildcard)
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_rsa"), ".ssh/id_*"));
-        assert!(path_matches_sensitive(Path::new("/home/user/.ssh/id_ecdsa"), ".ssh/id_*"));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_rsa"),
+            ".ssh/id_*"
+        ));
+        assert!(path_matches_sensitive(
+            Path::new("/home/user/.ssh/id_ecdsa"),
+            ".ssh/id_*"
+        ));
     }
 
     #[test]
@@ -981,9 +1030,18 @@ mod tests {
     fn test_is_path_prefix_component_boundary() {
         use super::is_path_prefix;
         use std::path::Path;
-        assert!(is_path_prefix(Path::new("/home/user/src/main.rs"), Path::new("/home/user/src")));
-        assert!(!is_path_prefix(Path::new("/home/user/src-hack/foo.rs"), Path::new("/home/user/src")));
-        assert!(!is_path_prefix(Path::new("/home/user/src"), Path::new("/home/user/src")));
+        assert!(is_path_prefix(
+            Path::new("/home/user/src/main.rs"),
+            Path::new("/home/user/src")
+        ));
+        assert!(!is_path_prefix(
+            Path::new("/home/user/src-hack/foo.rs"),
+            Path::new("/home/user/src")
+        ));
+        assert!(!is_path_prefix(
+            Path::new("/home/user/src"),
+            Path::new("/home/user/src")
+        ));
         assert!(is_path_prefix(Path::new("/a/b/c"), Path::new("/a/b")));
         assert!(!is_path_prefix(Path::new("/a/bc"), Path::new("/a/b")));
     }

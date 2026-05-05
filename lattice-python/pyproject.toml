@@ -31,4 +31,3 @@ Repository = "https://github.com/Skyline10124/lattice"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "lattice_core"
-python-source = "python"

@@ -65,14 +65,16 @@ impl AgentRunner {
                         return Err(format!(
                             "output_schema is not a valid JSON Schema for {}: {e}",
                             self.profile.agent.name
-                        ).into());
+                        )
+                        .into());
                     }
                 },
                 Err(e) => {
                     return Err(format!(
                         "output_schema is not valid JSON for {}: {e}",
                         self.profile.agent.name
-                    ).into());
+                    )
+                    .into());
                 }
             },
             None => None,
@@ -123,7 +125,8 @@ impl AgentRunner {
                 return Err(format!(
                     "Agent '{}' output still fails schema validation after {} retries",
                     self.profile.agent.name, MAX_SCHEMA_RETRIES
-                ).into());
+                )
+                .into());
             }
         }
 

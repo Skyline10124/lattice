@@ -367,7 +367,10 @@ impl Bus for InMemoryBus {
             if let Some(entry) = agents.get(aid) {
                 let allowed = &entry.descriptor.bus_config.subscribe;
                 if !allowed.is_empty() && !allowed.iter().any(|t| t == topic) {
-                    return Err(BusError::SubscribeUnauthorized(aid.clone(), topic.to_string()));
+                    return Err(BusError::SubscribeUnauthorized(
+                        aid.clone(),
+                        topic.to_string(),
+                    ));
                 }
             }
         }
@@ -393,7 +396,10 @@ impl Bus for InMemoryBus {
             if let Some(entry) = agents.get(&event.source) {
                 let allowed = &entry.descriptor.bus_config.publish;
                 if !allowed.is_empty() && !allowed.iter().any(|t| t == topic) {
-                    return Err(BusError::PublishUnauthorized(event.source.clone(), topic.to_string()));
+                    return Err(BusError::PublishUnauthorized(
+                        event.source.clone(),
+                        topic.to_string(),
+                    ));
                 }
             }
         }

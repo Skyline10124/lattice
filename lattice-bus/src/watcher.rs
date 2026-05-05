@@ -33,14 +33,11 @@ impl Watcher {
                 if let Ok(event) = res {
                     // React to agent.toml or .toml.sha256 file changes
                     // (sha256 sidecar deletion/modification can indicate tampering)
-                    let is_relevant = event
-                        .paths
-                        .iter()
-                        .any(|p| {
-                            p.file_name()
-                                .map(|n| n == "agent.toml" || n == "agent.toml.sha256")
-                                .unwrap_or(false)
-                        });
+                    let is_relevant = event.paths.iter().any(|p| {
+                        p.file_name()
+                            .map(|n| n == "agent.toml" || n == "agent.toml.sha256")
+                            .unwrap_or(false)
+                    });
                     if is_relevant {
                         match event.kind {
                             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
