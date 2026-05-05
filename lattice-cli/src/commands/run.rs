@@ -26,6 +26,8 @@ pub async fn run(
     previous_session: Option<crate::session::Session>,
     dry_run: bool,
     system_prompt: Option<&str>,
+    max_turns: u32,
+    stream_output: bool,
 ) -> Result<()> {
     // Dry-run: compile prompt through engine and print, no LLM call, no credential needed
     if dry_run {
@@ -66,9 +68,29 @@ pub async fn run(
         eprintln!("{}", "streaming...".dimmed());
     }
 
-    let events = agent.run(&prompt, 10).await;
+    let events = if json || !stream_output {
+        let events = agent.run(&prompt, max_turns).await;
+        display_events(&agent, events.clone(), verbose, json)?;
+        events
+    } else {
+        let mut renderer = EventRenderer::new(verbose);
+        let mut render_error = None;
+        let events = agent
+            .run_streaming(&prompt, max_turns, |event| {
+                if render_error.is_none() {
+                    if let Err(err) = renderer.render(event) {
+                        render_error = Some(err);
+                    }
+                }
+            })
+            .await;
+        if let Some(err) = render_error {
+            return Err(err);
+        }
+        renderer.finish()?;
+        events
+    };
     let content = extract_content(&events);
-    display_events(&agent, events, verbose, json)?;
 
     if save {
         let session = crate::session::finalize_session_turn(
@@ -374,6 +396,79 @@ fn agents_dir_path(override_path: Option<&str>) -> PathBuf {
 fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
     if verbose && !json && !buf.is_empty() {
         eprintln!("{} {}", "reasoning:".dimmed(), buf.trim());
+    }
+}
+
+struct EventRenderer {
+    verbose: bool,
+    reasoning_buf: String,
+}
+
+impl EventRenderer {
+    fn new(verbose: bool) -> Self {
+        Self {
+            verbose,
+            reasoning_buf: String::new(),
+        }
+    }
+
+    fn render(&mut self, event: LoopEvent) -> Result<()> {
+        match event {
+            LoopEvent::Token { text } => {
+                print!("{}", text);
+                std::io::stdout().flush()?;
+            }
+            LoopEvent::Reasoning { text } => {
+                self.reasoning_buf.push_str(&text);
+            }
+            LoopEvent::ToolCallRequired { calls } => {
+                self.flush_reasoning();
+                if self.verbose {
+                    eprintln!("\n{} {} tool call(s)...", "executing".dimmed(), calls.len());
+                }
+            }
+            LoopEvent::ToolResult { call, result } => {
+                if self.verbose {
+                    eprintln!(
+                        "\n{} {} -> {}",
+                        "tool".dimmed(),
+                        call.function.name,
+                        result.chars().take(200).collect::<String>()
+                    );
+                }
+            }
+            LoopEvent::Done { usage } => {
+                self.flush_reasoning();
+                if self.verbose {
+                    if let Some(u) = usage {
+                        eprintln!(
+                            "\n{}: {} tok (prompt: {}, completion: {})",
+                            "usage".dimmed(),
+                            u.total_tokens,
+                            u.prompt_tokens,
+                            u.completion_tokens,
+                        );
+                    }
+                }
+            }
+            LoopEvent::Error { message, .. } => {
+                self.flush_reasoning();
+                eprintln!("{} {}", "error:".red(), message);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.flush_reasoning();
+        println!();
+        std::io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn flush_reasoning(&mut self) {
+        flush_reasoning(&self.reasoning_buf, self.verbose, false);
+        self.reasoning_buf.clear();
     }
 }
 

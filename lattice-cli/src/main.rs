@@ -98,7 +98,10 @@ enum Commands {
     },
     #[command(about = "Run a prompt through the model or pipeline")]
     Run {
-        prompt: String,
+        #[arg(help = "Prompt text, or use --file to read from a file")]
+        prompt: Option<String>,
+        #[arg(short = 'f', long = "file", help = "Read prompt text from a file")]
+        file: Option<String>,
         #[arg(short, long, help = "Model alias or canonical ID")]
         model: Option<String>,
         #[arg(long, help = "Provider override")]
@@ -118,6 +121,20 @@ enum Commands {
         dry_run: bool,
         #[arg(long, help = "System prompt for prompt engine test")]
         system_prompt: Option<String>,
+        #[arg(long, default_value_t = 10, help = "Maximum agent turns")]
+        max_turns: u32,
+        #[arg(
+            long,
+            overrides_with = "no_stream",
+            help = "Stream tokens as they arrive"
+        )]
+        stream: bool,
+        #[arg(
+            long,
+            overrides_with = "stream",
+            help = "Print only after the run completes"
+        )]
+        no_stream: bool,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
@@ -239,6 +256,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Run {
             prompt,
+            file,
             model,
             provider,
             pipeline,
@@ -247,7 +265,11 @@ async fn main() -> Result<()> {
             tools_dir,
             dry_run,
             system_prompt,
+            max_turns,
+            stream,
+            no_stream,
         }) => {
+            let prompt = load_run_prompt(prompt, file.as_deref())?;
             if let Some(start_agent) = pipeline {
                 run::run_pipeline(
                     &prompt,
@@ -267,6 +289,15 @@ async fn main() -> Result<()> {
                 let provider = provider.or_else(|| cli.provider.clone());
                 let previous_session =
                     load_requested_session(cli.session.as_deref(), cli.continue_session)?;
+                let stream_output = if cli.json {
+                    false
+                } else if stream {
+                    true
+                } else if no_stream {
+                    false
+                } else {
+                    config.core.stream
+                };
                 run::run(
                     prompt,
                     model,
@@ -278,6 +309,8 @@ async fn main() -> Result<()> {
                     previous_session,
                     dry_run,
                     system_prompt.as_deref(),
+                    max_turns,
+                    stream_output,
                 )
                 .await?;
             }
@@ -355,6 +388,16 @@ fn load_requested_session(
     Ok(None)
 }
 
+fn load_run_prompt(prompt: Option<String>, file: Option<&str>) -> Result<String> {
+    match (prompt, file) {
+        (Some(_), Some(_)) => anyhow::bail!("Use either PROMPT or --file, not both"),
+        (Some(prompt), None) => Ok(prompt),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .map_err(|err| anyhow::anyhow!("Failed to read prompt file '{}': {}", path, err)),
+        (None, None) => anyhow::bail!("Missing prompt text or --file"),
+    }
+}
+
 async fn launch_tui(
     prompt: Option<String>,
     model: Option<String>,
@@ -376,4 +419,60 @@ async fn launch_tui(
         previous_session,
     );
     frontend::tui::run(options).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_run_prompt, Cli, Commands};
+    use clap::Parser;
+    use std::fs;
+
+    #[test]
+    fn load_run_prompt_reads_file_verbatim() {
+        let path =
+            std::env::temp_dir().join(format!("lattice-run-prompt-{}.txt", std::process::id()));
+        let content = "line 1\nquote: \"hello\"\nslash: \\\n";
+        fs::write(&path, content).expect("write prompt fixture");
+
+        let loaded = load_run_prompt(None, path.to_str());
+
+        fs::remove_file(&path).ok();
+        assert_eq!(loaded.expect("prompt file should load"), content);
+    }
+
+    #[test]
+    fn load_run_prompt_rejects_prompt_and_file_together() {
+        let err = load_run_prompt(Some("inline".into()), Some("prompt.txt"))
+            .expect_err("prompt and file should conflict");
+
+        assert!(err.to_string().contains("either PROMPT or --file"));
+    }
+
+    #[test]
+    fn run_stream_flags_default_to_config_control() {
+        let cli = Cli::parse_from(["lattice", "run", "hello"]);
+        let Some(Commands::Run {
+            stream, no_stream, ..
+        }) = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert!(!stream);
+        assert!(!no_stream);
+    }
+
+    #[test]
+    fn run_no_stream_overrides_stream_flag() {
+        let cli = Cli::parse_from(["lattice", "run", "hello", "--stream", "--no-stream"]);
+        let Some(Commands::Run {
+            stream, no_stream, ..
+        }) = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert!(!stream);
+        assert!(no_stream);
+    }
 }
