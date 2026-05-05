@@ -48,23 +48,8 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
-    // Build the final prompt, prepending previous session context if available
-    let final_prompt = if let Some(ref session) = previous_session {
-        let mut ctx = String::from("Previous conversation:\n");
-        for msg in &session.messages {
-            let role = match msg.role.to_lowercase().as_str() {
-                "user" => "User",
-                "assistant" => "Assistant",
-                _ => &msg.role,
-            };
-            ctx.push_str(&format!("{}: {}\n", role, msg.content));
-        }
-        ctx.push_str("---\n");
-        ctx.push_str(&prompt);
-        ctx
-    } else {
-        prompt.clone()
-    };
+    let final_prompt =
+        crate::session::build_prompt_with_history(previous_session.as_ref(), &prompt);
 
     let tools = default_tool_definitions();
     let mut agent = Agent::new(resolved)
@@ -82,15 +67,13 @@ pub async fn run(
     display_events(&agent, events, verbose, json)?;
 
     if save {
-        let mut session = crate::session::Session::new(resolved_model, resolved_provider);
-        session.messages.push(crate::session::SessionMessage {
-            role: "user".to_string(),
-            content: prompt.clone(),
-        });
-        session.messages.push(crate::session::SessionMessage {
-            role: "assistant".to_string(),
+        let session = crate::session::finalize_session_turn(
+            previous_session,
+            resolved_model,
+            resolved_provider,
+            prompt.clone(),
             content,
-        });
+        );
         let mgr = crate::session::SessionManager::new();
         mgr.save(&session)?;
         if verbose {
@@ -111,23 +94,7 @@ async fn dry_run_prompt(
     use lattice_agent::prompt;
     use std::collections::HashMap;
 
-    // Build final input text with session context if present
-    let user_input = if let Some(session) = previous_session {
-        let mut ctx = String::from("Previous conversation:\n");
-        for msg in &session.messages {
-            let role = match msg.role.to_lowercase().as_str() {
-                "user" => "User",
-                "assistant" => "Assistant",
-                _ => &msg.role,
-            };
-            ctx.push_str(&format!("{}: {}\n", role, msg.content));
-        }
-        ctx.push_str("---\n");
-        ctx.push_str(prompt);
-        ctx
-    } else {
-        prompt.to_string()
-    };
+    let user_input = crate::session::build_prompt_with_history(previous_session, prompt);
 
     // Use a default 128K model for dry-run to exercise full budget logic
     let resolved = lattice_core::ResolvedModel {

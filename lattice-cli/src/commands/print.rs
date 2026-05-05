@@ -37,23 +37,7 @@ pub async fn run(
     let resolved_model = resolved.canonical_id.clone();
     let resolved_provider = resolved.provider.clone();
 
-    // Build the final prompt, prepending previous session context if available
-    let final_prompt = if let Some(ref session) = previous_session {
-        let mut ctx = String::from("Previous conversation:\n");
-        for msg in &session.messages {
-            let role = match msg.role.to_lowercase().as_str() {
-                "user" => "User",
-                "assistant" => "Assistant",
-                _ => &msg.role,
-            };
-            ctx.push_str(&format!("{}: {}\n", role, msg.content));
-        }
-        ctx.push_str("---\n");
-        ctx.push_str(prompt);
-        ctx
-    } else {
-        prompt.to_string()
-    };
+    let final_prompt = crate::session::build_prompt_with_history(previous_session.as_ref(), prompt);
 
     let tools = tool_definitions();
     let mut agent = Agent::new(resolved.clone()).with_tools(tools);
@@ -71,15 +55,13 @@ pub async fn run(
     }
 
     if save {
-        let mut session = crate::session::Session::new(resolved_model, resolved_provider);
-        session.messages.push(crate::session::SessionMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        });
-        session.messages.push(crate::session::SessionMessage {
-            role: "assistant".to_string(),
+        let session = crate::session::finalize_session_turn(
+            previous_session,
+            resolved_model,
+            resolved_provider,
+            prompt.to_string(),
             content,
-        });
+        );
         let mgr = crate::session::SessionManager::new();
         mgr.save(&session)?;
         if verbose && !json {

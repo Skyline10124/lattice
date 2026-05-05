@@ -140,6 +140,7 @@ lattice bus
 lattice sessions list
 lattice sessions show <id>
 lattice sessions rm <id>
+lattice run --session <id> "continue this thread"
 
 # Session statistics
 lattice stats
@@ -193,7 +194,7 @@ LATTICE is in **alpha / dogfooding** stage. What works:
 - **Harness**: TOML-defined pipelines, handoff rule engine, fork parallel execution, dry-run validation, hot reload
 - **Plugins**: centralized builtin registry with 11 builtins; `--pipeline` auto-loads registry entries
 - **JSON schema validation**: jsonschema crate for LLM output validation with retry loop
-- **CLI**: run, resolve, models, debug, doctor, bus, config, sessions, stats, validate, list, new — session auto-save with SHA-256 IDs, `--continue-session`, `--provider` flag
+- **CLI**: run, resolve, models, debug, doctor, bus, config, sessions, stats, validate, list, new — session auto-save with SHA-256 IDs, `--continue-session`, `--session`, `--provider` flag
 - **HTTPS enforced**: non-localhost HTTP base URLs rejected at the engine level
 
 ## Project structure

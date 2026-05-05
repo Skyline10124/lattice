@@ -127,7 +127,7 @@ Full asyncification and elimination of C-isms across the stack:
 
 ## Current focus
 
-The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. DS-P0/P1/P2/P3 security + engineering improvements are all addressed. The 2026-05-03 CLI audit (13 issues) is fully resolved — sessions, stats, config set, `--continue-session`, `--no-save`, `--provider`, `list agents`, and `bus` default dir are all real implementations.
+The project is in **alpha / dogfooding** stage. Phases 1-5 are complete. DS-P0/P1/P2/P3 security + engineering improvements are all addressed. The 2026-05-03 CLI audit (13 issues) is fully resolved — sessions, stats, config set, `--continue-session`, `--session`, `--no-save`, `--provider`, `list agents`, and `bus` default dir are all real implementations.
 
 Current priorities:
 

@@ -24,12 +24,16 @@ pub fn run(action: SessionAction) -> Result<()> {
             println!();
             for s in &sessions {
                 println!(
-                    "  {}  {}  {}  {} messages",
+                    "  {}  {}  {}  {}  {} messages",
                     s.id.bold(),
                     s.model.cyan(),
-                    s.created_at.dimmed(),
+                    s.provider.dimmed(),
+                    s.updated_at.dimmed(),
                     s.message_count
                 );
+                if let Some(title) = &s.title {
+                    println!("      {}", title.dimmed());
+                }
             }
         }
         SessionAction::Show { id } => match manager.load(&id)? {
@@ -41,6 +45,10 @@ pub fn run(action: SessionAction) -> Result<()> {
                 );
                 println!("{}", format!("Provider: {}", session.provider).dimmed());
                 println!("{}", format!("Created: {}", session.created_at).dimmed());
+                println!("{}", format!("Updated: {}", session.updated_at).dimmed());
+                if let Some(title) = &session.title {
+                    println!("{}", format!("Title: {}", title).dimmed());
+                }
                 println!();
                 for msg in &session.messages {
                     let role_label = match msg.role.to_lowercase().as_str() {

@@ -78,6 +78,8 @@ show_reasoning = true
                 .parse::<toml_edit::DocumentMut>()
                 .map_err(|e| anyhow!("Failed to parse config: {}", e))?;
 
+            let item = config_value_for_key(&key, &value)?;
+
             // Navigate key path (e.g., "core.default_model" → doc["core"]["default_model"])
             let parts: Vec<&str> = key.split('.').collect();
             if parts.len() == 2 {
@@ -85,9 +87,9 @@ show_reasoning = true
                 if !doc.contains_table(parts[0]) {
                     doc[parts[0]] = toml_edit::table();
                 }
-                doc[parts[0]][parts[1]] = toml_edit::value(value.as_str());
+                doc[parts[0]][parts[1]] = item;
             } else {
-                doc[&key] = toml_edit::value(value.as_str());
+                doc[&key] = item;
             }
 
             // Write back
@@ -111,4 +113,45 @@ show_reasoning = true
     }
 
     Ok(())
+}
+
+fn config_value_for_key(key: &str, value: &str) -> Result<toml_edit::Item> {
+    match key {
+        "core.stream" | "core.save_sessions" | "ui.show_reasoning" => {
+            let parsed = value.parse::<bool>().map_err(|_| {
+                anyhow!(
+                    "{} expects a boolean value (true or false), got '{}'",
+                    key,
+                    value
+                )
+            })?;
+            Ok(toml_edit::value(parsed))
+        }
+        _ => Ok(toml_edit::value(value)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boolean_config_values_are_typed() -> Result<()> {
+        let item = config_value_for_key("core.save_sessions", "false")?;
+        assert_eq!(item.as_bool(), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_boolean_config_values_error() {
+        let err = config_value_for_key("core.save_sessions", "nope").unwrap_err();
+        assert!(err.to_string().contains("expects a boolean"));
+    }
+
+    #[test]
+    fn string_config_values_remain_strings() -> Result<()> {
+        let item = config_value_for_key("core.default_model", "sonnet")?;
+        assert_eq!(item.as_str(), Some("sonnet"));
+        Ok(())
+    }
 }

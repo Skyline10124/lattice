@@ -62,6 +62,7 @@ lattice list agents
 # 会话管理
 lattice sessions list
 lattice sessions show <id>
+lattice sessions rm <id>
 
 # 会话统计
 lattice stats
@@ -73,6 +74,9 @@ lattice config set core.default_model gpt-4
 
 # 继续上一次会话
 lattice run -c "继续上次的话题" -m sonnet
+
+# 继续指定会话
+lattice run --session <id> "继续这个话题" -m sonnet
 
 # Debug 模式（model 为位置参数，--prompt 为可选）
 lattice debug sonnet --resolve-only

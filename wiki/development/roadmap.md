@@ -7,7 +7,7 @@
 - [x] Phase 3: Dogfooding + Agent runtime — Agent::run() 自动 tool loop, 7 tools, SqliteMemory, harness + plugin + CLI + TUI
 - [x] Phase 4: 类型化插件 + DAG 编排 — Plugin trait (Input/Output), ErasedPlugin, PluginDagRunner, 11 builtin plugins
 - [x] Phase 5: 全 async + Rust native — tokio tools, 纯 Rust grep, SYNC_RT/BUS_RT 删除, Pipeline async
-- [x] CLI audit 修复 — sessions/stats/config set 真实实现, `--continue-session`/`--no-save`/`--provider`/`list agents`, SHA-256 session IDs, `KNOWN_ENV_VARS` 同步
+- [x] CLI audit 修复 — sessions/stats/config set 真实实现, `--continue-session`/`--session`/`--no-save`/`--provider`/`list agents`, SHA-256 session IDs, `KNOWN_ENV_VARS` 同步
 
 ## 进行中
 

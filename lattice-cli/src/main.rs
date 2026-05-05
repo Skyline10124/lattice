@@ -39,6 +39,9 @@ struct Cli {
     #[arg(short, long, global = true, help = "Continue last session")]
     continue_session: bool,
 
+    #[arg(long, global = true, help = "Continue a specific session id")]
+    session: Option<String>,
+
     #[arg(long, global = true, help = "Do not save session")]
     no_save: bool,
 
@@ -187,16 +190,13 @@ async fn main() -> Result<()> {
 
     let config = Config::load(cli.config.as_deref())?;
     let creds = CredentialStore::from_config(&config)?;
+    let save_sessions = config.core.save_sessions && !cli.no_save;
 
     // Print mode (single-turn streaming)
     if let Some(prompt) = cli.print {
         let model = cli.model.unwrap_or_else(|| config.default_model());
-        let previous_session = if cli.continue_session {
-            let mgr = crate::session::SessionManager::new();
-            mgr.latest().ok().flatten()
-        } else {
-            None
-        };
+        let previous_session =
+            load_requested_session(cli.session.as_deref(), cli.continue_session)?;
         return print::run(
             &model,
             &prompt,
@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
             cli.verbose,
             cli.json,
             &creds,
-            !cli.no_save,
+            save_sessions,
             previous_session,
         )
         .await;
@@ -265,12 +265,8 @@ async fn main() -> Result<()> {
                     .or_else(|| cli.model.clone())
                     .unwrap_or_else(|| config.default_model());
                 let provider = provider.or_else(|| cli.provider.clone());
-                let previous_session = if cli.continue_session {
-                    let mgr = crate::session::SessionManager::new();
-                    mgr.latest().ok().flatten()
-                } else {
-                    None
-                };
+                let previous_session =
+                    load_requested_session(cli.session.as_deref(), cli.continue_session)?;
                 run::run(
                     prompt,
                     model,
@@ -278,7 +274,7 @@ async fn main() -> Result<()> {
                     cli.verbose,
                     cli.json,
                     &creds,
-                    !cli.no_save,
+                    save_sessions,
                     previous_session,
                     dry_run,
                     system_prompt.as_deref(),
@@ -316,6 +312,23 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_requested_session(
+    id: Option<&str>,
+    continue_latest: bool,
+) -> Result<Option<crate::session::Session>> {
+    let manager = crate::session::SessionManager::new();
+    if let Some(id) = id {
+        return manager
+            .load(id)?
+            .ok_or_else(|| anyhow::anyhow!("Session '{}' not found", id))
+            .map(Some);
+    }
+    if continue_latest {
+        return manager.latest();
+    }
+    Ok(None)
 }
 
 async fn launch_tui(
