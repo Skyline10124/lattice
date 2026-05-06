@@ -209,17 +209,32 @@ impl AgentState {
             )
         };
 
+        // Strip leading orphaned tool messages (from prior incomplete trims)
         let sys_tokens: u32 = system_msgs.iter().map(estimate_msg).sum();
         let mut non_system_tokens: u32 = non_system.iter().map(estimate_msg).sum();
+        while non_system.first().is_some_and(|m| m.role == lattice_core::Role::Tool) {
+            let orphan = non_system.remove(0);
+            non_system_tokens = non_system_tokens.saturating_sub(estimate_msg(&orphan));
+        }
 
         // Remove oldest non-system messages until we fit. Keep a running token
         // total so large histories do not re-estimate the full window per loop.
+        // When removing an assistant message that has tool_calls, also remove
+        // the tool-result messages that follow it to avoid orphaned tool messages.
         while non_system.len() > 2 {
             if non_system_tokens + sys_tokens <= budget {
                 break;
             }
             let removed = non_system.remove(0);
             non_system_tokens = non_system_tokens.saturating_sub(estimate_msg(&removed));
+
+            // If the removed message had tool_calls, remove subsequent tool results
+            if removed.role == lattice_core::Role::Assistant && removed.tool_calls.is_some() {
+                while non_system.first().is_some_and(|m| m.role == lattice_core::Role::Tool) {
+                    let tool_msg = non_system.remove(0);
+                    non_system_tokens = non_system_tokens.saturating_sub(estimate_msg(&tool_msg));
+                }
+            }
         }
 
         // Rebuild: system first, then trimmed non-system
