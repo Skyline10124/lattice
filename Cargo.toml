@@ -1,0 +1,93 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lattice-hooks",
+    "crates/lattice-core",
+    "crates/lattice-session",
+    "crates/lattice-prompt",
+    "crates/lattice-agent",
+    "crates/lattice-plugin",
+    "crates/lattice-tools",
+    "crates/lattice-orchestrator",
+    "crates/lattice-runtime",
+    "crates/lattice-plugins",
+    "crates/lattice-cli",
+    "crates/lattice-sandbox",
+    "crates/lattice-policy",
+]
+
+[workspace.package]
+version = "0.1.0"
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["LATTICE Contributors"]
+
+[workspace.dependencies]
+# Internal crates
+lattice-hooks    = { path = "crates/lattice-hooks" }
+lattice-core     = { path = "crates/lattice-core" }
+lattice-session  = { path = "crates/lattice-session" }
+lattice-prompt   = { path = "crates/lattice-prompt" }
+lattice-agent    = { path = "crates/lattice-agent" }
+lattice-plugin   = { path = "crates/lattice-plugin" }
+lattice-tools    = { path = "crates/lattice-tools" }
+lattice-orchestrator = { path = "crates/lattice-orchestrator" }
+lattice-runtime  = { path = "crates/lattice-runtime" }
+lattice-plugins  = { path = "crates/lattice-plugins" }
+lattice-cli      = { path = "crates/lattice-cli" }
+lattice-sandbox  = { path = "crates/lattice-sandbox" }
+lattice-policy   = { path = "crates/lattice-policy" }
+
+# External dependencies — shared versions
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+blake3 = "1"
+chrono = "0.4"
+futures = "0.3"
+hex = "0.4"
+indexmap = "2"
+jsonschema = "0.26"
+notify = { version = "7", default-features = false, features = ["macos_kqueue"] }
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tiktoken-rs = "0.11"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time", "local-time"] }
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+landlock = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+libc = "0.2"
+
+# CLI dependencies
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+colored = "2"
+anyhow = "1"
+base64 = "0.22"
+dotenvy = "0.15"
+sha2 = "0.10"
+toml_edit = "0.22"
+ratatui = "0.30"
+crossterm = "0.28"
+unicode-width = "0.2"
+pulldown-cmark = { version = "0.12", default-features = false }
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+similar = "2"
+
+# Dev dependencies
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[profile.bench]
+lto = true

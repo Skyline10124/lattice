@@ -1,0 +1,15 @@
+[book]
+title = "LATTICE Runtime Wiki"
+authors = ["Skyline10124"]
+description = "Documentation for the LATTICE LLM engine runtime"
+src = "wiki"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/Skyline10124/lattice"
+edit-url-template = "https://github.com/Skyline10124/lattice/edit/main/{path}"
+
+[preprocessor.open-on-gh]

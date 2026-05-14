@@ -1,0 +1,104 @@
+use std::collections::HashSet;
+use std::path::Path;
+
+use anyhow::{bail, Result};
+use lattice_orchestrator::AgentRegistry;
+use lattice_runtime::Runtime;
+
+/// Validate all agent profiles in the default agents directory or a given path.
+pub fn run(dir: Option<String>) -> Result<()> {
+    let path = match dir {
+        Some(ref d) => Path::new(d).to_path_buf(),
+        None => super::safe_agents_dir(None).map_err(anyhow::Error::msg)?,
+    };
+
+    if !path.exists() {
+        println!(
+            "Directory '{}' does not exist. Nothing to validate.",
+            path.display()
+        );
+        return Ok(());
+    }
+
+    let registry = AgentRegistry::load_dir(&path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let profile_count = registry.list().len();
+
+    if profile_count == 0 {
+        println!("No agent profiles found in '{}'", path.display());
+        return Ok(());
+    }
+
+    println!("Found {} agent(s) in '{}'\n", profile_count, path.display());
+
+    let runtime = Runtime::builder()
+        .name("validate")
+        .agent_registry(registry.clone())
+        .build();
+    let mut errors = 0u32;
+    let mut agent_names = HashSet::new();
+
+    for profile in registry.list() {
+        let name = &profile.agent.name;
+        println!("  [check] {}", name);
+
+        if !agent_names.insert(name.clone()) {
+            println!("    ERROR: duplicate agent name '{}'", name);
+            errors += 1;
+        }
+
+        match runtime.resolve(&profile.agent.model) {
+            Ok(_) => println!("    model: {} OK", profile.agent.model),
+            Err(e) => {
+                println!("    model: {} — WARNING: {}", profile.agent.model, e);
+            }
+        }
+
+        for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
+            if let Some(ref target) = rule.target {
+                for name in target.agent_names() {
+                    if registry.get(name).is_none() {
+                        println!(
+                            "    rule[{}]: target '{}' is not a registered agent",
+                            i, name
+                        );
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        if let Some(ref fallback) = profile.handoff.fallback {
+            for name in fallback.agent_names() {
+                if registry.get(name).is_none() {
+                    println!("    fallback: '{}' is not a registered agent", name);
+                    errors += 1;
+                }
+            }
+        }
+    }
+
+    // Detect circular handoff chains via Runtime pipeline validation.
+    for profile in registry.list() {
+        let report = runtime.dry_run_pipeline(&profile.agent.name);
+        if report.circular {
+            println!(
+                "    ERROR: circular handoff detected starting from '{}'",
+                profile.agent.name
+            );
+            errors += 1;
+        }
+        for issue in &report.issues {
+            if issue.contains("not found") || issue.contains("unregistered") {
+                println!("    ERROR: {}", issue);
+                errors += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        bail!("{} validation error(s) found", errors);
+    }
+
+    println!("\nAll agents valid.");
+    Ok(())
+}

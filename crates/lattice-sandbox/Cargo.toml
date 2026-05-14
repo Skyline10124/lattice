@@ -1,0 +1,25 @@
+[package]
+name = "lattice-sandbox"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Sandbox types, policy checks, and platform-specific isolation for tool execution"
+
+[dependencies]
+lattice-policy = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
+tokio = { workspace = true }

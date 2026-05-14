@@ -1,0 +1,39 @@
+[package]
+name = "lattice-plugins"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Official LATTICE plugin implementations"
+
+[dependencies]
+lattice-core = { workspace = true }
+lattice-plugin = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = [
+    "code-review",
+    "refactor",
+    "test-gen",
+    "security-audit",
+    "doc-gen",
+    "pptx-gen",
+    "deep-research",
+    "image-gen",
+    "knowledge-base",
+    "plan-gen",
+    "verification",
+]
+code-review = []
+refactor = []
+test-gen = []
+security-audit = []
+doc-gen = []
+pptx-gen = []
+deep-research = []
+image-gen = []
+knowledge-base = []
+plan-gen = []
+verification = []

@@ -1,0 +1,19 @@
+[package]
+name = "lattice-hooks"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Universal hook system for runtime lifecycle interception"
+
+[dependencies]
+lattice-core = { workspace = true }
+lattice-prompt = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

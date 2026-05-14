@@ -1,0 +1,47 @@
+[package]
+name = "lattice-core"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Core types, transport, streaming, and provider abstractions"
+
+[dependencies]
+criterion = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, optional = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+indexmap = { workspace = true }
+jsonschema = { workspace = true }
+notify = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tiktoken-rs = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+urlencoding = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true, optional = true }
+sqlx = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[features]
+default = []
+axum = ["dep:axum"]
+blob-store = ["dep:sqlx"]
+sqlite-memory = ["dep:rusqlite"]

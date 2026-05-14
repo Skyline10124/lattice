@@ -1,0 +1,16 @@
+/target
+*.swp
+*.swo
+*~
+.env
+.agents/
+.claude/
+.codex/
+.planning/
+.sisyphus/
+.pytest_cache/
+.worktrees/
+__pycache__/
+*.py[cod]
+book/
+findings/

@@ -1,0 +1,274 @@
+//! Default tool definitions for the lattice engine.
+//!
+//! Separated from [`crate::executor::DefaultToolExecutor`] to allow consumers
+//! to reference tool definitions without importing the full executor.
+
+use lattice_core::types::ToolDefinition;
+
+/// Returns the built-in tool schema inventory.
+///
+/// This is not an exposure policy: callers should use capability resolution to
+/// decide which definitions an agent receives.
+pub fn default_tool_definitions() -> Vec<ToolDefinition> {
+    #[allow(unused_mut)]
+    let mut defs = vec![
+        ToolDefinition::new(
+            "workspace_context".into(),
+            "Summarize the current workspace: top-level entries, git state, project instruction files, and likely verification commands.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to summarize, relative to the project root (default: project root)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Maximum top-level entries to return (default: 40, hard cap: 100)"
+                    }
+                }
+            }),
+        ),
+        ToolDefinition::new(
+            "todo_write".into(),
+            "Record the current task plan as a concise todo list. Use for multi-step coding work and keep at most one item in_progress.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "maxItems": 100,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {
+                                    "type": "string",
+                                    "description": "Concrete task or checkpoint"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Current status for this todo"
+                                }
+                            },
+                            "required": ["content", "status"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        ),
+        ToolDefinition::new(
+            "read_file".into(),
+            "Read a text file. Supports optional 1-based line offset/limit and line-number output for targeted inspection.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path, or a path relative to the project root"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional 1-based starting line"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional maximum number of lines to return"
+                    },
+                    "line_numbers": {
+                        "type": "boolean",
+                        "description": "Whether to prefix returned lines with line numbers (default: true)"
+                    }
+                },
+                "required": ["path"]
+            }),
+        ),
+        ToolDefinition::new(
+            "read_files".into(),
+            "Read multiple text files in one call. Each file supports optional 1-based line offset/limit and line-number output.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "files": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Absolute path, or a path relative to the project root"
+                                },
+                                "offset": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Optional 1-based starting line"
+                                },
+                                "limit": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Optional maximum number of lines to return"
+                                },
+                                "line_numbers": {
+                                    "type": "boolean",
+                                    "description": "Whether to prefix returned lines with line numbers (default: true)"
+                                }
+                            },
+                            "required": ["path"]
+                        }
+                    }
+                },
+                "required": ["files"]
+            }),
+        ),
+        ToolDefinition::new(
+            "grep".into(),
+            "Search for a regex pattern in files under a path. Results are capped; narrow the path or pattern if truncated.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in (default: current dir)"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum matching lines to return (default: 200, hard cap: 1000)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        ),
+        ToolDefinition::new(
+            "write_file".into(),
+            "Write content to a file. Only allowed under the project source directories.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path under project root"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content to write"
+                    }
+                },
+                "required": ["path", "content"]
+            }),
+        ),
+        ToolDefinition::new(
+            "list_directory".into(),
+            "List files and directories in a path with stable sorting and output limits.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path to list"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of entries to return (default: 200, hard cap: 1000)"
+                    }
+                },
+                "required": ["path"]
+            }),
+        ),
+        ToolDefinition::new(
+            "find_files".into(),
+            "Find files or directories by a glob-like pattern matched against names and relative paths. Results are stable and capped.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob-like pattern, e.g. \"*.rs\", \"**/Cargo.toml\", or \"coding_*\""
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory to search in (default: project root)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of paths to return (default: 200, hard cap: 1000)"
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        ),
+        ToolDefinition::new(
+            "bash".into(),
+            "Run a command and return its output. Prefer other tools when possible.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to run"
+                    }
+                },
+                "required": ["command"]
+            }),
+        ),
+        ToolDefinition::new(
+            "patch".into(),
+            "Apply structured patch text with multi-file add, update, and delete operations. Prefer this for edits after reading current file hashes.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": "Codex-style structured patch text bounded by *** Begin Patch and *** End Patch"
+                    }
+                },
+                "required": ["patch"]
+            }),
+        ),
+        ToolDefinition::new(
+            "web_search".into(),
+            "Fetch a URL and return its text content.".into(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to fetch"
+                    }
+                },
+                "required": ["url"]
+            }),
+        ),
+    ];
+
+    #[cfg(feature = "blob-store")]
+    defs.push(ToolDefinition::new(
+        "bus:fetch".into(),
+        "Retrieve the full content of a blob referenced in the current prompt.".into(),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Blob key from the context (e.g. blob://events/code_review/a1b2c3d4)"
+                }
+            },
+            "required": ["key"]
+        }),
+    ));
+
+    defs
+}

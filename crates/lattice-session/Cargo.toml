@@ -1,0 +1,19 @@
+[package]
+name = "lattice-session"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE session graph and git-style conversation refs"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = []
