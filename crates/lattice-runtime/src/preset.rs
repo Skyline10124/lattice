@@ -2,14 +2,12 @@ use std::path::{Path, PathBuf};
 
 use lattice_agent::Agent;
 use lattice_core::ResolvedModel;
-use lattice_tools::{resolve_capabilities, CapabilitySelection, DefaultToolExecutor, ToolPreset};
+use lattice_tools::{resolve_capabilities, CapabilitySelection, DefaultToolExecutor, ToolBundle};
 
 use crate::RuntimeError;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AgentPreset {
-    Coding,
-}
+// AgentPreset has been removed. Coding-capable behavior is now expressed
+// through prompt content plus tool bundles, as per D-26/D-27/D-30.
 
 pub fn coding_system_prompt(project_root: impl AsRef<Path>, cwd: impl AsRef<Path>) -> String {
     format!(
@@ -61,12 +59,19 @@ pub(crate) fn apply_coding_preset(
     }
 
     let capabilities = resolve_capabilities(&CapabilitySelection {
-        presets: vec![ToolPreset::Coding],
-        bundles: Vec::new(),
+        bundles: vec![
+            ToolBundle::Workspace,
+            ToolBundle::Filesystem,
+            ToolBundle::Editing,
+            ToolBundle::Shell,
+            ToolBundle::Planning,
+            ToolBundle::Web,
+        ],
+        enabled: Vec::new(),
     });
 
     let security = spec.security.as_ref().ok_or_else(|| {
-        RuntimeError::Config("AgentPreset::Coding requires RuntimeSecurity".into())
+        RuntimeError::Config("coding-capable bundles require RuntimeSecurity".into())
     })?;
     let project_root_string = project_root.to_string_lossy().to_string();
     let executor = DefaultToolExecutor::new(&project_root_string)
@@ -164,7 +169,7 @@ mod tests {
             .project_root(root.to_string_lossy().to_string())
             .cwd(cwd.to_string_lossy().to_string())
             .security(Some(make_security(root)))
-            .preset(AgentPreset::Coding)
+            .capability_preset("coding")
     }
 
     #[test]
@@ -179,7 +184,7 @@ mod tests {
                 .project_root(missing.to_string_lossy().to_string())
                 .cwd(root.to_string_lossy().to_string())
                 .security(Some(make_security(&root)))
-                .preset(AgentPreset::Coding),
+                .capability_preset("coding"),
         );
         assert!(
             matches!(result, Err(RuntimeError::Config(message)) if message.contains("project_root"))
@@ -196,7 +201,7 @@ mod tests {
                 .project_root(PathBuf::new().to_string_lossy().to_string())
                 .cwd(root.to_string_lossy().to_string())
                 .security(Some(make_security(&root)))
-                .preset(AgentPreset::Coding),
+                .capability_preset("coding"),
         );
         assert!(
             matches!(result, Err(RuntimeError::Config(message)) if message.contains("project_root must not be empty"))

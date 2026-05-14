@@ -1948,6 +1948,7 @@ dependencies = [
  "lattice-orchestrator",
  "lattice-plugin",
  "lattice-plugins",
+ "lattice-profile",
  "lattice-prompt",
  "lattice-runtime",
  "lattice-sandbox",
@@ -2087,6 +2088,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lattice-profile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]

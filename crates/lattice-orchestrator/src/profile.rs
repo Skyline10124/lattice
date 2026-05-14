@@ -419,12 +419,31 @@ impl AgentProfile {
 ///
 /// Returns `(AgentProfile, blake3_hash_bytes)` on success.
 pub fn load_profile_verified(path: &Path) -> Result<(AgentProfile, [u8; 32]), ProfileError> {
+    load_profile_verified_inner(path, true)
+}
+
+/// Load and verify a profile without creating a missing `.toml.hash` sidecar.
+///
+/// If a sidecar already exists, it is still enforced. If no sidecar exists,
+/// the profile is parsed and returned read-only. This is intended for
+/// discovery/validation paths that must not mutate agent directories.
+pub fn load_profile_verified_read_only(
+    path: &Path,
+) -> Result<(AgentProfile, [u8; 32]), ProfileError> {
+    load_profile_verified_inner(path, false)
+}
+
+fn load_profile_verified_inner(
+    path: &Path,
+    write_missing_hash: bool,
+) -> Result<(AgentProfile, [u8; 32]), ProfileError> {
     let content = std::fs::read_to_string(path)?;
     let hash: [u8; 32] = blake3::hash(content.as_bytes()).into();
 
     let hash_path = path.with_extension("toml.hash");
+    let hash_sidecar_exists = hash_path.exists();
 
-    if hash_path.exists() {
+    if hash_sidecar_exists {
         // Verify against stored hash
         let stored_hex = std::fs::read_to_string(&hash_path)?;
         let stored: Vec<u8> =
@@ -436,9 +455,6 @@ pub fn load_profile_verified(path: &Path) -> Result<(AgentProfile, [u8; 32]), Pr
                 found: hex::encode(stored),
             });
         }
-    } else {
-        // First load — write hash file
-        std::fs::write(&hash_path, hex::encode(hash))?;
     }
 
     let profile: AgentProfile = toml::from_str(&content)?;
@@ -451,6 +467,13 @@ pub fn load_profile_verified(path: &Path) -> Result<(AgentProfile, [u8; 32]), Pr
         let spec = load_prompt_spec(profile_dir, prompt_path)
             .map_err(|e| ProfileError::PromptSpec(e.to_string()))?;
         profile.prompt_spec = Some(spec);
+    }
+
+    if !hash_sidecar_exists && write_missing_hash {
+        // First successful load — write hash file only after schema/prompt
+        // validation succeeds. Failed discovery/validation attempts must stay
+        // read-only and must not leave `.toml.hash` sidecars behind.
+        std::fs::write(&hash_path, hex::encode(hash))?;
     }
 
     Ok((profile, hash))

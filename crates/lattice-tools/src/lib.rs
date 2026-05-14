@@ -66,5 +66,5 @@ pub use lattice_sandbox::SandboxConfig;
 pub use tool_definitions::default_tool_definitions;
 
 pub use capabilities::{
-    resolve_capabilities, CapabilitySelection, ResolvedCapabilities, ToolBundle, ToolPreset,
+    resolve_capabilities, resolve_tool_names, CapabilitySelection, ResolvedCapabilities, ToolBundle,
 };

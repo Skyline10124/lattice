@@ -16,7 +16,7 @@ use lattice_core::types::ToolDefinition;
 use lattice_prompt::{ContextProvider, ProviderFactory};
 use lattice_tools::{
     default_tool_definitions, resolve_capabilities, tool_registry::ToolRegistry,
-    CapabilitySelection, DefaultToolExecutor, ToolBundle, ToolPreset,
+    CapabilitySelection, DefaultToolExecutor, ToolBundle,
 };
 use tracing::warn;
 
@@ -302,36 +302,54 @@ fn resolve_profile_tools(
     tool_registry: Option<&ToolRegistry>,
     allow_empty_capabilities: bool,
 ) -> Result<(Vec<ToolDefinition>, BTreeSet<String>), Box<dyn std::error::Error>> {
-    if profile.capabilities.presets.is_empty() && profile.capabilities.bundles.is_empty() {
-        if allow_empty_capabilities && profile.tools.enabled.is_empty() {
+    if profile.capabilities.presets.is_empty()
+        && profile.capabilities.bundles.is_empty()
+        && profile.tools.enabled.is_empty()
+    {
+        if allow_empty_capabilities {
             return Ok((Vec::new(), BTreeSet::new()));
         }
         return Err(format!(
-            "agent profile '{}' must declare [capabilities] presets or bundles",
+            "agent profile '{}' must declare [capabilities] presets or bundles or [tools].enabled",
             profile.agent.name
         )
         .into());
     }
 
+    let mut bundles: Vec<ToolBundle> = profile
+        .capabilities
+        .bundles
+        .iter()
+        .map(|bundle| {
+            ToolBundle::from_str(bundle)
+                .map_err(|_| format!("unknown capability bundle '{}'", bundle))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Map legacy preset strings to bundle equivalents.
+    for preset in &profile.capabilities.presets {
+        match preset.as_str() {
+            "coding" | "code-agent" => {
+                bundles.extend([
+                    ToolBundle::Workspace,
+                    ToolBundle::Filesystem,
+                    ToolBundle::Editing,
+                    ToolBundle::Shell,
+                    ToolBundle::Planning,
+                    ToolBundle::Web,
+                ]);
+            }
+            "reader" => {
+                bundles.push(ToolBundle::Filesystem);
+            }
+            "minimal" => { /* no extra bundles */ }
+            other => warn!("unknown legacy capability preset '{}' — ignoring", other),
+        }
+    }
+
     let selection = CapabilitySelection {
-        presets: profile
-            .capabilities
-            .presets
-            .iter()
-            .map(|preset| {
-                ToolPreset::from_str(preset)
-                    .map_err(|_| format!("unknown capability preset '{}'", preset))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        bundles: profile
-            .capabilities
-            .bundles
-            .iter()
-            .map(|bundle| {
-                ToolBundle::from_str(bundle)
-                    .map_err(|_| format!("unknown capability bundle '{}'", bundle))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        bundles,
+        enabled: profile.tools.enabled.clone(),
     };
     let resolved = resolve_capabilities(&selection);
     let resolved_builtin_names = resolved.tool_names.clone();
@@ -545,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_profile_exposes_only_workspace_and_filesystem_tools() {
+    fn reader_profile_exposes_filesystem_tools() {
         let mut profile = make_profile();
         profile.capabilities = crate::profile::CapabilitiesConfig {
             presets: vec!["reader".into()],
@@ -555,7 +573,6 @@ mod tests {
         let names = tool_names_for(&profile);
 
         for expected in [
-            "workspace_context",
             "read_file",
             "read_files",
             "grep",
@@ -565,6 +582,7 @@ mod tests {
             assert!(names.contains(&expected.to_string()), "{expected} missing");
         }
         for denied in [
+            "workspace_context",
             "write_file",
             "patch",
             "multi_patch",
@@ -635,17 +653,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_capability_string_reports_type_and_value() {
+    fn unknown_legacy_preset_is_gracefully_ignored() {
         let mut profile = make_profile();
         profile.capabilities.presets = vec!["typo-preset".into()];
+        profile.capabilities.bundles = vec!["filesystem".into()];
 
+        // Unknown presets log a warning but do not error — resolution continues.
         let result = resolve_profile_tools(&profile, None, false);
-
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("unknown capability preset 'typo-preset'"));
+        assert!(result.is_ok());
     }
 
     #[test]

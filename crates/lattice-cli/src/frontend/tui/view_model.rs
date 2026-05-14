@@ -205,7 +205,6 @@ mod tests {
                     project_root: Some(workdir.clone()),
                     cwd: Some(workdir),
                     thinking_effort: None,
-                    preset: Some(lattice_orchestrator::AgentPreset::Coding),
                 },
                 app.security.clone(),
                 None,

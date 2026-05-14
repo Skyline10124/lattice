@@ -1,6 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
-use lattice_orchestrator::AgentRegistry;
+
+use super::agent_inventory::{load_agent_inventory, AgentProfileKind};
 
 pub fn run() -> Result<()> {
     let dir = super::safe_agents_dir(None).map_err(anyhow::Error::msg)?;
@@ -10,37 +11,40 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    let registry = AgentRegistry::load_dir(&dir).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let mut agents: Vec<_> = registry.list().into_iter().collect();
+    let inventory = load_agent_inventory(&dir).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut agents = inventory.summaries();
 
     if agents.is_empty() {
         println!("{}", "No agents found.".yellow());
-        return Ok(());
     }
 
-    agents.sort_by(|a, b| a.agent.name.cmp(&b.agent.name));
+    agents.sort_by(|a, b| a.name.cmp(&b.name));
 
-    println!(
-        "{} {}",
-        agents.len().to_string().cyan().bold(),
-        "agent(s) found:".bold()
-    );
-    println!();
+    if !agents.is_empty() {
+        println!(
+            "{} {}",
+            agents.len().to_string().cyan().bold(),
+            "agent(s) found:".bold()
+        );
+        println!();
+    }
 
     for profile in &agents {
-        print!("  {}", profile.agent.name.green().bold());
-        if !profile.agent.model.is_empty() {
-            print!("  ({})", profile.agent.model.cyan());
+        print!("  {}", profile.name.green().bold());
+        if !profile.model.is_empty() {
+            print!("  ({})", profile.model.cyan());
         }
-        if profile.plugins.is_some() {
+        if profile.kind == AgentProfileKind::V1 {
+            print!("  [v1]");
+        }
+        if profile.has_plugins {
             print!("  [plugins]");
         }
         println!();
-        if !profile.agent.tags.is_empty() {
+        if !profile.tags.is_empty() {
             println!(
                 "    tags: {}",
                 profile
-                    .agent
                     .tags
                     .iter()
                     .map(|t| t.dimmed().to_string())
@@ -50,14 +54,14 @@ pub fn run() -> Result<()> {
         }
     }
 
-    if !registry.failed_loads().is_empty() {
+    if !inventory.failures().is_empty() {
         println!();
         println!(
             "{} {}",
-            registry.failed_loads().len().to_string().yellow().bold(),
+            inventory.failures().len().to_string().yellow().bold(),
             "agent profile(s) failed to load:".yellow()
         );
-        for failed in registry.failed_loads() {
+        for failed in inventory.failures() {
             println!("  {}: {}", failed.path.display(), failed.error);
         }
     }

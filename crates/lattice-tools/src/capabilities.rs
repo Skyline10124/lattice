@@ -1,4 +1,4 @@
-//! Capability bundle and preset resolution for built-in lattice tools.
+//! Capability bundle resolution for built-in lattice tools.
 //!
 //! This module owns tool exposure policy. `default_tool_definitions()` remains
 //! the schema inventory; callers use capability selections here to decide which
@@ -24,21 +24,12 @@ pub enum ToolBundle {
     Web,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ToolPreset {
-    Minimal,
-    Reader,
-    #[serde(alias = "code-agent")]
-    Coding,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilitySelection {
     #[serde(default)]
-    pub presets: Vec<ToolPreset>,
-    #[serde(default)]
     pub bundles: Vec<ToolBundle>,
+    #[serde(default)]
+    pub enabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,15 +41,13 @@ pub struct ResolvedCapabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CapabilityError {
-    #[error("unknown tool preset: {0}")]
-    UnknownPreset(String),
     #[error("unknown tool bundle: {0}")]
     UnknownBundle(String),
 }
 
 pub fn resolve_capabilities(selection: &CapabilitySelection) -> ResolvedCapabilities {
-    let bundles = resolve_bundles(selection);
-    let tool_names = tool_names_for_bundles(&bundles);
+    let bundles: BTreeSet<ToolBundle> = selection.bundles.iter().copied().collect();
+    let tool_names = resolve_tool_names(selection);
     let definitions = default_tool_definitions()
         .into_iter()
         .filter(|definition| tool_names.contains(&definition.name))
@@ -71,44 +60,20 @@ pub fn resolve_capabilities(selection: &CapabilitySelection) -> ResolvedCapabili
     }
 }
 
+/// Returns the deterministic `BTreeSet<String>` union of all tools expanded
+/// from selected bundles plus all explicit `enabled` tool names (D-29).
 pub fn resolve_tool_names(selection: &CapabilitySelection) -> BTreeSet<String> {
-    resolve_capabilities(selection).tool_names
-}
-
-fn resolve_bundles(selection: &CapabilitySelection) -> BTreeSet<ToolBundle> {
-    let mut bundles = BTreeSet::new();
-
-    for preset in &selection.presets {
-        bundles.extend(preset.bundles());
-    }
-
-    bundles.extend(selection.bundles.iter().copied());
-    bundles
-}
-
-fn tool_names_for_bundles(bundles: &BTreeSet<ToolBundle>) -> BTreeSet<String> {
     let mut tool_names = BTreeSet::new();
-    for bundle in bundles {
+
+    for bundle in &selection.bundles {
         tool_names.extend(bundle.tool_names().into_iter().map(String::from));
     }
-    tool_names
-}
 
-impl ToolPreset {
-    fn bundles(self) -> Vec<ToolBundle> {
-        match self {
-            ToolPreset::Minimal => Vec::new(),
-            ToolPreset::Reader => vec![ToolBundle::Workspace, ToolBundle::Filesystem],
-            ToolPreset::Coding => vec![
-                ToolBundle::Workspace,
-                ToolBundle::Filesystem,
-                ToolBundle::Editing,
-                ToolBundle::Shell,
-                ToolBundle::Planning,
-                ToolBundle::Web,
-            ],
-        }
+    for name in &selection.enabled {
+        tool_names.insert(name.clone());
     }
+
+    tool_names
 }
 
 impl ToolBundle {
@@ -162,34 +127,108 @@ impl FromStr for ToolBundle {
     }
 }
 
-impl FromStr for ToolPreset {
-    type Err = CapabilityError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "minimal" => Ok(Self::Minimal),
-            "reader" => Ok(Self::Reader),
-            "coding" | "code-agent" => Ok(Self::Coding),
-            _ => Err(CapabilityError::UnknownPreset(value.to_string())),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn names_for(selection: CapabilitySelection) -> BTreeSet<String> {
-        resolve_capabilities(&selection).tool_names
+    fn names_for(selection: &CapabilitySelection) -> BTreeSet<String> {
+        resolve_capabilities(selection).tool_names
+    }
+
+    // ── bundle-only selection ──────────────────────────────────────
+
+    #[test]
+    fn bundles_workspace_exposes_workspace_context() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Workspace],
+            enabled: Vec::new(),
+        };
+        assert_eq!(
+            names_for(&selection),
+            BTreeSet::from(["workspace_context".to_string()])
+        );
     }
 
     #[test]
-    fn coding_preset_resolves_expected_tools() {
-        let resolved = resolve_capabilities(&CapabilitySelection {
-            presets: vec![ToolPreset::Coding],
-            bundles: Vec::new(),
-        });
+    fn bundles_filesystem_exposes_read_and_search_tools() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Filesystem],
+            enabled: Vec::new(),
+        };
+        let names = names_for(&selection);
+        for tool in [
+            "read_file",
+            "read_files",
+            "grep",
+            "list_directory",
+            "find_files",
+        ] {
+            assert!(
+                names.contains(tool),
+                "{tool} should be in filesystem bundle"
+            );
+        }
+        assert!(!names.contains("write_file"));
+    }
 
+    #[test]
+    fn bundles_editing_exposes_write_and_patch() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Editing],
+            enabled: Vec::new(),
+        };
+        let names = names_for(&selection);
+        assert!(names.contains("write_file"));
+        assert!(names.contains("patch"));
+    }
+
+    #[test]
+    fn bundles_shell_exposes_bash() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Shell],
+            enabled: Vec::new(),
+        };
+        assert_eq!(names_for(&selection), BTreeSet::from(["bash".to_string()]));
+    }
+
+    #[test]
+    fn bundles_planning_exposes_todo_write() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Planning],
+            enabled: Vec::new(),
+        };
+        assert_eq!(
+            names_for(&selection),
+            BTreeSet::from(["todo_write".to_string()])
+        );
+    }
+
+    #[test]
+    fn bundles_web_exposes_web_search() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Web],
+            enabled: Vec::new(),
+        };
+        assert_eq!(
+            names_for(&selection),
+            BTreeSet::from(["web_search".to_string()])
+        );
+    }
+
+    #[test]
+    fn coding_capable_bundle_set_exposes_coding_tools() {
+        let selection = CapabilitySelection {
+            bundles: vec![
+                ToolBundle::Workspace,
+                ToolBundle::Filesystem,
+                ToolBundle::Editing,
+                ToolBundle::Shell,
+                ToolBundle::Planning,
+                ToolBundle::Web,
+            ],
+            enabled: Vec::new(),
+        };
+        let resolved = resolve_capabilities(&selection);
         assert_eq!(
             resolved.bundles,
             BTreeSet::from([
@@ -212,40 +251,12 @@ mod tests {
     }
 
     #[test]
-    fn coding_preset_from_str_accepts_code_agent_alias() {
-        assert_eq!(ToolPreset::from_str("coding"), Ok(ToolPreset::Coding));
-        assert_eq!(ToolPreset::from_str("code-agent"), Ok(ToolPreset::Coding));
-    }
-
-    #[test]
-    fn coding_preset_serde_roundtrips() {
-        let serialized = serde_json::to_string(&ToolPreset::Coding).expect("serialize preset");
-
-        assert_eq!(serialized, r#""coding""#);
-        assert_eq!(
-            serde_json::from_str::<ToolPreset>(&serialized).expect("deserialize preset"),
-            ToolPreset::Coding
-        );
-        assert_eq!(
-            serde_json::from_str::<ToolPreset>(r#""code-agent""#)
-                .expect("deserialize legacy preset alias"),
-            ToolPreset::Coding
-        );
-        assert_eq!(
-            serde_json::from_str::<CapabilitySelection>(r#"{"presets":["code-agent"]}"#)
-                .expect("deserialize legacy capability selection alias")
-                .presets,
-            vec![ToolPreset::Coding]
-        );
-    }
-
-    #[test]
-    fn reader_preset_excludes_editing_shell_planning_and_web() {
-        let names = names_for(CapabilitySelection {
-            presets: vec![ToolPreset::Reader],
-            bundles: Vec::new(),
-        });
-
+    fn workspace_and_filesystem_bundles_exclude_editing_shell_planning_web() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Workspace, ToolBundle::Filesystem],
+            enabled: Vec::new(),
+        };
+        let names = names_for(&selection);
         assert!(names.contains("workspace_context"));
         assert!(names.contains("read_file"));
         for excluded in ["write_file", "patch", "bash", "todo_write", "web_search"] {
@@ -253,36 +264,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn editing_bundle_exposes_patch() {
-        let resolved = resolve_capabilities(&CapabilitySelection {
-            presets: Vec::new(),
-            bundles: vec![ToolBundle::Editing],
-        });
-
-        assert!(resolved.tool_names.contains("write_file"));
-        assert!(resolved.tool_names.contains("patch"));
-    }
+    // ── explicit enabled tool names ─────────────────────────────────
 
     #[test]
-    fn workspace_context_is_workspace_bundle() {
-        let names = names_for(CapabilitySelection {
-            presets: Vec::new(),
-            bundles: vec![ToolBundle::Workspace],
-        });
-
-        assert_eq!(names, BTreeSet::from(["workspace_context".to_string()]));
-    }
-
-    #[test]
-    fn minimal_preset_resolves_no_tools() {
-        let resolved = resolve_capabilities(&CapabilitySelection {
-            presets: vec![ToolPreset::Minimal],
+    fn enabled_adds_explicit_tool_without_bundle() {
+        let selection = CapabilitySelection {
             bundles: Vec::new(),
-        });
+            enabled: vec!["grep".into()],
+        };
+        let names = names_for(&selection);
+        assert!(names.contains("grep"));
+        assert_eq!(names.len(), 1);
+    }
 
+    #[test]
+    fn enabled_with_bundle_union_includes_both() {
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Workspace],
+            enabled: vec!["grep".into()],
+        };
+        let names = names_for(&selection);
+        assert!(names.contains("workspace_context"));
+        assert!(names.contains("grep"));
+        assert_eq!(names.len(), 2);
+    }
+
+    // ── deduplication ───────────────────────────────────────────────
+
+    #[test]
+    fn duplicate_names_from_bundles_and_enabled_are_deduped() {
+        // 'workspace_context' is already in the Workspace bundle; enable it
+        // explicitly too — should still appear only once.
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Workspace],
+            enabled: vec!["workspace_context".into()],
+        };
+        let names = names_for(&selection);
+        assert_eq!(names, BTreeSet::from(["workspace_context".to_string()]));
+        assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_bundle_explicit_tool_dedup_is_deterministic() {
+        // Run the same selection twice and verify the order and content match.
+        let selection = CapabilitySelection {
+            bundles: vec![ToolBundle::Filesystem],
+            enabled: vec!["read_file".into()],
+        };
+        let a = names_for(&selection);
+        let b = names_for(&selection);
+        assert_eq!(a, b);
+    }
+
+    // ── default / empty selection ───────────────────────────────────
+
+    #[test]
+    fn empty_selection_resolves_no_tools() {
+        let resolved = resolve_capabilities(&CapabilitySelection::default());
         assert!(resolved.bundles.is_empty());
         assert!(resolved.tool_names.is_empty());
         assert!(resolved.definitions.is_empty());
+    }
+
+    #[test]
+    fn default_selection_is_empty() {
+        let sel = CapabilitySelection::default();
+        assert!(sel.bundles.is_empty());
+        assert!(sel.enabled.is_empty());
     }
 }

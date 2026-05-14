@@ -34,7 +34,7 @@ use lattice_sandbox::{
 use lattice_session::{CompactBoundary, Session, SessionMessage, SessionStore};
 use lattice_tools::{
     resolve_capabilities, tool_registry::ToolRegistry, CapabilitySelection, DefaultToolExecutor,
-    ToolBundle, ToolPreset,
+    ToolBundle,
 };
 
 pub mod handle;
@@ -42,7 +42,7 @@ pub mod preset;
 pub mod turn;
 pub mod turn_executor;
 pub use handle::{AgentHandleId, AgentHandleKey, AgentHandleSnapshot, RuntimePluginOverlay};
-pub use preset::{coding_system_prompt, AgentPreset};
+pub use preset::coding_system_prompt;
 pub use turn::{RuntimeTurnEvent, TurnCompletion, TurnId, TurnRequest, TurnStatus, TurnStream};
 pub use turn_executor::RuntimeAgentTurnExecutor;
 
@@ -344,7 +344,6 @@ pub struct AgentSpec {
     security: Option<RuntimeSecurity>,
     capabilities: CapabilitySelection,
     task_state_seed: Option<lattice_agent::TaskState>,
-    preset: Option<AgentPreset>,
 }
 
 impl AgentSpec {
@@ -360,7 +359,6 @@ impl AgentSpec {
             security: None,
             capabilities: CapabilitySelection::default(),
             task_state_seed: None,
-            preset: None,
         }
     }
 
@@ -404,20 +402,24 @@ impl AgentSpec {
         self
     }
 
-    pub fn preset(mut self, preset: AgentPreset) -> Self {
-        self.preset = Some(preset);
-        self
-    }
-
-    pub fn coding_preset(self) -> Self {
-        self.preset(AgentPreset::Coding)
-    }
-
     pub fn capability_preset(mut self, preset: impl Into<String>) -> Self {
         let preset = preset.into();
-        match ToolPreset::from_str(&preset) {
-            Ok(preset) => self.capabilities.presets.push(preset),
-            Err(_) => tracing::warn!("unknown capability preset '{}' on AgentSpec", preset),
+        match preset.as_str() {
+            "coding" | "code-agent" => {
+                self.capabilities.bundles.extend([
+                    ToolBundle::Workspace,
+                    ToolBundle::Filesystem,
+                    ToolBundle::Editing,
+                    ToolBundle::Shell,
+                    ToolBundle::Planning,
+                    ToolBundle::Web,
+                ]);
+            }
+            "reader" => {
+                self.capabilities.bundles.push(ToolBundle::Filesystem);
+            }
+            "minimal" => { /* no extra bundles */ }
+            other => tracing::warn!("unknown capability preset '{}' on AgentSpec", other),
         }
         self
     }
@@ -737,8 +739,7 @@ impl Runtime {
         let key = handle::AgentHandleKey::new(workspace, spec.model.clone(), security_policy)
             .with_session_id(session_id)
             .with_profile_name(Some(spec.profile_name.clone()))
-            .with_provider_override(spec.provider_override.clone())
-            .with_preset(spec.preset);
+            .with_provider_override(spec.provider_override.clone());
 
         let mut registry = self.handles.lock().unwrap();
 
@@ -818,8 +819,7 @@ impl Runtime {
         )
         .with_session_id(session_id.map(str::to_string))
         .with_profile_name(Some(spec.profile_name.clone()))
-        .with_provider_override(spec.provider_override.clone())
-        .with_preset(spec.preset);
+        .with_provider_override(spec.provider_override.clone());
 
         let registry = self.handles.lock().unwrap();
         let state = registry
@@ -849,8 +849,7 @@ impl Runtime {
             runtime_security_policy_key(&security),
         )
         .with_profile_name(Some(spec.profile_name.clone()))
-        .with_provider_override(spec.provider_override.clone())
-        .with_preset(spec.preset);
+        .with_provider_override(spec.provider_override.clone());
 
         let mut registry = self.handles.lock().unwrap();
         let (old_key, final_key, snapshot) = {
@@ -1010,8 +1009,15 @@ impl Runtime {
             }
             None => {
                 let capabilities = resolve_capabilities(&CapabilitySelection {
-                    presets: vec![ToolPreset::Coding],
-                    bundles: Vec::new(),
+                    bundles: vec![
+                        ToolBundle::Workspace,
+                        ToolBundle::Filesystem,
+                        ToolBundle::Editing,
+                        ToolBundle::Shell,
+                        ToolBundle::Planning,
+                        ToolBundle::Web,
+                    ],
+                    enabled: Vec::new(),
                 });
                 agent.set_system_prompt(&crate::preset::coding_system_prompt(
                     &state.key.workspace,
@@ -1131,13 +1137,8 @@ impl Runtime {
         let project_root = spec.project_root.clone().unwrap_or_else(|| ".".to_string());
         let cwd = spec.cwd.clone().unwrap_or_else(|| project_root.clone());
 
+        #[allow(unused_mut)]
         let mut capabilities = spec.capabilities.clone();
-        if spec.preset == Some(lattice_orchestrator::AgentPreset::Coding)
-            && capabilities.presets.is_empty()
-            && capabilities.bundles.is_empty()
-        {
-            capabilities.presets.push("coding".into());
-        }
 
         #[allow(deprecated)]
         let profile = lattice_orchestrator::AgentProfile {
@@ -1205,12 +1206,11 @@ impl Runtime {
                 PathBuf::from(&cwd),
             ));
         }
-        if spec.preset == Some(lattice_orchestrator::AgentPreset::Coding) {
-            agent = agent.with_provider(lattice_prompt::WorkspaceContextProvider::new(
-                PathBuf::from(&project_root),
-                PathBuf::from(&cwd),
-            ));
-        }
+        // WorkspaceContextProvider is always added for project-aware agents.
+        agent = agent.with_provider(lattice_prompt::WorkspaceContextProvider::new(
+            PathBuf::from(&project_root),
+            PathBuf::from(&cwd),
+        ));
         agent = agent
             .with_task_state_provider()
             .with_thinking_effort(spec.thinking_effort.clone());
@@ -1298,25 +1298,33 @@ impl Runtime {
         let resolved =
             self.resolve_with_provider(&spec.model, spec.provider_override.as_deref())?;
         let mut agent = Agent::new(resolved.clone());
-        let mut tool_definitions = Vec::new();
+        // Detect coding-capable agent via explicit bundle membership.
+        let has_all_coding_bundles = spec.capabilities.bundles.contains(&ToolBundle::Workspace)
+            && spec.capabilities.bundles.contains(&ToolBundle::Filesystem)
+            && spec.capabilities.bundles.contains(&ToolBundle::Editing)
+            && spec.capabilities.bundles.contains(&ToolBundle::Shell)
+            && spec.capabilities.bundles.contains(&ToolBundle::Planning)
+            && spec.capabilities.bundles.contains(&ToolBundle::Web);
 
-        if let Some(ref preset) = spec.preset {
-            match preset {
-                AgentPreset::Coding => {
-                    crate::preset::apply_coding_preset(&mut agent, &spec, &resolved)?;
-                    tool_definitions = resolve_capabilities(&CapabilitySelection {
-                        presets: vec![ToolPreset::Coding],
-                        bundles: Vec::new(),
-                    })
-                    .definitions;
-                }
-            }
-        }
-
-        if spec.preset.is_none() {
-            if spec.capabilities.presets.is_empty() && spec.capabilities.bundles.is_empty() {
+        let tool_definitions;
+        if has_all_coding_bundles {
+            crate::preset::apply_coding_preset(&mut agent, &spec, &resolved)?;
+            tool_definitions = resolve_capabilities(&CapabilitySelection {
+                bundles: vec![
+                    ToolBundle::Workspace,
+                    ToolBundle::Filesystem,
+                    ToolBundle::Editing,
+                    ToolBundle::Shell,
+                    ToolBundle::Planning,
+                    ToolBundle::Web,
+                ],
+                enabled: Vec::new(),
+            })
+            .definitions;
+        } else {
+            if spec.capabilities.bundles.is_empty() && spec.capabilities.enabled.is_empty() {
                 return Err(RuntimeError::Config(
-                    "AgentSpec must declare capabilities or a preset".into(),
+                    "AgentSpec must declare capabilities".into(),
                 ));
             }
             let capabilities = resolve_capabilities(&spec.capabilities);
@@ -1926,32 +1934,38 @@ parse = "text"
     }
 
     #[test]
-    fn agent_spec_minimal_capabilities_builds_without_default_tools() {
+    fn agent_spec_single_bundle_builds_with_expected_tools() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "minimal-test-model");
 
         let built = runtime
-            .build_agent(AgentSpec::new("minimal-test-model".into()).minimal_capabilities())
+            .build_agent(
+                AgentSpec::new("minimal-test-model".into())
+                    .capability_bundle("workspace"),
+            )
             .unwrap();
 
-        assert!(built.tool_definitions.is_empty());
+        assert!(!built.tool_definitions.is_empty());
     }
 
     #[test]
-    fn coding_preset_requires_runtime_security() {
+    fn coding_capable_bundles_require_runtime_security() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "code-agent-test-model");
 
-        let result =
-            runtime.build_agent(AgentSpec::new("code-agent-test-model".into()).coding_preset());
+        let result = runtime.build_agent(
+            AgentSpec::new("code-agent-test-model".into()).capability_preset("coding"),
+        );
 
         assert!(
-            matches!(result, Err(RuntimeError::Config(message)) if message.contains("AgentPreset::Coding requires RuntimeSecurity"))
+            matches!(&result, Err(RuntimeError::Config(msg)) if msg.contains("require") && msg.contains("RuntimeSecurity")),
+            "expected security error, got: {}",
+            result.as_ref().err().map(|e| e.to_string()).unwrap_or_else(|| "Ok(_)".into())
         );
     }
 
     #[test]
-    fn coding_preset_exposes_workspace_editing_shell_planning_and_web() {
+    fn coding_capable_bundles_expose_workspace_editing_shell_planning_and_web() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "code-agent-test-model");
         let security =
@@ -1961,7 +1975,7 @@ parse = "text"
             .build_agent(
                 AgentSpec::new("code-agent-test-model".into())
                     .security(Some(security))
-                    .coding_preset(),
+                    .capability_preset("coding"),
             )
             .unwrap();
         let names = built
@@ -1984,12 +1998,15 @@ parse = "text"
     }
 
     #[test]
-    fn generic_agent_without_preset_does_not_expose_coding_tools() {
+    fn generic_agent_with_filesystem_bundle_does_not_expose_coding_tools() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "generic-agent-test-model");
 
         let built = runtime
-            .build_agent(AgentSpec::new("generic-agent-test-model".into()).minimal_capabilities())
+            .build_agent(
+                AgentSpec::new("generic-agent-test-model".into())
+                    .capability_bundle("filesystem"),
+            )
             .unwrap();
         let names = built
             .tool_definitions
@@ -2400,7 +2417,6 @@ parse = "text"
             project_root: None,
             cwd: None,
             thinking_effort: None,
-            preset: None,
         }
     }
 

@@ -1,3 +1,4 @@
+pub mod agent_inventory;
 pub mod config_cmd;
 pub mod debug;
 pub mod doctor;

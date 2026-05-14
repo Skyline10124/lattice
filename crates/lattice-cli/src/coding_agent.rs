@@ -170,7 +170,6 @@ pub(crate) fn build_coding_agent_with_runtime(
         project_root: Some(workdir_str.clone()),
         cwd: Some(workdir_str),
         thinking_effort: options.thinking_effort,
-        preset: Some(lattice_orchestrator::AgentPreset::Coding),
     };
     let task_state_seed =
         load_latest_manifest_metadata(&runtime, options.previous_session.as_ref());

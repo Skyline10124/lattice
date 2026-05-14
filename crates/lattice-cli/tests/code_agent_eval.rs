@@ -16,10 +16,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use lattice_agent::LoopEvent;
-use lattice_runtime::{AgentPreset, AgentSpec, Runtime};
+use lattice_runtime::{AgentSpec, Runtime};
 use lattice_session::SessionStore;
 use lattice_tools::edit::content_hash;
-use lattice_tools::{resolve_capabilities, CapabilitySelection, ToolPreset};
+use lattice_tools::{resolve_capabilities, CapabilitySelection, ToolBundle};
 
 // These evals exercise the product preset path: Runtime::build_agent with AgentPreset::Coding.
 
@@ -157,7 +157,7 @@ mod fixtures {
             .project_root(root.to_string_lossy().to_string())
             .cwd(cwd.to_string_lossy().to_string())
             .security(Some(build_security(root)))
-            .preset(AgentPreset::Coding);
+            .capability_preset("coding");
 
         runtime.build_agent(spec).unwrap()
     }
@@ -681,8 +681,8 @@ fn eval_coding_preset_exposes_code_tools_but_non_coding_profile_does_not() {
     assert!(!code_names.contains(&"multi_patch"));
 
     let reader = resolve_capabilities(&CapabilitySelection {
-        presets: vec![ToolPreset::Reader],
-        bundles: Vec::new(),
+        bundles: vec![ToolBundle::Filesystem],
+        enabled: Vec::new(),
     });
     for excluded in ["patch", "bash", "todo_write", "write_file"] {
         assert!(!reader.tool_names.contains(excluded), "{excluded} leaked");

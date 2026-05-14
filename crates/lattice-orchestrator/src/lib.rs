@@ -22,8 +22,8 @@ pub mod ws;
 
 pub use agent_executor::{AgentExecutor, ExecutionOutput};
 pub use agent_spec::{
-    lower_profile_to_turn_spec, AgentPreset, AgentTurnExecutionError, AgentTurnExecutor,
-    AgentTurnOutput, AgentTurnRequest, AgentTurnSpec, AgentTurnStatus, ProfileLoweringError,
+    lower_profile_to_turn_spec, AgentTurnExecutionError, AgentTurnExecutor, AgentTurnOutput,
+    AgentTurnRequest, AgentTurnSpec, AgentTurnStatus, ProfileLoweringError,
 };
 pub use assembly::{
     assemble_agent_with_options, AgentAssemblyOptions, AgentFactory, AssembledAgent,

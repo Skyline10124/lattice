@@ -65,7 +65,6 @@ pub struct AgentHandleKey {
     pub profile_name: Option<String>,
     pub model: String,
     pub provider_override: Option<String>,
-    pub preset: Option<lattice_orchestrator::AgentPreset>,
     pub security_policy: String,
 }
 
@@ -79,7 +78,6 @@ impl AgentHandleKey {
             profile_name: None,
             model,
             provider_override: None,
-            preset: None,
             security_policy,
         }
     }
@@ -96,11 +94,6 @@ impl AgentHandleKey {
 
     pub fn with_provider_override(mut self, provider: Option<String>) -> Self {
         self.provider_override = provider;
-        self
-    }
-
-    pub fn with_preset(mut self, preset: Option<lattice_orchestrator::AgentPreset>) -> Self {
-        self.preset = preset;
         self
     }
 }

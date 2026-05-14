@@ -1,155 +1,134 @@
-# Roadmap: LATTICE
+# Roadmap: v1.0 Single Agent Core
 
-## Milestones
+**Created:** 2026-05-14
+**Phase numbering:** Reset to Phase 1 for this first formal GSD milestone.
+**Requirements:** 20 total, 20 mapped, 0 unmapped.
 
-- **v1.0 Tech Debt Cleanup & Architecture Refactoring** -- Phases 1-5 (shipped 2026-05-08, archived)
-- **v1.1 Prompt Lifecycle & Session Runtime** -- Phases 6-9 (shipped 2026-05-10, archived)
-- **v1.2 CC/Codex Capability Foundation & Code Agent** -- Phases 10-14 (shipped 2026-05-12, archived)
-- **v1.3 Generic Agent Runtime & Session Graph** -- Phases 15-19 (planning)
+## Milestone Goal
 
-## Phases
+Reduce LATTICE to a coherent generic single-agent runtime and remove plugin/orchestrator/pipeline/subagent/code-agent-specific architecture from the current codebase.
 
-<details>
-<summary>v1.0 Tech Debt Cleanup & Architecture Refactoring (Phases 1-5) -- SHIPPED 2026-05-08</summary>
+## Phase Summary
 
-- [x] Phase 1: M1 Code Cleanup (3/3 plans) -- completed 2026-05-08
-- [x] Phase 2: M1 Sandbox Extraction (2/2 plans) -- completed 2026-05-08
-- [x] Phase 3: M2 Core Decoupling (1/1 plan) -- completed 2026-05-08
-- [x] Phase 4: M2 Tools Consolidation (1/1 plan) -- completed 2026-05-08
-- [x] Phase 5: M2 Orchestrator Rename (2/2 plans) -- completed 2026-05-08
+| # | Phase | Goal | Requirements | Success Criteria |
+|---|-------|------|--------------|------------------|
+| 1 | Profile Contract Extraction | Establish generic profile/spec contracts outside orchestration semantics. | PROF-01, PROF-02, PROF-03 | 4 |
+| 2 | Runtime Assembly Cutover | Make runtime assemble and run generic agents without plugin/orchestrator dependencies. | RUN-01, RUN-02, RUN-03, RUN-04 | 5 |
+| 3 | CLI/TUI Single-Agent UX | Route CLI/TUI through the generic path and remove plugin/code-agent/orchestrator UI surfaces. | CLI-01, CLI-02, CLI-03, CLI-04, CLI-05 | 5 |
+| 4 | Workspace Layer Removal | Remove plugin/orchestrator crates, examples, imports, and dead tests. | REM-01, REM-02, REM-03, REM-04 | 4 |
+| 5 | Verification And Docs | Prove the new architecture builds, behaves, and is documented. | VER-01, VER-02, VER-03, VER-04 | 5 |
 
-Archive: `.planning/milestones/v1.0-ROADMAP.md`
+## Phase Details
 
-</details>
+### Phase 1: Profile Contract Extraction
 
-<details>
-<summary>v1.1 Prompt Lifecycle & Session Runtime (Phases 6-9) -- SHIPPED 2026-05-10</summary>
+**Goal:** Establish a generic profile and turn/build spec model that preserves useful declarative configuration while removing plugin, handoff, orchestrator, and coding-preset semantics.
 
-- [x] Phase 6: Contribution Path Migration (2/2 plans) -- completed 2026-05-09
-- [x] Phase 7: PromptSpec Profile Loading (2/2 plans) -- completed 2026-05-10
-- [x] Phase 8: Declarative Hook Builder (2/2 plans) -- completed 2026-05-10
-- [x] Phase 9: Manifest Collection (2/2 plans) -- completed 2026-05-10
+**Requirements:** PROF-01, PROF-02, PROF-03
 
-Archive: `.planning/milestones/v1.1-ROADMAP.md`
-Phase archive: `.planning/milestones/v1.1-phases/`
+**Success criteria:**
+1. A generic profile/spec contract exists in `lattice-profile` or an equivalent narrow module with no plugin/handoff/orchestrator fields.
+2. Existing runtime/CLI default profile data can be represented without `AgentPreset::Coding`.
+3. Profile lowering is pure data conversion and does not construct live agents, read CLI/TUI state, or access session stores.
+4. Unit tests cover profile parsing/defaulting/lowering and reject removed fields or concepts.
 
-</details>
+**Notes:**
+- Extract from `lattice-orchestrator/src/profile.rs` and `agent_spec.rs` before deleting orchestrator.
+- Keep capability config focused on tool exposure.
 
-<details>
-<summary>v1.2 CC/Codex Capability Foundation & Code Agent (Phases 10-14) -- SHIPPED 2026-05-12</summary>
+### Phase 2: Runtime Assembly Cutover
 
-- [x] Phase 10: Capability Bundles & Profile Isolation (4/4 plans) -- completed 2026-05-10
-- [x] Phase 11: Structured Editing Engine (4/4 plans) -- completed 2026-05-10
-- [x] Phase 12: Permission & Approval Workflow (4/4 plans) -- completed 2026-05-11
-- [x] Phase 13: Agent Task & Recovery State (4/4 plans) -- completed 2026-05-11
-- [x] Phase 14: Main Code Agent & Eval Harness (7/7 plans) -- completed 2026-05-12
+**Goal:** Move active agent assembly into runtime-owned generic logic and remove runtime dependence on orchestrator/plugin abstractions.
 
-Archive: `.planning/milestones/v1.2-ROADMAP.md`
-Requirements: `.planning/milestones/v1.2-REQUIREMENTS.md`
-Milestone audit: `.planning/milestones/v1.2-MILESTONE-AUDIT.md`
+**Requirements:** RUN-01, RUN-02, RUN-03, RUN-04
 
-</details>
+**Success criteria:**
+1. Runtime builds/reuses a generic agent handle from profile/spec and runtime security.
+2. Runtime assembly wires prompt providers, tool schema provider, memory/context, and sandbox-bound tool executor without `lattice_orchestrator::assembly`.
+3. Runtime turn completion still saves session messages and turn manifests.
+4. Runtime public API no longer exposes pipeline/micro-agent/event-bus/plugin-registry/plugin-overlay/orchestrator-executor concepts.
+5. Targeted runtime tests prove sandbox binding and generic turn completion.
 
-<details open>
-<summary>v1.3 Generic Agent Runtime & Session Graph (Phases 15-19) -- PLANNING</summary>
+**Notes:**
+- Preserve current `RuntimeTurnEvent`, `TurnRequest`, `TurnCompletion`, and handle architecture where possible.
+- Avoid unrelated session/tool large-file splits.
 
-- [x] Phase 15: Generic Agent Runtime Naming & Profile Assembly — completed 2026-05-13
-  - **Goal:** Replace code-agent-specific internal construction with generic agent specs, profile assembly, and compatibility boundaries.
-  - **Requirements:** GEN-01, GEN-02, GEN-03, GEN-04
-  - **Plans:** 4 plans
-  - **Success criteria:**
-    1. Runtime exposes product-neutral agent spec/factory concepts.
-    2. `lattice code` remains backed by the coding preset and preserves v1.2 behavior.
-    3. Code-agent naming remains only where it describes the user-facing coding preset or an explicit compatibility shim.
-    4. Non-coding profiles do not inherit coding capabilities by default.
-  - **Plans:**
-    - [x] 15-01-PLAN.md — Rename ToolPreset::CodeAgent to ToolPreset::Coding with backward-compatible FromStr
-    - [x] 15-02-PLAN.md — Create runtime preset module, extend AgentSpec, add preset dispatch to build_agent, delete code_agent.rs
-    - [x] 15-03-PLAN.md — Update orchestrator assembly test fixtures and test names to canonical 'coding' preset
-    - [x] 15-04-PLAN.md — Migrate CLI coding_agent.rs and code_agent_eval.rs to AgentSpec + AgentPreset::Coding
+### Phase 3: CLI/TUI Single-Agent UX
 
-- [ ] Phase 16: Runtime-Owned Agent Instance & Turn Lifecycle
-  - **Goal:** Move live agent instance ownership, turn submission, streaming, security, task-state carryover, and manifest handoff into `lattice-runtime`.
-  - **Requirements:** OWN-01, OWN-02, OWN-03, OWN-04
-  - **Success criteria:**
-    1. Runtime can create, reuse, and dispose agent handles keyed by profile/session/model/workspace/security.
-    2. A runtime turn API streams events without exposing mutable `Agent` ownership to callers.
-    3. Runtime owns turn completion data needed for final reports, task state, token usage, and manifest persistence.
-    4. Runtime security approvals survive agent reuse or rebuild within the same runtime/session flow.
-  - **Plans:** 6 plans
-    - [ ] 16-01-PLAN.md — Lower profile/spec/turn abstractions in orchestrator
-    - [ ] 16-02-PLAN.md — Add runtime-owned agent handle registry and lifecycle state
-    - [ ] 16-03-PLAN.md — Implement runtime submit_turn, semantic events, completion bundles, and persistence
-    - [ ] 16-04-PLAN.md — Migrate orchestrator pipeline execution to runtime-owned handles
-    - [ ] 16-05-PLAN.md — Bridge CLI one-shot commands and coding evals to runtime-owned turns
-    - [ ] 16-06-PLAN.md — Bridge TUI runtime handles/events, plugin overlays, approval state, and guardrails
+**Goal:** Make the user-facing CLI and TUI reflect one generic agent path.
 
-- [ ] Phase 17: Frontend Adapter Migration
-  - **Goal:** Convert CLI and TUI execution paths into adapters over runtime-owned agent handles and stream events.
-  - **Requirements:** FE-01, FE-02, FE-03, FE-04
-  - **Success criteria:**
-    1. TUI `App` state no longer stores `Arc<Mutex<Agent>>`.
-    2. TUI turn execution maps runtime stream events into the existing UI event model.
-    3. CLI `lattice code` one-shot execution uses the same runtime turn path as the TUI.
-    4. Session resume, queued input, plugin-mode, approval retry, and final reporting keep their existing behavior.
-  - **Plans:** 6 plans
-    - **Wave 1**
-      - [x] 17-01-PLAN.md - Runtime turn gap closure and frontend support APIs
-    - **Wave 2** *(blocked on Wave 1 completion)*
-      - [x] 17-02-PLAN.md - CLI `code`/`run`/`debug` hard cut to runtime turns
-      - [x] 17-03-PLAN.md - TUI runtime handle/event/completion migration
-    - **Wave 3** *(blocked on Wave 2 TUI migration)*
-      - [x] 17-04-PLAN.md - TUI queued prompt and cancellation UX
-      - [x] 17-05-PLAN.md - TUI plugin mode and approval runtime APIs
-    - **Wave 4** *(blocked on Waves 2-3 completion)*
-      - [x] 17-06-PLAN.md - Regression guards and final workspace gates
+**Requirements:** CLI-01, CLI-02, CLI-03, CLI-04, CLI-05
 
-- [ ] Phase 18: Session Graph Interface & Agent/Manifest Decoupling
-  - **Goal:** Preserve core git-style conversation graph operations while separating session graph storage from generic agent execution details.
-  - **Requirements:** SESS-01, SESS-02, SESS-03, SESS-04, DEC-01, DEC-02, DEC-03
-  - **Success criteria:**
-    1. Session core graph operations are explicit and covered for both file and SQLite stores.
-    2. Advanced helpers such as reflog, tag, reset, rebase, stash, and gc are separated or clearly extension-marked.
-    3. `lattice-agent` manifests no longer require branch or parent git commit fields.
-    4. Runtime/CLI layers record workspace git metadata when needed without leaking it into the generic agent core.
+**Success criteria:**
+1. CLI `run` and TUI prompt submission use the same generic runtime spec/profile path.
+2. `code` is removed or becomes a thin generic profile/default-tool alias with no separate `coding_agent.rs` module.
+3. CLI command tree no longer exposes pipeline, orchestrator status, plugin loading, plugin execution, or agent-registry validation/listing commands.
+4. TUI removes plugin commands, plugin statusline labels, plugin handles, plugin overlay application, and plugin menus.
+5. TUI still supports core single-agent interactions: model/provider, prompt streaming, tools, approvals/permissions, and sessions.
 
-- [ ] Phase 19: Regression & Compatibility Hardening
-  - **Goal:** Lock down behavior, compatibility, and documentation after the generic runtime/session migration.
-  - **Requirements:** EVAL-01, EVAL-02, EVAL-03, EVAL-04
-  - **Success criteria:**
-    1. Existing deterministic code-agent evals pass through the generic runtime path.
-    2. Tests or compile-time checks prevent CLI/TUI from regressing to direct live `Agent` ownership.
-    3. Session graph tests cover preserved core operations and the extension boundary.
-    4. Relevant formatting, clippy, and test commands pass or any unavailable command is explicitly documented.
+**Notes:**
+- Rename tests and fixtures away from `coding_agent` terminology.
+- Keep frontend runtime guard tests, but update them for the generic runtime path.
 
-</details>
+### Phase 4: Workspace Layer Removal
 
-## Progress
+**Goal:** Delete obsolete extension/orchestration layers from the active workspace.
 
-**Active Execution Order:** 15 -> 16 -> 17 -> 18 -> 19
+**Requirements:** REM-01, REM-02, REM-03, REM-04
 
-| Phase | Milestone | Plans Complete | Status | Completed |
-|-------|-----------|----------------|--------|-----------|
-| 1. M1 Code Cleanup | v1.0 | 3/3 | Complete | 2026-05-08 |
-| 2. M1 Sandbox Extraction | v1.0 | 2/2 | Complete | 2026-05-08 |
-| 3. M2 Core Decoupling | v1.0 | 1/1 | Complete | 2026-05-08 |
-| 4. M2 Tools Consolidation | v1.0 | 1/1 | Complete | 2026-05-08 |
-| 5. M2 Orchestrator Rename | v1.0 | 2/2 | Complete | 2026-05-08 |
-| 6. Contribution Path Migration | v1.1 | 2/2 | Complete | 2026-05-09 |
-| 7. PromptSpec Profile Loading | v1.1 | 2/2 | Complete | 2026-05-10 |
-| 8. Declarative Hook Builder | v1.1 | 2/2 | Complete | 2026-05-10 |
-| 9. Manifest Collection | v1.1 | 2/2 | Complete | 2026-05-10 |
-| 10. Capability Bundles & Profile Isolation | v1.2 | 4/4 | Complete    | 2026-05-10 |
-| 11. Structured Editing Engine | v1.2 | 4/4 | Complete   | 2026-05-10 |
-| 12. Permission & Approval Workflow | v1.2 | 4/4 | Complete    | 2026-05-11 |
-| 13. Agent Task & Recovery State | v1.2 | 4/4 | Complete    | 2026-05-11 |
-| 14. Main Code Agent & Eval Harness | v1.2 | 7/7 | Complete   | 2026-05-12 |
-| 15. Generic Agent Runtime Naming & Profile Assembly | v1.3 | 4/4 | Complete    | 2026-05-13 |
-| 16. Runtime-Owned Agent Instance & Turn Lifecycle | v1.3 | 0/6 | Ready to execute | — |
-| 17. Frontend Adapter Migration | v1.3 | 6/6 | Complete   | 2026-05-13 |
-| 18. Session Graph Interface & Agent/Manifest Decoupling | v1.3 | — | Pending | — |
-| 19. Regression & Compatibility Hardening | v1.3 | — | Pending | — |
+**Success criteria:**
+1. Root `Cargo.toml` no longer lists `lattice-plugin`, `lattice-plugins`, or `lattice-orchestrator`.
+2. Runtime/CLI/agent/profile crates compile without imports from removed crates.
+3. Examples and tests that only covered plugin/orchestrator/pipeline/subagent behavior are deleted or rewritten for generic agent behavior.
+4. Source grep checks show removed symbols and crate names absent from active source, except historical planning docs or explicit migration notes.
+
+**Notes:**
+- This phase should happen after Phases 1-3 to avoid losing profile/spec code before replacement exists.
+- Expect test fixture cleanup to be a major part of this phase.
+
+### Phase 5: Verification And Docs
+
+**Goal:** Prove the simplified architecture is stable and make docs match the new code.
+
+**Requirements:** VER-01, VER-02, VER-03, VER-04
+
+**Success criteria:**
+1. `cargo check --workspace` succeeds.
+2. Targeted tests pass for runtime, agent, CLI/TUI, tools, sandbox, and session paths.
+3. Boundary checks confirm active workspace has no plugin/orchestrator/code-agent runtime surface.
+4. README, AGENTS/CLAUDE where appropriate, and `.planning/codebase` maps describe the simplified single-agent architecture.
+5. Final report identifies any deferred extension work as future requirements rather than hidden code.
+
+**Notes:**
+- Preferred final gate: `cargo fmt --all --check`, `cargo clippy --workspace -- -D warnings`, and `cargo test --workspace` if the refactor reaches full closure.
+- If full workspace tests expose unrelated pre-existing failures, document them and run focused gates for changed crates.
+
+## Coverage
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| PROF-01 | Phase 1 | Pending |
+| PROF-02 | Phase 1 | Pending |
+| PROF-03 | Phase 1 | Pending |
+| RUN-01 | Phase 2 | Pending |
+| RUN-02 | Phase 2 | Pending |
+| RUN-03 | Phase 2 | Pending |
+| RUN-04 | Phase 2 | Pending |
+| CLI-01 | Phase 3 | Pending |
+| CLI-02 | Phase 3 | Pending |
+| CLI-03 | Phase 3 | Pending |
+| CLI-04 | Phase 3 | Pending |
+| CLI-05 | Phase 3 | Pending |
+| REM-01 | Phase 4 | Pending |
+| REM-02 | Phase 4 | Pending |
+| REM-03 | Phase 4 | Pending |
+| REM-04 | Phase 4 | Pending |
+| VER-01 | Phase 5 | Pending |
+| VER-02 | Phase 5 | Pending |
+| VER-03 | Phase 5 | Pending |
+| VER-04 | Phase 5 | Pending |
+
+**Coverage status:** 20 / 20 requirements mapped.
 
 ---
-*Created: 2026-05-10*
-*Last updated: 2026-05-13 after Phase 17 planning*
+*Roadmap created: 2026-05-14 for v1.0 Single Agent Core*

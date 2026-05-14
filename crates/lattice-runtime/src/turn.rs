@@ -133,8 +133,9 @@ impl Runtime {
             }
             let model = state.model.canonical_id.clone();
             let provider = state.model.provider.clone();
-            let persist_final_report =
-                state.spec.preset == Some(lattice_orchestrator::AgentPreset::Coding);
+            // Final report persistence is always enabled; coding behavior is
+            // expressed through prompt + tool bundles, not typed presets.
+            let persist_final_report = true;
             let agent = state.agent.take().ok_or_else(|| {
                 RuntimeError::Config("handle has no internal agent; rebuild required".into())
             })?;
@@ -978,7 +979,6 @@ mod tests {
             project_root: Some(root.to_string_lossy().to_string()),
             cwd: Some(root.to_string_lossy().to_string()),
             thinking_effort: None,
-            preset: None,
         };
         let security =
             crate::build_runtime_security(&crate::RuntimeSecurityConfig::default(), &root).unwrap();
@@ -1216,7 +1216,6 @@ mod tests {
             project_root: Some(root.to_string_lossy().to_string()),
             cwd: Some(root.to_string_lossy().to_string()),
             thinking_effort: None,
-            preset: None,
         };
         let security =
             crate::build_runtime_security(&crate::RuntimeSecurityConfig::default(), root).unwrap();
@@ -1240,7 +1239,6 @@ mod tests {
             project_root: Some(root.to_string_lossy().to_string()),
             cwd: Some(root.to_string_lossy().to_string()),
             thinking_effort: None,
-            preset: Some(lattice_orchestrator::AgentPreset::Coding),
         };
         let security =
             crate::build_runtime_security(&crate::RuntimeSecurityConfig::default(), root).unwrap();

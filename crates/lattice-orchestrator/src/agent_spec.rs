@@ -11,22 +11,6 @@ use thiserror::Error;
 use crate::profile::AgentProfile;
 
 // ---------------------------------------------------------------------------
-// AgentPreset — typed agent preset classification
-// ---------------------------------------------------------------------------
-
-/// Typed classification of an agent's role / execution profile.
-///
-/// The coding preset triggers runtime-side coding-specific composition
-/// (project instructions, task-state tracking, final reporting, etc.).
-/// Non-coding agents leave preset as `None` and receive generic turn
-/// execution with no preset-specific completion policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AgentPreset {
-    /// Coding agent: project instructions, task-state tracking, final report.
-    Coding,
-}
-
-// ---------------------------------------------------------------------------
 // AgentTurnSpec — executable profile data for one turn session
 // ---------------------------------------------------------------------------
 
@@ -63,8 +47,6 @@ pub struct AgentTurnSpec {
     pub cwd: Option<String>,
     /// Optional thinking effort / extended reasoning budget.
     pub thinking_effort: Option<String>,
-    /// Optional typed preset classification.
-    pub preset: Option<AgentPreset>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,8 +171,6 @@ pub enum ProfileLoweringError {
 /// 3. `system_prompt` is set only when `prompt_spec.content` is absent,
 ///    matching the current `assemble_agent` behavior to avoid duplication.
 /// 4. `capabilities`, `tools`, `behavior`, `handoff`, and `memory` are cloned.
-/// 5. If `capabilities.presets` contains `"coding"` or `"code-agent"`,
-///    `preset` is set to `Some(AgentPreset::Coding)`.
 pub fn lower_profile_to_turn_spec(
     profile: &AgentProfile,
 ) -> Result<AgentTurnSpec, ProfileLoweringError> {
@@ -201,18 +181,6 @@ pub fn lower_profile_to_turn_spec(
     if profile.agent.model.is_empty() {
         return Err(ProfileLoweringError::EmptyModel);
     }
-
-    // Determine preset from capabilities.presets
-    let preset = if profile
-        .capabilities
-        .presets
-        .iter()
-        .any(|p| p == "coding" || p == "code-agent")
-    {
-        Some(AgentPreset::Coding)
-    } else {
-        None
-    };
 
     // System prompt: only set when PromptSpec.content is absent
     #[allow(deprecated)]
@@ -246,7 +214,6 @@ pub fn lower_profile_to_turn_spec(
         project_root: None,    // set by caller based on runtime context
         cwd: None,             // set by caller based on runtime context
         thinking_effort: None, // set by caller
-        preset,
     })
 }
 
@@ -311,7 +278,6 @@ mod tests {
             project_root: None,
             cwd: None,
             thinking_effort: None,
-            preset: None,
         };
         let request = AgentTurnRequest {
             input: "hello".into(),
@@ -378,19 +344,20 @@ mod lowering_tests {
 
         assert_eq!(spec.profile_name, "test-agent");
         assert_eq!(spec.model, "claude-sonnet");
-        assert!(spec.preset.is_none());
     }
 
     #[test]
-    fn profile_lowering_maps_coding_alias_to_coding_preset() {
+    fn profile_lowering_no_longer_derives_preset_from_capabilities() {
         let mut profile = make_profile("coder", "gpt-4o");
         profile.capabilities.presets = vec!["coding".into()];
+        // Lowering must succeed without deriving any preset.
         let spec = lower_profile_to_turn_spec(&profile).unwrap();
-        assert_eq!(spec.preset, Some(AgentPreset::Coding));
+        assert_eq!(spec.profile_name, "coder");
+        assert_eq!(spec.model, "gpt-4o");
 
         profile.capabilities.presets = vec!["code-agent".into()];
         let spec = lower_profile_to_turn_spec(&profile).unwrap();
-        assert_eq!(spec.preset, Some(AgentPreset::Coding));
+        assert_eq!(spec.model, "gpt-4o");
     }
 
     #[test]

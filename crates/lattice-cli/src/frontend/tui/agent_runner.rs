@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
-use lattice_orchestrator::{AgentPreset, AgentTurnSpec};
+use lattice_orchestrator::AgentTurnSpec;
 use lattice_runtime::{AgentHandleId, Runtime, RuntimeTurnEvent, TurnId, TurnRequest, TurnStatus};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -180,7 +180,6 @@ fn runtime_turn_spec(request: &AgentBuildRequest) -> AgentTurnSpec {
         project_root: Some(workdir.clone()),
         cwd: Some(workdir),
         thinking_effort: request.thinking_effort.clone(),
-        preset: Some(AgentPreset::Coding),
     }
 }
 

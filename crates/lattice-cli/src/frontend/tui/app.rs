@@ -833,7 +833,7 @@ mod tests {
     use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry};
     use lattice_core::streaming::TokenUsage;
     use lattice_core::types::ToolDefinition;
-    use lattice_orchestrator::{AgentPreset, AgentTurnSpec};
+    use lattice_orchestrator::AgentTurnSpec;
     use lattice_sandbox::{ApprovalKind, ApprovedRule, RiskClass};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -949,7 +949,6 @@ mod tests {
             project_root: Some(workdir.clone()),
             cwd: Some(workdir),
             thinking_effort: None,
-            preset: Some(AgentPreset::Coding),
         }
     }
 

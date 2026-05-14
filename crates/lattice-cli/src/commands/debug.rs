@@ -201,7 +201,6 @@ pub(crate) fn debug_turn_spec(
         project_root: Some(workspace.clone()),
         cwd: Some(workspace),
         thinking_effort: None,
-        preset: None,
     }
 }
 

@@ -14,6 +14,7 @@ members = [
     "crates/lattice-cli",
     "crates/lattice-sandbox",
     "crates/lattice-policy",
+    "crates/lattice-profile",
 ]
 
 [workspace.package]
@@ -38,6 +39,7 @@ lattice-plugins  = { path = "crates/lattice-plugins" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-sandbox  = { path = "crates/lattice-sandbox" }
 lattice-policy   = { path = "crates/lattice-policy" }
+lattice-profile  = { path = "crates/lattice-profile" }
 
 # External dependencies — shared versions
 async-trait = "0.1"
