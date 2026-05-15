@@ -12,10 +12,9 @@ use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnRequest}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::coding_agent;
 use crate::profile_runtime::{prepare_profile_runtime_session, ProfileRuntimeSessionRequest};
 
-pub struct CodingAgentRuntimeTurnFixture {
+pub struct ProfileRuntimeTurnFixture {
     pub model: String,
     pub base_url: String,
     pub workdir: PathBuf,
@@ -26,14 +25,14 @@ pub struct CodingAgentRuntimeTurnFixture {
     pub session_store: Option<PathBuf>,
 }
 
-impl CodingAgentRuntimeTurnFixture {
+impl ProfileRuntimeTurnFixture {
     pub fn with_session_store(mut self, path: PathBuf) -> Self {
         self.session_store = Some(path);
         self
     }
 }
 
-pub struct CodingAgentRuntimeTurnResult {
+pub struct ProfileRuntimeTurnResult {
     pub completion: TurnCompletion,
     pub rendered: serde_json::Value,
 }
@@ -95,9 +94,9 @@ pub struct GenericRuntimeTurnResult {
     pub completion: TurnCompletion,
 }
 
-pub async fn run_coding_agent_runtime_turn(
-    fixture: CodingAgentRuntimeTurnFixture,
-) -> Result<CodingAgentRuntimeTurnResult> {
+pub async fn run_profile_runtime_turn(
+    fixture: ProfileRuntimeTurnFixture,
+) -> Result<ProfileRuntimeTurnResult> {
     let json = fixture.json;
     let generic = run_generic_runtime_turn(GenericRuntimeTurnFixture {
         model: fixture.model,
@@ -108,7 +107,7 @@ pub async fn run_coding_agent_runtime_turn(
         save_session: fixture.save_session,
         session_id: fixture.session_id,
         session_store: fixture.session_store,
-        profile_name: "coding".into(),
+        profile_name: "code".into(),
         tool_bundles: vec![
             "workspace".into(),
             "filesystem".into(),
@@ -119,8 +118,9 @@ pub async fn run_coding_agent_runtime_turn(
         ],
     })
     .await?;
-    let completion = coding_agent::require_successful_runtime_completion(generic.completion)?;
-    let rendered = coding_agent::render_completion_value(&completion);
+    let completion =
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
+    let rendered = crate::runtime_turn::render_completion_value(&completion);
 
     if json {
         assert!(
@@ -129,7 +129,7 @@ pub async fn run_coding_agent_runtime_turn(
         );
     }
 
-    Ok(CodingAgentRuntimeTurnResult {
+    Ok(ProfileRuntimeTurnResult {
         completion,
         rendered,
     })
@@ -153,7 +153,7 @@ pub async fn run_command_runtime_turn(
     })
     .await?;
     let completion =
-        crate::coding_agent::require_successful_runtime_completion(generic.completion)?;
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
     let rendered = crate::commands::run::run_completion_value(&completion);
 
     if json {
@@ -201,6 +201,7 @@ pub async fn run_generic_runtime_turn(
             project_root: fixture.workdir.clone(),
             global_agents_dir: fixture.workdir.join(".unused-global-agents"),
             security_config: crate::config::SecurityConfig::default(),
+            model_override: None,
             provider_override: None,
             session_id: fixture.session_id.clone(),
             task_state_seed: None,
@@ -227,38 +228,6 @@ pub async fn run_generic_runtime_turn(
         session,
         completion,
     })
-}
-
-pub async fn submit_profile_runtime_turn(
-    runtime: &Runtime,
-    session: RuntimeAgentSession,
-    request: TurnRequest,
-    mut renderer: Option<&mut crate::commands::run::RuntimeEventRenderer>,
-) -> Result<TurnCompletion> {
-    let submitted = runtime.submit_session_turn(session, request).await?;
-    let mut events = submitted.events;
-    while let Some(event) = events.next().await {
-        if let Some(renderer) = renderer.as_deref_mut() {
-            renderer.render(&event)?;
-        }
-    }
-    Ok(submitted.completion.await?)
-}
-
-pub async fn submit_coding_profile_runtime_turn(
-    runtime: &Runtime,
-    session: RuntimeAgentSession,
-    request: TurnRequest,
-    mut renderer: Option<&mut crate::coding_agent::CodingEventRenderer>,
-) -> Result<TurnCompletion> {
-    let submitted = runtime.submit_session_turn(session, request).await?;
-    let mut events = submitted.events;
-    while let Some(event) = events.next().await {
-        if let Some(renderer) = renderer.as_deref_mut() {
-            renderer.render_runtime(&event)?;
-        }
-    }
-    Ok(submitted.completion.await?)
 }
 
 fn write_profile_package(
@@ -324,7 +293,7 @@ pub async fn debug_chat_runtime_turn(
     })
     .await?;
     let completion =
-        crate::coding_agent::require_successful_runtime_completion(generic.completion)?;
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
     let response_len = completion.assistant_text.len();
     let model = completion.model.clone();
     let provider = completion.provider.clone();

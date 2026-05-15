@@ -1,4 +1,3 @@
-use crate::coding_agent;
 use crate::session::SessionStore;
 
 use super::app::{permission_modes, summarize_prompt, App};
@@ -61,7 +60,7 @@ impl CommandRegistry {
             "/model" => {
                 let model = parts.collect::<Vec<_>>().join(" ");
                 if model.is_empty() {
-                    let models = coding_agent::authenticated_models(&app.credentials);
+                    let models = crate::model_inventory::authenticated_models(&app.credentials);
                     let idx = models
                         .iter()
                         .position(|m| *m == app.current_model)
@@ -84,15 +83,17 @@ impl CommandRegistry {
                 } else {
                     &app.current_provider
                 };
+                let snapshot = app.snapshot_label.as_deref().unwrap_or("snapshot:none");
                 app.push_system_message(&format!(
-                    "model={} provider={} messages={} tokens={} transcript={} sandbox={} plugins={}",
+                    "model={} provider={} messages={} tokens={} transcript={} sandbox={} {} {}",
                     app.current_model,
                     provider,
                     app.messages.len(),
                     app.token_count,
                     if app.transcript_mode { "on" } else { "off" },
                     app.security.mode_label,
-                    app.plugin_count(),
+                    app.agent_label,
+                    snapshot,
                 ));
                 true
             }
@@ -119,52 +120,11 @@ impl CommandRegistry {
                 }
                 true
             }
-            "/plugins" => {
-                let names = app.plugin_names();
-                if names.is_empty() {
-                    app.push_system_message("No plugins loaded.");
-                } else {
-                    let lines = names
-                        .iter()
-                        .filter_map(|name| app.plugin_summary(name))
-                        .map(|(name, description)| format!("  {name:<16} {description}"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    app.push_system_message(&format!(
-                        "{} plugin(s) loaded · /plugin <name> <prompt>:\n{}",
-                        names.len(),
-                        lines
-                    ));
-                }
-                true
-            }
-            "/plugin" => {
-                let name = parts.next().unwrap_or("");
-                let prompt = parts.collect::<Vec<_>>().join(" ");
-                if name.is_empty() {
-                    let names = app.plugin_names();
-                    if names.is_empty() {
-                        app.push_system_message("No plugins loaded.");
-                    } else {
-                        app.menu = Some(MenuState::new(MenuKind::Plugin, names, 0));
-                    }
-                } else if prompt.trim().is_empty() {
-                    if app.has_plugin(name) {
-                        app.composer.set_input(format!("/plugin {name} "));
-                    } else {
-                        app.push_system_message(&format!(
-                            "Plugin not found: {name}. Use /plugins to list loaded plugins."
-                        ));
-                    }
-                } else if let Err(err) = app.prepare_plugin_prompt(name, prompt) {
-                    app.push_system_message(&format!("Plugin failed: {err}"));
-                }
-                true
-            }
             "/provider" => {
                 let arg = parts.collect::<Vec<_>>().join(" ");
                 if arg.is_empty() {
-                    let providers = coding_agent::authenticated_providers(&app.credentials);
+                    let providers =
+                        crate::model_inventory::authenticated_providers(&app.credentials);
                     if providers.is_empty() {
                         let p = if app.current_provider.is_empty() {
                             "auto"

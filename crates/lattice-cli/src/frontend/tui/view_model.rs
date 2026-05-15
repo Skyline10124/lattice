@@ -30,7 +30,8 @@ pub(super) struct StatuslineView<'a> {
     pub(super) transcript_mode: bool,
     pub(super) thinking_effort: Option<&'a str>,
     pub(super) sandbox: &'a str,
-    pub(super) plugin_label: String,
+    pub(super) agent_label: &'a str,
+    pub(super) snapshot_label: Option<&'a str>,
     pub(super) queued_count: usize,
     pub(super) mode_label: &'static str,
     pub(super) spinner: &'static str,
@@ -59,10 +60,8 @@ impl<'a> TuiViewModel<'a> {
                 transcript_mode: app.transcript_mode,
                 thinking_effort: app.thinking_effort.as_deref(),
                 sandbox: app.security.mode_label.as_str(),
-                plugin_label: app
-                    .active_plugin_name()
-                    .map(|name| format!("plugin:{name}"))
-                    .unwrap_or_else(|| format!("plugins:{}", app.plugin_count())),
+                agent_label: &app.agent_label,
+                snapshot_label: app.snapshot_label.as_deref(),
                 queued_count: app.turn.queued_inputs.len(),
                 mode_label: app.mode_label(),
                 spinner: app.spinner(),
@@ -103,7 +102,6 @@ mod tests {
     use super::*;
     use crate::frontend::tui::state::ChatMessage;
     use lattice_core::types::Role;
-    use lattice_runtime::RuntimeAgentSession;
 
     #[test]
     fn view_model_tracks_composer_and_queue_state() {
@@ -147,70 +145,22 @@ mod tests {
         assert_eq!(vm.thinking, Some("step one"));
     }
 
-    fn test_runtime_session(
-        app: &App,
-        profile_name: &str,
-        session_id: &str,
-    ) -> RuntimeAgentSession {
-        crate::profile_runtime::prepare_generated_profile_runtime_session(
-            &app.runtime,
-            crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
-                profile_name: profile_name.into(),
-                model: app.current_model.clone(),
-                system_prompt: lattice_runtime::coding_system_prompt(&app.workdir, &app.workdir),
-                tool_bundles: vec!["workspace".into(), "filesystem".into()],
-                thinking_effort: None,
-                project_root: app.workdir.clone(),
-                security: app.security.clone(),
-                provider_override: app.provider_override.clone(),
-                session_id: Some(session_id.into()),
-                task_state_seed: None,
-            },
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn plugin_statusline_normal_session_shows_plugins_count() {
+    fn view_model_exposes_agent_label() {
         let app = App::new();
 
         let vm = TuiViewModel::from_app(&app);
 
-        assert_eq!(
-            vm.statusline.plugin_label,
-            format!("plugins:{}", app.plugin_count())
-        );
+        assert_eq!(vm.statusline.agent_label, "agent:default");
     }
 
     #[test]
-    fn plugin_statusline_plugin_prompt_running_shows_plugin_statusline() {
-        let mut runtime = lattice_runtime::Runtime::builder().build();
-        runtime
-            .register_model(lattice_core::catalog::ModelCatalogEntry {
-                canonical_id: "plugin-status-model".into(),
-                context_length: 8192,
-                providers: vec![lattice_core::catalog::CatalogProviderEntry {
-                    provider_id: "ollama".into(),
-                    api_model_id: "plugin-status-model".into(),
-                    priority: 1,
-                    credential_keys: std::collections::HashMap::new(),
-                    base_url: Some("http://127.0.0.1:9".into()),
-                    api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-                    provider_specific: std::collections::HashMap::new(),
-                }],
-                aliases: Vec::new(),
-            })
-            .unwrap();
+    fn view_model_exposes_snapshot_label() {
         let mut app = App::new();
-        app.runtime = runtime;
-        app.current_model = "plugin-status-model".into();
-        let session = test_runtime_session(&app, "plugin:CodeReview", "plugin-status-session");
-        app.plugin_sessions
-            .insert("CodeReview".into(), session.clone());
-        app.active_session_id = session.session_id.clone();
+        app.snapshot_label = Some("snapshot:abcdef12".into());
 
         let vm = TuiViewModel::from_app(&app);
 
-        assert_eq!(vm.statusline.plugin_label, "plugin:CodeReview");
+        assert_eq!(vm.statusline.snapshot_label, Some("snapshot:abcdef12"));
     }
 }

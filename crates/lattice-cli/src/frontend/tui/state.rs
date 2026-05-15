@@ -200,14 +200,6 @@ pub(in crate::frontend::tui) const SLASH_COMMANDS: &[SlashSuggestion] = &[
         description: "approve the latest or selected permission proposal",
     },
     SlashSuggestion {
-        command: "/plugins",
-        description: "list available runtime plugins",
-    },
-    SlashSuggestion {
-        command: "/plugin <name>",
-        description: "run a prompt through a plugin",
-    },
-    SlashSuggestion {
         command: "/tokens",
         description: "show token breakdown",
     },
@@ -294,7 +286,6 @@ pub(in crate::frontend::tui) enum MenuKind {
     Model,
     Provider,
     Permissions,
-    Plugin,
 }
 
 impl MenuState {

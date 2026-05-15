@@ -24,7 +24,7 @@ pub fn run(name: String) -> Result<()> {
     println!("  {}", toml_path.display());
     println!();
     println!("Edit the file to configure your agent, then run:");
-    println!("  lattice validate {}", agents_dir.display());
+    println!("  lattice run --agent {} \"hello\"", name);
     println!();
 
     Ok(())
@@ -73,7 +73,6 @@ mod tests {
             "confidence_threshold",
             "max_retries",
             "enforce_sandbox",
-            "code_agent",
         ];
         for f in &forbidden {
             assert!(!template.contains(f), "template must not contain '{f}'");

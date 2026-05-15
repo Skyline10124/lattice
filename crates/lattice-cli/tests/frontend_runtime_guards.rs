@@ -1,16 +1,22 @@
 use std::path::PathBuf;
 
-const FRONTEND_FILES: &[&str] = &[
-    "src/coding_agent.rs",
+const CLI_UX_FILES: &[&str] = &[
+    "src/main.rs",
     "src/commands/run.rs",
     "src/commands/debug.rs",
-    "src/frontend/tui/action.rs",
+    "src/profile_runtime.rs",
+    "src/runtime_turn.rs",
+    "src/session_seed.rs",
+    "src/model_inventory.rs",
     "src/frontend/tui/app.rs",
     "src/frontend/tui/agent_runner.rs",
-    "src/frontend/tui/event.rs",
-    "src/frontend/tui/plugin_mode.rs",
-    "src/frontend/tui/update.rs",
+    "src/frontend/tui/commands.rs",
+    "src/frontend/tui/state.rs",
     "src/frontend/tui/view_model.rs",
+    "src/frontend/tui/widgets/statusline.rs",
+    "src/frontend/tui/widgets/welcome.rs",
+    "src/frontend/tui/widgets/composer.rs",
+    "src/test_support.rs",
 ];
 
 fn manifest_dir() -> PathBuf {
@@ -18,7 +24,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn frontend_sources() -> Vec<(&'static str, String)> {
-    FRONTEND_FILES
+    CLI_UX_FILES
         .iter()
         .map(|path| {
             let full_path = manifest_dir().join(path);
@@ -131,4 +137,55 @@ fn frontend_no_runtime_handle_owned_execution() {
         "latest_turn_completion",
         "RuntimePluginOverlay",
     ]);
+}
+
+#[test]
+fn single_agent_ux_has_no_removed_cli_or_tui_surfaces() {
+    let deny = [
+        "Commands::Code",
+        "coding_agent",
+        "code_agent",
+        "AgentPreset::Coding",
+        "pipeline: Option",
+        "orchestrator_status",
+        "plugins_dir",
+        concat!("\"", "/plugins", "\""),
+        concat!("\"", "/plugin"),
+        "PluginRegistry",
+        "plugin_registry",
+        "plugin_sessions",
+        "plugin_label",
+        "RuntimePluginOverlay",
+        "PreparedSubmission",
+        "RunPluginContext",
+        "MenuKind::Plugin",
+        "profile_sessions",
+        "profile_rebind",
+        "fork_profile",
+        concat!("\"", "/agent", "\""),
+    ];
+    assert_absent_in_active_source(&deny);
+}
+
+#[test]
+fn single_agent_ux_uses_profile_runtime_path() {
+    let sources = frontend_sources()
+        .into_iter()
+        .map(|(_, source)| active_source(&source))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for expected in [
+        "ProfileSource",
+        "prepare_profile_runtime_session",
+        "RuntimeAgentSession",
+        "submit_session_turn",
+        "agent_label",
+        "profile_drift_warning",
+    ] {
+        assert!(
+            sources.contains(expected),
+            "single-agent UX should continue to use {expected}"
+        );
+    }
 }

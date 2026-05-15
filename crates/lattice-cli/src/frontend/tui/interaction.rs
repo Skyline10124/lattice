@@ -279,9 +279,6 @@ fn accept_menu_selection(app: &mut App) {
             MenuKind::Permissions => {
                 app.switch_permissions(&selected);
             }
-            MenuKind::Plugin => {
-                app.composer.set_input(format!("/plugin {selected} "));
-            }
         }
     }
 }

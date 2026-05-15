@@ -14,16 +14,14 @@ pub(super) struct AgentBuildRequest {
     pub(super) tx: UnboundedSender<Event>,
     pub(super) runtime: Runtime,
     pub(super) existing_session: Option<RuntimeAgentSession>,
-    pub(super) profile_name: String,
+    pub(super) profile_source: lattice_profile::ProfileSource,
+    pub(super) agent_label: String,
     pub(super) current_model: String,
     pub(super) previous_model: String,
     pub(super) provider_override: Option<String>,
-    pub(super) system_prompt: String,
-    pub(super) tool_bundles: Vec<String>,
     pub(super) workdir: PathBuf,
     pub(super) previous_session: Option<crate::session::Session>,
     pub(super) task_state_seed: Option<lattice_agent::TaskState>,
-    pub(super) thinking_effort: Option<String>,
     pub(super) security: crate::security::RuntimeSecurity,
 }
 
@@ -76,7 +74,7 @@ pub(super) async fn ensure_agent(request: AgentBuildRequest) -> AgentBuildStatus
     let session_id = request.previous_session.as_ref().map(|s| s.id.clone());
     let can_reuse = request.current_model == request.previous_model
         && request.existing_session.as_ref().is_some_and(|session| {
-            session.spec.profile_name == request.profile_name
+            session.source_label == request.agent_label
                 && session.spec.model == request.current_model
                 && session.invocation.provider_override == request.provider_override
         });
@@ -130,25 +128,21 @@ fn build_runtime_session(
         128000
     };
     let task_state_seed = request.task_state_seed.clone().or_else(|| {
-        crate::coding_agent::load_latest_manifest_metadata(
+        crate::session_seed::load_latest_manifest_metadata(
             &request.runtime,
             request.previous_session.as_ref(),
         )
     });
-    let session = crate::profile_runtime::prepare_generated_profile_runtime_session(
+    let session = crate::profile_runtime::prepare_profile_runtime_session_with_security(
         &request.runtime,
-        crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
-            profile_name: request.profile_name.clone(),
-            model: request.current_model.clone(),
-            system_prompt: request.system_prompt.clone(),
-            tool_bundles: request.tool_bundles.clone(),
-            thinking_effort: request.thinking_effort.clone(),
-            project_root: request.workdir.clone(),
-            security: request.security.clone(),
-            provider_override: request.provider_override.clone(),
-            session_id,
-            task_state_seed,
-        },
+        request.profile_source.clone(),
+        request.workdir.clone(),
+        crate::profile_runtime::default_global_agents_dir(),
+        request.security.clone(),
+        Some(request.current_model.clone()),
+        request.provider_override.clone(),
+        session_id,
+        task_state_seed,
     )?;
 
     Ok(AgentBuildOutcome {
@@ -427,23 +421,47 @@ mod tests {
         existing_session: Option<RuntimeAgentSession>,
         previous_model: &str,
     ) -> AgentBuildRequest {
+        write_test_profile(dir, profile_name, model);
         AgentBuildRequest {
             turn_id: 42,
             tx,
             runtime,
             existing_session,
-            profile_name: profile_name.into(),
+            profile_source: lattice_profile::ProfileSource::Name(profile_name.into()),
+            agent_label: format!("agent:{profile_name}"),
             current_model: model.into(),
             previous_model: previous_model.into(),
             provider_override: None,
-            system_prompt: "You are a deterministic TUI test agent.".into(),
-            tool_bundles: vec!["workspace".into(), "filesystem".into()],
             workdir: dir.to_path_buf(),
             previous_session: None,
             task_state_seed: None,
-            thinking_effort: None,
             security,
         }
+    }
+
+    fn write_test_profile(project_root: &Path, name: &str, model: &str) {
+        let dir = project_root.join(".lattice").join("agents").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!(
+                r#"
+schema_version = 1
+
+[agent]
+name = "{name}"
+model = "{model}"
+
+[prompt]
+system = "You are a deterministic TUI test agent."
+
+[tools]
+bundles = ["workspace", "filesystem"]
+enabled = []
+"#
+            ),
+        )
+        .unwrap();
     }
 
     #[tokio::test]
@@ -459,7 +477,7 @@ mod tests {
             runtime.clone(),
             dir.path(),
             security,
-            "coding",
+            "default",
             "tui-runtime-session-model",
             None,
             "",
@@ -475,7 +493,7 @@ mod tests {
                 _ => panic!("runtime handle build should succeed"),
             },
         };
-        assert_eq!(outcome.session.spec.profile_name, "coding");
+        assert_eq!(outcome.session.spec.profile_name, "default");
         assert_eq!(outcome.session.spec.model, "tui-runtime-session-model");
         match rx.try_recv().unwrap() {
             Event::ModelInfo {
@@ -492,7 +510,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_agent_rejects_existing_session_with_wrong_profile() {
+    async fn tui_runtime_uses_selected_profile_source() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "tui-profile-isolation-model");
         let dir = tempfile::tempdir().unwrap();
@@ -503,7 +521,7 @@ mod tests {
             runtime.clone(),
             dir.path(),
             security.clone(),
-            "coding",
+            "default",
             "tui-profile-isolation-model",
             None,
             "",
@@ -514,12 +532,12 @@ mod tests {
             AgentBuildStatus::Failed => panic!("normal session should build"),
         };
 
-        let plugin_session = match ensure_agent(build_request(
+        let reviewer_session = match ensure_agent(build_request(
             tx,
             runtime.clone(),
             dir.path(),
             security,
-            "plugin:CodeReview",
+            "reviewer",
             "tui-profile-isolation-model",
             Some(normal_session.clone()),
             "tui-profile-isolation-model",
@@ -527,11 +545,11 @@ mod tests {
         .await
         {
             AgentBuildStatus::Ready(outcome) => outcome.session,
-            AgentBuildStatus::Failed => panic!("plugin session should build"),
+            AgentBuildStatus::Failed => panic!("selected profile session should build"),
         };
         assert_ne!(
-            plugin_session.spec.profile_name, normal_session.spec.profile_name,
-            "plugin requests must not reuse a coding-profile session"
+            reviewer_session.spec.profile_name, normal_session.spec.profile_name,
+            "different selected profiles must not reuse the existing session"
         );
     }
 
@@ -778,6 +796,7 @@ mod tests {
     fn runtime_turn_event_stale_runtime_event_is_ignored() {
         let (tx, mut rx) = unbounded_channel();
         let runtime_turn_id = TurnId::new();
+        let stale_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
@@ -791,7 +810,7 @@ mod tests {
             ),
             RuntimeTurnEvent::Token {
                 session_id: "runtime-session".into(),
-                turn_id: runtime_turn_id.clone(),
+                turn_id: stale_turn_id,
                 text: "ignored".into(),
             },
         );

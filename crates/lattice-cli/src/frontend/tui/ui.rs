@@ -38,36 +38,12 @@ mod tests {
     use std::time::Duration;
 
     use lattice_core::types::Role;
-    use lattice_runtime::RuntimeAgentSession;
 
     use super::*;
     use crate::frontend::tui::render_test::render_app;
     use crate::frontend::tui::state::{
         ChatMessage, MenuKind, MenuState, ToolStatus, SELECTION_LIST_PAGE_SIZE,
     };
-
-    fn test_runtime_session(
-        app: &App,
-        profile_name: &str,
-        session_id: &str,
-    ) -> RuntimeAgentSession {
-        crate::profile_runtime::prepare_generated_profile_runtime_session(
-            &app.runtime,
-            crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
-                profile_name: profile_name.into(),
-                model: app.current_model.clone(),
-                system_prompt: lattice_runtime::coding_system_prompt(&app.workdir, &app.workdir),
-                tool_bundles: vec!["workspace".into(), "filesystem".into()],
-                thinking_effort: None,
-                project_root: app.workdir.clone(),
-                security: app.security.clone(),
-                provider_override: app.provider_override.clone(),
-                session_id: Some(session_id.into()),
-                task_state_seed: None,
-            },
-        )
-        .unwrap()
-    }
 
     #[test]
     fn renders_empty_default_screen() {
@@ -79,11 +55,22 @@ mod tests {
             &screen,
             &[
                 "model  deepseek-v4-flash @ unresolved",
+                "agent  agent:default",
+                "runtime  sandbox:project",
                 "Tip: Type / to see all available commands.",
                 "Type a message or / for commands",
                 " prompt  deepseek-v4-flash@unresolved  ready",
             ],
         );
+    }
+
+    #[test]
+    fn welcome_does_not_render_plugin_count() {
+        let app = App::new();
+
+        let screen = render_app(&app, 100, 24);
+
+        assert!(!screen.contains("plugins:"));
     }
 
     #[test]
@@ -279,61 +266,27 @@ mod tests {
         }
     }
 
-    mod plugin_statusline {
+    mod agent_statusline {
         use super::*;
 
         #[test]
-        fn plugin_prompt_transcript_row_keeps_at_plugin_prefix() {
+        fn agent_statusline_shows_agent_label() {
             let mut app = App::new();
-            app.messages.push(ChatMessage::new(
-                Role::User,
-                "@CodeReview inspect this diff".into(),
-            ));
+            app.agent_label = "agent:reviewer".into();
 
             let screen = render_app(&app, 120, 18);
 
-            assert_screen_contains(&screen, &["@CodeReview inspect this diff"]);
+            assert_screen_contains(&screen, &["agent:reviewer"]);
         }
 
         #[test]
-        fn plugin_prompt_running_shows_plugin_statusline() {
-            let mut runtime = lattice_runtime::Runtime::builder().build();
-            runtime
-                .register_model(lattice_core::catalog::ModelCatalogEntry {
-                    canonical_id: "plugin-status-render-model".into(),
-                    context_length: 8192,
-                    providers: vec![lattice_core::catalog::CatalogProviderEntry {
-                        provider_id: "ollama".into(),
-                        api_model_id: "plugin-status-render-model".into(),
-                        priority: 1,
-                        credential_keys: std::collections::HashMap::new(),
-                        base_url: Some("http://127.0.0.1:9".into()),
-                        api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-                        provider_specific: std::collections::HashMap::new(),
-                    }],
-                    aliases: Vec::new(),
-                })
-                .unwrap();
+        fn agent_statusline_shows_snapshot_label() {
             let mut app = App::new();
-            app.runtime = runtime;
-            app.current_model = "plugin-status-render-model".into();
-            app.status = crate::frontend::tui::state::AppStatus::Streaming;
-            app.turn.stream_started = Some(std::time::Instant::now());
-            let session = test_runtime_session(&app, "plugin:CodeReview", "plugin-render-session");
-            app.plugin_sessions
-                .insert("CodeReview".into(), session.clone());
-            app.active_session_id = session.session_id.clone();
-            app.messages.push(ChatMessage::new(
-                Role::User,
-                "@CodeReview inspect this diff".into(),
-            ));
+            app.snapshot_label = Some("snapshot:abcdef12".into());
 
-            let screen = render_app(&app, 160, 24);
+            let screen = render_app(&app, 120, 18);
 
-            assert_screen_contains(
-                &screen,
-                &["@CodeReview inspect this diff", "plugin:CodeReview"],
-            );
+            assert_screen_contains(&screen, &["snapshot:abcdef12"]);
         }
     }
 

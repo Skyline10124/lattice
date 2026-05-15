@@ -81,11 +81,17 @@ pub(in crate::frontend::tui) fn render_welcome(
         Style::default().fg(theme.subtext),
     )]));
     lines.push(Line::from(vec![Span::styled(
-        format!(
-            "  runtime  sandbox:{} · plugins:{}",
-            app.security.mode_label,
-            app.plugin_count()
-        ),
+        format!("  agent  {}", app.agent_label),
+        Style::default().fg(theme.subtext),
+    )]));
+    if let Some(snapshot) = app.snapshot_label.as_deref() {
+        lines.push(Line::from(vec![Span::styled(
+            format!("  snapshot  {}", snapshot),
+            Style::default().fg(theme.subtext),
+        )]));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        format!("  runtime  sandbox:{}", app.security.mode_label),
         Style::default().fg(theme.subtext),
     )]));
     if let Some(ref e) = app.thinking_effort {
@@ -133,7 +139,7 @@ fn welcome_tip() -> &'static str {
             "Up/Down arrows navigate input history.",
             "/model <name> switches the LLM for the next turn.",
             "/permissions switches the runtime sandbox for later turns.",
-            "/plugins lists loaded official and local runtime plugins.",
+            "/status shows the current agent and session snapshot.",
         ];
         let ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

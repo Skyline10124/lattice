@@ -65,8 +65,12 @@ impl Statusline {
             Span::raw("  "),
             Span::styled(format!("sandbox:{}", status.sandbox), styles.dim),
             Span::raw("  "),
-            Span::styled(status.plugin_label.clone(), styles.dim),
+            Span::styled(status.agent_label.to_string(), styles.dim),
         ];
+        if let Some(snapshot) = status.snapshot_label {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(snapshot.to_string(), styles.dim));
+        }
 
         append_optional_segments(&mut spans, vm, styles.dim);
         append_fitting_hints(&mut spans, width, styles.dim);

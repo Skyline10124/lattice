@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: Single Agent Core
-status: ready
-last_updated: "2026-05-15T04:09:42Z"
-last_activity: 2026-05-15 -- Phase 02 runtime assembly cutover complete
+status: executing
+last_updated: "2026-05-15T08:30:09.000Z"
+last_activity: 2026-05-15 -- Phase 03 verification passed
 progress:
   total_phases: 5
-  completed_phases: 2
-  total_plans: 11
-  completed_plans: 6
-  percent: 55
+  completed_phases: 3
+  total_plans: 17
+  completed_plans: 17
+  percent: 100
 ---
 
 # Planning State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-14)
 
 **Core value:** A user can run one generic agent with reliable model routing, prompt/context assembly, sandboxed tools, session persistence, and CLI/TUI feedback without immature extension layers in the execution path.
-**Current focus:** Phase 03 — CLI/TUI single-agent UX
+**Current focus:** Phase 04 — Workspace layer removal
 
 ## Current Position
 
 Phase: 3
-Plan: Not planned
-Status: Ready to discuss/plan
-Last activity: 2026-05-15 -- Phase 02 completed; Phase 03 is next
+Plan: All 6 plans executed
+Status: Verified; ready for Phase 04
+Last activity: 2026-05-15 -- Phase 03 verification passed
 
 ## Accumulated Context
 
@@ -45,5 +45,4 @@ Last activity: 2026-05-15 -- Phase 02 completed; Phase 03 is next
 
 ### Todos
 
-- Discuss/plan Phase 03 CLI/TUI single-agent UX.
-- Remove or reshape remaining user-facing plugin, pipeline, and code-agent UX surfaces in Phase 03.
+- Plan Phase 04 workspace layer removal.

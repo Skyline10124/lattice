@@ -19,31 +19,18 @@ pub(crate) fn default_global_agents_dir() -> PathBuf {
         .join("agents")
 }
 
-#[allow(dead_code)] // Profile-source helper is the Phase 2 contract; CLI UX wires it in Phase 3.
+#[derive(Clone)]
 pub(crate) struct ProfileRuntimeSessionRequest {
     pub(crate) source: ProfileSource,
     pub(crate) project_root: PathBuf,
     pub(crate) global_agents_dir: PathBuf,
     pub(crate) security_config: SecurityConfig,
+    pub(crate) model_override: Option<String>,
     pub(crate) provider_override: Option<String>,
     pub(crate) session_id: Option<String>,
     pub(crate) task_state_seed: Option<lattice_agent::TaskState>,
 }
 
-pub(crate) struct GeneratedProfileRuntimeSessionRequest {
-    pub(crate) profile_name: String,
-    pub(crate) model: String,
-    pub(crate) system_prompt: String,
-    pub(crate) tool_bundles: Vec<String>,
-    pub(crate) thinking_effort: Option<String>,
-    pub(crate) project_root: PathBuf,
-    pub(crate) security: RuntimeSecurity,
-    pub(crate) provider_override: Option<String>,
-    pub(crate) session_id: Option<String>,
-    pub(crate) task_state_seed: Option<lattice_agent::TaskState>,
-}
-
-#[allow(dead_code)] // Profile-source helper is the Phase 2 contract; CLI UX wires it in Phase 3.
 pub(crate) fn prepare_profile_runtime_session(
     runtime: &Runtime,
     request: ProfileRuntimeSessionRequest,
@@ -56,53 +43,20 @@ pub(crate) fn prepare_profile_runtime_session(
         request.project_root,
         request.global_agents_dir,
         security,
+        request.model_override,
         request.provider_override,
         request.session_id,
         request.task_state_seed,
     )
 }
 
-pub(crate) fn prepare_generated_profile_runtime_session(
-    runtime: &Runtime,
-    request: GeneratedProfileRuntimeSessionRequest,
-) -> Result<RuntimeAgentSession> {
-    let dir = std::env::temp_dir().join(format!(
-        "lattice-runtime-profile-{}-{}",
-        std::process::id(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir)?;
-    let profile_path = dir.join("agent.toml");
-    std::fs::write(
-        &profile_path,
-        generated_agent_toml(
-            &request.profile_name,
-            &request.model,
-            &request.system_prompt,
-            &request.tool_bundles,
-            request.thinking_effort.as_deref(),
-        ),
-    )?;
-    let result = prepare_profile_runtime_session_with_security(
-        runtime,
-        ProfileSource::Path(profile_path),
-        request.project_root,
-        default_global_agents_dir(),
-        request.security,
-        request.provider_override,
-        request.session_id,
-        request.task_state_seed,
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    result
-}
-
-fn prepare_profile_runtime_session_with_security(
+pub(crate) fn prepare_profile_runtime_session_with_security(
     runtime: &Runtime,
     source: ProfileSource,
     project_root: PathBuf,
     global_agents_dir: PathBuf,
     security: RuntimeSecurity,
+    model_override: Option<String>,
     provider_override: Option<String>,
     session_id: Option<String>,
     task_state_seed: Option<lattice_agent::TaskState>,
@@ -113,7 +67,10 @@ fn prepare_profile_runtime_session_with_security(
     };
     let loaded = resolve_agent_profile(source, &paths)?;
     let source_fingerprint = source_fingerprint(&loaded.path)?;
-    let spec = lower_profile_to_spec(&loaded)?;
+    let mut spec = lower_profile_to_spec(&loaded)?;
+    if let Some(model) = model_override {
+        spec.model = model;
+    }
     let source_label = loaded.path.display().to_string();
 
     runtime
@@ -133,75 +90,45 @@ fn prepare_profile_runtime_session_with_security(
         .map_err(Into::into)
 }
 
-pub(crate) fn source_fingerprint(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)?;
-    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
+pub(crate) fn profile_source_from_agent_arg(agent: Option<&str>) -> ProfileSource {
+    let Some(agent) = agent.map(str::trim).filter(|value| !value.is_empty()) else {
+        return ProfileSource::Default;
+    };
+    let has_path_separator = agent.contains('/') || (cfg!(windows) && agent.contains('\\'));
+    let is_path = Path::new(agent).is_absolute()
+        || agent.starts_with("./")
+        || agent.starts_with("../")
+        || has_path_separator
+        || agent.ends_with(".toml");
+    if is_path {
+        ProfileSource::Path(PathBuf::from(agent))
+    } else {
+        ProfileSource::Name(agent.to_string())
+    }
 }
 
-fn generated_agent_toml(
-    profile_name: &str,
-    model: &str,
-    system_prompt: &str,
-    tool_bundles: &[String],
-    thinking_effort: Option<&str>,
-) -> String {
-    let bundles = tool_bundles
-        .iter()
-        .map(|bundle| toml_string(bundle))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let reasoning_effort = thinking_effort
-        .map(|effort| format!("reasoning_effort = {}\n", toml_string(effort)))
-        .unwrap_or_default();
+pub(crate) fn create_default_profile(dir: &Path, template: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("agent.toml");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(&path)?;
+    use std::io::Write as _;
+    file.write_all(template.as_bytes())?;
+    Ok(path)
+}
+
+pub(crate) fn missing_default_message(default_agent_dir: &Path) -> String {
+    let profile_path = default_agent_dir.join("agent.toml");
     format!(
-        r#"schema_version = 1
-
-[agent]
-name = {}
-model = {}
-
-[prompt]
-system = {}
-
-[tools]
-bundles = [{bundles}]
-enabled = []
-
-[security]
-sandbox_mode = "project"
-
-[context]
-project_instructions = true
-workspace_context = true
-
-[behavior]
-max_turns = 10
-{reasoning_effort}
-"#,
-        toml_string(profile_name),
-        toml_string(model),
-        toml_string(system_prompt)
+        "No default agent profile found at {}. Create one before running non-interactively.",
+        profile_path.display()
     )
 }
 
-fn toml_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            '\u{08}' => escaped.push_str("\\b"),
-            '\u{0c}' => escaped.push_str("\\f"),
-            ch if ch.is_control() => escaped.push_str(&format!("\\u{:04X}", ch as u32)),
-            ch => escaped.push(ch),
-        }
-    }
-    escaped.push('"');
-    escaped
+pub(crate) fn source_fingerprint(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&bytes)))
 }
 
 #[cfg(test)]
@@ -268,6 +195,7 @@ enabled = []
                 project_root: project.path().to_path_buf(),
                 global_agents_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
                 security_config: SecurityConfig::default(),
+                model_override: None,
                 provider_override: None,
                 session_id: Some("audit-session".to_string()),
                 task_state_seed: None,
@@ -300,5 +228,126 @@ enabled = []
             .source_fingerprint
             .as_deref()
             .is_some_and(|value| value.starts_with("sha256:")));
+    }
+
+    #[test]
+    fn agent_arg_none_uses_default_profile_source() {
+        assert!(matches!(
+            profile_source_from_agent_arg(None),
+            ProfileSource::Default
+        ));
+        assert!(matches!(
+            profile_source_from_agent_arg(Some("  ")),
+            ProfileSource::Default
+        ));
+    }
+
+    #[test]
+    fn agent_arg_name_uses_named_profile_source() {
+        match profile_source_from_agent_arg(Some("reviewer")) {
+            ProfileSource::Name(name) => assert_eq!(name, "reviewer"),
+            other => panic!("expected named source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_arg_path_uses_explicit_profile_source() {
+        for value in [
+            "./agent.toml",
+            "../profiles/agent.toml",
+            "/tmp/agent.toml",
+            "profiles/reviewer",
+            "reviewer.toml",
+        ] {
+            assert!(
+                matches!(
+                    profile_source_from_agent_arg(Some(value)),
+                    ProfileSource::Path(_)
+                ),
+                "{value} should parse as path"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn agent_arg_windows_separator_uses_explicit_profile_source() {
+        assert!(matches!(
+            profile_source_from_agent_arg(Some("profiles\\reviewer")),
+            ProfileSource::Path(_)
+        ));
+    }
+
+    #[test]
+    fn missing_default_creation_writes_project_local_template() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join(".lattice/agents/default");
+        let path = create_default_profile(&agent_dir, "schema_version = 1\n").unwrap();
+
+        assert_eq!(path, agent_dir.join("agent.toml"));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "schema_version = 1\n"
+        );
+    }
+
+    #[test]
+    fn missing_default_creation_refuses_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join(".lattice/agents/default");
+        let path = create_default_profile(&agent_dir, "first").unwrap();
+
+        let err = create_default_profile(&agent_dir, "second").unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "first");
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn profile_runtime_model_override_keeps_profile_semantics() {
+        let project = tempfile::tempdir().unwrap();
+        let agent_dir = project.path().join(".lattice/agents/default");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("agent.toml"),
+            r#"
+schema_version = 1
+
+[agent]
+name = "default"
+model = "profile-model"
+
+[prompt]
+system = "Keep this prompt."
+
+[tools]
+bundles = ["workspace"]
+enabled = []
+"#,
+        )
+        .unwrap();
+
+        let runtime = Runtime::builder().build();
+        let session = prepare_profile_runtime_session(
+            &runtime,
+            ProfileRuntimeSessionRequest {
+                source: ProfileSource::Default,
+                project_root: project.path().to_path_buf(),
+                global_agents_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+                security_config: SecurityConfig::default(),
+                model_override: Some("override-model".into()),
+                provider_override: None,
+                session_id: None,
+                task_state_seed: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(session.spec.model, "override-model");
+        assert_eq!(session.spec.system_prompt, "Keep this prompt.");
+        assert_eq!(session.spec.tools.bundles, vec!["workspace"]);
     }
 }

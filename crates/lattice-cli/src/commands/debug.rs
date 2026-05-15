@@ -81,20 +81,16 @@ pub async fn run(
 
     let cwd = std::env::current_dir()?;
     let security = crate::security::default_runtime_security(&cwd)?;
-    let session = crate::profile_runtime::prepare_generated_profile_runtime_session(
+    let session = crate::profile_runtime::prepare_profile_runtime_session_with_security(
         &runtime,
-        crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
-            profile_name: "debug".into(),
-            model: model.clone(),
-            system_prompt: "You are a helpful assistant. Be concise and accurate.".into(),
-            tool_bundles: vec!["workspace".into(), "filesystem".into()],
-            thinking_effort: None,
-            project_root: cwd,
-            security,
-            provider_override,
-            session_id: None,
-            task_state_seed: None,
-        },
+        lattice_profile::ProfileSource::Default,
+        cwd,
+        crate::profile_runtime::default_global_agents_dir(),
+        security,
+        Some(model.clone()),
+        provider_override,
+        None,
+        None,
     )?;
 
     tracing::info!(prompt_len = prompt_text.len(), "debug: submit_turn start");

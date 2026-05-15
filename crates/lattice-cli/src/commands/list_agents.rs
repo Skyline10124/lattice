@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use super::agent_inventory::{load_agent_inventory, AgentProfileKind};
+use super::agent_inventory::load_agent_inventory;
 
 pub fn run() -> Result<()> {
     let dir = super::safe_agents_dir(None).map_err(anyhow::Error::msg)?;
@@ -34,24 +34,8 @@ pub fn run() -> Result<()> {
         if !profile.model.is_empty() {
             print!("  ({})", profile.model.cyan());
         }
-        if profile.kind == AgentProfileKind::V1 {
-            print!("  [v1]");
-        }
-        if profile.has_plugins {
-            print!("  [plugins]");
-        }
+        print!("  [v1]");
         println!();
-        if !profile.tags.is_empty() {
-            println!(
-                "    tags: {}",
-                profile
-                    .tags
-                    .iter()
-                    .map(|t| t.dimmed().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-        }
     }
 
     if !inventory.failures().is_empty() {

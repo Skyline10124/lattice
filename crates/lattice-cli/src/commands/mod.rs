@@ -5,7 +5,6 @@ pub mod doctor;
 pub mod list_agents;
 pub mod models;
 pub mod new_agent;
-pub mod orchestrator_status;
 pub mod resolve;
 pub mod run;
 pub mod sessions;

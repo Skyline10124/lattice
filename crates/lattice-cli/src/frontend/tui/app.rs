@@ -5,7 +5,6 @@ use anyhow::Result;
 use base64::Engine as _;
 use crossterm::event::{KeyEvent, MouseEvent};
 use lattice_core::types::Role;
-use lattice_plugin::registry::PluginRegistry;
 use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnId, TurnStatus};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -16,7 +15,6 @@ use super::composer::ComposerState;
 use super::event::Event;
 use super::keymap::RuntimeKeymap;
 use super::pager::PagerOverlay;
-use super::plugin_mode::{PreparedSubmission, RunPluginContext};
 use super::state::{AppStatus, ChatMessage, FileSnapshot, MenuState, SlashSuggestion};
 use super::theme::Theme;
 use super::turn::{StreamOutcome, StreamTokenUpdate, TurnState};
@@ -35,6 +33,11 @@ fn write_osc52_clipboard(text: &str) {
 
 type ClipboardSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+fn short_snapshot_label(hash: &str) -> String {
+    let short = hash.chars().take(8).collect::<String>();
+    format!("snapshot:{short}")
+}
+
 /// Application state.
 pub(super) struct App {
     pub(super) should_quit: bool,
@@ -50,17 +53,18 @@ pub(super) struct App {
     pub(super) transcript_mode: bool,
     pub(super) spinner_index: usize,
     pub(super) provider_override: Option<String>,
+    pub(super) agent_source: lattice_profile::ProfileSource,
+    pub(super) agent_label: String,
+    pub(super) snapshot_label: Option<String>,
     pub(super) credentials: HashMap<String, String>,
     pub(super) workdir: std::path::PathBuf,
     pub(super) save_sessions: bool,
     pub(super) security: crate::security::RuntimeSecurity,
     pub(super) security_config: crate::config::SecurityConfig,
-    pub(super) plugin_registry: Option<Arc<PluginRegistry>>,
     pub(super) session: Option<crate::session::Session>,
     pub(super) event_tx: Option<UnboundedSender<Event>>,
     pub(super) runtime: Runtime,
-    pub(super) normal_session: Option<RuntimeAgentSession>,
-    pub(super) plugin_sessions: HashMap<String, RuntimeAgentSession>,
+    pub(super) active_agent_session: Option<RuntimeAgentSession>,
     pub(super) active_session_id: Option<String>,
     last_approval_task_state: Option<lattice_agent::TaskState>,
     pub(super) active_runtime_turn: Option<TurnId>,
@@ -68,7 +72,6 @@ pub(super) struct App {
     pending_cancelled_session_id: Option<String>,
     pending_cancelled_runtime_turn: Option<TurnId>,
     pub(super) turn: TurnState,
-    prepared_submission: Option<PreparedSubmission>,
     pub(super) activity: ActivityState,
     pub(super) thinking_effort: Option<String>,
     pub(super) context_limit: u32,
@@ -94,6 +97,9 @@ impl App {
             transcript_mode: false,
             spinner_index: 0,
             provider_override: None,
+            agent_source: lattice_profile::ProfileSource::Default,
+            agent_label: "agent:default".into(),
+            snapshot_label: None,
             credentials: HashMap::new(),
             workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             save_sessions: false,
@@ -102,12 +108,10 @@ impl App {
                 &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )
             .expect("default runtime security should build"),
-            plugin_registry: crate::plugins::build_plugin_registry().ok(),
             session: None,
             event_tx: None,
             runtime: crate::runtime::model_runtime(HashMap::new()),
-            normal_session: None,
-            plugin_sessions: HashMap::new(),
+            active_agent_session: None,
             active_session_id: None,
             last_approval_task_state: None,
             active_runtime_turn: None,
@@ -115,7 +119,6 @@ impl App {
             pending_cancelled_session_id: None,
             pending_cancelled_runtime_turn: None,
             turn: TurnState::default(),
-            prepared_submission: None,
             activity: ActivityState::default(),
             menu: None,
             pager: None,
@@ -136,7 +139,7 @@ impl App {
         self.scroll_offset = 0;
         self.turn.reset_runtime();
         self.clear_search();
-        self.prepared_submission = None;
+        self.snapshot_label = None;
     }
 
     fn begin_turn(&mut self, user: String) -> u64 {
@@ -204,11 +207,11 @@ impl App {
     }
 
     pub(super) fn clear_runtime_sessions(&mut self) {
-        self.normal_session = None;
-        self.plugin_sessions.clear();
+        self.active_agent_session = None;
         self.active_session_id = None;
         self.last_approval_task_state = None;
         self.active_runtime_turn = None;
+        self.snapshot_label = None;
         self.clear_pending_cancelled_turn();
     }
 
@@ -277,9 +280,6 @@ impl App {
         }
         self.composer.add_to_history(text.clone());
         if self.handle_slash_command(&text) {
-            if let Some(prepared) = self.prepared_submission.take() {
-                return self.submit_prepared(prepared).await;
-            }
             self.composer.clear();
             self.scroll_offset = 0;
             return Ok(());
@@ -305,33 +305,10 @@ impl App {
             return Ok(());
         }
 
-        self.submit_model_turn(text.clone(), text, None).await
+        self.submit_model_turn(text.clone(), text).await
     }
 
-    async fn submit_prepared(&mut self, prepared: PreparedSubmission) -> Result<()> {
-        if self.turn.is_active(&self.status) {
-            let queued = match prepared.raw_prompt.as_deref() {
-                Some(raw) => prepared
-                    .plugin
-                    .as_ref()
-                    .map(|plugin| format!("/plugin {} {}", plugin.name, raw))
-                    .unwrap_or_else(|| prepared.display.clone()),
-                None => prepared.display.clone(),
-            };
-            self.queue_input(queued);
-            self.composer.clear();
-            return Ok(());
-        }
-        self.submit_model_turn(prepared.display, prepared.prompt, prepared.plugin)
-            .await
-    }
-
-    async fn submit_model_turn(
-        &mut self,
-        display_text: String,
-        prompt_text: String,
-        plugin: Option<RunPluginContext>,
-    ) -> Result<()> {
+    async fn submit_model_turn(&mut self, display_text: String, prompt_text: String) -> Result<()> {
         self.messages
             .push(ChatMessage::new(Role::User, display_text.clone()));
         self.token_count +=
@@ -356,42 +333,23 @@ impl App {
             }
         };
 
-        let profile_name = plugin
-            .as_ref()
-            .map(|plugin| format!("plugin:{}", plugin.name))
-            .unwrap_or_else(|| "coding".into());
-        let existing_session = self.existing_session_for_submission(plugin.as_ref());
-        let system_prompt = plugin
-            .as_ref()
-            .map(plugin_system_prompt)
-            .unwrap_or_else(|| lattice_runtime::coding_system_prompt(&self.workdir, &self.workdir));
-        let tool_bundles = vec![
-            "workspace".into(),
-            "filesystem".into(),
-            "editing".into(),
-            "shell".into(),
-            "planning".into(),
-            "web".into(),
-        ];
         let task_state_seed = self.last_approval_task_state.clone().or_else(|| {
-            crate::coding_agent::load_latest_manifest_metadata(&self.runtime, self.session.as_ref())
+            crate::session_seed::load_latest_manifest_metadata(&self.runtime, self.session.as_ref())
         });
 
         let runtime_session = match super::agent_runner::ensure_agent(AgentBuildRequest {
             turn_id,
             tx: tx.clone(),
             runtime: self.runtime.clone(),
-            existing_session,
-            profile_name,
+            existing_session: self.active_agent_session.clone(),
+            profile_source: self.agent_source.clone(),
+            agent_label: self.agent_label.clone(),
             current_model: self.current_model.clone(),
             previous_model: self.previous_model.clone(),
             provider_override: self.provider_override.clone(),
-            system_prompt,
-            tool_bundles,
             workdir: self.workdir.clone(),
             previous_session: self.session.clone(),
             task_state_seed,
-            thinking_effort: self.thinking_effort.clone(),
             security: self.security.clone(),
         })
         .await
@@ -400,12 +358,9 @@ impl App {
                 if let Some(rebuilt) = outcome.rebuilt {
                     self.apply_rebuilt_agent(rebuilt);
                 }
-                if let Some(plugin) = plugin.as_ref() {
-                    self.plugin_sessions
-                        .insert(plugin.name.clone(), outcome.session.clone());
-                } else {
-                    self.normal_session = Some(outcome.session.clone());
-                }
+                self.snapshot_label =
+                    Some(short_snapshot_label(&outcome.session.profile_snapshot.hash));
+                self.active_agent_session = Some(outcome.session.clone());
                 let session_id = outcome
                     .session
                     .session_id
@@ -435,16 +390,6 @@ impl App {
         Ok(())
     }
 
-    fn existing_session_for_submission(
-        &self,
-        plugin: Option<&RunPluginContext>,
-    ) -> Option<RuntimeAgentSession> {
-        match plugin {
-            Some(plugin) => self.plugin_sessions.get(&plugin.name).cloned(),
-            None => self.normal_session.clone(),
-        }
-    }
-
     fn apply_rebuilt_agent(&mut self, rebuilt: RebuiltAgent) {
         self.context_limit = rebuilt.context_limit;
         self.current_model = rebuilt.model;
@@ -467,7 +412,7 @@ impl App {
         self.clear_runtime_sessions();
         self.previous_model.clear();
         self.session = None;
-        self.prepared_submission = None;
+        self.snapshot_label = None;
         self.status = AppStatus::Ready;
     }
 
@@ -539,44 +484,6 @@ impl App {
             ),
             Err(err) => self.push_system_message(&format!("Approval failed: {err}")),
         }
-    }
-
-    pub(super) fn plugin_count(&self) -> usize {
-        super::plugin_mode::plugin_count(self.plugin_registry.as_ref())
-    }
-
-    pub(super) fn active_plugin_name(&self) -> Option<String> {
-        self.plugin_sessions
-            .iter()
-            .find(|(_, session)| {
-                session
-                    .session_id
-                    .as_deref()
-                    .is_some_and(|id| self.active_session_id.as_deref() == Some(id))
-            })
-            .map(|(name, _)| name.clone())
-    }
-
-    pub(super) fn plugin_names(&self) -> Vec<String> {
-        super::plugin_mode::plugin_names(self.plugin_registry.as_ref())
-    }
-
-    pub(super) fn has_plugin(&self, name: &str) -> bool {
-        super::plugin_mode::has_plugin(self.plugin_registry.as_ref(), name)
-    }
-
-    pub(super) fn plugin_summary(&self, name: &str) -> Option<(String, String)> {
-        super::plugin_mode::plugin_summary(self.plugin_registry.as_ref(), name)
-    }
-
-    pub(super) fn prepare_plugin_prompt(&mut self, name: &str, prompt: String) -> Result<()> {
-        self.prepared_submission = Some(super::plugin_mode::prepare_submission(
-            self.plugin_registry.as_ref(),
-            &self.workdir,
-            name,
-            prompt,
-        )?);
-        Ok(())
     }
 
     pub(super) fn slash_suggestions(&self) -> Vec<SlashSuggestion> {
@@ -819,15 +726,6 @@ pub(super) fn summarize_prompt(text: &str, max_chars: usize) -> String {
     out
 }
 
-fn plugin_system_prompt(plugin: &RunPluginContext) -> String {
-    let mut prompt = plugin.system_prompt.clone();
-    if let Some(delta) = plugin.output_contract_delta.as_deref() {
-        prompt.push_str("\n\n");
-        prompt.push_str(delta);
-    }
-    prompt
-}
-
 impl Default for App {
     fn default() -> Self {
         Self::new()
@@ -841,7 +739,6 @@ mod tests {
     use crossterm::event::KeyCode;
     use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry};
     use lattice_core::streaming::TokenUsage;
-    use lattice_core::types::ToolDefinition;
     use lattice_sandbox::{ApprovalKind, ApprovedRule, RiskClass};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -934,38 +831,49 @@ mod tests {
         app
     }
 
-    fn test_plugin_context(name: &str) -> RunPluginContext {
-        RunPluginContext {
-            name: name.into(),
-            system_prompt: "Review code carefully.".into(),
-            output_contract_delta: Some("Return JSON.".into()),
-            tools: vec![ToolDefinition::new(
-                "plugin_read".into(),
-                "Read plugin data".into(),
-                serde_json::json!({"type": "object"}),
-            )],
-        }
-    }
-
     fn test_runtime_session(
         app: &App,
         profile_name: &str,
         session_id: &str,
     ) -> RuntimeAgentSession {
-        crate::profile_runtime::prepare_generated_profile_runtime_session(
+        let project = tempfile::tempdir().unwrap();
+        let dir = project
+            .path()
+            .join(".lattice")
+            .join("agents")
+            .join(profile_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!(
+                r#"
+schema_version = 1
+
+[agent]
+name = "{profile_name}"
+model = "{model}"
+
+[prompt]
+system = "You are a deterministic TUI test agent."
+
+[tools]
+bundles = ["workspace", "filesystem"]
+enabled = []
+"#,
+                model = app.current_model
+            ),
+        )
+        .unwrap();
+        crate::profile_runtime::prepare_profile_runtime_session_with_security(
             &app.runtime,
-            crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
-                profile_name: profile_name.into(),
-                model: app.current_model.clone(),
-                system_prompt: lattice_runtime::coding_system_prompt(&app.workdir, &app.workdir),
-                tool_bundles: vec!["workspace".into(), "filesystem".into()],
-                thinking_effort: None,
-                project_root: app.workdir.clone(),
-                security: app.security.clone(),
-                provider_override: app.provider_override.clone(),
-                session_id: Some(session_id.into()),
-                task_state_seed: None,
-            },
+            lattice_profile::ProfileSource::Name(profile_name.into()),
+            project.path().to_path_buf(),
+            project.path().join(".unused-global-agents"),
+            app.security.clone(),
+            Some(app.current_model.clone()),
+            app.provider_override.clone(),
+            Some(session_id.into()),
+            None,
         )
         .unwrap()
     }
@@ -1104,7 +1012,7 @@ mod tests {
         assert_eq!(app.current_model, "llama-3.1");
         assert!(app.current_provider.is_empty());
         assert_eq!(app.status, AppStatus::Ready);
-        assert!(app.normal_session.is_none());
+        assert!(app.active_agent_session.is_none());
         assert_eq!(
             app.messages.last().unwrap().content,
             "Model switched to llama-3.1."
@@ -1241,7 +1149,7 @@ mod tests {
 
         assert_eq!(app.security.mode_label, "strict");
         assert_eq!(app.security_config.sandbox_mode, "strict");
-        assert!(app.normal_session.is_none());
+        assert!(app.active_agent_session.is_none());
         assert!(app
             .messages
             .last()
@@ -1412,8 +1320,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_plugin_plugin_and_normal_sessions_share_security_by_default() {
-        let app = app_with_test_runtime("runtime-plugin-security-model");
+    fn active_agent_session_shares_runtime_security() {
+        let mut app = app_with_test_runtime("runtime-agent-security-model");
         app.security
             .approve_rule(ApprovedRule {
                 kind: ApprovalKind::CommandPrefix {
@@ -1423,21 +1331,11 @@ mod tests {
             })
             .unwrap();
 
-        let normal_session = test_runtime_session(&app, "coding", "normal-session");
-        let plugin_session = test_runtime_session(&app, "plugin:CodeReview", "plugin-session");
+        let session = test_runtime_session(&app, "default", "agent-session");
+        app.active_agent_session = Some(session.clone());
 
         assert_eq!(
-            normal_session
-                .invocation
-                .security
-                .approved_rules
-                .lock()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            plugin_session
+            session
                 .invocation
                 .security
                 .approved_rules
@@ -1449,91 +1347,49 @@ mod tests {
     }
 
     #[test]
-    fn runtime_plugin_switching_to_normal_clears_active_plugin_session() {
-        let mut app = app_with_test_runtime("runtime-plugin-clear-model");
-        let plugin = test_plugin_context("CodeReview");
-        let normal_session = test_runtime_session(&app, "coding", "normal-session");
-        let plugin_session = test_runtime_session(&app, "plugin:CodeReview", "plugin-session");
-        app.plugin_sessions
-            .insert(plugin.name.clone(), plugin_session.clone());
-        app.active_session_id = plugin_session.session_id.clone();
-
-        app.normal_session = Some(normal_session.clone());
-        app.active_session_id = normal_session.session_id.clone();
-
-        assert!(app.active_plugin_name().is_none());
-    }
-
-    #[test]
-    fn permissions_switch_permission_switch_clears_plugin_runtime_context() {
-        let mut app = app_with_test_runtime("permissions-plugin-clear-model");
-        let plugin = test_plugin_context("CodeReview");
-        let plugin_session = test_runtime_session(&app, "plugin:CodeReview", "plugin-session");
-        app.plugin_sessions
-            .insert(plugin.name.clone(), plugin_session.clone());
-        app.active_session_id = plugin_session.session_id.clone();
+    fn permissions_switch_clears_active_agent_session() {
+        let mut app = app_with_test_runtime("permissions-agent-clear-model");
+        app.active_agent_session = Some(test_runtime_session(&app, "default", "agent-session"));
+        app.active_session_id = Some("agent-session".into());
 
         app.switch_permissions("strict");
 
         assert_eq!(app.security.mode_label, "strict");
-        assert!(app.normal_session.is_none());
-        assert!(app.plugin_sessions.is_empty());
+        assert!(app.active_agent_session.is_none());
         assert!(app.active_session_id.is_none());
-        assert!(app.active_plugin_name().is_none());
     }
 
     #[test]
-    fn slash_plugins_lists_registry() {
+    fn slash_registry_has_no_plugin_commands() {
+        let mut app = App::new();
+        app.composer.set_input("/pl");
+
+        let suggestions = app.slash_suggestions();
+
+        let plural = ["/", "plugins"].concat();
+        let singular = ["/", "plugin <name>"].concat();
+
+        assert!(!suggestions.iter().any(|s| s.command == plural));
+        assert!(!suggestions.iter().any(|s| s.command == singular));
+    }
+
+    #[test]
+    fn slash_plugin_is_not_handled() {
         let mut app = App::new();
 
-        assert!(app.handle_slash_command("/plugins"));
+        let removed_command = ["/", "plugin CodeReview inspect this diff"].concat();
 
-        let msg = app.messages.last().unwrap().content.as_str();
-        assert!(msg.contains("plugin(s) loaded"));
-        assert!(msg.contains("/plugin <name> <prompt>"));
+        assert!(app.handle_slash_command(&removed_command));
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, Role::System);
+        assert!(app.messages[0].content.contains("Unknown command: /plugin"));
     }
 
     #[test]
-    fn slash_plugin_prepares_plugin_submission() {
-        let mut app = App::new();
-
-        assert!(app.handle_slash_command("/plugin CodeReview inspect this diff"));
-
-        let prepared = app
-            .prepared_submission
-            .as_ref()
-            .expect("plugin command should prepare a submission");
-        assert!(prepared.display.starts_with("@CodeReview "));
-        assert!(prepared.prompt.contains("Review the following code"));
-        assert_eq!(prepared.plugin.as_ref().unwrap().name, "CodeReview");
-    }
-
-    #[test]
-    fn plugin_submission_does_not_fall_back_to_normal_session() {
-        let mut app = app_with_test_runtime("plugin-session-isolation-model");
-        let plugin = test_plugin_context("CodeReview");
-        let normal_session = test_runtime_session(&app, "coding", "normal-session");
-        let plugin_session = test_runtime_session(&app, "plugin:CodeReview", "plugin-session");
-        app.normal_session = Some(normal_session.clone());
-
+    fn tui_completion_sets_snapshot_label() {
         assert_eq!(
-            app.existing_session_for_submission(Some(&plugin))
-                .map(|session| session.spec.profile_name),
-            None,
-            "first plugin turn must not reuse the normal coding session"
-        );
-
-        app.plugin_sessions
-            .insert(plugin.name.clone(), plugin_session.clone());
-        assert_eq!(
-            app.existing_session_for_submission(Some(&plugin))
-                .map(|session| session.spec.profile_name),
-            Some("plugin:CodeReview".into())
-        );
-        assert_eq!(
-            app.existing_session_for_submission(None)
-                .map(|session| session.spec.profile_name),
-            Some("coding".into())
+            short_snapshot_label("abcdef1234567890"),
+            "snapshot:abcdef12"
         );
     }
 
@@ -1831,7 +1687,7 @@ mod tests {
         assert_eq!(app.current_provider, "old-provider");
         assert_eq!(app.messages.len(), 2);
         assert!(app.previous_model.is_empty());
-        assert!(app.normal_session.is_none());
+        assert!(app.active_agent_session.is_none());
     }
 
     #[test]
@@ -1929,29 +1785,19 @@ mod tests {
     #[test]
     fn load_session_clears_runtime_sessions_and_transient_state() {
         let mut app = app_with_test_runtime("load-session-clear-model");
-        app.normal_session = Some(test_runtime_session(&app, "coding", "normal-session"));
-        app.plugin_sessions.insert(
-            "CodeReview".into(),
-            test_runtime_session(&app, "plugin:CodeReview", "plugin-session"),
-        );
-        app.active_session_id = Some("plugin-session".into());
+        app.active_agent_session = Some(test_runtime_session(&app, "default", "agent-session"));
+        app.active_session_id = Some("agent-session".into());
         app.active_runtime_turn = Some(TurnId::new());
-        app.prepared_submission = Some(PreparedSubmission {
-            display: "display".into(),
-            prompt: "prompt".into(),
-            raw_prompt: None,
-            plugin: None,
-        });
+        app.snapshot_label = Some("snapshot:abcdef12".into());
         app.turn.queued_inputs.push_back("queued".into());
         app.start_search("old".into());
 
         app.load_session(test_session());
 
-        assert!(app.normal_session.is_none());
-        assert!(app.plugin_sessions.is_empty());
+        assert!(app.active_agent_session.is_none());
         assert!(app.active_session_id.is_none());
         assert!(app.active_runtime_turn.is_none());
-        assert!(app.prepared_submission.is_none());
+        assert!(app.snapshot_label.is_none());
         assert!(app.turn.queued_inputs.is_empty());
         assert!(!app.activity.search.is_active());
     }

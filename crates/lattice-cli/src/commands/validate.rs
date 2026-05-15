@@ -44,53 +44,12 @@ pub fn run(dir: Option<String>) -> Result<()> {
 
     println!("Found {} agent(s) in '{}'\n", profile_count, path.display());
 
-    let registry = inventory.legacy_registry();
     let runtime = Runtime::builder().build();
     let mut agent_names = HashSet::new();
 
-    for profile in registry.list() {
-        let name = &profile.agent.name;
-        println!("  [check] {}", name);
-
-        if !agent_names.insert(name.clone()) {
-            println!("    ERROR: duplicate agent name '{}'", name);
-            errors += 1;
-        }
-
-        match runtime.resolve(&profile.agent.model) {
-            Ok(_) => println!("    model: {} OK", profile.agent.model),
-            Err(e) => {
-                println!("    model: {} — WARNING: {}", profile.agent.model, e);
-            }
-        }
-
-        for (i, rule) in profile.handoff.handoff_rules.iter().enumerate() {
-            if let Some(ref target) = rule.target {
-                for name in target.agent_names() {
-                    if registry.get(name).is_none() {
-                        println!(
-                            "    rule[{}]: target '{}' is not a registered agent",
-                            i, name
-                        );
-                        errors += 1;
-                    }
-                }
-            }
-        }
-
-        if let Some(ref fallback) = profile.handoff.fallback {
-            for name in fallback.agent_names() {
-                if registry.get(name).is_none() {
-                    println!("    fallback: '{}' is not a registered agent", name);
-                    errors += 1;
-                }
-            }
-        }
-    }
-
     for loaded in inventory.v1_profiles() {
         let name = &loaded.profile.agent.name;
-        println!("  [check] {} [v1]", name);
+        println!("  [check] {}", name);
 
         if !agent_names.insert(name.clone()) {
             println!("    ERROR: duplicate agent name '{}'", name);
@@ -109,6 +68,6 @@ pub fn run(dir: Option<String>) -> Result<()> {
         bail!("{} validation error(s) found", errors);
     }
 
-    println!("\nAll agents valid.");
+    println!("\nAll v1 agents valid.");
     Ok(())
 }
