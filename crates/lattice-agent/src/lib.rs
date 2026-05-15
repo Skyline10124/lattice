@@ -10,7 +10,6 @@ pub mod hook;
 mod manifest;
 pub mod memory;
 pub mod message_source;
-mod plugin_agent;
 pub mod prompt;
 mod run;
 pub mod sandbox;
@@ -48,7 +47,6 @@ pub use manifest::{
     FragmentRecord, HookDecisionRecord, PromptSnapshot, SessionContext, ToolDecisionRecord,
     TurnManifestObject,
 };
-pub use plugin_agent::PluginAgent;
 pub use sandbox::SandboxConfig;
 pub use state::{
     ApprovalProposalRecord, ChangedFileRecord, TaskState, TaskStateError, TodoItem, TodoStatus,

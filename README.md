@@ -2,24 +2,23 @@
 
 ![LATTICE banner](logo-banner.svg)
 
-LATTICE is a model-centric LLM engine with model routing, agent execution, plugin runtime, and federated orchestration.
+LATTICE is a Rust LLM runtime for running one well-instrumented generic agent with reliable model routing, profile-driven prompt assembly, sandboxed tool execution, session persistence, and CLI/TUI feedback.
 
 ## Workspace
 
 ```
 lattice/
 ├── crates/
-│   ├── lattice-hooks/       # Universal hook system
-│   ├── lattice-core/        # Core types, transport, streaming
-│   ├── lattice-session/     # Session graph and git-style conversation refs
-│   ├── lattice-prompt/      # Prompt layers, providers, and compilation
-│   ├── lattice-sandbox/     # Command, path, URL, and Landlock policy
-│   ├── lattice-tools/       # Tool schemas, capability bundles, and executor
-│   ├── lattice-agent/       # Agent loop, state, memory, hooks, audit
-│   ├── lattice-plugin/      # Plugin trait, loader, registry, DAG runner
-│   ├── lattice-orchestrator/# Profiles, pipelines, event bus, micro-agents
-│   ├── lattice-runtime/     # Top-level runtime and shared wiring policy
-│   ├── lattice-plugins/     # Official plugin implementations
+│   ├── lattice-hooks/       # Lifecycle hook points
+│   ├── lattice-core/        # Core types, transport, streaming, model resolution
+│   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
+│   ├── lattice-prompt/      # Prompt layers, context providers, compilation
+│   ├── lattice-sandbox/     # Landlock isolation, path/command/URL policy, audit
+│   ├── lattice-tools/       # Tool schemas, capability bundles, executor
+│   ├── lattice-agent/       # Multi-turn agent loop, state, memory, hooks
+│   ├── lattice-policy/      # Shared approval/denial foundation
+│   ├── lattice-profile/     # Agent profile specification and lowering
+│   ├── lattice-runtime/     # Top-level runtime assembly and session wiring
 │   └── lattice-cli/         # CLI and TUI
 ├── benches/
 ├── examples/
@@ -38,10 +37,14 @@ cargo fmt --all --check
 ## CLI
 
 ```sh
-cargo run -p lattice-cli -- code "fix the failing tests" -m sonnet
-cargo run -p lattice-cli -- run "1+1=?" -m deepseek-v4-flash
+cargo run -p lattice-cli -- run "1+1=?" -m sonnet
+cargo run -p lattice-cli -- run "review src/" --agent reviewer
 cargo run -p lattice-cli -- resolve sonnet --trace
 cargo run -p lattice-cli -- models --auth
+cargo run -p lattice-cli -- sessions list
+cargo run -p lattice-cli -- config show
+cargo run -p lattice-cli -- debug "test prompt" -m sonnet
+cargo run -p lattice-cli -- doctor
 cargo run -p lattice-cli -- tui -m sonnet
 ```
 

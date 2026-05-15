@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Build & Test
 
@@ -16,19 +16,23 @@ cargo bench                     # benchmarks
 ## CLI
 
 ```sh
-cargo run -p lattice-cli -- code "fix the failing tests" -m sonnet
-cargo run -p lattice-cli -- run "1+1=?" -m deepseek-v4-flash
+cargo run -p lattice-cli -- run "1+1=?" -m sonnet
+cargo run -p lattice-cli -- run "review src/" --agent reviewer
 cargo run -p lattice-cli -- resolve sonnet --trace
 cargo run -p lattice-cli -- models --auth
+cargo run -p lattice-cli -- sessions list
+cargo run -p lattice-cli -- config show
+cargo run -p lattice-cli -- debug "test prompt" -m sonnet
+cargo run -p lattice-cli -- doctor
 cargo run -p lattice-cli -- tui -m sonnet
 ```
 
 ## Architecture
 
-LATTICE is a model-centric LLM engine. The workspace enforces a layered dependency flow:
+LATTICE is a model-centric LLM runtime. The workspace enforces a layered dependency flow:
 
 ```
-hooks → core → session/prompt/sandbox/tools → agent → plugin → orchestrator → runtime → cli
+hooks → core → session/prompt/sandbox/tools → agent → runtime → cli
 ```
 
 | Crate | Role |
@@ -40,10 +44,9 @@ hooks → core → session/prompt/sandbox/tools → agent → plugin → orchest
 | `lattice-sandbox` | Landlock isolation, path/command/URL policy, audit logging |
 | `lattice-tools` | Tool schemas, capability bundles, executor trait, registry |
 | `lattice-agent` | Multi-turn async agent loop, state machine, memory, context management |
-| `lattice-plugin` | Plugin trait (typed LLM functions), DAG runner, loader, registry |
-| `lattice-orchestrator` | Pipelines, micro-agent bus, agent registry, handoff rules, profiles |
-| `lattice-runtime` | Top-level `Runtime` builder that wires everything together |
-| `lattice-plugins` | Official plugin implementations (feature-gated) |
+| `lattice-policy` | Shared approval/denial foundation for sandbox and runtime security |
+| `lattice-profile` | Agent profile specification, discovery, and lowering to runtime spec |
+| `lattice-runtime` | Top-level `Runtime` builder that wires assembly, session, and turn execution |
 | `lattice-cli` | Binary entry point, subcommands, TUI, config, credentials |
 
 ### Key Types
@@ -51,17 +54,20 @@ hooks → core → session/prompt/sandbox/tools → agent → plugin → orchest
 - `Runtime` / `RuntimeBuilder` — main entrypoint; `Runtime::builder().build()`
 - `ResolvedModel` — canonical model + provider + protocol + credential status
 - `StreamEvent` — normalized streaming events (tokens, reasoning, tool calls, usage)
-- `Agent` — multi-turn conversation loop with tool execution
-- `Pipeline` — profile-driven agent orchestration with handoff/fork
-- `Plugin` trait — typed LLM function contracts with Input/Output generics
-- `EventBus` — async pub/sub for runtime and pipeline events
-- `SandboxConfig` — platform-specific isolation policy
+- `RuntimeAgentSession` — assembled agent session from profile + runtime invocation context
+- `TurnRequest` / `SubmittedTurn` / `TurnCompletion` — turn lifecycle types
+- `RuntimeSecurity` / `RuntimeSecurityConfig` — sandbox, audit, and policy wiring
+- `SessionStore` — session persistence trait
 
-### Plugin Feature Flags
+### Turn Execution
 
-`lattice-plugins` gates each plugin behind a feature: `code-review`, `refactor`, `test-gen`,
-`security-audit`, `doc-gen`, `pptx-gen`, `deep-research`, `image-gen`, `knowledge-base`,
-`plan-gen`, `verification`. All enabled by default.
+The main agent turn path is:
+
+1. `prepare_profile_runtime_session` lowers a profile into an `AgentSessionRequest`, assembles a `RuntimeAgentSession`, and opens or resumes a session from the session store.
+2. The agent loop runs inside the runtime's `Agent` state machine, streaming events as `RuntimeTurnEvent` values.
+3. Turn outcomes are persisted as `SubmittedTurn` / `TurnCompletion` through the session store.
+
+Common entry points are `prepare_profile_runtime_session`, `submit_session_turn`, and the `profile_drift_warning` guard that detects when a profile source has changed since the session start.
 
 ## Environment
 
