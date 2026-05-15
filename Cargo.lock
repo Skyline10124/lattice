@@ -1945,9 +1945,6 @@ dependencies = [
  "futures",
  "lattice-agent",
  "lattice-core",
- "lattice-orchestrator",
- "lattice-plugin",
- "lattice-plugins",
  "lattice-profile",
  "lattice-prompt",
  "lattice-runtime",
@@ -2020,65 +2017,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "lattice-orchestrator"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "blake3",
- "futures",
- "hex",
- "indexmap",
- "jsonschema",
- "lattice-agent",
- "lattice-core",
- "lattice-hooks",
- "lattice-plugin",
- "lattice-prompt",
- "lattice-tools",
- "notify",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lattice-plugin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "indexmap",
- "lattice-agent",
- "lattice-core",
- "lattice-prompt",
- "lattice-sandbox",
- "lattice-tools",
- "notify",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "lattice-plugins"
-version = "0.1.0"
-dependencies = [
- "lattice-core",
- "lattice-plugin",
- "serde",
- "serde_json",
 ]
 
 [[package]]

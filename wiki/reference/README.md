@@ -1,3 +1,0 @@
-# reference
-
-Documentation for reference.

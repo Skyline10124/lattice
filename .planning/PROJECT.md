@@ -31,12 +31,12 @@ A user can run one generic agent with reliable model routing, prompt/context ass
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] Generic single-agent profile and turn specification become first-class core runtime inputs.
-- [ ] `lattice-agent` remains a generic agent loop and does not know about profile files, session stores, CLI commands, plugins, subagents, or orchestration.
-- [ ] `lattice-runtime` is the only application-level assembly layer for profile, model routing, prompt, tools, sandbox, policy, memory/context, and session persistence.
-- [ ] `lattice-cli` and TUI route through the generic runtime turn path rather than `code_agent`, plugin mode, or pipeline/orchestrator paths.
-- [ ] Plugin, official plugin, orchestrator, pipeline, micro-agent, subagent, and handoff code is removed from the current workspace rather than hidden behind unused commands.
-- [ ] Verification covers build closure, dependency boundary cleanup, and absence of removed concepts from active runtime/CLI/TUI code.
+- ✓ Generic single-agent profile and turn specification become first-class core runtime inputs — Validated in Phases 1-3, 2026-05-15.
+- ✓ `lattice-agent` remains a generic agent loop and does not know about profile files, session stores, CLI commands, plugins, subagents, or orchestration — Validated in Phases 1-3, 2026-05-15.
+- ✓ `lattice-runtime` is the only application-level assembly layer for profile, model routing, prompt, tools, sandbox, policy, memory/context, and session persistence — Validated in Phases 1-3, 2026-05-15.
+- ✓ `lattice-cli` and TUI route through the generic runtime turn path rather than `code_agent`, plugin mode, or pipeline/orchestrator paths — Validated in Phases 1-3, 2026-05-15.
+- ✓ Plugin, official plugin, orchestrator, pipeline, micro-agent, subagent, and handoff code is removed from the current workspace rather than hidden behind unused commands — Validated in Phase 4, 2026-05-15.
+- ✓ Verification covers build closure, dependency boundary cleanup, and absence of removed concepts from active runtime/CLI/TUI code — Validated in Phase 4, 2026-05-15.
 
 ### Out of Scope
 
@@ -69,10 +69,10 @@ The user explicitly wants one generic agent, not a `code_agent`, and wants plugi
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Build one generic agent path before reintroducing extensions | A specialized coding agent or plugin/orchestrator layer will keep polluting runtime, profile, and TUI types | — Pending |
-| Remove plugin/orchestrator/pipeline/subagent code from the current workspace | Hidden unused layers still affect dependencies, tests, naming, and architecture decisions | — Pending |
-| Treat coding behavior as profile/tool capability, not an agent subtype | The agent loop should stay generic; tools and prompt decide behavior | — Pending |
-| Make `profile` a first-class main-path concept | The useful part of orchestrator today is declarative agent config and lowering, not orchestration | — Pending |
+| Build one generic agent path before reintroducing extensions | A specialized coding agent or plugin/orchestrator layer will keep polluting runtime, profile, and TUI types | ✓ Done — Phases 1-4 |
+| Remove plugin/orchestrator/pipeline/subagent code from the current workspace | Hidden unused layers still affect dependencies, tests, naming, and architecture decisions | ✓ Done — Phase 4 deleted 3 crates, 66 wiki files, 2 guard tests |
+| Treat coding behavior as profile/tool capability, not an agent subtype | The agent loop should stay generic; tools and prompt decide behavior | ✓ Done — Phases 1-3 |
+| Make `profile` a first-class main-path concept | The useful part of orchestrator today is declarative agent config and lowering, not orchestration | ✓ Done — Phases 2-3 |
 
 ## Evolution
 

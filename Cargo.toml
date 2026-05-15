@@ -6,11 +6,8 @@ members = [
     "crates/lattice-session",
     "crates/lattice-prompt",
     "crates/lattice-agent",
-    "crates/lattice-plugin",
     "crates/lattice-tools",
-    "crates/lattice-orchestrator",
     "crates/lattice-runtime",
-    "crates/lattice-plugins",
     "crates/lattice-cli",
     "crates/lattice-sandbox",
     "crates/lattice-policy",
@@ -31,11 +28,8 @@ lattice-core     = { path = "crates/lattice-core" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-prompt   = { path = "crates/lattice-prompt" }
 lattice-agent    = { path = "crates/lattice-agent" }
-lattice-plugin   = { path = "crates/lattice-plugin" }
 lattice-tools    = { path = "crates/lattice-tools" }
-lattice-orchestrator = { path = "crates/lattice-orchestrator" }
 lattice-runtime  = { path = "crates/lattice-runtime" }
-lattice-plugins  = { path = "crates/lattice-plugins" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-sandbox  = { path = "crates/lattice-sandbox" }
 lattice-policy   = { path = "crates/lattice-policy" }

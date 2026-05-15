@@ -15,7 +15,7 @@ Reduce LATTICE to a coherent generic single-agent runtime and remove plugin/orch
 | 1 | Profile Contract Extraction | Establish generic profile/spec contracts outside orchestration semantics. | PROF-01, PROF-02, PROF-03 | 4 |
 | 2 | Runtime Assembly Cutover | Make runtime assemble and run generic agents without plugin/orchestrator dependencies. | RUN-01, RUN-02, RUN-03, RUN-04 | 5 |
 | 3 | CLI/TUI Single-Agent UX | Route CLI/TUI through the generic path and remove plugin/code-agent/orchestrator UI surfaces. | CLI-01, CLI-02, CLI-03, CLI-04, CLI-05 | 5 |
-| 4 | Workspace Layer Removal | Remove plugin/orchestrator crates, examples, imports, and dead tests. | REM-01, REM-02, REM-03, REM-04 | 4 |
+| 4 | Workspace Layer Removal | 3/3 | Complete    | 2026-05-15 |
 | 5 | Verification And Docs | Prove the new architecture builds, behaves, and is documented. | VER-01, VER-02, VER-03, VER-04 | 5 |
 
 ## Phase Details
@@ -85,6 +85,19 @@ Plans:
 **Goal:** Delete obsolete extension/orchestration layers from the active workspace.
 
 **Requirements:** REM-01, REM-02, REM-03, REM-04
+
+**Plans:** 3/3 plans complete
+
+Plans:
+**Wave 1**
+- [x] 04-01-PLAN.md - Delete crate directories and clean root Cargo.toml
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 04-02-PLAN.md - Dead dependency and forbidden-string cleanup
+- [x] 04-03-PLAN.md - Guard test and wiki deletion
+
+**Cross-cutting constraints:**
+- D-04: No replacement guard tests or grep-based CI checks are added
 
 **Success criteria:**
 1. Root `Cargo.toml` no longer lists `lattice-plugin`, `lattice-plugins`, or `lattice-orchestrator`.

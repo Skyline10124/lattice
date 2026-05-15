@@ -1,3 +1,0 @@
-# development
-
-Documentation for development.

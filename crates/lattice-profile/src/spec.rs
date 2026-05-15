@@ -104,10 +104,8 @@ mod tests {
         let prod = &source[..test_start];
         let forbidden = [
             "lattice_runtime",
-            "lattice_orchestrator",
             "lattice_agent",
             "lattice_session",
-            "lattice_plugin",
             "lattice_cli",
             "AgentPreset",
             "ToolPreset",

@@ -28,10 +28,10 @@
 
 ### Removal
 
-- [ ] **REM-01**: Workspace no longer includes `crates/lattice-plugin`, `crates/lattice-plugins`, or `crates/lattice-orchestrator` as active members.
-- [ ] **REM-02**: Active source no longer imports `lattice_plugin`, `lattice_plugins`, or `lattice_orchestrator`.
-- [ ] **REM-03**: Active source no longer contains runtime/CLI/TUI definitions for `PluginRegistry`, `RuntimePluginOverlay`, `Pipeline`, `MicroAgent`, `AgentPreset::Coding`, or `coding_agent`.
-- [ ] **REM-04**: Examples, tests, and docs that only exercise plugin/orchestrator/pipeline/subagent behavior are removed or rewritten for the generic single-agent path.
+- [x] **REM-01**: Workspace no longer includes `crates/lattice-plugin`, `crates/lattice-plugins`, or `crates/lattice-orchestrator` as active members.
+- [x] **REM-02**: Active source no longer imports `lattice_plugin`, `lattice_plugins`, or `lattice_orchestrator`.
+- [x] **REM-03**: Active source no longer contains runtime/CLI/TUI definitions for `PluginRegistry`, `RuntimePluginOverlay`, `Pipeline`, `MicroAgent`, `AgentPreset::Coding`, or `coding_agent`.
+- [x] **REM-04**: Examples, tests, and docs that only exercise plugin/orchestrator/pipeline/subagent behavior are removed or rewritten for the generic single-agent path.
 
 ### Verification
 
@@ -74,10 +74,10 @@
 | CLI-03 | Phase 3 | Pending |
 | CLI-04 | Phase 3 | Pending |
 | CLI-05 | Phase 3 | Pending |
-| REM-01 | Phase 4 | Pending |
-| REM-02 | Phase 4 | Pending |
-| REM-03 | Phase 4 | Pending |
-| REM-04 | Phase 4 | Pending |
+| REM-01 | Phase 4 | Complete |
+| REM-02 | Phase 4 | Complete |
+| REM-03 | Phase 4 | Complete |
+| REM-04 | Phase 4 | Complete |
 | VER-01 | Phase 5 | Pending |
 | VER-02 | Phase 5 | Pending |
 | VER-03 | Phase 5 | Pending |
