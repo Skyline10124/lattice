@@ -8,13 +8,12 @@ description = "LATTICE runtime — top-level entry point for mobile embedding"
 
 [dependencies]
 lattice-core = { workspace = true }
+lattice-profile = { workspace = true }
 lattice-session = { workspace = true }
 lattice-prompt = { workspace = true }
 lattice-agent = { workspace = true }
-lattice-plugin = { workspace = true }
 lattice-sandbox = { workspace = true }
 lattice-tools = { workspace = true }
-lattice-orchestrator = { workspace = true }
 reqwest = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -28,4 +27,4 @@ uuid = { workspace = true }
 
 [features]
 default = []
-blob-store = ["lattice-agent/blob-store", "lattice-orchestrator/blob-store"]
+blob-store = ["lattice-agent/blob-store"]

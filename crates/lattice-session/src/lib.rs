@@ -13,6 +13,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod turn_tx;
+pub use turn_tx::{
+    CommitTurnRequest, CommittedTurn, OpenTurnRequest, OpenedTurn, ProfileDrift, ProfileSnapshot,
+    ProfileSnapshotDraft, ProfileSnapshotSummary, ProfileSourceAudit, TurnOutcomeStatus,
+};
+
 const MAX_SESSION_ID_LEN: usize = 128;
 const MAX_BRANCH_NAME_LEN: usize = 128;
 const DEFAULT_BRANCH: &str = "main";
@@ -73,6 +79,8 @@ pub enum SessionError {
     NoSession,
     #[error("path error: {0}")]
     Path(String),
+    #[error("transaction conflict: {0}")]
+    Conflict(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -627,6 +635,16 @@ pub trait SessionStore: Send + Sync {
     }
     fn latest_turn_manifest_ids(&self, _session_id: &str) -> Result<Vec<String>> {
         Ok(Vec::new())
+    }
+    fn open_turn(&self, _request: OpenTurnRequest) -> Result<OpenedTurn> {
+        Err(SessionError::Path(
+            "open_turn is not implemented for this store".into(),
+        ))
+    }
+    fn commit_turn(&self, _request: CommitTurnRequest) -> Result<CommittedTurn> {
+        Err(SessionError::Path(
+            "commit_turn is not implemented for this store".into(),
+        ))
     }
 }
 
@@ -1846,6 +1864,15 @@ impl SqliteCasSessionStore {
                 created_at TEXT NOT NULL,
                 object_path TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS profile_snapshots (
+                session_id TEXT PRIMARY KEY,
+                hash TEXT NOT NULL,
+                source_label TEXT NOT NULL,
+                source_fingerprint TEXT,
+                captured_at TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                canonical_spec_json TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS reflog (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -2531,6 +2558,143 @@ impl SqliteCasSessionStore {
         Ok(())
     }
 
+    fn write_profile_snapshot_with_conn(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        snapshot: &ProfileSnapshot,
+    ) -> Result<()> {
+        validate_session_id(session_id)?;
+        conn.execute(
+            "INSERT INTO profile_snapshots
+             (session_id, hash, source_label, source_fingerprint, captured_at, summary_json, canonical_spec_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session_id,
+                &snapshot.hash,
+                &snapshot.source.source_label,
+                &snapshot.source.source_fingerprint,
+                &snapshot.captured_at,
+                stable_json("profile_snapshot_summary", &snapshot.summary)?,
+                stable_json("profile_snapshot_canonical_spec", &snapshot.canonical_spec)?,
+            ],
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    fn profile_snapshot_with_conn(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+    ) -> Result<Option<ProfileSnapshot>> {
+        validate_session_id(session_id)?;
+        let row: Option<(
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = conn
+            .query_row(
+                "SELECT hash, source_label, source_fingerprint, captured_at, summary_json, canonical_spec_json
+                 FROM profile_snapshots WHERE session_id = ?1",
+                params![session_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+        let Some((
+            hash,
+            source_label,
+            source_fingerprint,
+            captured_at,
+            summary_json,
+            canonical_spec_json,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let summary = serde_json::from_str(&summary_json).map_err(|source| SessionError::Json {
+            path: self.db_path.clone(),
+            source,
+        })?;
+        let canonical_spec =
+            serde_json::from_str(&canonical_spec_json).map_err(|source| SessionError::Json {
+                path: self.db_path.clone(),
+                source,
+            })?;
+        Ok(Some(ProfileSnapshot {
+            hash,
+            source: ProfileSourceAudit {
+                source_label,
+                source_fingerprint,
+            },
+            canonical_spec,
+            summary,
+            captured_at,
+        }))
+    }
+
+    fn next_turn_index_with_conn(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        history: &[SessionMessage],
+        parent_manifest_ids: &[String],
+    ) -> Result<usize> {
+        let mut max_parent_index = None;
+        for manifest_id in parent_manifest_ids {
+            if let Some(manifest) = self.get_turn_manifest_with_conn(conn, manifest_id)? {
+                max_parent_index = Some(
+                    max_parent_index
+                        .map(|index: usize| index.max(manifest.turn_index))
+                        .unwrap_or(manifest.turn_index),
+                );
+            }
+        }
+        if let Some(index) = max_parent_index {
+            return Ok(index.saturating_add(1));
+        }
+
+        let next_from_db: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(turn_index) + 1 FROM turn_manifests WHERE session_id = ?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+        if let Some(index) = next_from_db {
+            return Ok(index.max(0) as usize);
+        }
+
+        Ok(history
+            .iter()
+            .filter(|message| {
+                message.role.eq_ignore_ascii_case("user") && message.compact.is_none()
+            })
+            .count())
+    }
+
     fn put_turn_manifest_with_conn(
         &self,
         conn: &Connection,
@@ -2692,6 +2856,173 @@ impl SessionStore for SqliteCasSessionStore {
                     path: self.db_path.clone(),
                     source,
                 }),
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn open_turn(&self, request: OpenTurnRequest) -> Result<OpenedTurn> {
+        let conn = self.conn()?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+
+        let result = (|| {
+            let session_id = request
+                .session_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+            validate_session_id(&session_id)?;
+
+            let base_commit_id = self.commit_id_for_session_with_conn(&conn, &session_id)?;
+            let history = match &base_commit_id {
+                Some(commit_id) => self
+                    .read_commit(commit_id)?
+                    .map(|commit| self.session_from_commit(&commit))
+                    .transpose()?
+                    .map(|session| session.messages)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let parent_manifest_ids = match &base_commit_id {
+                Some(commit_id) => self
+                    .read_commit(commit_id)?
+                    .map(|commit| commit.turn_manifest_ids)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
+            let existing_snapshot = self.profile_snapshot_with_conn(&conn, &session_id)?;
+            let profile_snapshot = match existing_snapshot {
+                Some(snapshot) => snapshot,
+                None => {
+                    self.write_profile_snapshot_with_conn(
+                        &conn,
+                        &session_id,
+                        &request.profile_snapshot,
+                    )?;
+                    request.profile_snapshot
+                }
+            };
+            let profile_drift =
+                profile_snapshot.drift_for(request.current_source_fingerprint.clone());
+            let turn_index =
+                self.next_turn_index_with_conn(&conn, &session_id, &history, &parent_manifest_ids)?;
+            Ok(OpenedTurn {
+                turn_id: Uuid::new_v4().simple().to_string(),
+                session_id,
+                base_commit_id,
+                turn_index,
+                profile_snapshot,
+                profile_drift,
+                history,
+                parent_manifest_ids,
+            })
+        })();
+
+        match result {
+            Ok(opened) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|source| SessionError::Database {
+                        path: self.db_path.clone(),
+                        source,
+                    })?;
+                Ok(opened)
+            }
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn commit_turn(&self, request: CommitTurnRequest) -> Result<CommittedTurn> {
+        validate_session_id(&request.session_id)?;
+        validate_session_id(&request.turn_id)?;
+        let conn = self.conn()?;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+
+        let result = (|| {
+            let current_head = self.commit_id_for_session_with_conn(&conn, &request.session_id)?;
+            if current_head != request.base_commit_id {
+                return Err(SessionError::Conflict(format!(
+                    "base commit mismatch for session '{}': expected {:?}, found {:?}",
+                    request.session_id, request.base_commit_id, current_head
+                )));
+            }
+            let snapshot = self
+                .profile_snapshot_with_conn(&conn, &request.session_id)?
+                .ok_or_else(|| {
+                    SessionError::Conflict(format!(
+                        "session '{}' has no bound profile snapshot",
+                        request.session_id
+                    ))
+                })?;
+            if snapshot.hash != request.profile_hash {
+                return Err(SessionError::Conflict(format!(
+                    "profile snapshot mismatch for session '{}': expected {}, found {}",
+                    request.session_id, snapshot.hash, request.profile_hash
+                )));
+            }
+
+            let mut session = match &request.base_commit_id {
+                Some(commit_id) => self
+                    .read_commit(commit_id)?
+                    .map(|commit| self.session_from_commit(&commit))
+                    .transpose()?
+                    .ok_or_else(|| SessionError::NotFound(commit_id.clone()))?,
+                None => Session::new(request.model.clone(), request.provider.clone()),
+            };
+            session.id = request.session_id.clone();
+            session.model = request.model.clone();
+            session.provider = request.provider.clone();
+            session.messages.extend(request.messages.clone());
+            session.touch();
+
+            let mut manifests = request.manifests;
+            for manifest in &mut manifests {
+                manifest.session_id = request.session_id.clone();
+                turn_tx::add_turn_metadata(manifest, &request.status, &snapshot);
+            }
+            let mut manifest_ids = Vec::with_capacity(manifests.len());
+            for manifest in &manifests {
+                manifest_ids.push(turn_manifest_id(manifest)?);
+            }
+            for mut manifest in manifests {
+                manifest.commit_id = None;
+                self.put_turn_manifest_with_conn(&conn, manifest)?;
+            }
+            let commit = self.record_session_with_manifests_with_conn(
+                &conn,
+                &session,
+                manifest_ids.clone(),
+            )?;
+            self.backfill_turn_manifest_commit_ids_with_conn(&conn, &commit.id, &manifest_ids)?;
+            self.advance_head_with_conn(&conn, &session.id, "commit")?;
+            Ok(CommittedTurn {
+                session_id: session.id,
+                turn_id: request.turn_id,
+                commit_id: commit.id,
+                turn_manifest_ids: manifest_ids,
+            })
+        })();
+
+        match result {
+            Ok(committed) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|source| SessionError::Database {
+                        path: self.db_path.clone(),
+                        source,
+                    })?;
+                Ok(committed)
+            }
             Err(err) => {
                 let _ = conn.execute_batch("ROLLBACK");
                 Err(err)
@@ -4448,6 +4779,361 @@ mod tests {
             tools: Vec::new(),
             metadata: serde_json::Value::Null,
         }
+    }
+
+    fn test_profile_snapshot(source_fingerprint: &str) -> ProfileSnapshot {
+        ProfileSnapshot::from_draft(ProfileSnapshotDraft {
+            source: ProfileSourceAudit::new("agent.toml", Some(source_fingerprint)),
+            canonical_spec: serde_json::json!({
+                "profile_name": "default",
+                "model": "test-model",
+                "tools": {"bundles": ["filesystem"], "enabled": ["shell"]},
+                "security": {"sandbox_mode": "workspace-write"},
+                "context": {"project_instructions": true, "workspace_context": false},
+                "behavior": {"reasoning_effort": "medium"}
+            }),
+            summary: ProfileSnapshotSummary {
+                profile_name: "default".to_string(),
+                source_label: "agent.toml".to_string(),
+                model: "test-model".to_string(),
+                tool_bundles: vec!["filesystem".to_string()],
+                enabled_tools: vec!["shell".to_string()],
+                security_mode: Some("workspace-write".to_string()),
+                context: serde_json::json!({
+                    "project_instructions": true,
+                    "workspace_context": false
+                }),
+                behavior: serde_json::json!({"reasoning_effort": "medium"}),
+            },
+            captured_at: Some("2026-05-14T00:00:00Z".to_string()),
+        })
+        .expect("profile snapshot should be valid")
+    }
+
+    fn test_messages(user: &str, assistant: &str) -> Vec<SessionMessage> {
+        vec![
+            SessionMessage {
+                role: "user".to_string(),
+                content: user.to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                artifact_ids: Vec::new(),
+                compact: None,
+            },
+            SessionMessage {
+                role: "assistant".to_string(),
+                content: assistant.to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                artifact_ids: Vec::new(),
+                compact: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn open_turn_binds_profile_snapshot_for_new_session() -> Result<()> {
+        let dir = temp_dir("open_turn_binds_profile_snapshot");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let snapshot = test_profile_snapshot("fingerprint-a");
+
+        let opened = store.open_turn(OpenTurnRequest {
+            session_id: Some("open-turn-session".to_string()),
+            profile_snapshot: snapshot.clone(),
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+
+        assert_eq!(opened.session_id, "open-turn-session");
+        assert_eq!(opened.base_commit_id, None);
+        assert_eq!(opened.turn_index, 0);
+        assert_eq!(opened.profile_snapshot.hash, snapshot.hash);
+        assert!(opened.profile_drift.is_none());
+        assert!(opened.history.is_empty());
+        assert!(opened.parent_manifest_ids.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn open_turn_reuses_locked_snapshot_and_reports_drift() -> Result<()> {
+        let dir = temp_dir("open_turn_reuses_locked_snapshot");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let snapshot = test_profile_snapshot("fingerprint-a");
+        let first = store.open_turn(OpenTurnRequest {
+            session_id: Some("drift-session".to_string()),
+            profile_snapshot: snapshot.clone(),
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+        let committed = store.commit_turn(CommitTurnRequest {
+            session_id: first.session_id.clone(),
+            turn_id: first.turn_id.clone(),
+            base_commit_id: first.base_commit_id.clone(),
+            profile_hash: first.profile_snapshot.hash.clone(),
+            status: TurnOutcomeStatus::Completed,
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            messages: test_messages("hello", "hi"),
+            manifests: vec![test_manifest(&first.session_id, "req-drift-1")],
+        })?;
+
+        let changed_snapshot = test_profile_snapshot("fingerprint-b");
+        let second = store.open_turn(OpenTurnRequest {
+            session_id: Some("drift-session".to_string()),
+            profile_snapshot: changed_snapshot,
+            current_source_fingerprint: Some("fingerprint-b".to_string()),
+        })?;
+
+        assert_eq!(
+            second.base_commit_id.as_deref(),
+            Some(committed.commit_id.as_str())
+        );
+        assert_eq!(second.profile_snapshot.hash, snapshot.hash);
+        assert_eq!(second.history.len(), 2);
+        assert_eq!(second.parent_manifest_ids, committed.turn_manifest_ids);
+        let drift = second.profile_drift.expect("changed source should drift");
+        assert_eq!(drift.locked_hash, snapshot.hash);
+        assert!(drift.warning.contains(&snapshot.hash));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn open_turn_derives_next_index_from_manifests_not_message_pairs() -> Result<()> {
+        let dir = temp_dir("open_turn_derives_next_index_from_manifests");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let snapshot = test_profile_snapshot("fingerprint-a");
+        let first = store.open_turn(OpenTurnRequest {
+            session_id: Some("manifest-index-session".to_string()),
+            profile_snapshot: snapshot.clone(),
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+        let mut messages = test_messages("hello", "hi");
+        messages.insert(
+            0,
+            SessionMessage {
+                role: "system".to_string(),
+                content: "system context".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                artifact_ids: Vec::new(),
+                compact: None,
+            },
+        );
+        messages.push(SessionMessage {
+            role: "tool".to_string(),
+            content: "tool output".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some("call-1".to_string()),
+            name: Some("read_file".to_string()),
+            artifact_ids: Vec::new(),
+            compact: None,
+        });
+        let committed = store.commit_turn(CommitTurnRequest {
+            session_id: first.session_id.clone(),
+            turn_id: first.turn_id.clone(),
+            base_commit_id: first.base_commit_id.clone(),
+            profile_hash: first.profile_snapshot.hash.clone(),
+            status: TurnOutcomeStatus::Completed,
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            messages,
+            manifests: vec![test_manifest(&first.session_id, "req-index-1")],
+        })?;
+
+        let second = store.open_turn(OpenTurnRequest {
+            session_id: Some(first.session_id.clone()),
+            profile_snapshot: snapshot,
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+
+        assert_eq!(second.history.len(), 4);
+        assert_eq!(second.parent_manifest_ids, committed.turn_manifest_ids);
+        assert_eq!(second.turn_index, 1);
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_turn_rejects_stale_base_commit() -> Result<()> {
+        let dir = temp_dir("commit_turn_rejects_stale_base_commit");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let opened = store.open_turn(OpenTurnRequest {
+            session_id: Some("stale-base-session".to_string()),
+            profile_snapshot: test_profile_snapshot("fingerprint-a"),
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+        let _ = store.commit_turn(CommitTurnRequest {
+            session_id: opened.session_id.clone(),
+            turn_id: opened.turn_id.clone(),
+            base_commit_id: opened.base_commit_id.clone(),
+            profile_hash: opened.profile_snapshot.hash.clone(),
+            status: TurnOutcomeStatus::Completed,
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            messages: test_messages("hello", "hi"),
+            manifests: vec![test_manifest(&opened.session_id, "req-stale-1")],
+        })?;
+
+        let err = store
+            .commit_turn(CommitTurnRequest {
+                session_id: opened.session_id.clone(),
+                turn_id: Uuid::new_v4().simple().to_string(),
+                base_commit_id: opened.base_commit_id,
+                profile_hash: opened.profile_snapshot.hash,
+                status: TurnOutcomeStatus::Completed,
+                model: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                messages: test_messages("again", "done"),
+                manifests: vec![test_manifest(&opened.session_id, "req-stale-2")],
+            })
+            .expect_err("stale base must fail");
+        assert!(matches!(err, SessionError::Conflict(_)));
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_turn_rejects_profile_hash_mismatch() -> Result<()> {
+        let dir = temp_dir("commit_turn_rejects_profile_hash_mismatch");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let opened = store.open_turn(OpenTurnRequest {
+            session_id: Some("wrong-profile-session".to_string()),
+            profile_snapshot: test_profile_snapshot("fingerprint-a"),
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+
+        let err = store
+            .commit_turn(CommitTurnRequest {
+                session_id: opened.session_id.clone(),
+                turn_id: opened.turn_id,
+                base_commit_id: opened.base_commit_id,
+                profile_hash: "not-the-locked-hash".to_string(),
+                status: TurnOutcomeStatus::Completed,
+                model: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                messages: test_messages("hello", "hi"),
+                manifests: vec![test_manifest(&opened.session_id, "req-wrong-profile")],
+            })
+            .expect_err("wrong profile hash must fail");
+        assert!(matches!(err, SessionError::Conflict(_)));
+        assert!(store.load(&opened.session_id)?.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_turn_writes_completed_error_and_cancelled_statuses() -> Result<()> {
+        let dir = temp_dir("commit_turn_writes_statuses");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let statuses = [
+            (TurnOutcomeStatus::Completed, "completed"),
+            (TurnOutcomeStatus::Error, "error"),
+            (TurnOutcomeStatus::Cancelled, "cancelled"),
+        ];
+
+        for (index, (status, expected)) in statuses.into_iter().enumerate() {
+            let session_id = format!("status-session-{index}");
+            let opened = store.open_turn(OpenTurnRequest {
+                session_id: Some(session_id.clone()),
+                profile_snapshot: test_profile_snapshot("fingerprint-a"),
+                current_source_fingerprint: Some("fingerprint-a".to_string()),
+            })?;
+            let committed = store.commit_turn(CommitTurnRequest {
+                session_id: session_id.clone(),
+                turn_id: opened.turn_id,
+                base_commit_id: opened.base_commit_id,
+                profile_hash: opened.profile_snapshot.hash.clone(),
+                status,
+                model: "test-model".to_string(),
+                provider: "test-provider".to_string(),
+                messages: test_messages("hello", "hi"),
+                manifests: vec![test_manifest(&session_id, &format!("req-status-{index}"))],
+            })?;
+            let loaded = store
+                .get_turn_manifest(&committed.turn_manifest_ids[0])?
+                .expect("manifest should exist");
+            assert_eq!(loaded.metadata["turn_status"], expected);
+            assert_eq!(
+                loaded.metadata["profile_snapshot"]["hash"],
+                opened.profile_snapshot.hash
+            );
+        }
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn commit_turn_manifest_metadata_excludes_secret_fields() -> Result<()> {
+        let dir = temp_dir("commit_turn_metadata_excludes_secrets");
+        let store = SqliteCasSessionStore::new(dir.clone());
+        let mut snapshot = test_profile_snapshot("fingerprint-a");
+        snapshot.summary.context = serde_json::json!({
+            "project_instructions": true,
+            "api_key": "secret",
+            "credentials": {"OPENAI_API_KEY": "secret"},
+            "env": {"ANTHROPIC_API_KEY": "secret"}
+        });
+        snapshot.canonical_spec = serde_json::json!({
+            "profile_name": "default",
+            "model": "test-model",
+            "authorization": "Bearer secret",
+            "tools": {"bundles": ["filesystem"]}
+        });
+        snapshot = ProfileSnapshot::from_draft(ProfileSnapshotDraft {
+            source: snapshot.source,
+            canonical_spec: snapshot.canonical_spec,
+            summary: snapshot.summary,
+            captured_at: Some(snapshot.captured_at),
+        })?;
+        let opened = store.open_turn(OpenTurnRequest {
+            session_id: Some("secret-metadata-session".to_string()),
+            profile_snapshot: snapshot,
+            current_source_fingerprint: Some("fingerprint-a".to_string()),
+        })?;
+        let mut manifest = test_manifest(&opened.session_id, "req-secret-metadata");
+        manifest.metadata = serde_json::json!({
+            "safe": true,
+            "apiKey": "secret",
+            "authorization": "Bearer secret",
+            "nested": {
+                "credentials": {"api_key": "secret"},
+                "safe": "ok"
+            }
+        });
+
+        let committed = store.commit_turn(CommitTurnRequest {
+            session_id: opened.session_id.clone(),
+            turn_id: opened.turn_id,
+            base_commit_id: opened.base_commit_id,
+            profile_hash: opened.profile_snapshot.hash,
+            status: TurnOutcomeStatus::Completed,
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            messages: test_messages("hello", "hi"),
+            manifests: vec![manifest],
+        })?;
+        let loaded = store
+            .get_turn_manifest(&committed.turn_manifest_ids[0])?
+            .expect("manifest should exist");
+        assert!(!turn_tx::contains_secret_key(&loaded.metadata));
+        assert_eq!(loaded.metadata["safe"], true);
+        assert_eq!(loaded.metadata["nested"]["safe"], "ok");
+
+        fs::remove_dir_all(&dir).ok();
+        Ok(())
     }
 
     #[test]

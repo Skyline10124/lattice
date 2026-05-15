@@ -128,7 +128,7 @@ mod run_runtime {
             result.completion.saved_session_id.as_deref(),
             Some("run-runtime-session")
         );
-        let store = lattice_session::FileSessionStore::new(session_store.path());
+        let store = lattice_session::SqliteCasSessionStore::new(session_store.path());
         let saved = store
             .load("run-runtime-session")
             .unwrap()
@@ -136,6 +136,78 @@ mod run_runtime {
         assert!(saved
             .messages
             .iter()
-            .any(|message| message.role == "assistant" && message.content == "persisted run text"));
+            .any(|message| message.role == "assistant"
+                && message.content.contains("persisted run text")));
+    }
+
+    #[tokio::test]
+    async fn run_command_no_save_does_not_persist_session() {
+        let Some(port) = crate::test_support::spawn_scripted_openai_server(vec![
+            crate::test_support::scripted_content_response("transient run text"),
+        ])
+        .await
+        else {
+            eprintln!("skipping run no-save eval: loopback bind denied");
+            return;
+        };
+        let workdir = tempfile::tempdir().unwrap();
+        let session_store = tempfile::tempdir().unwrap();
+
+        let result = crate::test_support::run_command_runtime_turn(
+            crate::test_support::RunCommandRuntimeTurnFixture {
+                model: "scripted-run-runtime-nosave".into(),
+                base_url: format!("http://127.0.0.1:{port}"),
+                workdir: workdir.path().to_path_buf(),
+                prompt: "Run without persisting".into(),
+                json: true,
+                save_session: false,
+                session_id: Some("run-runtime-nosave-session".into()),
+                session_store: Some(session_store.path().to_path_buf()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.completion.saved_session_id, None);
+        let store = lattice_session::SqliteCasSessionStore::new(session_store.path());
+        assert!(
+            store.load("run-runtime-nosave-session").unwrap().is_none(),
+            "no-save runtime run should not persist a session"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_cli_runtime_turn_uses_profile_backed_submission() {
+        let Some(port) = crate::test_support::spawn_scripted_openai_server(vec![
+            crate::test_support::scripted_content_response("generic cli runtime text"),
+        ])
+        .await
+        else {
+            eprintln!("skipping generic CLI runtime eval: loopback bind denied");
+            return;
+        };
+        let workdir = tempfile::tempdir().unwrap();
+
+        let result = crate::test_support::run_command_runtime_turn(
+            crate::test_support::RunCommandRuntimeTurnFixture {
+                model: "scripted-generic-cli-runtime-turn".into(),
+                base_url: format!("http://127.0.0.1:{port}"),
+                workdir: workdir.path().to_path_buf(),
+                prompt: "Use profile-backed runtime".into(),
+                json: false,
+                save_session: false,
+                session_id: None,
+                session_store: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.completion.assistant_text, "generic cli runtime text");
+        assert_eq!(
+            result.completion.status,
+            lattice_runtime::TurnStatus::Completed
+        );
+        assert_eq!(result.rendered["content"], "generic cli runtime text");
     }
 }

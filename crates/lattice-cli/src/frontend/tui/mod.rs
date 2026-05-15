@@ -92,12 +92,12 @@ pub(crate) async fn run(options: TuiOptions) -> Result<()> {
     let security = crate::security::build_runtime_security(&options.security_config, &app.workdir)?;
     app.security = security;
     app.security_config = options.security_config;
-    let mut plugin_builder = lattice_runtime::Runtime::builder()
-        .plugin_registry(crate::plugins::build_plugin_registry()?);
-    if let Some(plugin_dir) = options.plugin_dir.as_deref() {
-        plugin_builder = plugin_builder.load_plugin_dir(plugin_dir.to_path_buf())?;
+    app.plugin_registry = Some(crate::plugins::build_plugin_registry()?);
+    if options.plugin_dir.is_some() {
+        app.push_system_message(
+            "Plugin directory loading is unavailable in the single-agent runtime cutover.",
+        );
     }
-    app.plugin_registry = Some(plugin_builder.build().plugin_registry());
     if let Some(session) = options.previous_session {
         app.load_session(session);
     }

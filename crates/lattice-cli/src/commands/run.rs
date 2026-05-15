@@ -2,9 +2,10 @@ use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
 use lattice_core::types::Role;
-use lattice_orchestrator::AgentTurnSpec;
 use lattice_prompt as prompt;
-use lattice_runtime::{AgentHandleId, Runtime, RuntimeTurnEvent, TurnCompletion, TurnRequest};
+use lattice_runtime::{
+    Runtime, RuntimeAgentSession, RuntimeTurnEvent, TurnCompletion, TurnRequest,
+};
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -60,31 +61,31 @@ pub async fn run(
         return Ok(());
     }
     let session_id = previous_session.as_ref().map(|session| session.id.clone());
-    let turn_spec = run_turn_spec(
-        model.clone(),
-        provider_override.map(str::to_string),
-        system_prompt.map(str::to_string),
-        ".".into(),
-    );
-    let seed_messages = previous_session
-        .as_ref()
-        .map(crate::session::messages_for_agent)
-        .unwrap_or_default();
     let task_state_seed =
         crate::coding_agent::load_latest_manifest_metadata(&runtime, previous_session.as_ref());
-    let handle_id = runtime.get_or_create_agent_handle_for_session_seeded(
-        turn_spec,
-        security.clone(),
-        session_id.clone(),
-        seed_messages,
-        task_state_seed,
+    let session = crate::profile_runtime::prepare_generated_profile_runtime_session(
+        &runtime,
+        crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
+            profile_name: "run".into(),
+            model: model.clone(),
+            system_prompt: system_prompt
+                .map(str::to_string)
+                .unwrap_or_else(|| "You are a helpful assistant. Be concise and accurate.".into()),
+            tool_bundles: vec!["workspace".into(), "filesystem".into()],
+            thinking_effort: None,
+            project_root: std::env::current_dir()?,
+            security: security.clone(),
+            provider_override: provider_override.map(str::to_string),
+            session_id: session_id.clone(),
+            task_state_seed,
+        },
     )?;
-    let snapshot = runtime.agent_handle_snapshot(&handle_id)?;
+    let resolved = runtime.resolve_with_provider(&model, provider_override)?;
 
     if verbose {
         eprintln!(
             "{}",
-            format!("resolved: {}@{}", snapshot.model, snapshot.provider).cyan()
+            format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan()
         );
     }
 
@@ -100,11 +101,11 @@ pub async fn run(
         cancellation_id: None,
     };
     let completion = if json || !stream_output {
-        submit_run_runtime_turn(&runtime, &handle_id, request, None).await?
+        submit_run_runtime_turn(&runtime, session, request, None).await?
     } else {
         let mut renderer = RuntimeEventRenderer::new(verbose, false);
         let completion =
-            submit_run_runtime_turn(&runtime, &handle_id, request, Some(&mut renderer)).await?;
+            submit_run_runtime_turn(&runtime, session, request, Some(&mut renderer)).await?;
         renderer.finish(
             completion
                 .token_usage
@@ -197,133 +198,16 @@ async fn dry_run_prompt(
 /// Run a pipeline: load agent registry, create registries, and execute.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_pipeline(
-    prompt: &str,
-    start_agent: &str,
-    agents_dir: Option<&str>,
-    plugins_dir: Option<&str>,
+    _prompt: &str,
+    _start_agent: &str,
+    _agents_dir: Option<&str>,
+    _plugins_dir: Option<&str>,
     _tools_dir: Option<&str>,
-    verbose: bool,
-    json: bool,
-    creds: HashMap<String, String>,
+    _verbose: bool,
+    _json: bool,
+    _creds: HashMap<String, String>,
 ) -> Result<()> {
-    let (runtime, dir) = crate::runtime::pipeline_runtime(agents_dir, plugins_dir, creds)?;
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!("loading agents from {} ...", dir.display()).dimmed()
-        );
-    }
-
-    let registry = runtime.agent_registry();
-
-    if registry.list().is_empty() {
-        anyhow::bail!("No agent profiles found in '{}'", dir.display());
-    }
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!("loaded {} agents", registry.list().len()).cyan()
-        );
-        for profile in registry.list() {
-            eprintln!("  - {} ({})", profile.agent.name, profile.agent.model);
-        }
-    }
-
-    if verbose {
-        for meta in runtime.plugin_registry().list() {
-            eprintln!("  plugin: {} — {}", meta.name, meta.description);
-        }
-    }
-
-    // Validate pipeline chain before running
-    let report = runtime.dry_run_pipeline(start_agent);
-    if !report.valid {
-        eprintln!("{}", "Pipeline validation failed:".red());
-        for issue in &report.issues {
-            eprintln!("  - {}", issue.red());
-        }
-        anyhow::bail!(
-            "Pipeline '{}' is invalid — fix agent profiles before running",
-            start_agent
-        );
-    }
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!(
-                "pipeline chain: {} → end",
-                report.agents_in_chain.join(" → ")
-            )
-            .cyan()
-        );
-    }
-
-    let result = runtime.run_pipeline(start_agent, prompt).await;
-
-    if json {
-        let out = serde_json::json!({
-            "completed": result.completed,
-            "duration_ms": result.duration_ms,
-            "agents": result.results.iter().map(|r| serde_json::json!({
-                "agent": r.agent_name,
-                "output": r.output,
-                "next": r.next,
-                "duration_ms": r.duration_ms,
-            })).collect::<Vec<_>>(),
-            "errors": result.errors.iter().map(|e| serde_json::json!({
-                "agent": e.agent_name,
-                "message": e.message,
-                "skippable": e.skippable,
-            })).collect::<Vec<_>>(),
-            "skipped": result.skipped,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        println!(
-            "{}",
-            format!("Pipeline completed in {}ms", result.duration_ms).green()
-        );
-        if result.completed {
-            println!("{}", "Status: completed".green());
-        } else {
-            println!("{}", "Status: incomplete".yellow());
-        }
-
-        for r in &result.results {
-            println!();
-            println!(
-                "{}",
-                format!("── {} ({}ms) ──", r.agent_name, r.duration_ms).cyan()
-            );
-            let preview: String = r.output.to_string().chars().take(500).collect();
-            println!("{}", preview);
-            if let Some(ref next) = r.next {
-                eprintln!("{}", format!("  → next: {}", next).dimmed());
-            }
-        }
-
-        for e in &result.errors {
-            println!();
-            println!("{}", format!("── {} (ERROR) ──", e.agent_name).red());
-            println!("  {}", e.message.red());
-            if e.skippable {
-                println!("  {}", "(skippable)".dimmed());
-            }
-        }
-
-        if !result.skipped.is_empty() {
-            println!();
-            println!(
-                "{}",
-                format!("Skipped: {}", result.skipped.join(", ")).yellow()
-            );
-        }
-    }
-
-    Ok(())
+    anyhow::bail!("pipeline execution is unavailable in the single-agent runtime cutover")
 }
 
 fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
@@ -332,49 +216,21 @@ fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
     }
 }
 
-pub(crate) fn run_turn_spec(
-    model: String,
-    provider_override: Option<String>,
-    system_prompt: Option<String>,
-    workspace: String,
-) -> AgentTurnSpec {
-    AgentTurnSpec {
-        profile_name: "run".into(),
-        model,
-        provider_override,
-        system_prompt,
-        prompt_spec: None,
-        capabilities: lattice_orchestrator::CapabilitiesConfig {
-            presets: vec!["minimal".into()],
-            bundles: Vec::new(),
-        },
-        tools: Default::default(),
-        behavior: Default::default(),
-        handoff: Default::default(),
-        memory: Default::default(),
-        project_root: Some(workspace.clone()),
-        cwd: Some(workspace),
-        thinking_effort: None,
-    }
-}
-
 pub(crate) async fn submit_run_runtime_turn(
     runtime: &Runtime,
-    handle_id: &AgentHandleId,
+    session: RuntimeAgentSession,
     request: TurnRequest,
     mut renderer: Option<&mut RuntimeEventRenderer>,
 ) -> Result<TurnCompletion> {
-    let stream = runtime.submit_turn(handle_id, request).await?;
-    tokio::pin!(stream);
-    while let Some(event) = stream.next().await {
+    let submitted = runtime.submit_session_turn(session, request).await?;
+    let mut events = submitted.events;
+    while let Some(event) = events.next().await {
         if let Some(renderer) = renderer.as_deref_mut() {
             renderer.render(&event)?;
         }
     }
 
-    let completion = runtime
-        .latest_turn_completion(handle_id)?
-        .ok_or_else(|| anyhow::anyhow!("runtime turn completed without stored completion"))?;
+    let completion = submitted.completion.await?;
     crate::coding_agent::require_successful_runtime_completion(completion)
 }
 
@@ -431,7 +287,7 @@ impl RuntimeEventRenderer {
         }
     }
 
-    fn render(&mut self, event: &RuntimeTurnEvent) -> Result<()> {
+    pub(crate) fn render(&mut self, event: &RuntimeTurnEvent) -> Result<()> {
         match event {
             RuntimeTurnEvent::Token { text, .. } => {
                 if !self.json {

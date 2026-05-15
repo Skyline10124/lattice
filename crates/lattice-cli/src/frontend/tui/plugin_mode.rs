@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use lattice_core::types::ToolDefinition;
 use lattice_plugin::registry::PluginRegistry;
-use lattice_runtime::RuntimePluginOverlay;
 
 #[derive(Debug, Clone)]
 pub(super) struct PreparedSubmission {
@@ -14,7 +13,7 @@ pub(super) struct PreparedSubmission {
     pub(super) plugin: Option<RunPluginContext>,
 }
 
-#[allow(dead_code)] // Runtime plugin handles consume these fields in the follow-up migration.
+#[allow(dead_code)] // Phase 3 owns final plugin command UX cleanup.
 #[derive(Debug, Clone)]
 pub(super) struct RunPluginContext {
     pub(super) name: String,
@@ -82,16 +81,6 @@ pub(super) fn prepare_submission(
                 .collect(),
         }),
     })
-}
-
-pub(super) fn runtime_plugin_overlay(plugin: &RunPluginContext) -> RuntimePluginOverlay {
-    RuntimePluginOverlay {
-        name: plugin.name.clone(),
-        system_prompt_delta: plugin.system_prompt.clone(),
-        output_contract_delta: plugin.output_contract_delta.clone(),
-        tools: plugin.tools.clone(),
-        authorized_tool_names: plugin.tools.iter().map(|tool| tool.name.clone()).collect(),
-    }
 }
 
 fn find_plugin_name(names: Vec<String>, query: &str) -> Option<String> {
@@ -208,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_plugin_runtime_plugin_overlay_maps_context() {
+    fn run_plugin_context_keeps_prompt_and_tool_delta_locally() {
         let context = RunPluginContext {
             name: "CodeReview".into(),
             system_prompt: "Review code carefully.".into(),
@@ -220,14 +209,12 @@ mod tests {
             )],
         };
 
-        let overlay = runtime_plugin_overlay(&context);
-
-        assert_eq!(overlay.name, "CodeReview");
-        assert_eq!(overlay.system_prompt_delta, "Review code carefully.");
+        assert_eq!(context.name, "CodeReview");
+        assert_eq!(context.system_prompt, "Review code carefully.");
         assert_eq!(
-            overlay.output_contract_delta.as_deref(),
+            context.output_contract_delta.as_deref(),
             Some("Return JSON.")
         );
-        assert_eq!(overlay.authorized_tool_names, vec!["plugin_read"]);
+        assert_eq!(context.tools[0].name, "plugin_read");
     }
 }

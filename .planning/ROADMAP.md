@@ -42,6 +42,16 @@ Reduce LATTICE to a coherent generic single-agent runtime and remove plugin/orch
 
 **Requirements:** RUN-01, RUN-02, RUN-03, RUN-04
 
+**Plans:** 6 plans
+
+Plans:
+- [x] 02-01-PLAN.md - Session-owned profile snapshot and turn transaction API
+- [x] 02-02-PLAN.md - Runtime-owned generic assembly and sandbox-bound tools
+- [x] 02-03-PLAN.md - Session/turn identity runtime submission and completion path
+- [x] 02-04-PLAN.md - CLI generic runtime adapters
+- [x] 02-05-PLAN.md - TUI session-owned runtime adapters
+- [x] 02-06-PLAN.md - Runtime extension API and dependency cleanup
+
 **Success criteria:**
 1. Runtime builds/reuses a generic agent handle from profile/spec and runtime security.
 2. Runtime assembly wires prompt providers, tool schema provider, memory/context, and sandbox-bound tool executor without `lattice_orchestrator::assembly`.
@@ -110,10 +120,10 @@ Reduce LATTICE to a coherent generic single-agent runtime and remove plugin/orch
 | PROF-01 | Phase 1 | Pending |
 | PROF-02 | Phase 1 | Pending |
 | PROF-03 | Phase 1 | Pending |
-| RUN-01 | Phase 2 | Pending |
-| RUN-02 | Phase 2 | Pending |
-| RUN-03 | Phase 2 | Pending |
-| RUN-04 | Phase 2 | Pending |
+| RUN-01 | Phase 2 | Complete |
+| RUN-02 | Phase 2 | Complete |
+| RUN-03 | Phase 2 | Complete |
+| RUN-04 | Phase 2 | Complete |
 | CLI-01 | Phase 3 | Pending |
 | CLI-02 | Phase 3 | Pending |
 | CLI-03 | Phase 3 | Pending |

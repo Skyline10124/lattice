@@ -266,14 +266,14 @@ fn accept_menu_selection(app: &mut App) {
                 app.current_model = selected.clone();
                 app.previous_model.clear();
                 app.current_provider.clear();
-                app.clear_runtime_handles();
+                app.clear_runtime_sessions();
                 app.push_system_message(&format!("Model: {selected}"));
             }
             MenuKind::Provider => {
                 app.cancel_active_turn();
                 app.provider_override = Some(selected.clone());
                 app.current_provider = selected.clone();
-                app.clear_runtime_handles();
+                app.clear_runtime_sessions();
                 app.push_system_message(&format!("Provider: {selected}"));
             }
             MenuKind::Permissions => {

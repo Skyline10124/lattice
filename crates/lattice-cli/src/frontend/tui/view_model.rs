@@ -103,7 +103,7 @@ mod tests {
     use super::*;
     use crate::frontend::tui::state::ChatMessage;
     use lattice_core::types::Role;
-    use lattice_runtime::RuntimePluginOverlay;
+    use lattice_runtime::RuntimeAgentSession;
 
     #[test]
     fn view_model_tracks_composer_and_queue_state() {
@@ -147,8 +147,31 @@ mod tests {
         assert_eq!(vm.thinking, Some("step one"));
     }
 
+    fn test_runtime_session(
+        app: &App,
+        profile_name: &str,
+        session_id: &str,
+    ) -> RuntimeAgentSession {
+        crate::profile_runtime::prepare_generated_profile_runtime_session(
+            &app.runtime,
+            crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
+                profile_name: profile_name.into(),
+                model: app.current_model.clone(),
+                system_prompt: lattice_runtime::coding_system_prompt(&app.workdir, &app.workdir),
+                tool_bundles: vec!["workspace".into(), "filesystem".into()],
+                thinking_effort: None,
+                project_root: app.workdir.clone(),
+                security: app.security.clone(),
+                provider_override: app.provider_override.clone(),
+                session_id: Some(session_id.into()),
+                task_state_seed: None,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn plugin_statusline_normal_handle_shows_plugins_count() {
+    fn plugin_statusline_normal_session_shows_plugins_count() {
         let app = App::new();
 
         let vm = TuiViewModel::from_app(&app);
@@ -181,48 +204,10 @@ mod tests {
         let mut app = App::new();
         app.runtime = runtime;
         app.current_model = "plugin-status-model".into();
-        let workdir = app.workdir.to_string_lossy().to_string();
-        let handle_id = app
-            .runtime
-            .get_or_create_agent_handle_for_session(
-                lattice_orchestrator::AgentTurnSpec {
-                    profile_name: "plugin:CodeReview".into(),
-                    model: app.current_model.clone(),
-                    provider_override: None,
-                    system_prompt: Some(lattice_runtime::coding_system_prompt(
-                        &app.workdir,
-                        &app.workdir,
-                    )),
-                    prompt_spec: None,
-                    capabilities: lattice_orchestrator::CapabilitiesConfig {
-                        presets: vec!["coding".into()],
-                        bundles: Vec::new(),
-                    },
-                    tools: Default::default(),
-                    behavior: Default::default(),
-                    handoff: Default::default(),
-                    memory: Default::default(),
-                    project_root: Some(workdir.clone()),
-                    cwd: Some(workdir),
-                    thinking_effort: None,
-                },
-                app.security.clone(),
-                None,
-            )
-            .unwrap();
-        app.runtime
-            .set_agent_plugin_overlay(
-                &handle_id,
-                Some(RuntimePluginOverlay {
-                    name: "CodeReview".into(),
-                    system_prompt_delta: "Review code carefully.".into(),
-                    output_contract_delta: None,
-                    tools: Vec::new(),
-                    authorized_tool_names: Vec::new(),
-                }),
-            )
-            .unwrap();
-        app.active_handle = Some(handle_id);
+        let session = test_runtime_session(&app, "plugin:CodeReview", "plugin-status-session");
+        app.plugin_sessions
+            .insert("CodeReview".into(), session.clone());
+        app.active_session_id = session.session_id.clone();
 
         let vm = TuiViewModel::from_app(&app);
 

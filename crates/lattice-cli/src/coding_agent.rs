@@ -5,10 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
-use lattice_core::types::Message;
-use lattice_orchestrator::AgentTurnSpec;
 use lattice_runtime::{
-    AgentHandleId, Runtime, RuntimeTurnEvent, TurnCompletion, TurnRequest, TurnStatus,
+    Runtime, RuntimeAgentSession, RuntimeTurnEvent, TurnCompletion, TurnRequest, TurnStatus,
 };
 
 use crate::security::RuntimeSecurity;
@@ -34,13 +32,11 @@ pub(crate) struct CodingAgentBuildOptions {
     pub(crate) workdir: PathBuf,
     pub(crate) credentials: HashMap<String, String>,
     pub(crate) previous_session: Option<crate::session::Session>,
-    pub(crate) prior_messages: Vec<Message>,
-    pub(crate) thinking_effort: Option<String>,
     pub(crate) security: RuntimeSecurity,
 }
 
 pub(crate) struct BuiltCodingAgent {
-    pub(crate) handle_id: AgentHandleId,
+    pub(crate) session: RuntimeAgentSession,
     pub(crate) runtime: Runtime,
     pub(crate) model: String,
     pub(crate) provider: String,
@@ -55,8 +51,6 @@ pub(crate) async fn run(options: CodingAgentOptions) -> Result<()> {
         workdir: options.workdir.clone(),
         credentials: options.credentials.clone(),
         previous_session: options.previous_session.clone(),
-        prior_messages: Vec::new(),
-        thinking_effort: None,
         security: options.security.clone(),
     })?;
     let resolved_model = built.model;
@@ -85,16 +79,12 @@ pub(crate) async fn run(options: CodingAgentOptions) -> Result<()> {
     };
 
     let completion = if options.json || !options.stream_output {
-        submit_coding_runtime_turn(&built.runtime, &built.handle_id, request, None).await?
+        submit_coding_runtime_turn(&built.runtime, built.session, request, None).await?
     } else {
         let mut renderer = CodingEventRenderer::new(options.verbose, false);
-        let completion = submit_coding_runtime_turn(
-            &built.runtime,
-            &built.handle_id,
-            request,
-            Some(&mut renderer),
-        )
-        .await?;
+        let completion =
+            submit_coding_runtime_turn(&built.runtime, built.session, request, Some(&mut renderer))
+                .await?;
         let final_report_markdown = completion.final_report.clone().unwrap_or_default();
         renderer.finish(
             completion
@@ -129,17 +119,6 @@ pub(crate) fn build_coding_agent_with_runtime(
     runtime: Runtime,
     options: CodingAgentBuildOptions,
 ) -> Result<BuiltCodingAgent> {
-    let messages = if !options.prior_messages.is_empty() {
-        options.prior_messages
-    } else if let Some(session) = options.previous_session.as_ref() {
-        crate::session::messages_for_agent(session)
-    } else {
-        Vec::new()
-    };
-    let session_id_for_handle = options.previous_session.as_ref().map(|s| s.id.clone());
-
-    let workdir_str = options.workdir.to_string_lossy().to_string();
-
     let resolved =
         runtime.resolve_with_provider(&options.model, options.provider_override.as_deref())?;
     let model = resolved.canonical_id.clone();
@@ -149,41 +128,34 @@ pub(crate) fn build_coding_agent_with_runtime(
     } else {
         128000
     };
-
-    let turn_spec = AgentTurnSpec {
-        profile_name: "coding".into(),
-        model: options.model,
-        provider_override: options.provider_override,
-        system_prompt: Some(lattice_runtime::coding_system_prompt(
-            &options.workdir,
-            &options.workdir,
-        )),
-        prompt_spec: None,
-        capabilities: lattice_orchestrator::CapabilitiesConfig {
-            presets: vec!["coding".into()],
-            bundles: Vec::new(),
-        },
-        tools: Default::default(),
-        behavior: Default::default(),
-        handoff: Default::default(),
-        memory: Default::default(),
-        project_root: Some(workdir_str.clone()),
-        cwd: Some(workdir_str),
-        thinking_effort: options.thinking_effort,
-    };
     let task_state_seed =
         load_latest_manifest_metadata(&runtime, options.previous_session.as_ref());
-    let handle_id = runtime.get_or_create_agent_handle_for_session_seeded(
-        turn_spec,
-        options.security.clone(),
-        session_id_for_handle,
-        messages,
-        task_state_seed,
+    let system_prompt = lattice_runtime::coding_system_prompt(&options.workdir, &options.workdir);
+    let session = crate::profile_runtime::prepare_generated_profile_runtime_session(
+        &runtime,
+        crate::profile_runtime::GeneratedProfileRuntimeSessionRequest {
+            profile_name: "coding".into(),
+            model: options.model,
+            system_prompt,
+            tool_bundles: vec![
+                "workspace".into(),
+                "filesystem".into(),
+                "editing".into(),
+                "shell".into(),
+                "planning".into(),
+                "web".into(),
+            ],
+            thinking_effort: None,
+            project_root: options.workdir,
+            security: options.security,
+            provider_override: options.provider_override,
+            session_id: options.previous_session.as_ref().map(|s| s.id.clone()),
+            task_state_seed,
+        },
     )?;
-    let _snapshot = runtime.agent_handle_snapshot(&handle_id)?;
 
     Ok(BuiltCodingAgent {
-        handle_id,
+        session,
         runtime,
         model,
         provider,
@@ -193,21 +165,19 @@ pub(crate) fn build_coding_agent_with_runtime(
 
 pub(crate) async fn submit_coding_runtime_turn(
     runtime: &Runtime,
-    handle_id: &AgentHandleId,
+    session: RuntimeAgentSession,
     request: TurnRequest,
     mut renderer: Option<&mut CodingEventRenderer>,
 ) -> Result<TurnCompletion> {
-    let stream = runtime.submit_turn(handle_id, request).await?;
-    tokio::pin!(stream);
-    while let Some(event) = stream.next().await {
+    let submitted = runtime.submit_session_turn(session, request).await?;
+    let mut events = submitted.events;
+    while let Some(event) = events.next().await {
         if let Some(renderer) = renderer.as_deref_mut() {
             renderer.render_runtime(&event)?;
         }
     }
 
-    let completion = runtime
-        .latest_turn_completion(handle_id)?
-        .ok_or_else(|| anyhow::anyhow!("runtime turn completed without stored completion"))?;
+    let completion = submitted.completion.await?;
     require_successful_runtime_completion(completion)
 }
 
@@ -289,7 +259,7 @@ impl CodingEventRenderer {
         }
     }
 
-    fn render_runtime(&mut self, event: &RuntimeTurnEvent) -> Result<()> {
+    pub(crate) fn render_runtime(&mut self, event: &RuntimeTurnEvent) -> Result<()> {
         match event {
             RuntimeTurnEvent::Token { text, .. } => {
                 if !self.json {
@@ -517,7 +487,7 @@ mod tests {
 
     fn completion_with_status(status: TurnStatus, error: Option<&str>) -> TurnCompletion {
         TurnCompletion {
-            handle_id: AgentHandleId::new(),
+            session_id: "test-session".into(),
             turn_id: lattice_runtime::TurnId::new(),
             status,
             assistant_text: String::new(),
@@ -528,6 +498,7 @@ mod tests {
             model: "test-model".into(),
             provider: "test-provider".into(),
             saved_session_id: None,
+            profile_drift_warning: None,
             error: error.map(str::to_string),
         }
     }

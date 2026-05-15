@@ -13,10 +13,10 @@
 
 ### Runtime
 
-- [ ] **RUN-01**: Runtime can construct and reuse one generic agent handle from profile/spec, resolved model, prompt providers, tool capabilities, sandbox policy, memory/context, and optional session seed.
-- [ ] **RUN-02**: Runtime tool execution remains bound to `RuntimeSecurity` sandbox and policy settings after plugin/orchestrator assembly is removed.
-- [ ] **RUN-03**: Runtime turn completion persists session messages and turn manifests through the existing session store path.
-- [ ] **RUN-04**: Runtime public APIs no longer expose pipeline, micro-agent, event bus, plugin registry, plugin directory loading, plugin overlay, or runtime-backed orchestrator executor concepts.
+- [x] **RUN-01**: Runtime can construct and reuse one generic agent handle from profile/spec, resolved model, prompt providers, tool capabilities, sandbox policy, memory/context, and optional session seed.
+- [x] **RUN-02**: Runtime tool execution remains bound to `RuntimeSecurity` sandbox and policy settings after plugin/orchestrator assembly is removed.
+- [x] **RUN-03**: Runtime turn completion persists session messages and turn manifests through the existing session store path.
+- [x] **RUN-04**: Runtime public APIs no longer expose pipeline, micro-agent, event bus, plugin registry, plugin directory loading, plugin overlay, or runtime-backed orchestrator executor concepts.
 
 ### CLI/TUI
 
@@ -65,10 +65,10 @@
 | PROF-01 | Phase 1 | Pending |
 | PROF-02 | Phase 1 | Pending |
 | PROF-03 | Phase 1 | Pending |
-| RUN-01 | Phase 2 | Pending |
-| RUN-02 | Phase 2 | Pending |
-| RUN-03 | Phase 2 | Pending |
-| RUN-04 | Phase 2 | Pending |
+| RUN-01 | Phase 2 | Complete |
+| RUN-02 | Phase 2 | Complete |
+| RUN-03 | Phase 2 | Complete |
+| RUN-04 | Phase 2 | Complete |
 | CLI-01 | Phase 3 | Pending |
 | CLI-02 | Phase 3 | Pending |
 | CLI-03 | Phase 3 | Pending |
@@ -90,4 +90,4 @@
 
 ---
 *Requirements defined: 2026-05-14*
-*Last updated: 2026-05-14 after milestone v1.0 requirements definition*
+*Last updated: 2026-05-15 after Phase 2 runtime assembly cutover*

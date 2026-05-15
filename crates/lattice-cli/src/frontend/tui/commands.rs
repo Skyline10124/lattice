@@ -73,7 +73,7 @@ impl CommandRegistry {
                     app.previous_model.clear();
                     app.current_provider.clear();
                     app.status = AppStatus::Ready;
-                    app.clear_runtime_handles();
+                    app.clear_runtime_sessions();
                     app.push_system_message(&format!("Model switched to {model}."));
                 }
                 true
@@ -185,7 +185,7 @@ impl CommandRegistry {
                     app.cancel_active_turn();
                     app.provider_override = Some(arg.clone());
                     app.current_provider = arg;
-                    app.clear_runtime_handles();
+                    app.clear_runtime_sessions();
                     app.push_system_message("Provider override set. Agent will rebuild next turn.");
                 }
                 true
@@ -272,7 +272,7 @@ impl CommandRegistry {
                     "off" | "none" => {
                         app.cancel_active_turn();
                         app.thinking_effort = None;
-                        app.clear_runtime_handles();
+                        app.clear_runtime_sessions();
                         app.push_system_message(
                             "Thinking effort: auto (model default). Agent will rebuild.",
                         );
@@ -280,7 +280,7 @@ impl CommandRegistry {
                     "low" | "medium" | "high" | "xhigh" | "max" => {
                         app.cancel_active_turn();
                         app.thinking_effort = Some(level.to_string());
-                        app.clear_runtime_handles();
+                        app.clear_runtime_sessions();
                         app.push_system_message(&format!(
                             "Thinking effort: {level}. Agent will rebuild next turn."
                         ));

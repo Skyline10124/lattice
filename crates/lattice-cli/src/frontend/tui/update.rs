@@ -1,8 +1,6 @@
-use anyhow::Result;
-use lattice_runtime::TurnCompletion;
-
 use super::action::TuiAction;
 use super::app::App;
+use anyhow::Result;
 
 /// Applies normalized actions to the TUI coordinator.
 pub(super) async fn apply_action(app: &mut App, action: TuiAction) -> Result<()> {
@@ -46,25 +44,23 @@ pub(super) async fn apply_action(app: &mut App, action: TuiAction) -> Result<()>
         }
         TuiAction::RuntimeTurnStarted {
             turn_id,
-            handle_id,
+            session_id,
             runtime_turn_id,
         } => {
-            app.mark_runtime_turn_started(turn_id, handle_id, runtime_turn_id);
+            app.mark_runtime_turn_started(turn_id, session_id, runtime_turn_id);
         }
         TuiAction::RuntimeTurnFinished {
             turn_id,
-            runtime,
-            handle_id,
+            session_id,
             runtime_turn_id,
             status,
+            completion,
             error,
         } => {
-            if app.accepts_runtime_turn(turn_id, &handle_id, &runtime_turn_id) {
-                let completion: Option<TurnCompletion> =
-                    runtime.latest_turn_completion(&handle_id)?;
+            if app.accepts_runtime_turn(turn_id, &session_id, &runtime_turn_id) {
                 app.apply_runtime_completion(
                     turn_id,
-                    &handle_id,
+                    &session_id,
                     &runtime_turn_id,
                     status,
                     completion.as_ref(),
@@ -73,10 +69,6 @@ pub(super) async fn apply_action(app: &mut App, action: TuiAction) -> Result<()>
                 app.reap_audit().await;
             }
         }
-        TuiAction::RuntimeBusy {
-            turn_id,
-            prompt_text,
-        } => app.queue_runtime_busy_prompt(turn_id, prompt_text),
     }
     Ok(())
 }

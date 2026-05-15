@@ -7,6 +7,7 @@ mod credentials;
 mod display;
 mod frontend;
 mod plugins;
+mod profile_runtime;
 mod runtime;
 mod security;
 mod session;

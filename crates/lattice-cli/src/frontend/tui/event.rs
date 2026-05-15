@@ -1,5 +1,5 @@
 use crossterm::event::{self, Event as CEvent, KeyEvent, MouseEvent};
-use lattice_runtime::{AgentHandleId, Runtime, TurnId, TurnStatus};
+use lattice_runtime::{TurnCompletion, TurnId, TurnStatus};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -37,22 +37,17 @@ pub(super) enum Event {
     /// Runtime has associated the local widget turn with a runtime turn id.
     RuntimeTurnStarted {
         turn_id: u64,
-        handle_id: AgentHandleId,
+        session_id: String,
         runtime_turn_id: TurnId,
     },
-    /// Runtime terminal lifecycle reached stream end; completion can be queried.
+    /// Runtime terminal lifecycle reached stream end.
     RuntimeTurnFinished {
         turn_id: u64,
-        runtime: Runtime,
-        handle_id: AgentHandleId,
+        session_id: String,
         runtime_turn_id: TurnId,
         status: TurnStatus,
+        completion: Option<TurnCompletion>,
         error: Option<String>,
-    },
-    /// Runtime rejected a submit because the handle is already active.
-    RuntimeBusy {
-        turn_id: u64,
-        prompt_text: String,
     },
 }
 

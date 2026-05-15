@@ -4,9 +4,13 @@ const FRONTEND_FILES: &[&str] = &[
     "src/coding_agent.rs",
     "src/commands/run.rs",
     "src/commands/debug.rs",
+    "src/frontend/tui/action.rs",
     "src/frontend/tui/app.rs",
     "src/frontend/tui/agent_runner.rs",
+    "src/frontend/tui/event.rs",
     "src/frontend/tui/plugin_mode.rs",
+    "src/frontend/tui/update.rs",
+    "src/frontend/tui/view_model.rs",
 ];
 
 fn manifest_dir() -> PathBuf {
@@ -102,19 +106,29 @@ fn frontend_no_active_loop_event_rendering() {
 fn frontend_uses_runtime_turn_completion() {
     let sources = frontend_sources()
         .into_iter()
-        .map(|(_, source)| source)
+        .map(|(_, source)| active_source(&source))
         .collect::<Vec<_>>()
         .join("\n");
 
     for expected in [
         "RuntimeTurnEvent",
+        "RuntimeAgentSession",
         "TurnCompletion",
-        "submit_turn(",
-        "latest_turn_completion",
+        "submit_session_turn",
     ] {
         assert!(
             sources.contains(expected),
             "frontend runtime paths should continue to use {expected}"
         );
     }
+}
+
+#[test]
+fn frontend_no_runtime_handle_owned_execution() {
+    assert_absent_in_active_source(&[
+        "AgentHandleId",
+        "get_or_create_agent_handle",
+        "latest_turn_completion",
+        "RuntimePluginOverlay",
+    ]);
 }

@@ -45,10 +45,7 @@ pub fn run(dir: Option<String>) -> Result<()> {
     println!("Found {} agent(s) in '{}'\n", profile_count, path.display());
 
     let registry = inventory.legacy_registry();
-    let runtime = Runtime::builder()
-        .name("validate")
-        .agent_registry(registry.clone())
-        .build();
+    let runtime = Runtime::builder().build();
     let mut agent_names = HashSet::new();
 
     for profile in registry.list() {
@@ -104,24 +101,6 @@ pub fn run(dir: Option<String>) -> Result<()> {
             Ok(_) => println!("    model: {} OK", loaded.profile.agent.model),
             Err(e) => {
                 println!("    model: {} — WARNING: {}", loaded.profile.agent.model, e);
-            }
-        }
-    }
-
-    // Detect circular handoff chains via Runtime pipeline validation.
-    for profile in registry.list() {
-        let report = runtime.dry_run_pipeline(&profile.agent.name);
-        if report.circular {
-            println!(
-                "    ERROR: circular handoff detected starting from '{}'",
-                profile.agent.name
-            );
-            errors += 1;
-        }
-        for issue in &report.issues {
-            if issue.contains("not found") || issue.contains("unregistered") {
-                println!("    ERROR: {}", issue);
-                errors += 1;
             }
         }
     }
