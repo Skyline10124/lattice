@@ -55,11 +55,22 @@ mod tests {
             &screen,
             &[
                 "model  deepseek-v4-flash @ unresolved",
+                "agent  agent:default",
+                "runtime  sandbox:project",
                 "Tip: Type / to see all available commands.",
                 "Type a message or / for commands",
                 " prompt  deepseek-v4-flash@unresolved  ready",
             ],
         );
+    }
+
+    #[test]
+    fn welcome_does_not_render_plugin_count() {
+        let app = App::new();
+
+        let screen = render_app(&app, 100, 24);
+
+        assert!(!screen.contains("plugins:"));
     }
 
     #[test]
@@ -255,100 +266,27 @@ mod tests {
         }
     }
 
-    mod plugin_statusline {
+    mod agent_statusline {
         use super::*;
 
         #[test]
-        fn plugin_prompt_transcript_row_keeps_at_plugin_prefix() {
+        fn agent_statusline_shows_agent_label() {
             let mut app = App::new();
-            app.messages.push(ChatMessage::new(
-                Role::User,
-                "@CodeReview inspect this diff".into(),
-            ));
+            app.agent_label = "agent:reviewer".into();
 
             let screen = render_app(&app, 120, 18);
 
-            assert_screen_contains(&screen, &["@CodeReview inspect this diff"]);
+            assert_screen_contains(&screen, &["agent:reviewer"]);
         }
 
         #[test]
-        fn plugin_prompt_running_shows_plugin_statusline() {
-            let mut runtime = lattice_runtime::Runtime::builder().build();
-            runtime
-                .register_model(lattice_core::catalog::ModelCatalogEntry {
-                    canonical_id: "plugin-status-render-model".into(),
-                    context_length: 8192,
-                    providers: vec![lattice_core::catalog::CatalogProviderEntry {
-                        provider_id: "ollama".into(),
-                        api_model_id: "plugin-status-render-model".into(),
-                        priority: 1,
-                        credential_keys: std::collections::HashMap::new(),
-                        base_url: Some("http://127.0.0.1:9".into()),
-                        api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-                        provider_specific: std::collections::HashMap::new(),
-                    }],
-                    aliases: Vec::new(),
-                })
-                .unwrap();
+        fn agent_statusline_shows_snapshot_label() {
             let mut app = App::new();
-            app.runtime = runtime;
-            app.current_model = "plugin-status-render-model".into();
-            app.status = crate::frontend::tui::state::AppStatus::Streaming;
-            app.turn.stream_started = Some(std::time::Instant::now());
-            let workdir = app.workdir.to_string_lossy().to_string();
-            let handle_id = app
-                .runtime
-                .get_or_create_agent_handle_for_session(
-                    lattice_orchestrator::AgentTurnSpec {
-                        profile_name: "plugin:CodeReview".into(),
-                        model: app.current_model.clone(),
-                        provider_override: None,
-                        system_prompt: Some(lattice_runtime::coding_system_prompt(
-                            &app.workdir,
-                            &app.workdir,
-                        )),
-                        prompt_spec: None,
-                        capabilities: lattice_orchestrator::CapabilitiesConfig {
-                            presets: vec!["coding".into()],
-                            bundles: Vec::new(),
-                        },
-                        tools: Default::default(),
-                        behavior: Default::default(),
-                        handoff: Default::default(),
-                        memory: Default::default(),
-                        project_root: Some(workdir.clone()),
-                        cwd: Some(workdir),
-                        thinking_effort: None,
-                        preset: Some(lattice_orchestrator::AgentPreset::Coding),
-                    },
-                    app.security.clone(),
-                    None,
-                )
-                .unwrap();
-            app.runtime
-                .set_agent_plugin_overlay(
-                    &handle_id,
-                    Some(lattice_runtime::RuntimePluginOverlay {
-                        name: "CodeReview".into(),
-                        system_prompt_delta: "Review code carefully.".into(),
-                        output_contract_delta: None,
-                        tools: Vec::new(),
-                        authorized_tool_names: Vec::new(),
-                    }),
-                )
-                .unwrap();
-            app.active_handle = Some(handle_id);
-            app.messages.push(ChatMessage::new(
-                Role::User,
-                "@CodeReview inspect this diff".into(),
-            ));
+            app.snapshot_label = Some("snapshot:abcdef12".into());
 
-            let screen = render_app(&app, 160, 24);
+            let screen = render_app(&app, 120, 18);
 
-            assert_screen_contains(
-                &screen,
-                &["@CodeReview inspect this diff", "plugin:CodeReview"],
-            );
+            assert_screen_contains(&screen, &["snapshot:abcdef12"]);
         }
     }
 

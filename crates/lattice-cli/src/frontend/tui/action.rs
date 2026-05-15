@@ -1,5 +1,5 @@
 use crossterm::event::{KeyEvent, MouseEvent};
-use lattice_runtime::{AgentHandleId, Runtime, TurnId, TurnStatus};
+use lattice_runtime::{TurnCompletion, TurnId, TurnStatus};
 
 use super::event::Event;
 use super::state::FileSnapshot;
@@ -32,20 +32,16 @@ pub(super) enum TuiAction {
     },
     RuntimeTurnStarted {
         turn_id: u64,
-        handle_id: AgentHandleId,
+        session_id: String,
         runtime_turn_id: TurnId,
     },
     RuntimeTurnFinished {
         turn_id: u64,
-        runtime: Runtime,
-        handle_id: AgentHandleId,
+        session_id: String,
         runtime_turn_id: TurnId,
         status: TurnStatus,
+        completion: Option<TurnCompletion>,
         error: Option<String>,
-    },
-    RuntimeBusy {
-        turn_id: u64,
-        prompt_text: String,
     },
 }
 
@@ -95,34 +91,27 @@ impl From<Event> for TuiAction {
             },
             Event::RuntimeTurnStarted {
                 turn_id,
-                handle_id,
+                session_id,
                 runtime_turn_id,
             } => Self::RuntimeTurnStarted {
                 turn_id,
-                handle_id,
+                session_id,
                 runtime_turn_id,
             },
             Event::RuntimeTurnFinished {
                 turn_id,
-                runtime,
-                handle_id,
+                session_id,
                 runtime_turn_id,
                 status,
+                completion,
                 error,
             } => Self::RuntimeTurnFinished {
                 turn_id,
-                runtime,
-                handle_id,
+                session_id,
                 runtime_turn_id,
                 status,
+                completion,
                 error,
-            },
-            Event::RuntimeBusy {
-                turn_id,
-                prompt_text,
-            } => Self::RuntimeBusy {
-                turn_id,
-                prompt_text,
             },
         }
     }

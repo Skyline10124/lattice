@@ -2,16 +2,19 @@ use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
 use lattice_core::types::Role;
-use lattice_orchestrator::AgentTurnSpec;
+use lattice_profile::{ProfileError, ProfileSource};
 use lattice_prompt as prompt;
-use lattice_runtime::{AgentHandleId, Runtime, RuntimeTurnEvent, TurnCompletion, TurnRequest};
+use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnRequest};
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     prompt: String,
     model: String,
+    model_override: Option<String>,
+    agent: Option<&str>,
     provider_override: Option<&str>,
     verbose: bool,
     json: bool,
@@ -22,7 +25,9 @@ pub async fn run(
     system_prompt: Option<&str>,
     max_turns: u32,
     stream_output: bool,
-    security: crate::security::RuntimeSecurity,
+    project_root: PathBuf,
+    security_config: crate::config::SecurityConfig,
+    global_agents_dir: PathBuf,
 ) -> Result<()> {
     // Dry-run: compile prompt through engine and print, no LLM call, no credential needed
     if dry_run {
@@ -60,31 +65,28 @@ pub async fn run(
         return Ok(());
     }
     let session_id = previous_session.as_ref().map(|session| session.id.clone());
-    let turn_spec = run_turn_spec(
-        model.clone(),
-        provider_override.map(str::to_string),
-        system_prompt.map(str::to_string),
-        ".".into(),
-    );
-    let seed_messages = previous_session
-        .as_ref()
-        .map(crate::session::messages_for_agent)
-        .unwrap_or_default();
     let task_state_seed =
-        crate::coding_agent::load_latest_manifest_metadata(&runtime, previous_session.as_ref());
-    let handle_id = runtime.get_or_create_agent_handle_for_session_seeded(
-        turn_spec,
+        crate::session_seed::load_latest_manifest_metadata(&runtime, previous_session.as_ref());
+    let security = crate::security::build_runtime_security(&security_config, &project_root)?;
+    let source = crate::profile_runtime::profile_source_from_agent_arg(agent);
+    let session = prepare_run_profile_session(
+        &runtime,
+        source,
+        model_override,
+        project_root.clone(),
+        global_agents_dir,
         security.clone(),
+        security_config,
+        provider_override.map(str::to_string),
         session_id.clone(),
-        seed_messages,
         task_state_seed,
     )?;
-    let snapshot = runtime.agent_handle_snapshot(&handle_id)?;
+    let resolved = runtime.resolve_with_provider(&model, provider_override)?;
 
     if verbose {
         eprintln!(
             "{}",
-            format!("resolved: {}@{}", snapshot.model, snapshot.provider).cyan()
+            format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan()
         );
     }
 
@@ -100,11 +102,11 @@ pub async fn run(
         cancellation_id: None,
     };
     let completion = if json || !stream_output {
-        submit_run_runtime_turn(&runtime, &handle_id, request, None).await?
+        submit_run_runtime_turn(&runtime, session, request, None).await?
     } else {
-        let mut renderer = RuntimeEventRenderer::new(verbose, false);
+        let mut renderer = crate::runtime_turn::RuntimeEventRenderer::new(verbose, false);
         let completion =
-            submit_run_runtime_turn(&runtime, &handle_id, request, Some(&mut renderer)).await?;
+            submit_run_runtime_turn(&runtime, session, request, Some(&mut renderer)).await?;
         renderer.finish(
             completion
                 .token_usage
@@ -118,6 +120,7 @@ pub async fn run(
     if json || !stream_output {
         render_run_completion(&completion, verbose, json)?;
     }
+    render_profile_warning(&completion, agent, previous_session.is_some(), json)?;
 
     if save && verbose {
         let saved_id = completion
@@ -129,6 +132,71 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_run_profile_session(
+    runtime: &Runtime,
+    source: ProfileSource,
+    model_override: Option<String>,
+    project_root: PathBuf,
+    global_agents_dir: PathBuf,
+    security: crate::security::RuntimeSecurity,
+    security_config: crate::config::SecurityConfig,
+    provider_override: Option<String>,
+    session_id: Option<String>,
+    task_state_seed: Option<lattice_agent::TaskState>,
+) -> Result<RuntimeAgentSession> {
+    let request = crate::profile_runtime::ProfileRuntimeSessionRequest {
+        source: source.clone(),
+        project_root: project_root.clone(),
+        global_agents_dir: global_agents_dir.clone(),
+        security_config,
+        model_override: model_override.clone(),
+        provider_override: provider_override.clone(),
+        session_id: session_id.clone(),
+        task_state_seed: task_state_seed.clone(),
+    };
+    match crate::profile_runtime::prepare_profile_runtime_session(runtime, request) {
+        Ok(session) => Ok(session),
+        Err(error) if matches!(source, ProfileSource::Default) => {
+            let Some(profile_error) = error.downcast_ref::<ProfileError>() else {
+                return Err(error);
+            };
+            let ProfileError::MissingDefault { dir, template } = profile_error else {
+                return Err(error);
+            };
+            if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+                anyhow::bail!("{}", crate::profile_runtime::missing_default_message(dir));
+            }
+            eprint!(
+                "No default agent profile exists. Create .lattice/agents/default/agent.toml and continue this run? [y/N] "
+            );
+            std::io::stderr().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                anyhow::bail!("{}", crate::profile_runtime::missing_default_message(dir));
+            }
+            let path = crate::profile_runtime::create_default_profile(dir, template)?;
+            eprintln!(
+                "Created {}. Edit it later to change prompt, tools, model, or security settings.",
+                path.strip_prefix(&project_root).unwrap_or(&path).display()
+            );
+            crate::profile_runtime::prepare_profile_runtime_session_with_security(
+                runtime,
+                ProfileSource::Default,
+                project_root,
+                global_agents_dir,
+                security,
+                model_override,
+                provider_override,
+                session_id,
+                task_state_seed,
+            )
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn display_id(id: &str) -> String {
@@ -194,200 +262,37 @@ async fn dry_run_prompt(
     Ok(())
 }
 
-/// Run a pipeline: load agent registry, create registries, and execute.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_pipeline(
-    prompt: &str,
-    start_agent: &str,
-    agents_dir: Option<&str>,
-    plugins_dir: Option<&str>,
-    _tools_dir: Option<&str>,
-    verbose: bool,
-    json: bool,
-    creds: HashMap<String, String>,
-) -> Result<()> {
-    let (runtime, dir) = crate::runtime::pipeline_runtime(agents_dir, plugins_dir, creds)?;
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!("loading agents from {} ...", dir.display()).dimmed()
-        );
-    }
-
-    let registry = runtime.agent_registry();
-
-    if registry.list().is_empty() {
-        anyhow::bail!("No agent profiles found in '{}'", dir.display());
-    }
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!("loaded {} agents", registry.list().len()).cyan()
-        );
-        for profile in registry.list() {
-            eprintln!("  - {} ({})", profile.agent.name, profile.agent.model);
-        }
-    }
-
-    if verbose {
-        for meta in runtime.plugin_registry().list() {
-            eprintln!("  plugin: {} — {}", meta.name, meta.description);
-        }
-    }
-
-    // Validate pipeline chain before running
-    let report = runtime.dry_run_pipeline(start_agent);
-    if !report.valid {
-        eprintln!("{}", "Pipeline validation failed:".red());
-        for issue in &report.issues {
-            eprintln!("  - {}", issue.red());
-        }
-        anyhow::bail!(
-            "Pipeline '{}' is invalid — fix agent profiles before running",
-            start_agent
-        );
-    }
-
-    if verbose {
-        eprintln!(
-            "{}",
-            format!(
-                "pipeline chain: {} → end",
-                report.agents_in_chain.join(" → ")
-            )
-            .cyan()
-        );
-    }
-
-    let result = runtime.run_pipeline(start_agent, prompt).await;
-
-    if json {
-        let out = serde_json::json!({
-            "completed": result.completed,
-            "duration_ms": result.duration_ms,
-            "agents": result.results.iter().map(|r| serde_json::json!({
-                "agent": r.agent_name,
-                "output": r.output,
-                "next": r.next,
-                "duration_ms": r.duration_ms,
-            })).collect::<Vec<_>>(),
-            "errors": result.errors.iter().map(|e| serde_json::json!({
-                "agent": e.agent_name,
-                "message": e.message,
-                "skippable": e.skippable,
-            })).collect::<Vec<_>>(),
-            "skipped": result.skipped,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        println!(
-            "{}",
-            format!("Pipeline completed in {}ms", result.duration_ms).green()
-        );
-        if result.completed {
-            println!("{}", "Status: completed".green());
-        } else {
-            println!("{}", "Status: incomplete".yellow());
-        }
-
-        for r in &result.results {
-            println!();
-            println!(
-                "{}",
-                format!("── {} ({}ms) ──", r.agent_name, r.duration_ms).cyan()
-            );
-            let preview: String = r.output.to_string().chars().take(500).collect();
-            println!("{}", preview);
-            if let Some(ref next) = r.next {
-                eprintln!("{}", format!("  → next: {}", next).dimmed());
-            }
-        }
-
-        for e in &result.errors {
-            println!();
-            println!("{}", format!("── {} (ERROR) ──", e.agent_name).red());
-            println!("  {}", e.message.red());
-            if e.skippable {
-                println!("  {}", "(skippable)".dimmed());
-            }
-        }
-
-        if !result.skipped.is_empty() {
-            println!();
-            println!(
-                "{}",
-                format!("Skipped: {}", result.skipped.join(", ")).yellow()
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn flush_reasoning(buf: &str, verbose: bool, json: bool) {
-    if verbose && !json && !buf.is_empty() {
-        eprintln!("{} {}", "reasoning:".dimmed(), buf.trim());
-    }
-}
-
-pub(crate) fn run_turn_spec(
-    model: String,
-    provider_override: Option<String>,
-    system_prompt: Option<String>,
-    workspace: String,
-) -> AgentTurnSpec {
-    AgentTurnSpec {
-        profile_name: "run".into(),
-        model,
-        provider_override,
-        system_prompt,
-        prompt_spec: None,
-        capabilities: lattice_orchestrator::CapabilitiesConfig {
-            presets: vec!["minimal".into()],
-            bundles: Vec::new(),
-        },
-        tools: Default::default(),
-        behavior: Default::default(),
-        handoff: Default::default(),
-        memory: Default::default(),
-        project_root: Some(workspace.clone()),
-        cwd: Some(workspace),
-        thinking_effort: None,
-        preset: None,
-    }
-}
-
 pub(crate) async fn submit_run_runtime_turn(
     runtime: &Runtime,
-    handle_id: &AgentHandleId,
+    session: RuntimeAgentSession,
     request: TurnRequest,
-    mut renderer: Option<&mut RuntimeEventRenderer>,
+    mut renderer: Option<&mut crate::runtime_turn::RuntimeEventRenderer>,
 ) -> Result<TurnCompletion> {
-    let stream = runtime.submit_turn(handle_id, request).await?;
-    tokio::pin!(stream);
-    while let Some(event) = stream.next().await {
+    let submitted = runtime.submit_session_turn(session, request).await?;
+    let mut events = submitted.events;
+    while let Some(event) = events.next().await {
         if let Some(renderer) = renderer.as_deref_mut() {
             renderer.render(&event)?;
         }
     }
 
-    let completion = runtime
-        .latest_turn_completion(handle_id)?
-        .ok_or_else(|| anyhow::anyhow!("runtime turn completed without stored completion"))?;
-    crate::coding_agent::require_successful_runtime_completion(completion)
+    let completion = submitted.completion.await?;
+    crate::runtime_turn::require_successful_runtime_completion(completion)
 }
 
 pub(crate) fn run_completion_value(completion: &TurnCompletion) -> serde_json::Value {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "content": completion.assistant_text,
         "total_tokens": completion
             .token_usage
             .as_ref()
             .map(|usage| usage.total_tokens)
             .unwrap_or_default(),
-    })
+    });
+    if let Some(warning) = completion.profile_drift_warning.as_ref() {
+        value["profile_warning"] = serde_json::Value::String(warning.clone());
+    }
+    value
 }
 
 fn render_run_completion(completion: &TurnCompletion, verbose: bool, json: bool) -> Result<()> {
@@ -415,87 +320,78 @@ fn render_run_completion(completion: &TurnCompletion, verbose: bool, json: bool)
     Ok(())
 }
 
-pub(crate) struct RuntimeEventRenderer {
-    verbose: bool,
+fn render_profile_warning(
+    completion: &TurnCompletion,
+    agent: Option<&str>,
+    restored_session: bool,
     json: bool,
-    content_buf: String,
-    reasoning_buf: String,
+) -> Result<()> {
+    if json {
+        return Ok(());
+    }
+    let Some(warning) = completion.profile_drift_warning.as_ref() else {
+        return Ok(());
+    };
+    if restored_session {
+        if let Some(agent) = agent {
+            let hash = snapshot_hash_from_warning(warning).unwrap_or(warning);
+            eprintln!("Ignoring --agent {agent}; restored session is locked to snapshot {hash}.");
+        } else {
+            eprintln!("{warning}");
+        }
+    } else {
+        eprintln!("{warning}");
+    }
+    Ok(())
 }
 
-impl RuntimeEventRenderer {
-    fn new(verbose: bool, json: bool) -> Self {
-        Self {
-            verbose,
-            json,
-            content_buf: String::new(),
-            reasoning_buf: String::new(),
+fn snapshot_hash_from_warning(warning: &str) -> Option<&str> {
+    warning.split("snapshot ").nth(1).map(str::trim)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_runtime::{TurnId, TurnStatus};
+
+    fn completion_with_profile_warning() -> TurnCompletion {
+        TurnCompletion {
+            session_id: "session".into(),
+            turn_id: TurnId::new(),
+            status: TurnStatus::Completed,
+            assistant_text: "answer".into(),
+            token_usage: None,
+            task_state_snapshot: lattice_agent::TaskState::new(),
+            final_report: None,
+            turn_manifests: Vec::new(),
+            model: "model".into(),
+            provider: "provider".into(),
+            saved_session_id: None,
+            profile_drift_warning: Some(
+                "profile changed on disk; current session remains locked to snapshot abcdef123456"
+                    .into(),
+            ),
+            error: None,
         }
     }
 
-    fn render(&mut self, event: &RuntimeTurnEvent) -> Result<()> {
-        match event {
-            RuntimeTurnEvent::Token { text, .. } => {
-                if !self.json {
-                    print!("{}", text);
-                    std::io::stdout().flush()?;
-                }
-                self.content_buf.push_str(text);
-            }
-            RuntimeTurnEvent::Reasoning { text, .. } => {
-                self.reasoning_buf.push_str(text);
-            }
-            RuntimeTurnEvent::ToolStarted {
-                batch_count, name, ..
-            } => {
-                self.flush_reasoning();
-                if self.verbose && !self.json {
-                    eprintln!("\n{} {} tool call(s)...", "executing".dimmed(), batch_count);
-                    eprintln!("{} {}", "tool".dimmed(), name);
-                }
-            }
-            RuntimeTurnEvent::ToolFinished { name, result, .. } => {
-                if self.verbose && !self.json {
-                    eprintln!(
-                        "\n{} {} -> {}",
-                        "tool".dimmed(),
-                        name,
-                        result.chars().take(200).collect::<String>()
-                    );
-                }
-            }
-            RuntimeTurnEvent::Completed { .. } => {
-                self.flush_reasoning();
-            }
-            RuntimeTurnEvent::Error { message, .. } => {
-                self.flush_reasoning();
-                eprintln!("{} {}", "error:".red(), message);
-            }
-            RuntimeTurnEvent::ManifestReady { .. } => {}
-            RuntimeTurnEvent::Cancelled { .. } => {
-                self.flush_reasoning();
-                eprintln!("{}", "cancelled".yellow());
-            }
-        }
-        Ok(())
+    #[test]
+    fn run_completion_json_includes_profile_warning() {
+        let value = run_completion_value(&completion_with_profile_warning());
+
+        assert_eq!(value["content"], "answer");
+        assert_eq!(
+            value["profile_warning"],
+            "profile changed on disk; current session remains locked to snapshot abcdef123456"
+        );
     }
 
-    fn finish(&mut self, total_tokens: Option<u64>) -> Result<()> {
-        self.flush_reasoning();
-        if self.json {
-            let out = serde_json::json!({
-                "content": self.content_buf,
-                "total_tokens": total_tokens.unwrap_or_default(),
-            });
-            println!("{}", serde_json::to_string_pretty(&out)?);
-        } else {
-            println!();
-        }
-        std::io::stdout().flush()?;
-        Ok(())
-    }
+    #[test]
+    fn profile_drift_warning_hash_suffix_is_extracted() {
+        let warning = completion_with_profile_warning()
+            .profile_drift_warning
+            .unwrap();
 
-    fn flush_reasoning(&mut self) {
-        flush_reasoning(&self.reasoning_buf, self.verbose, self.json);
-        self.reasoning_buf.clear();
+        assert_eq!(snapshot_hash_from_warning(&warning), Some("abcdef123456"));
     }
 }

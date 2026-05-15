@@ -64,7 +64,7 @@ pub(in crate::frontend::tui) fn render_help(f: &mut Frame, area: Rect, theme: &T
         help_row("Ctrl+N", "new session", "Ctrl+L", "clear transcript", theme),
         help_row("Ctrl+F", "find", "Ctrl+G", "next match", theme),
         help_row("Ctrl+O", "thinking", "Ctrl+E", "expand tool", theme),
-        help_row("/permissions", "sandbox", "/plugins", "plugins", theme),
+        help_row("/permissions", "sandbox", "/status", "agent", theme),
         help_row("Esc", "clear/close", "End", "jump bottom", theme),
         help_row("↑/↓", "scroll/history", "Ctrl+C", "quit", theme),
     ];

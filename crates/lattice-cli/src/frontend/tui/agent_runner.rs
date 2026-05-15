@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
-use lattice_orchestrator::{AgentPreset, AgentTurnSpec};
-use lattice_runtime::{AgentHandleId, Runtime, RuntimeTurnEvent, TurnId, TurnRequest, TurnStatus};
+use lattice_runtime::{
+    Runtime, RuntimeAgentSession, RuntimeTurnEvent, TurnId, TurnRequest, TurnStatus,
+};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::activity::file_snapshot_for_tool;
@@ -12,19 +13,20 @@ pub(super) struct AgentBuildRequest {
     pub(super) turn_id: u64,
     pub(super) tx: UnboundedSender<Event>,
     pub(super) runtime: Runtime,
-    pub(super) existing_handle: Option<AgentHandleId>,
-    pub(super) profile_name: String,
+    pub(super) existing_session: Option<RuntimeAgentSession>,
+    pub(super) profile_source: lattice_profile::ProfileSource,
+    pub(super) agent_label: String,
     pub(super) current_model: String,
     pub(super) previous_model: String,
     pub(super) provider_override: Option<String>,
     pub(super) workdir: PathBuf,
     pub(super) previous_session: Option<crate::session::Session>,
-    pub(super) thinking_effort: Option<String>,
+    pub(super) task_state_seed: Option<lattice_agent::TaskState>,
     pub(super) security: crate::security::RuntimeSecurity,
 }
 
 pub(super) struct AgentBuildOutcome {
-    pub(super) handle_id: AgentHandleId,
+    pub(super) session: RuntimeAgentSession,
     pub(super) rebuilt: Option<RebuiltAgent>,
 }
 
@@ -41,7 +43,7 @@ pub(super) enum AgentBuildStatus {
 
 pub(super) struct AgentStreamRequest {
     pub(super) runtime: Runtime,
-    pub(super) handle_id: AgentHandleId,
+    pub(super) session: RuntimeAgentSession,
     pub(super) prompt_text: String,
     pub(super) turn_id: u64,
     pub(super) tx: UnboundedSender<Event>,
@@ -54,7 +56,7 @@ pub(super) struct AgentStreamRequest {
 struct RuntimeEventContext<'a> {
     tx: &'a UnboundedSender<Event>,
     local_turn_id: u64,
-    handle_id: &'a AgentHandleId,
+    session_id: &'a str,
     runtime_turn_id: Option<&'a TurnId>,
     workdir: &'a Path,
     security: &'a crate::security::RuntimeSecurity,
@@ -67,29 +69,26 @@ struct RuntimeTerminal {
     error: Option<String>,
 }
 
-/// Build or reuse the runtime-owned handle backing the active TUI turn.
+/// Build or reuse the runtime-owned session backing the active TUI turn.
 pub(super) async fn ensure_agent(request: AgentBuildRequest) -> AgentBuildStatus {
-    let spec = runtime_turn_spec(&request);
     let session_id = request.previous_session.as_ref().map(|s| s.id.clone());
-    let needs_rebuild =
-        request.existing_handle.is_none() || request.current_model != request.previous_model;
+    let can_reuse = request.current_model == request.previous_model
+        && request.existing_session.as_ref().is_some_and(|session| {
+            session.source_label == request.agent_label
+                && session.spec.model == request.current_model
+                && session.invocation.provider_override == request.provider_override
+        });
 
-    if !needs_rebuild {
-        if let Some(handle_id) = request.existing_handle.as_ref() {
-            let matches_request = request
-                .runtime
-                .agent_handle_matches(handle_id, &spec, &request.security, session_id.as_deref())
-                .unwrap_or(false);
-            if matches_request {
-                return AgentBuildStatus::Ready(AgentBuildOutcome {
-                    handle_id: handle_id.clone(),
-                    rebuilt: None,
-                });
-            }
+    if can_reuse {
+        if let Some(session) = request.existing_session.as_ref() {
+            return AgentBuildStatus::Ready(AgentBuildOutcome {
+                session: session.clone(),
+                rebuilt: None,
+            });
         }
     }
 
-    match build_runtime_handle(&request, spec, session_id) {
+    match build_runtime_session(&request, session_id) {
         Ok(outcome) => {
             let _ = request.tx.send(Event::ModelInfo {
                 turn_id: request.turn_id,
@@ -116,9 +115,8 @@ pub(super) async fn ensure_agent(request: AgentBuildRequest) -> AgentBuildStatus
     }
 }
 
-fn build_runtime_handle(
+fn build_runtime_session(
     request: &AgentBuildRequest,
-    spec: AgentTurnSpec,
     session_id: Option<String>,
 ) -> anyhow::Result<AgentBuildOutcome> {
     let resolved = request
@@ -129,59 +127,32 @@ fn build_runtime_handle(
     } else {
         128000
     };
-    let seed_messages = request
-        .previous_session
-        .as_ref()
-        .map(crate::session::messages_for_agent)
-        .unwrap_or_default();
-    let task_state_seed = crate::coding_agent::load_latest_manifest_metadata(
+    let task_state_seed = request.task_state_seed.clone().or_else(|| {
+        crate::session_seed::load_latest_manifest_metadata(
+            &request.runtime,
+            request.previous_session.as_ref(),
+        )
+    });
+    let session = crate::profile_runtime::prepare_profile_runtime_session_with_security(
         &request.runtime,
-        request.previous_session.as_ref(),
-    );
-    let handle_id = request
-        .runtime
-        .get_or_create_agent_handle_for_session_seeded(
-            spec,
-            request.security.clone(),
-            session_id,
-            seed_messages,
-            task_state_seed,
-        )?;
+        request.profile_source.clone(),
+        request.workdir.clone(),
+        crate::profile_runtime::default_global_agents_dir(),
+        request.security.clone(),
+        Some(request.current_model.clone()),
+        request.provider_override.clone(),
+        session_id,
+        task_state_seed,
+    )?;
 
     Ok(AgentBuildOutcome {
-        handle_id,
+        session,
         rebuilt: Some(RebuiltAgent {
             model: resolved.canonical_id,
             provider: resolved.provider,
             context_limit,
         }),
     })
-}
-
-fn runtime_turn_spec(request: &AgentBuildRequest) -> AgentTurnSpec {
-    let workdir = request.workdir.to_string_lossy().to_string();
-    AgentTurnSpec {
-        profile_name: request.profile_name.clone(),
-        model: request.current_model.clone(),
-        provider_override: request.provider_override.clone(),
-        system_prompt: Some(lattice_runtime::coding_system_prompt(
-            &request.workdir,
-            &request.workdir,
-        )),
-        prompt_spec: None,
-        capabilities: lattice_orchestrator::CapabilitiesConfig {
-            presets: vec!["coding".into()],
-            bundles: Vec::new(),
-        },
-        tools: Default::default(),
-        behavior: Default::default(),
-        handoff: Default::default(),
-        memory: Default::default(),
-        project_root: Some(workdir.clone()),
-        cwd: Some(workdir),
-        thinking_effort: request.thinking_effort.clone(),
-        preset: Some(AgentPreset::Coding),
-    }
 }
 
 pub(super) fn spawn_stream(request: AgentStreamRequest) {
@@ -193,19 +164,12 @@ pub(super) fn spawn_stream(request: AgentStreamRequest) {
             session_id: request.session_id.clone(),
             cancellation_id: None,
         };
-        let stream = match request
+        let submitted = match request
             .runtime
-            .submit_turn(&request.handle_id, turn_request)
+            .submit_session_turn(request.session.clone(), turn_request)
             .await
         {
-            Ok(stream) => stream,
-            Err(lattice_runtime::RuntimeError::HandleBusy(_)) => {
-                let _ = request.tx.send(Event::RuntimeBusy {
-                    turn_id: request.turn_id,
-                    prompt_text: request.prompt_text,
-                });
-                return;
-            }
+            Ok(submitted) => submitted,
             Err(err) => {
                 let _ = request.tx.send(pack_error(
                     request.turn_id,
@@ -215,16 +179,18 @@ pub(super) fn spawn_stream(request: AgentStreamRequest) {
             }
         };
 
-        tokio::pin!(stream);
+        let session_id = submitted.session_id.clone();
+        let mut stream = submitted.events;
         let mut runtime_turn_id: Option<TurnId> = None;
         let mut terminal: Option<RuntimeTerminal> = None;
         while let Some(event) = stream.next().await {
             let event_turn_id = runtime_event_turn_id(&event).clone();
+            let event_session_id = event_session_id(&event).to_string();
             if runtime_turn_id.is_none() {
                 runtime_turn_id = Some(event_turn_id.clone());
                 let _ = request.tx.send(Event::RuntimeTurnStarted {
                     turn_id: request.turn_id,
-                    handle_id: request.handle_id.clone(),
+                    session_id: event_session_id.clone(),
                     runtime_turn_id: event_turn_id.clone(),
                 });
             }
@@ -232,7 +198,7 @@ pub(super) fn spawn_stream(request: AgentStreamRequest) {
             let context = RuntimeEventContext {
                 tx: &request.tx,
                 local_turn_id: request.turn_id,
-                handle_id: &request.handle_id,
+                session_id: &session_id,
                 runtime_turn_id: runtime_turn_id.as_ref(),
                 workdir: &request.workdir,
                 security: &request.security,
@@ -242,13 +208,14 @@ pub(super) fn spawn_stream(request: AgentStreamRequest) {
             }
         }
 
+        let completion = submitted.completion.await.ok();
         if let Some(done) = terminal {
             let _ = request.tx.send(Event::RuntimeTurnFinished {
                 turn_id: request.turn_id,
-                runtime: request.runtime,
-                handle_id: request.handle_id,
+                session_id,
                 runtime_turn_id: done.runtime_turn_id,
                 status: done.status,
+                completion,
                 error: done.error,
             });
         }
@@ -269,9 +236,9 @@ fn dispatch_runtime_event(
     context: RuntimeEventContext<'_>,
     event: RuntimeTurnEvent,
 ) -> Option<RuntimeTerminal> {
-    let event_handle = runtime_event_handle_id(&event);
+    let event_session = event_session_id(&event);
     let event_turn = runtime_event_turn_id(&event);
-    if event_handle != context.handle_id {
+    if event_session != context.session_id {
         return None;
     }
     if context
@@ -375,16 +342,16 @@ fn dispatch_runtime_event(
     }
 }
 
-fn runtime_event_handle_id(event: &RuntimeTurnEvent) -> &AgentHandleId {
+fn event_session_id(event: &RuntimeTurnEvent) -> &str {
     match event {
-        RuntimeTurnEvent::Token { handle_id, .. }
-        | RuntimeTurnEvent::Reasoning { handle_id, .. }
-        | RuntimeTurnEvent::ToolStarted { handle_id, .. }
-        | RuntimeTurnEvent::ToolFinished { handle_id, .. }
-        | RuntimeTurnEvent::ManifestReady { handle_id, .. }
-        | RuntimeTurnEvent::Completed { handle_id, .. }
-        | RuntimeTurnEvent::Cancelled { handle_id, .. }
-        | RuntimeTurnEvent::Error { handle_id, .. } => handle_id,
+        RuntimeTurnEvent::Token { session_id, .. }
+        | RuntimeTurnEvent::Reasoning { session_id, .. }
+        | RuntimeTurnEvent::ToolStarted { session_id, .. }
+        | RuntimeTurnEvent::ToolFinished { session_id, .. }
+        | RuntimeTurnEvent::ManifestReady { session_id, .. }
+        | RuntimeTurnEvent::Completed { session_id, .. }
+        | RuntimeTurnEvent::Cancelled { session_id, .. }
+        | RuntimeTurnEvent::Error { session_id, .. } => session_id,
     }
 }
 
@@ -410,7 +377,7 @@ mod tests {
 
     fn test_context<'a>(
         tx: &'a UnboundedSender<Event>,
-        handle_id: &'a AgentHandleId,
+        session_id: &'a str,
         runtime_turn_id: Option<&'a TurnId>,
         workdir: &'a Path,
         security: &'a crate::security::RuntimeSecurity,
@@ -418,7 +385,7 @@ mod tests {
         RuntimeEventContext {
             tx,
             local_turn_id: 7,
-            handle_id,
+            session_id,
             runtime_turn_id,
             workdir,
             security,
@@ -444,28 +411,77 @@ mod tests {
             .unwrap();
     }
 
+    fn build_request(
+        tx: UnboundedSender<Event>,
+        runtime: Runtime,
+        dir: &Path,
+        security: crate::security::RuntimeSecurity,
+        profile_name: &str,
+        model: &str,
+        existing_session: Option<RuntimeAgentSession>,
+        previous_model: &str,
+    ) -> AgentBuildRequest {
+        write_test_profile(dir, profile_name, model);
+        AgentBuildRequest {
+            turn_id: 42,
+            tx,
+            runtime,
+            existing_session,
+            profile_source: lattice_profile::ProfileSource::Name(profile_name.into()),
+            agent_label: format!("agent:{profile_name}"),
+            current_model: model.into(),
+            previous_model: previous_model.into(),
+            provider_override: None,
+            workdir: dir.to_path_buf(),
+            previous_session: None,
+            task_state_seed: None,
+            security,
+        }
+    }
+
+    fn write_test_profile(project_root: &Path, name: &str, model: &str) {
+        let dir = project_root.join(".lattice").join("agents").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!(
+                r#"
+schema_version = 1
+
+[agent]
+name = "{name}"
+model = "{model}"
+
+[prompt]
+system = "You are a deterministic TUI test agent."
+
+[tools]
+bundles = ["workspace", "filesystem"]
+enabled = []
+"#
+            ),
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
-    async fn tui_build_request_returns_runtime_handle() {
+    async fn tui_build_request_returns_runtime_session() {
         let mut runtime = Runtime::builder().build();
-        register_test_model(&mut runtime, "tui-runtime-handle-model");
+        register_test_model(&mut runtime, "tui-runtime-session-model");
         let dir = tempfile::tempdir().unwrap();
         let security = crate::security::default_runtime_security(dir.path()).unwrap();
         let (tx, mut rx) = unbounded_channel();
 
-        let status = ensure_agent(AgentBuildRequest {
-            turn_id: 42,
+        let status = ensure_agent(build_request(
             tx,
-            runtime: runtime.clone(),
-            existing_handle: None,
-            profile_name: "coding".into(),
-            current_model: "tui-runtime-handle-model".into(),
-            previous_model: String::new(),
-            provider_override: None,
-            workdir: dir.path().to_path_buf(),
-            previous_session: None,
-            thinking_effort: None,
+            runtime.clone(),
+            dir.path(),
             security,
-        })
+            "default",
+            "tui-runtime-session-model",
+            None,
+            "",
+        ))
         .await;
 
         let outcome = match status {
@@ -477,9 +493,8 @@ mod tests {
                 _ => panic!("runtime handle build should succeed"),
             },
         };
-        let snapshot = runtime.agent_handle_snapshot(&outcome.handle_id).unwrap();
-        assert_eq!(snapshot.model, "tui-runtime-handle-model");
-        assert_eq!(snapshot.provider, "ollama");
+        assert_eq!(outcome.session.spec.profile_name, "default");
+        assert_eq!(outcome.session.spec.model, "tui-runtime-session-model");
         match rx.try_recv().unwrap() {
             Event::ModelInfo {
                 turn_id,
@@ -487,7 +502,7 @@ mod tests {
                 provider,
             } => {
                 assert_eq!(turn_id, 42);
-                assert_eq!(model, "tui-runtime-handle-model");
+                assert_eq!(model, "tui-runtime-session-model");
                 assert_eq!(provider, "ollama");
             }
             _ => panic!("expected model info event"),
@@ -495,69 +510,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_agent_rejects_existing_handle_with_wrong_profile() {
+    async fn tui_runtime_uses_selected_profile_source() {
         let mut runtime = Runtime::builder().build();
         register_test_model(&mut runtime, "tui-profile-isolation-model");
         let dir = tempfile::tempdir().unwrap();
         let security = crate::security::default_runtime_security(dir.path()).unwrap();
         let (tx, _rx) = unbounded_channel();
-        let normal_request = AgentBuildRequest {
-            turn_id: 1,
-            tx: tx.clone(),
-            runtime: runtime.clone(),
-            existing_handle: None,
-            profile_name: "coding".into(),
-            current_model: "tui-profile-isolation-model".into(),
-            previous_model: String::new(),
-            provider_override: None,
-            workdir: dir.path().to_path_buf(),
-            previous_session: None,
-            thinking_effort: None,
-            security: security.clone(),
-        };
-        let normal_handle = match ensure_agent(normal_request).await {
-            AgentBuildStatus::Ready(outcome) => outcome.handle_id,
-            AgentBuildStatus::Failed => panic!("normal handle should build"),
+        let normal_session = match ensure_agent(build_request(
+            tx.clone(),
+            runtime.clone(),
+            dir.path(),
+            security.clone(),
+            "default",
+            "tui-profile-isolation-model",
+            None,
+            "",
+        ))
+        .await
+        {
+            AgentBuildStatus::Ready(outcome) => outcome.session,
+            AgentBuildStatus::Failed => panic!("normal session should build"),
         };
 
-        let plugin_status = ensure_agent(AgentBuildRequest {
-            turn_id: 2,
+        let reviewer_session = match ensure_agent(build_request(
             tx,
-            runtime: runtime.clone(),
-            existing_handle: Some(normal_handle.clone()),
-            profile_name: "plugin:CodeReview".into(),
-            current_model: "tui-profile-isolation-model".into(),
-            previous_model: "tui-profile-isolation-model".into(),
-            provider_override: None,
-            workdir: dir.path().to_path_buf(),
-            previous_session: None,
-            thinking_effort: None,
+            runtime.clone(),
+            dir.path(),
             security,
-        })
-        .await;
-
-        let plugin_handle = match plugin_status {
-            AgentBuildStatus::Ready(outcome) => outcome.handle_id,
-            AgentBuildStatus::Failed => panic!("plugin handle should build"),
+            "reviewer",
+            "tui-profile-isolation-model",
+            Some(normal_session.clone()),
+            "tui-profile-isolation-model",
+        ))
+        .await
+        {
+            AgentBuildStatus::Ready(outcome) => outcome.session,
+            AgentBuildStatus::Failed => panic!("selected profile session should build"),
         };
         assert_ne!(
-            plugin_handle, normal_handle,
-            "plugin requests must not reuse a coding-profile handle"
+            reviewer_session.spec.profile_name, normal_session.spec.profile_name,
+            "different selected profiles must not reuse the existing session"
         );
     }
 
     #[test]
     fn runtime_turn_event_runtime_token_event_becomes_stream_token() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Token {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
                 text: "hello".into(),
             },
@@ -581,15 +593,20 @@ mod tests {
     #[test]
     fn runtime_turn_event_runtime_reasoning_event_becomes_stream_token() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Reasoning {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
                 text: "thinking".into(),
             },
@@ -616,7 +633,6 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "before").unwrap();
         let security = crate::security::default_runtime_security(dir.path()).unwrap();
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let arguments = serde_json::json!({
             "path": "notes.txt",
@@ -627,13 +643,13 @@ mod tests {
         dispatch_runtime_event(
             test_context(
                 &tx,
-                &handle_id,
+                "runtime-session",
                 Some(&runtime_turn_id),
                 dir.path(),
                 &security,
             ),
             RuntimeTurnEvent::ToolStarted {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
                 call_id: "call-1".into(),
                 name: "write_file".into(),
@@ -661,15 +677,20 @@ mod tests {
     #[test]
     fn runtime_turn_event_manifest_ready_is_invisible() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         let terminal = dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::ManifestReady {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
                 count: 1,
             },
@@ -682,15 +703,20 @@ mod tests {
     #[test]
     fn runtime_turn_event_runtime_completed_event_queries_completion() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         let terminal = dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Completed {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
             },
         )
@@ -707,15 +733,20 @@ mod tests {
     #[test]
     fn runtime_turn_event_cancelled_is_terminal_without_transcript_token() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         let terminal = dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Cancelled {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
             },
         )
@@ -729,15 +760,20 @@ mod tests {
     #[test]
     fn runtime_turn_event_error_becomes_terminal_stream_error() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         let terminal = dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Error {
-                handle_id: handle_id.clone(),
+                session_id: "runtime-session".into(),
                 turn_id: runtime_turn_id.clone(),
                 message: "provider failed".into(),
                 retryable: false,
@@ -759,17 +795,22 @@ mod tests {
     #[test]
     fn runtime_turn_event_stale_runtime_event_is_ignored() {
         let (tx, mut rx) = unbounded_channel();
-        let handle_id = AgentHandleId::new();
-        let other_handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
+        let stale_turn_id = TurnId::new();
         let workdir = std::env::current_dir().unwrap();
         let security = crate::security::default_runtime_security(&workdir).unwrap();
 
         let terminal = dispatch_runtime_event(
-            test_context(&tx, &handle_id, Some(&runtime_turn_id), &workdir, &security),
+            test_context(
+                &tx,
+                "runtime-session",
+                Some(&runtime_turn_id),
+                &workdir,
+                &security,
+            ),
             RuntimeTurnEvent::Token {
-                handle_id: other_handle_id,
-                turn_id: runtime_turn_id.clone(),
+                session_id: "runtime-session".into(),
+                turn_id: stale_turn_id,
                 text: "ignored".into(),
             },
         );

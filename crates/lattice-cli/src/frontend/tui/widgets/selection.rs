@@ -234,7 +234,6 @@ fn menu_title(kind: &MenuKind) -> &'static str {
         MenuKind::Model => " models ",
         MenuKind::Provider => " providers ",
         MenuKind::Permissions => " permissions ",
-        MenuKind::Plugin => " plugins ",
     }
 }
 

@@ -1,3 +1,0 @@
-# operations
-
-Documentation for operations.

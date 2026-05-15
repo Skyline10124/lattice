@@ -30,7 +30,8 @@ pub(super) struct StatuslineView<'a> {
     pub(super) transcript_mode: bool,
     pub(super) thinking_effort: Option<&'a str>,
     pub(super) sandbox: &'a str,
-    pub(super) plugin_label: String,
+    pub(super) agent_label: &'a str,
+    pub(super) snapshot_label: Option<&'a str>,
     pub(super) queued_count: usize,
     pub(super) mode_label: &'static str,
     pub(super) spinner: &'static str,
@@ -59,10 +60,8 @@ impl<'a> TuiViewModel<'a> {
                 transcript_mode: app.transcript_mode,
                 thinking_effort: app.thinking_effort.as_deref(),
                 sandbox: app.security.mode_label.as_str(),
-                plugin_label: app
-                    .active_plugin_name()
-                    .map(|name| format!("plugin:{name}"))
-                    .unwrap_or_else(|| format!("plugins:{}", app.plugin_count())),
+                agent_label: &app.agent_label,
+                snapshot_label: app.snapshot_label.as_deref(),
                 queued_count: app.turn.queued_inputs.len(),
                 mode_label: app.mode_label(),
                 spinner: app.spinner(),
@@ -103,7 +102,6 @@ mod tests {
     use super::*;
     use crate::frontend::tui::state::ChatMessage;
     use lattice_core::types::Role;
-    use lattice_runtime::RuntimePluginOverlay;
 
     #[test]
     fn view_model_tracks_composer_and_queue_state() {
@@ -148,85 +146,21 @@ mod tests {
     }
 
     #[test]
-    fn plugin_statusline_normal_handle_shows_plugins_count() {
+    fn view_model_exposes_agent_label() {
         let app = App::new();
 
         let vm = TuiViewModel::from_app(&app);
 
-        assert_eq!(
-            vm.statusline.plugin_label,
-            format!("plugins:{}", app.plugin_count())
-        );
+        assert_eq!(vm.statusline.agent_label, "agent:default");
     }
 
     #[test]
-    fn plugin_statusline_plugin_prompt_running_shows_plugin_statusline() {
-        let mut runtime = lattice_runtime::Runtime::builder().build();
-        runtime
-            .register_model(lattice_core::catalog::ModelCatalogEntry {
-                canonical_id: "plugin-status-model".into(),
-                context_length: 8192,
-                providers: vec![lattice_core::catalog::CatalogProviderEntry {
-                    provider_id: "ollama".into(),
-                    api_model_id: "plugin-status-model".into(),
-                    priority: 1,
-                    credential_keys: std::collections::HashMap::new(),
-                    base_url: Some("http://127.0.0.1:9".into()),
-                    api_protocol: lattice_core::catalog::ApiProtocol::OpenAiChat,
-                    provider_specific: std::collections::HashMap::new(),
-                }],
-                aliases: Vec::new(),
-            })
-            .unwrap();
+    fn view_model_exposes_snapshot_label() {
         let mut app = App::new();
-        app.runtime = runtime;
-        app.current_model = "plugin-status-model".into();
-        let workdir = app.workdir.to_string_lossy().to_string();
-        let handle_id = app
-            .runtime
-            .get_or_create_agent_handle_for_session(
-                lattice_orchestrator::AgentTurnSpec {
-                    profile_name: "plugin:CodeReview".into(),
-                    model: app.current_model.clone(),
-                    provider_override: None,
-                    system_prompt: Some(lattice_runtime::coding_system_prompt(
-                        &app.workdir,
-                        &app.workdir,
-                    )),
-                    prompt_spec: None,
-                    capabilities: lattice_orchestrator::CapabilitiesConfig {
-                        presets: vec!["coding".into()],
-                        bundles: Vec::new(),
-                    },
-                    tools: Default::default(),
-                    behavior: Default::default(),
-                    handoff: Default::default(),
-                    memory: Default::default(),
-                    project_root: Some(workdir.clone()),
-                    cwd: Some(workdir),
-                    thinking_effort: None,
-                    preset: Some(lattice_orchestrator::AgentPreset::Coding),
-                },
-                app.security.clone(),
-                None,
-            )
-            .unwrap();
-        app.runtime
-            .set_agent_plugin_overlay(
-                &handle_id,
-                Some(RuntimePluginOverlay {
-                    name: "CodeReview".into(),
-                    system_prompt_delta: "Review code carefully.".into(),
-                    output_contract_delta: None,
-                    tools: Vec::new(),
-                    authorized_tool_names: Vec::new(),
-                }),
-            )
-            .unwrap();
-        app.active_handle = Some(handle_id);
+        app.snapshot_label = Some("snapshot:abcdef12".into());
 
         let vm = TuiViewModel::from_app(&app);
 
-        assert_eq!(vm.statusline.plugin_label, "plugin:CodeReview");
+        assert_eq!(vm.statusline.snapshot_label, Some("snapshot:abcdef12"));
     }
 }

@@ -1,3 +1,0 @@
-# problems
-
-Documentation for problems.

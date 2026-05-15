@@ -1,8 +1,9 @@
 use anyhow::Result;
 use colored::Colorize;
 use futures::StreamExt;
-use lattice_orchestrator::AgentTurnSpec;
-use lattice_runtime::{AgentHandleId, Runtime, RuntimeTurnEvent, TurnCompletion, TurnRequest};
+use lattice_runtime::{
+    Runtime, RuntimeAgentSession, RuntimeTurnEvent, TurnCompletion, TurnRequest,
+};
 use std::time::{Duration, Instant};
 
 fn flush_reasoning(buf: &str) {
@@ -78,15 +79,25 @@ pub async fn run(
 
     let start = Instant::now();
 
-    let security = crate::security::default_runtime_security(&std::env::current_dir()?)?;
-    let turn_spec = debug_turn_spec(model.clone(), provider_override, ".".into());
-    let handle_id = runtime.get_or_create_agent_handle_for_session(turn_spec, security, None)?;
+    let cwd = std::env::current_dir()?;
+    let security = crate::security::default_runtime_security(&cwd)?;
+    let session = crate::profile_runtime::prepare_profile_runtime_session_with_security(
+        &runtime,
+        lattice_profile::ProfileSource::Default,
+        cwd,
+        crate::profile_runtime::default_global_agents_dir(),
+        security,
+        Some(model.clone()),
+        provider_override,
+        None,
+        None,
+    )?;
 
     tracing::info!(prompt_len = prompt_text.len(), "debug: submit_turn start");
 
     let summary = execute_debug_runtime_turn(
         &runtime,
-        &handle_id,
+        session,
         TurnRequest {
             input: prompt_text.clone(),
             max_turns: 10,
@@ -179,40 +190,14 @@ pub(crate) struct DebugRuntimeSummary {
     pub(crate) errors: Vec<String>,
 }
 
-pub(crate) fn debug_turn_spec(
-    model: String,
-    provider_override: Option<String>,
-    workspace: String,
-) -> AgentTurnSpec {
-    AgentTurnSpec {
-        profile_name: "debug".into(),
-        model,
-        provider_override,
-        system_prompt: None,
-        prompt_spec: None,
-        capabilities: lattice_orchestrator::CapabilitiesConfig {
-            presets: vec!["minimal".into()],
-            bundles: Vec::new(),
-        },
-        tools: Default::default(),
-        behavior: Default::default(),
-        handoff: Default::default(),
-        memory: Default::default(),
-        project_root: Some(workspace.clone()),
-        cwd: Some(workspace),
-        thinking_effort: None,
-        preset: None,
-    }
-}
-
 pub(crate) async fn execute_debug_runtime_turn(
     runtime: &Runtime,
-    handle_id: &AgentHandleId,
+    session: RuntimeAgentSession,
     request: TurnRequest,
     start: Instant,
 ) -> Result<DebugRuntimeSummary> {
-    let stream = runtime.submit_turn(handle_id, request).await?;
-    tokio::pin!(stream);
+    let submitted = runtime.submit_session_turn(session, request).await?;
+    let mut stream = submitted.events;
 
     let mut reasoning_text = String::new();
     let mut tool_names = Vec::new();
@@ -242,9 +227,7 @@ pub(crate) async fn execute_debug_runtime_turn(
     }
 
     let elapsed = start.elapsed();
-    let completion = runtime
-        .latest_turn_completion(handle_id)?
-        .ok_or_else(|| anyhow::anyhow!("runtime turn completed without stored completion"))?;
+    let completion = submitted.completion.await?;
 
     Ok(DebugRuntimeSummary {
         completion,

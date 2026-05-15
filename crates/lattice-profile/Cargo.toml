@@ -1,0 +1,16 @@
+[package]
+name = "lattice-profile"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Strict single-agent profile schema, loading, discovery, defaults, and pure lowering"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

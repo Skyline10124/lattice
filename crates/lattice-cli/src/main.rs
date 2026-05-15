@@ -1,22 +1,24 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-mod coding_agent;
 mod commands;
 mod config;
 mod credentials;
 mod display;
 mod frontend;
-mod plugins;
+mod model_inventory;
+mod profile_runtime;
 mod runtime;
+mod runtime_turn;
 mod security;
 mod session;
+mod session_seed;
 #[cfg(test)]
 mod test_support;
 
 use commands::{
-    config_cmd, debug, doctor, list_agents, models, new_agent, orchestrator_status, resolve, run,
-    sessions, stats, validate,
+    config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run, sessions, stats,
+    validate,
 };
 use config::Config;
 use credentials::CredentialStore;
@@ -95,34 +97,18 @@ enum Commands {
         #[command(subcommand)]
         action: commands::sessions::SessionAction,
     },
-    #[command(about = "Show orchestrator status: agents, subscriptions, and configuration")]
-    Orchestrator {
-        #[arg(long, help = "JSON output")]
-        json: bool,
-        #[arg(long, help = "Project directory (default: current dir)")]
-        dir: Option<String>,
-    },
-    #[command(about = "Run a prompt through the model or pipeline")]
+    #[command(about = "Run a prompt through an agent profile")]
     Run {
         #[arg(help = "Prompt text, or use --file to read from a file")]
         prompt: Option<String>,
         #[arg(short = 'f', long = "file", help = "Read prompt text from a file")]
         file: Option<String>,
+        #[arg(long, help = "Agent profile name or path (default: default)")]
+        agent: Option<String>,
         #[arg(short, long, help = "Model alias or canonical ID")]
         model: Option<String>,
         #[arg(long, help = "Provider override")]
         provider: Option<String>,
-        #[arg(long, help = "Run as pipeline (start agent name)")]
-        pipeline: Option<String>,
-        #[arg(long, help = "Agent directory path (default: ~/.lattice/agents/)")]
-        agents_dir: Option<String>,
-        #[arg(
-            long,
-            help = "Plugin directory for DAG execution (default: official plugins)"
-        )]
-        plugins_dir: Option<String>,
-        #[arg(long, help = "Tool definitions path (default: agent default tools)")]
-        tools_dir: Option<String>,
         #[arg(long, help = "Dry-run: compile prompt and print without calling LLM")]
         dry_run: bool,
         #[arg(long, help = "System prompt for prompt engine test")]
@@ -140,29 +126,6 @@ enum Commands {
             overrides_with = "stream",
             help = "Print only after the run completes"
         )]
-        no_stream: bool,
-    },
-    #[command(about = "Launch the coding agent for repo-aware implementation work")]
-    Code {
-        #[arg(help = "Task for the coding agent, or use --file")]
-        prompt: Option<String>,
-        #[arg(short = 'f', long = "file", help = "Read task text from a file")]
-        file: Option<String>,
-        #[arg(short, long, help = "Model alias or canonical ID")]
-        model: Option<String>,
-        #[arg(long, help = "Provider override")]
-        provider: Option<String>,
-        #[arg(long, help = "Working directory for file tools and repo context")]
-        workdir: Option<String>,
-        #[arg(long, default_value_t = 20, help = "Maximum agent turns")]
-        max_turns: u32,
-        #[arg(
-            long,
-            overrides_with = "no_stream",
-            help = "Stream tokens as they arrive"
-        )]
-        stream: bool,
-        #[arg(long, overrides_with = "stream", help = "Print only after completion")]
         no_stream: bool,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
@@ -195,10 +158,10 @@ enum Commands {
     Tui {
         #[arg(long, help = "Optional prompt to pre-fill")]
         prompt: Option<String>,
+        #[arg(long, help = "Agent profile name or path (default: default)")]
+        agent: Option<String>,
         #[arg(long, help = "Model alias or canonical ID")]
         model: Option<String>,
-        #[arg(long, help = "Local manifest plugin directory")]
-        plugins_dir: Option<String>,
     },
 }
 
@@ -243,13 +206,17 @@ async fn main() -> Result<()> {
 
     // Quick mode (single-turn, no tool execution, pipe-friendly)
     if let Some(prompt) = cli.quick {
-        let model = cli.model.unwrap_or_else(|| config.default_model());
+        let explicit_model = cli.model.clone();
+        let model = explicit_model
+            .clone()
+            .unwrap_or_else(|| config.default_model());
         let previous_session =
             load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-        let security = security::build_runtime_security(&config.security, &cwd)?;
         return run::run(
             prompt,
             model,
+            explicit_model,
+            None,
             cli.provider.as_deref(),
             cli.verbose,
             cli.json,
@@ -260,7 +227,9 @@ async fn main() -> Result<()> {
             None,
             1,
             !cli.json,
-            security,
+            cwd,
+            config.security.clone(),
+            profile_runtime::default_global_agents_dir(),
         )
         .await;
     }
@@ -280,9 +249,6 @@ async fn main() -> Result<()> {
         Some(Commands::Doctor) => {
             doctor::run(&config, &creds)?;
         }
-        Some(Commands::Orchestrator { json, dir }) => {
-            orchestrator_status::run(json, dir)?;
-        }
         Some(Commands::Stats) => {
             stats::run()?;
         }
@@ -295,12 +261,9 @@ async fn main() -> Result<()> {
         Some(Commands::Run {
             prompt,
             file,
+            agent,
             model,
             provider,
-            pipeline,
-            agents_dir,
-            plugins_dir,
-            tools_dir,
             dry_run,
             system_prompt,
             max_turns,
@@ -308,66 +271,9 @@ async fn main() -> Result<()> {
             no_stream,
         }) => {
             let prompt = load_run_prompt(prompt, file.as_deref())?;
-            if let Some(start_agent) = pipeline {
-                run::run_pipeline(
-                    &prompt,
-                    &start_agent,
-                    agents_dir.as_deref(),
-                    plugins_dir.as_deref(),
-                    tools_dir.as_deref(),
-                    cli.verbose,
-                    cli.json,
-                    creds.to_hashmap(),
-                )
-                .await?;
-            } else {
-                let model = model
-                    .or_else(|| cli.model.clone())
-                    .unwrap_or_else(|| config.default_model());
-                let provider = provider.or_else(|| cli.provider.clone());
-                let previous_session =
-                    load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-                let stream_output = if cli.json {
-                    false
-                } else if stream {
-                    true
-                } else if no_stream {
-                    false
-                } else {
-                    config.core.stream
-                };
-                let security = security::build_runtime_security(&config.security, &cwd)?;
-                run::run(
-                    prompt,
-                    model,
-                    provider.as_deref(),
-                    cli.verbose,
-                    cli.json,
-                    &creds,
-                    save_sessions,
-                    previous_session,
-                    dry_run,
-                    system_prompt.as_deref(),
-                    max_turns,
-                    stream_output,
-                    security,
-                )
-                .await?;
-            }
-        }
-        Some(Commands::Code {
-            prompt,
-            file,
-            model,
-            provider,
-            workdir,
-            max_turns,
-            stream,
-            no_stream,
-        }) => {
-            let prompt = load_run_prompt(prompt, file.as_deref())?;
-            let model = model
-                .or_else(|| cli.model.clone())
+            let explicit_model = model.or_else(|| cli.model.clone());
+            let model = explicit_model
+                .clone()
                 .unwrap_or_else(|| config.default_model());
             let provider = provider.or_else(|| cli.provider.clone());
             let previous_session =
@@ -381,25 +287,26 @@ async fn main() -> Result<()> {
             } else {
                 config.core.stream
             };
-            let workdir = workdir
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| cwd.clone());
-            let security = security::build_runtime_security(&config.security, &workdir)?;
-            let options = coding_agent::CodingAgentOptions {
+            run::run(
                 prompt,
                 model,
-                provider_override: provider,
-                workdir,
+                explicit_model,
+                agent.as_deref(),
+                provider.as_deref(),
+                cli.verbose,
+                cli.json,
+                &creds,
+                save_sessions,
+                previous_session,
+                dry_run,
+                system_prompt.as_deref(),
                 max_turns,
                 stream_output,
-                verbose: cli.verbose,
-                json: cli.json,
-                credentials: creds.to_hashmap(),
-                save_session: save_sessions,
-                previous_session,
-                security,
-            };
-            coding_agent::run(options).await?;
+                cwd,
+                config.security.clone(),
+                profile_runtime::default_global_agents_dir(),
+            )
+            .await?;
         }
         Some(Commands::Debug {
             prompt,
@@ -410,6 +317,7 @@ async fn main() -> Result<()> {
             let model = model
                 .or_else(|| cli.model.clone())
                 .unwrap_or_else(|| config.default_model());
+            let provider = provider.or_else(|| cli.provider.clone());
             debug::run(prompt, model, provider, resolve_only, &creds).await?;
         }
         Some(Commands::Validate { dir }) => {
@@ -417,13 +325,14 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Tui {
             prompt,
+            agent,
             model,
-            plugins_dir,
         }) => {
             let previous_session =
                 load_requested_session(cli.session.as_deref(), cli.continue_session)?;
             let options = frontend::tui::options_from_config(
                 prompt,
+                agent,
                 model.or_else(|| cli.model.clone()),
                 cli.provider.clone(),
                 &config,
@@ -431,7 +340,6 @@ async fn main() -> Result<()> {
                 save_sessions,
                 previous_session,
                 config.security.clone(),
-                plugins_dir.map(std::path::PathBuf::from),
             );
             frontend::tui::run(options).await?;
         }
@@ -447,6 +355,7 @@ async fn main() -> Result<()> {
                 load_requested_session(cli.session.as_deref(), cli.continue_session)?;
             let options = frontend::tui::options_from_config(
                 None,
+                None,
                 cli.model.clone(),
                 cli.provider.clone(),
                 &config,
@@ -454,7 +363,6 @@ async fn main() -> Result<()> {
                 save_sessions,
                 previous_session,
                 config.security.clone(),
-                None,
             );
             frontend::tui::run(options).await?;
         }

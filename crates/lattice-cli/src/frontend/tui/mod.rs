@@ -7,7 +7,6 @@ use crossterm::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::{self, Write};
-use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::credentials::CredentialStore;
@@ -26,7 +25,6 @@ mod interaction;
 mod keymap;
 mod markdown;
 mod pager;
-mod plugin_mode;
 #[cfg(test)]
 mod render_test;
 mod search;
@@ -59,10 +57,11 @@ impl Drop for TerminalGuard {
 
 pub(crate) struct TuiOptions {
     pub(crate) prompt: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) agent_label: String,
     pub(crate) model: String,
     pub(crate) provider_override: Option<String>,
     pub(crate) workdir: std::path::PathBuf,
-    pub(crate) plugin_dir: Option<PathBuf>,
     pub(crate) credentials: std::collections::HashMap<String, String>,
     pub(crate) save_sessions: bool,
     pub(crate) previous_session: Option<crate::session::Session>,
@@ -84,6 +83,9 @@ pub(crate) async fn run(options: TuiOptions) -> Result<()> {
 
     let mut app = App::new();
     app.current_model = options.model;
+    app.agent_source =
+        crate::profile_runtime::profile_source_from_agent_arg(options.agent.as_deref());
+    app.agent_label = options.agent_label;
     app.provider_override = options.provider_override;
     app.workdir = options.workdir;
     app.credentials = options.credentials;
@@ -92,12 +94,6 @@ pub(crate) async fn run(options: TuiOptions) -> Result<()> {
     let security = crate::security::build_runtime_security(&options.security_config, &app.workdir)?;
     app.security = security;
     app.security_config = options.security_config;
-    let mut plugin_builder = lattice_runtime::Runtime::builder()
-        .plugin_registry(crate::plugins::build_plugin_registry()?);
-    if let Some(plugin_dir) = options.plugin_dir.as_deref() {
-        plugin_builder = plugin_builder.load_plugin_dir(plugin_dir.to_path_buf())?;
-    }
-    app.plugin_registry = Some(plugin_builder.build().plugin_registry());
     if let Some(session) = options.previous_session {
         app.load_session(session);
     }
@@ -128,6 +124,7 @@ pub(crate) async fn run(options: TuiOptions) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn options_from_config(
     prompt: Option<String>,
+    agent: Option<String>,
     model: Option<String>,
     provider_override: Option<String>,
     config: &Config,
@@ -135,7 +132,6 @@ pub(crate) fn options_from_config(
     save_sessions: bool,
     previous_session: Option<crate::session::Session>,
     security_config: crate::config::SecurityConfig,
-    plugin_dir: Option<PathBuf>,
 ) -> TuiOptions {
     let model = model
         .or_else(|| {
@@ -145,16 +141,26 @@ pub(crate) fn options_from_config(
         })
         .unwrap_or_else(|| config.default_model());
 
+    let agent_label = agent_label(agent.as_deref());
     TuiOptions {
         prompt,
+        agent,
+        agent_label,
         model,
         provider_override,
         workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        plugin_dir,
         credentials: creds.to_hashmap(),
         save_sessions,
         previous_session,
         security_config,
+    }
+}
+
+pub(crate) fn agent_label(agent: Option<&str>) -> String {
+    match crate::profile_runtime::profile_source_from_agent_arg(agent) {
+        lattice_profile::ProfileSource::Default => "agent:default".to_string(),
+        lattice_profile::ProfileSource::Name(name) => format!("agent:{name}"),
+        lattice_profile::ProfileSource::Path(path) => format!("agent:{}", path.display()),
     }
 }
 

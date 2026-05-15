@@ -5,14 +5,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use futures::StreamExt;
 use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry};
-use lattice_runtime::{Runtime, TurnCompletion, TurnRequest};
+use lattice_profile::ProfileSource;
+use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnRequest};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::coding_agent::{self, CodingAgentBuildOptions};
+use crate::profile_runtime::{prepare_profile_runtime_session, ProfileRuntimeSessionRequest};
 
-pub struct CodingAgentRuntimeTurnFixture {
+pub struct ProfileRuntimeTurnFixture {
     pub model: String,
     pub base_url: String,
     pub workdir: PathBuf,
@@ -23,14 +25,14 @@ pub struct CodingAgentRuntimeTurnFixture {
     pub session_store: Option<PathBuf>,
 }
 
-impl CodingAgentRuntimeTurnFixture {
+impl ProfileRuntimeTurnFixture {
     pub fn with_session_store(mut self, path: PathBuf) -> Self {
         self.session_store = Some(path);
         self
     }
 }
 
-pub struct CodingAgentRuntimeTurnResult {
+pub struct ProfileRuntimeTurnResult {
     pub completion: TurnCompletion,
     pub rendered: serde_json::Value,
 }
@@ -66,69 +68,68 @@ pub struct DebugRuntimeTurnResult {
     pub provider: String,
 }
 
-pub async fn run_coding_agent_runtime_turn(
-    fixture: CodingAgentRuntimeTurnFixture,
-) -> Result<CodingAgentRuntimeTurnResult> {
-    let mut builder = Runtime::builder();
-    if let Some(path) = fixture.session_store.as_ref() {
-        builder = builder.session_store(Arc::new(lattice_session::FileSessionStore::new(path)));
+pub struct GenericRuntimeTurnFixture {
+    pub model: String,
+    pub base_url: String,
+    pub workdir: PathBuf,
+    pub prompt: String,
+    pub json: bool,
+    pub save_session: bool,
+    pub session_id: Option<String>,
+    pub session_store: Option<PathBuf>,
+    pub profile_name: String,
+    pub tool_bundles: Vec<String>,
+}
+
+impl GenericRuntimeTurnFixture {
+    pub fn with_session_store(mut self, path: PathBuf) -> Self {
+        self.session_store = Some(path);
+        self
     }
-    let mut runtime = builder.build();
-    runtime.register_model(ModelCatalogEntry {
-        canonical_id: fixture.model.clone(),
-        context_length: 8192,
-        providers: vec![CatalogProviderEntry {
-            provider_id: "ollama".into(),
-            api_model_id: fixture.model.clone(),
-            priority: 1,
-            credential_keys: HashMap::new(),
-            base_url: Some(fixture.base_url),
-            api_protocol: ApiProtocol::OpenAiChat,
-            provider_specific: HashMap::new(),
-        }],
-        aliases: Vec::new(),
-    })?;
+}
 
-    let security = lattice_runtime::build_runtime_security(
-        &lattice_runtime::RuntimeSecurityConfig::default(),
-        &fixture.workdir,
-    )?;
-    let built = coding_agent::build_coding_agent_with_runtime(
-        runtime,
-        CodingAgentBuildOptions {
-            model: fixture.model,
-            provider_override: None,
-            workdir: fixture.workdir,
-            credentials: HashMap::new(),
-            previous_session: None,
-            prior_messages: Vec::new(),
-            thinking_effort: None,
-            security,
-        },
-    )?;
-    let completion = coding_agent::submit_coding_runtime_turn(
-        &built.runtime,
-        &built.handle_id,
-        TurnRequest {
-            input: fixture.prompt,
-            max_turns: 2,
-            persist_session: fixture.save_session,
-            session_id: fixture.session_id,
-            cancellation_id: None,
-        },
-        None,
-    )
+pub struct GenericRuntimeTurnResult {
+    pub runtime: Runtime,
+    pub session: RuntimeAgentSession,
+    pub completion: TurnCompletion,
+}
+
+pub async fn run_profile_runtime_turn(
+    fixture: ProfileRuntimeTurnFixture,
+) -> Result<ProfileRuntimeTurnResult> {
+    let json = fixture.json;
+    let generic = run_generic_runtime_turn(GenericRuntimeTurnFixture {
+        model: fixture.model,
+        base_url: fixture.base_url,
+        workdir: fixture.workdir,
+        prompt: fixture.prompt,
+        json,
+        save_session: fixture.save_session,
+        session_id: fixture.session_id,
+        session_store: fixture.session_store,
+        profile_name: "code".into(),
+        tool_bundles: vec![
+            "workspace".into(),
+            "filesystem".into(),
+            "editing".into(),
+            "shell".into(),
+            "planning".into(),
+            "web".into(),
+        ],
+    })
     .await?;
-    let rendered = coding_agent::render_completion_value(&completion);
+    let completion =
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
+    let rendered = crate::runtime_turn::render_completion_value(&completion);
 
-    if fixture.json {
+    if json {
         assert!(
             rendered.is_object(),
             "JSON rendering should produce an object"
         );
     }
 
-    Ok(CodingAgentRuntimeTurnResult {
+    Ok(ProfileRuntimeTurnResult {
         completion,
         rendered,
     })
@@ -137,40 +138,25 @@ pub async fn run_coding_agent_runtime_turn(
 pub async fn run_command_runtime_turn(
     fixture: RunCommandRuntimeTurnFixture,
 ) -> Result<RunCommandRuntimeTurnResult> {
-    let mut builder = Runtime::builder();
-    if let Some(path) = fixture.session_store.as_ref() {
-        builder = builder.session_store(Arc::new(lattice_session::FileSessionStore::new(path)));
-    }
-    let mut runtime = builder.build();
-    register_scripted_model(&mut runtime, &fixture.model, fixture.base_url);
-    let security = lattice_runtime::build_runtime_security(
-        &lattice_runtime::RuntimeSecurityConfig::default(),
-        &fixture.workdir,
-    )?;
-    let workspace = fixture.workdir.to_string_lossy().to_string();
-    let spec =
-        crate::commands::run::run_turn_spec(fixture.model.clone(), None, None, workspace.clone());
-    let handle_id = runtime.get_or_create_agent_handle_for_session(
-        spec,
-        security,
-        fixture.session_id.clone(),
-    )?;
-    let completion = crate::commands::run::submit_run_runtime_turn(
-        &runtime,
-        &handle_id,
-        TurnRequest {
-            input: fixture.prompt,
-            max_turns: 2,
-            persist_session: fixture.save_session,
-            session_id: fixture.session_id,
-            cancellation_id: None,
-        },
-        None,
-    )
+    let json = fixture.json;
+    let generic = run_generic_runtime_turn(GenericRuntimeTurnFixture {
+        model: fixture.model,
+        base_url: fixture.base_url,
+        workdir: fixture.workdir,
+        prompt: fixture.prompt,
+        json,
+        save_session: fixture.save_session,
+        session_id: fixture.session_id,
+        session_store: fixture.session_store,
+        profile_name: "run".into(),
+        tool_bundles: vec!["workspace".into(), "filesystem".into()],
+    })
     .await?;
+    let completion =
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
     let rendered = crate::commands::run::run_completion_value(&completion);
 
-    if fixture.json {
+    if json {
         assert!(
             rendered.is_object(),
             "JSON rendering should produce an object"
@@ -183,39 +169,139 @@ pub async fn run_command_runtime_turn(
     })
 }
 
+pub async fn run_generic_runtime_turn(
+    fixture: GenericRuntimeTurnFixture,
+) -> Result<GenericRuntimeTurnResult> {
+    write_profile_package(
+        &fixture.workdir,
+        &fixture.profile_name,
+        &fixture.model,
+        "You are a deterministic generic runtime test agent.",
+        &fixture.tool_bundles,
+    )?;
+    let mut builder = Runtime::builder();
+    let default_session_store = std::env::temp_dir().join(format!(
+        "lattice-cli-generic-session-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let session_store_path = fixture
+        .session_store
+        .unwrap_or_else(|| default_session_store.clone());
+    std::fs::create_dir_all(&session_store_path)?;
+    builder = builder.session_store(Arc::new(lattice_session::SqliteCasSessionStore::new(
+        &session_store_path,
+    )));
+    let mut runtime = builder.build();
+    register_scripted_model(&mut runtime, &fixture.model, fixture.base_url);
+    let session = prepare_profile_runtime_session(
+        &runtime,
+        ProfileRuntimeSessionRequest {
+            source: ProfileSource::Name(fixture.profile_name),
+            project_root: fixture.workdir.clone(),
+            global_agents_dir: fixture.workdir.join(".unused-global-agents"),
+            security_config: crate::config::SecurityConfig::default(),
+            model_override: None,
+            provider_override: None,
+            session_id: fixture.session_id.clone(),
+            task_state_seed: None,
+        },
+    )?;
+    let submitted = runtime
+        .submit_session_turn(
+            session.clone(),
+            TurnRequest {
+                input: fixture.prompt,
+                max_turns: 2,
+                persist_session: fixture.save_session,
+                session_id: fixture.session_id,
+                cancellation_id: None,
+            },
+        )
+        .await?;
+    let mut events = submitted.events;
+    while events.next().await.is_some() {}
+    let completion = submitted.completion.await?;
+
+    Ok(GenericRuntimeTurnResult {
+        runtime,
+        session,
+        completion,
+    })
+}
+
+fn write_profile_package(
+    project_root: &PathBuf,
+    name: &str,
+    model: &str,
+    system_prompt: &str,
+    bundles: &[String],
+) -> Result<()> {
+    let dir = project_root.join(".lattice").join("agents").join(name);
+    std::fs::create_dir_all(&dir)?;
+    let bundles = bundles
+        .iter()
+        .map(|bundle| format!("\"{}\"", bundle))
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(
+        dir.join("agent.toml"),
+        format!(
+            r#"
+schema_version = 1
+
+[agent]
+name = "{name}"
+model = "{model}"
+
+[prompt]
+system = "{system_prompt}"
+
+[tools]
+bundles = [{bundles}]
+enabled = []
+
+[security]
+sandbox_mode = "project"
+
+[context]
+project_instructions = false
+workspace_context = false
+
+[behavior]
+max_turns = 2
+"#
+        ),
+    )?;
+    Ok(())
+}
+
 pub async fn debug_chat_runtime_turn(
     fixture: DebugRuntimeTurnFixture,
 ) -> Result<DebugRuntimeTurnResult> {
-    let mut runtime = Runtime::builder().build();
-    register_scripted_model(&mut runtime, &fixture.model, fixture.base_url);
-    let security = lattice_runtime::build_runtime_security(
-        &lattice_runtime::RuntimeSecurityConfig::default(),
-        &fixture.workdir,
-    )?;
-    let workspace = fixture.workdir.to_string_lossy().to_string();
-    let spec = crate::commands::debug::debug_turn_spec(fixture.model, None, workspace);
-    let handle_id = runtime.get_or_create_agent_handle_for_session(spec, security, None)?;
-    let summary = crate::commands::debug::execute_debug_runtime_turn(
-        &runtime,
-        &handle_id,
-        TurnRequest {
-            input: fixture.prompt,
-            max_turns: 2,
-            persist_session: false,
-            session_id: None,
-            cancellation_id: None,
-        },
-        std::time::Instant::now(),
-    )
+    let generic = run_generic_runtime_turn(GenericRuntimeTurnFixture {
+        model: fixture.model,
+        base_url: fixture.base_url,
+        workdir: fixture.workdir,
+        prompt: fixture.prompt,
+        json: false,
+        save_session: false,
+        session_id: None,
+        session_store: None,
+        profile_name: "debug".into(),
+        tool_bundles: vec!["workspace".into(), "filesystem".into()],
+    })
     .await?;
-    let response_len = summary.completion.assistant_text.len();
-    let model = summary.completion.model.clone();
-    let provider = summary.completion.provider.clone();
+    let completion =
+        crate::runtime_turn::require_successful_runtime_completion(generic.completion)?;
+    let response_len = completion.assistant_text.len();
+    let model = completion.model.clone();
+    let provider = completion.provider.clone();
 
     Ok(DebugRuntimeTurnResult {
-        completion: summary.completion,
+        completion,
         response_len,
-        tool_names: summary.tool_names,
+        tool_names: Vec::new(),
         model,
         provider,
     })
@@ -326,4 +412,54 @@ fn stop_chunk() -> String {
         }]
     });
     format!("data: {}\n\n", chunk)
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn generic_runtime_turn_fixture_submits_profile_backed_turn() {
+        let Some(port) =
+            super::spawn_scripted_openai_server(vec![super::scripted_content_response(
+                "generic fixture text",
+            )])
+            .await
+        else {
+            eprintln!("skipping generic runtime fixture test: loopback bind denied");
+            return;
+        };
+        let workdir = tempfile::tempdir().unwrap();
+        let session_store = tempfile::tempdir().unwrap();
+        let result = super::run_generic_runtime_turn(super::GenericRuntimeTurnFixture {
+            model: "scripted-generic-runtime-fixture".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            workdir: workdir.path().to_path_buf(),
+            prompt: "Use generic runtime fixture".into(),
+            json: false,
+            save_session: true,
+            session_id: Some("generic-runtime-fixture-session".into()),
+            session_store: Some(session_store.path().to_path_buf()),
+            profile_name: "fixture".into(),
+            tool_bundles: vec!["workspace".into(), "filesystem".into()],
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.completion.assistant_text, "generic fixture text");
+        assert_eq!(
+            result.completion.status,
+            lattice_runtime::TurnStatus::Completed
+        );
+        assert_eq!(
+            result.completion.saved_session_id.as_deref(),
+            Some("generic-runtime-fixture-session")
+        );
+        assert_eq!(result.session.spec.profile_name, "fixture");
+        assert!(result
+            .session
+            .profile_snapshot
+            .source
+            .source_fingerprint
+            .as_deref()
+            .is_some_and(|value| value.starts_with("sha256:")));
+    }
 }

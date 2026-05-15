@@ -5,8 +5,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use crossterm::event::{KeyEvent, MouseEvent};
 use lattice_core::types::Role;
-use lattice_plugin::registry::PluginRegistry;
-use lattice_runtime::{AgentHandleId, Runtime, TurnCompletion, TurnId, TurnStatus};
+use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnId, TurnStatus};
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::activity::{ActivityContext, ActivityState, ToolOutputUpdate};
@@ -16,7 +15,6 @@ use super::composer::ComposerState;
 use super::event::Event;
 use super::keymap::RuntimeKeymap;
 use super::pager::PagerOverlay;
-use super::plugin_mode::{runtime_plugin_overlay, PreparedSubmission, RunPluginContext};
 use super::state::{AppStatus, ChatMessage, FileSnapshot, MenuState, SlashSuggestion};
 use super::theme::Theme;
 use super::turn::{StreamOutcome, StreamTokenUpdate, TurnState};
@@ -35,6 +33,11 @@ fn write_osc52_clipboard(text: &str) {
 
 type ClipboardSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+fn short_snapshot_label(hash: &str) -> String {
+    let short = hash.chars().take(8).collect::<String>();
+    format!("snapshot:{short}")
+}
+
 /// Application state.
 pub(super) struct App {
     pub(super) should_quit: bool,
@@ -50,25 +53,25 @@ pub(super) struct App {
     pub(super) transcript_mode: bool,
     pub(super) spinner_index: usize,
     pub(super) provider_override: Option<String>,
+    pub(super) agent_source: lattice_profile::ProfileSource,
+    pub(super) agent_label: String,
+    pub(super) snapshot_label: Option<String>,
     pub(super) credentials: HashMap<String, String>,
     pub(super) workdir: std::path::PathBuf,
     pub(super) save_sessions: bool,
     pub(super) security: crate::security::RuntimeSecurity,
     pub(super) security_config: crate::config::SecurityConfig,
-    pub(super) plugin_registry: Option<Arc<PluginRegistry>>,
     pub(super) session: Option<crate::session::Session>,
     pub(super) event_tx: Option<UnboundedSender<Event>>,
     pub(super) runtime: Runtime,
-    pub(super) normal_handle: Option<AgentHandleId>,
-    pub(super) plugin_handles: HashMap<String, AgentHandleId>,
-    pub(super) active_handle: Option<AgentHandleId>,
-    last_approval_handle: Option<AgentHandleId>,
+    pub(super) active_agent_session: Option<RuntimeAgentSession>,
+    pub(super) active_session_id: Option<String>,
+    last_approval_task_state: Option<lattice_agent::TaskState>,
     pub(super) active_runtime_turn: Option<TurnId>,
     pending_cancelled_turn_id: Option<u64>,
-    pending_cancelled_handle: Option<AgentHandleId>,
+    pending_cancelled_session_id: Option<String>,
     pending_cancelled_runtime_turn: Option<TurnId>,
     pub(super) turn: TurnState,
-    prepared_submission: Option<PreparedSubmission>,
     pub(super) activity: ActivityState,
     pub(super) thinking_effort: Option<String>,
     pub(super) context_limit: u32,
@@ -94,6 +97,9 @@ impl App {
             transcript_mode: false,
             spinner_index: 0,
             provider_override: None,
+            agent_source: lattice_profile::ProfileSource::Default,
+            agent_label: "agent:default".into(),
+            snapshot_label: None,
             credentials: HashMap::new(),
             workdir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             save_sessions: false,
@@ -102,20 +108,17 @@ impl App {
                 &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             )
             .expect("default runtime security should build"),
-            plugin_registry: crate::plugins::build_plugin_registry().ok(),
             session: None,
             event_tx: None,
             runtime: crate::runtime::model_runtime(HashMap::new()),
-            normal_handle: None,
-            plugin_handles: HashMap::new(),
-            active_handle: None,
-            last_approval_handle: None,
+            active_agent_session: None,
+            active_session_id: None,
+            last_approval_task_state: None,
             active_runtime_turn: None,
             pending_cancelled_turn_id: None,
-            pending_cancelled_handle: None,
+            pending_cancelled_session_id: None,
             pending_cancelled_runtime_turn: None,
             turn: TurnState::default(),
-            prepared_submission: None,
             activity: ActivityState::default(),
             menu: None,
             pager: None,
@@ -131,12 +134,12 @@ impl App {
         self.messages = super::session_state::messages_from_session(&session);
         self.current_provider = session.provider.clone();
         self.session = Some(session);
-        self.clear_runtime_handles();
+        self.clear_runtime_sessions();
         self.previous_model.clear();
         self.scroll_offset = 0;
         self.turn.reset_runtime();
         self.clear_search();
-        self.prepared_submission = None;
+        self.snapshot_label = None;
     }
 
     fn begin_turn(&mut self, user: String) -> u64 {
@@ -144,16 +147,19 @@ impl App {
     }
 
     pub(super) fn cancel_active_turn(&mut self) {
-        if let Some(handle_id) = self.active_handle.clone() {
-            let _ = self.runtime.cancel_turn(&handle_id);
+        if let (Some(session_id), Some(runtime_turn)) = (
+            self.active_session_id.clone(),
+            self.active_runtime_turn.clone(),
+        ) {
+            let _ = self.runtime.cancel_session_turn(&session_id, &runtime_turn);
             if let Some(turn_id) = self.turn.active_turn_id {
                 self.pending_cancelled_turn_id = Some(turn_id);
-                self.pending_cancelled_handle = Some(handle_id);
-                self.pending_cancelled_runtime_turn = self.active_runtime_turn.clone();
+                self.pending_cancelled_session_id = Some(session_id);
+                self.pending_cancelled_runtime_turn = Some(runtime_turn);
             }
         }
         self.turn.cancel(&mut self.status);
-        self.active_handle = None;
+        self.active_session_id = None;
         self.active_runtime_turn = None;
     }
 
@@ -164,14 +170,14 @@ impl App {
     pub(super) fn accepts_runtime_turn(
         &self,
         turn_id: u64,
-        handle_id: &AgentHandleId,
+        session_id: &str,
         runtime_turn_id: &TurnId,
     ) -> bool {
-        let active_matches = self.active_handle.as_ref() == Some(handle_id)
+        let active_matches = self.active_session_id.as_deref() == Some(session_id)
             && self.active_runtime_turn.as_ref() == Some(runtime_turn_id)
             && (self.turn.accepts(turn_id) || self.turn.active_turn_id.is_none());
         let pending_cancel_matches =
-            self.accepts_pending_cancelled_runtime_turn(turn_id, handle_id, runtime_turn_id)
+            self.accepts_pending_cancelled_runtime_turn(turn_id, session_id, runtime_turn_id)
                 && (self.turn.accepts(turn_id) || self.turn.active_turn_id.is_none());
         active_matches || pending_cancel_matches
     }
@@ -179,53 +185,50 @@ impl App {
     pub(super) fn mark_runtime_turn_started(
         &mut self,
         turn_id: u64,
-        handle_id: AgentHandleId,
+        session_id: String,
         runtime_turn_id: TurnId,
     ) {
         if self.pending_cancelled_turn_id == Some(turn_id)
-            && self.pending_cancelled_handle.as_ref() == Some(&handle_id)
+            && self.pending_cancelled_session_id.as_deref() == Some(session_id.as_str())
             && self.pending_cancelled_runtime_turn.is_none()
         {
             self.pending_cancelled_runtime_turn = Some(runtime_turn_id);
             return;
         }
-        if self.turn.accepts(turn_id) && self.active_handle.as_ref() == Some(&handle_id) {
+        if self.turn.accepts(turn_id)
+            && self
+                .active_session_id
+                .as_deref()
+                .is_none_or(|active| active == session_id)
+        {
+            self.active_session_id = Some(session_id);
             self.active_runtime_turn = Some(runtime_turn_id);
         }
     }
 
-    pub(super) fn clear_runtime_handles(&mut self) {
-        self.clear_plugin_runtime_overlays();
-        self.normal_handle = None;
-        self.plugin_handles.clear();
-        self.active_handle = None;
-        self.last_approval_handle = None;
+    pub(super) fn clear_runtime_sessions(&mut self) {
+        self.active_agent_session = None;
+        self.active_session_id = None;
+        self.last_approval_task_state = None;
         self.active_runtime_turn = None;
+        self.snapshot_label = None;
         self.clear_pending_cancelled_turn();
-    }
-
-    fn clear_plugin_runtime_overlays(&self) {
-        for handle_id in self.plugin_handles.values() {
-            if let Err(err) = self.runtime.set_agent_plugin_overlay(handle_id, None) {
-                tracing::debug!("failed to clear plugin overlay for handle {handle_id}: {err}");
-            }
-        }
     }
 
     fn accepts_pending_cancelled_runtime_turn(
         &self,
         turn_id: u64,
-        handle_id: &AgentHandleId,
+        session_id: &str,
         runtime_turn_id: &TurnId,
     ) -> bool {
         self.pending_cancelled_turn_id == Some(turn_id)
-            && self.pending_cancelled_handle.as_ref() == Some(handle_id)
+            && self.pending_cancelled_session_id.as_deref() == Some(session_id)
             && self.pending_cancelled_runtime_turn.as_ref() == Some(runtime_turn_id)
     }
 
     fn clear_pending_cancelled_turn(&mut self) {
         self.pending_cancelled_turn_id = None;
-        self.pending_cancelled_handle = None;
+        self.pending_cancelled_session_id = None;
         self.pending_cancelled_runtime_turn = None;
     }
 
@@ -277,9 +280,6 @@ impl App {
         }
         self.composer.add_to_history(text.clone());
         if self.handle_slash_command(&text) {
-            if let Some(prepared) = self.prepared_submission.take() {
-                return self.submit_prepared(prepared).await;
-            }
             self.composer.clear();
             self.scroll_offset = 0;
             return Ok(());
@@ -305,33 +305,10 @@ impl App {
             return Ok(());
         }
 
-        self.submit_model_turn(text.clone(), text, None).await
+        self.submit_model_turn(text.clone(), text).await
     }
 
-    async fn submit_prepared(&mut self, prepared: PreparedSubmission) -> Result<()> {
-        if self.turn.is_active(&self.status) {
-            let queued = match prepared.raw_prompt.as_deref() {
-                Some(raw) => prepared
-                    .plugin
-                    .as_ref()
-                    .map(|plugin| format!("/plugin {} {}", plugin.name, raw))
-                    .unwrap_or_else(|| prepared.display.clone()),
-                None => prepared.display.clone(),
-            };
-            self.queue_input(queued);
-            self.composer.clear();
-            return Ok(());
-        }
-        self.submit_model_turn(prepared.display, prepared.prompt, prepared.plugin)
-            .await
-    }
-
-    async fn submit_model_turn(
-        &mut self,
-        display_text: String,
-        prompt_text: String,
-        plugin: Option<RunPluginContext>,
-    ) -> Result<()> {
+    async fn submit_model_turn(&mut self, display_text: String, prompt_text: String) -> Result<()> {
         self.messages
             .push(ChatMessage::new(Role::User, display_text.clone()));
         self.token_count +=
@@ -356,24 +333,23 @@ impl App {
             }
         };
 
-        let profile_name = plugin
-            .as_ref()
-            .map(|plugin| format!("plugin:{}", plugin.name))
-            .unwrap_or_else(|| "coding".into());
-        let existing_handle = self.existing_handle_for_submission(plugin.as_ref());
+        let task_state_seed = self.last_approval_task_state.clone().or_else(|| {
+            crate::session_seed::load_latest_manifest_metadata(&self.runtime, self.session.as_ref())
+        });
 
-        let handle_id = match super::agent_runner::ensure_agent(AgentBuildRequest {
+        let runtime_session = match super::agent_runner::ensure_agent(AgentBuildRequest {
             turn_id,
             tx: tx.clone(),
             runtime: self.runtime.clone(),
-            existing_handle,
-            profile_name,
+            existing_session: self.active_agent_session.clone(),
+            profile_source: self.agent_source.clone(),
+            agent_label: self.agent_label.clone(),
             current_model: self.current_model.clone(),
             previous_model: self.previous_model.clone(),
             provider_override: self.provider_override.clone(),
             workdir: self.workdir.clone(),
             previous_session: self.session.clone(),
-            thinking_effort: self.thinking_effort.clone(),
+            task_state_seed,
             security: self.security.clone(),
         })
         .await
@@ -382,14 +358,16 @@ impl App {
                 if let Some(rebuilt) = outcome.rebuilt {
                     self.apply_rebuilt_agent(rebuilt);
                 }
-                if let Some(plugin) = plugin.as_ref() {
-                    self.plugin_handles
-                        .insert(plugin.name.clone(), outcome.handle_id.clone());
-                } else {
-                    self.normal_handle = Some(outcome.handle_id.clone());
-                }
-                self.active_handle = Some(outcome.handle_id.clone());
-                outcome.handle_id
+                self.snapshot_label =
+                    Some(short_snapshot_label(&outcome.session.profile_snapshot.hash));
+                self.active_agent_session = Some(outcome.session.clone());
+                let session_id = outcome
+                    .session
+                    .session_id
+                    .clone()
+                    .or_else(|| self.session.as_ref().map(|session| session.id.clone()));
+                self.active_session_id = session_id;
+                outcome.session
             }
             AgentBuildStatus::Failed => {
                 self.status = AppStatus::Ready;
@@ -397,11 +375,9 @@ impl App {
             }
         };
 
-        self.apply_runtime_plugin_context(plugin.as_ref(), &handle_id)?;
-
         super::agent_runner::spawn_stream(AgentStreamRequest {
             runtime: self.runtime.clone(),
-            handle_id,
+            session: runtime_session,
             prompt_text,
             turn_id,
             tx,
@@ -414,39 +390,11 @@ impl App {
         Ok(())
     }
 
-    fn existing_handle_for_submission(
-        &self,
-        plugin: Option<&RunPluginContext>,
-    ) -> Option<AgentHandleId> {
-        match plugin {
-            Some(plugin) => self.plugin_handles.get(&plugin.name).cloned(),
-            None => self.normal_handle.clone(),
-        }
-    }
-
     fn apply_rebuilt_agent(&mut self, rebuilt: RebuiltAgent) {
         self.context_limit = rebuilt.context_limit;
         self.current_model = rebuilt.model;
         self.current_provider = rebuilt.provider;
         self.previous_model = self.current_model.clone();
-    }
-
-    fn apply_runtime_plugin_context(
-        &mut self,
-        plugin: Option<&RunPluginContext>,
-        handle_id: &AgentHandleId,
-    ) -> Result<()> {
-        match plugin {
-            Some(plugin) => {
-                self.runtime
-                    .set_agent_plugin_overlay(handle_id, Some(runtime_plugin_overlay(plugin)))?;
-            }
-            None => {
-                self.clear_plugin_runtime_overlays();
-                let _ = self.runtime.set_agent_plugin_overlay(handle_id, None);
-            }
-        }
-        Ok(())
     }
 
     fn handle_slash_command(&mut self, text: &str) -> bool {
@@ -461,10 +409,10 @@ impl App {
         self.token_count = 0;
         self.turn.reset_runtime();
         self.clear_search();
-        self.clear_runtime_handles();
+        self.clear_runtime_sessions();
         self.previous_model.clear();
         self.session = None;
-        self.prepared_submission = None;
+        self.snapshot_label = None;
         self.status = AppStatus::Ready;
     }
 
@@ -490,7 +438,7 @@ impl App {
                 self.cancel_active_turn();
                 self.security_config = next_config;
                 self.security = security;
-                self.clear_runtime_handles();
+                self.clear_runtime_sessions();
                 self.previous_model.clear();
                 self.push_system_message(&format!(
                     "Permissions switched to '{}'. Agent will rebuild next turn.",
@@ -504,21 +452,23 @@ impl App {
     }
 
     pub(super) fn approve_pending_proposal(&mut self, selector: &str) {
-        let Some(handle_id) = self.approval_handle_for_selector(selector) else {
+        let Some(mut task_state) = self.approval_task_state_for_selector(selector) else {
             self.push_system_message("Approval failed: no active agent state yet.");
             return;
         };
-        let result = self
-            .runtime
-            .approve_handle_pending_proposal(&handle_id, selector);
+        let result = crate::security::approve_proposal(&self.security, &mut task_state, selector)
+            .map_err(|err| lattice_runtime::RuntimeError::Config(err.to_string()));
+        if result.is_ok() {
+            self.last_approval_task_state = Some(task_state);
+        }
         self.push_approval_result(result);
     }
 
-    fn approval_handle_for_selector(&self, _selector: &str) -> Option<AgentHandleId> {
-        self.active_handle
-            .clone()
-            .or_else(|| self.last_approval_handle.clone())
-            .or_else(|| self.normal_handle.clone())
+    fn approval_task_state_for_selector(
+        &self,
+        _selector: &str,
+    ) -> Option<lattice_agent::TaskState> {
+        self.last_approval_task_state.clone()
     }
 
     fn push_approval_result(
@@ -529,45 +479,11 @@ impl App {
             Ok(message) => self.push_system_message(&format!(
                 "{message}. Continue or retry the blocked request when ready."
             )),
-            Err(lattice_runtime::RuntimeError::HandleBusy(_)) => self.push_system_message(
+            Err(lattice_runtime::RuntimeError::TurnBusy(_)) => self.push_system_message(
                 "Approval failed: agent is busy; try again after the current turn finishes.",
             ),
             Err(err) => self.push_system_message(&format!("Approval failed: {err}")),
         }
-    }
-
-    pub(super) fn plugin_count(&self) -> usize {
-        super::plugin_mode::plugin_count(self.plugin_registry.as_ref())
-    }
-
-    pub(super) fn active_plugin_name(&self) -> Option<String> {
-        let handle_id = self.active_handle.as_ref()?;
-        self.runtime
-            .agent_handle_snapshot(handle_id)
-            .ok()
-            .and_then(|snapshot| snapshot.plugin_overlay_name)
-    }
-
-    pub(super) fn plugin_names(&self) -> Vec<String> {
-        super::plugin_mode::plugin_names(self.plugin_registry.as_ref())
-    }
-
-    pub(super) fn has_plugin(&self, name: &str) -> bool {
-        super::plugin_mode::has_plugin(self.plugin_registry.as_ref(), name)
-    }
-
-    pub(super) fn plugin_summary(&self, name: &str) -> Option<(String, String)> {
-        super::plugin_mode::plugin_summary(self.plugin_registry.as_ref(), name)
-    }
-
-    pub(super) fn prepare_plugin_prompt(&mut self, name: &str, prompt: String) -> Result<()> {
-        self.prepared_submission = Some(super::plugin_mode::prepare_submission(
-            self.plugin_registry.as_ref(),
-            &self.workdir,
-            name,
-            prompt,
-        )?);
-        Ok(())
     }
 
     pub(super) fn slash_suggestions(&self) -> Vec<SlashSuggestion> {
@@ -583,18 +499,6 @@ impl App {
         self.push_system_message(&format!(
             "Queued prompt #{count}. Press Enter on \"Send queued prompt\" when ready."
         ));
-    }
-
-    pub(super) fn queue_runtime_busy_prompt(&mut self, turn_id: u64, prompt_text: String) {
-        if !self.turn.accepts(turn_id) {
-            return;
-        }
-        self.turn.finish();
-        self.status = AppStatus::Ready;
-        self.active_handle = None;
-        self.active_runtime_turn = None;
-        self.queue_input(prompt_text);
-        self.push_system_message("Agent is still working on this conversation. Prompt queued.");
     }
 
     pub(super) fn queue_prompt_active(&self) -> bool {
@@ -663,17 +567,17 @@ impl App {
     pub(super) fn apply_runtime_completion(
         &mut self,
         turn_id: u64,
-        handle_id: &AgentHandleId,
+        session_id: &str,
         runtime_turn_id: &TurnId,
         status: TurnStatus,
         completion: Option<&TurnCompletion>,
         error: Option<String>,
     ) {
-        if !self.accepts_runtime_turn(turn_id, handle_id, runtime_turn_id) {
+        if !self.accepts_runtime_turn(turn_id, session_id, runtime_turn_id) {
             return;
         }
         let pending_cancelled =
-            self.accepts_pending_cancelled_runtime_turn(turn_id, handle_id, runtime_turn_id);
+            self.accepts_pending_cancelled_runtime_turn(turn_id, session_id, runtime_turn_id);
 
         if let Some(completion) = completion {
             self.current_model = completion.model.clone();
@@ -683,7 +587,10 @@ impl App {
                 .latest_pending_approval()
                 .is_some()
             {
-                self.last_approval_handle = Some(handle_id.clone());
+                self.last_approval_task_state = Some(completion.task_state_snapshot.clone());
+            }
+            if let Some(warning) = completion.profile_drift_warning.as_ref() {
+                self.push_system_message(warning);
             }
             if let Some(usage) = completion.token_usage.as_ref() {
                 self.token_count = usage.total_tokens as usize;
@@ -716,7 +623,7 @@ impl App {
             }
         }
         self.active_runtime_turn = None;
-        self.active_handle = None;
+        self.active_session_id = None;
         if pending_cancelled {
             self.clear_pending_cancelled_turn();
         }
@@ -832,8 +739,6 @@ mod tests {
     use crossterm::event::KeyCode;
     use lattice_core::catalog::{ApiProtocol, CatalogProviderEntry, ModelCatalogEntry};
     use lattice_core::streaming::TokenUsage;
-    use lattice_core::types::ToolDefinition;
-    use lattice_orchestrator::{AgentPreset, AgentTurnSpec};
     use lattice_sandbox::{ApprovalKind, ApprovedRule, RiskClass};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -873,13 +778,11 @@ mod tests {
         }
     }
 
-    fn test_completion(
-        handle_id: AgentHandleId,
-        runtime_turn_id: TurnId,
-        status: TurnStatus,
-    ) -> TurnCompletion {
+    const RUNTIME_SESSION_ID: &str = "runtime-session";
+
+    fn test_completion(runtime_turn_id: TurnId, status: TurnStatus) -> TurnCompletion {
         TurnCompletion {
-            handle_id,
+            session_id: RUNTIME_SESSION_ID.into(),
             turn_id: runtime_turn_id,
             status,
             assistant_text: "answer".into(),
@@ -893,7 +796,8 @@ mod tests {
             turn_manifests: Vec::new(),
             model: "runtime-model".into(),
             provider: "runtime-provider".into(),
-            saved_session_id: Some("runtime-session".into()),
+            saved_session_id: Some(RUNTIME_SESSION_ID.into()),
+            profile_drift_warning: None,
             error: (status == TurnStatus::Error).then(|| "runtime failed".into()),
         }
     }
@@ -927,63 +831,61 @@ mod tests {
         app
     }
 
-    fn test_turn_spec(app: &App, profile_name: &str) -> AgentTurnSpec {
-        let workdir = app.workdir.to_string_lossy().to_string();
-        AgentTurnSpec {
-            profile_name: profile_name.into(),
-            model: app.current_model.clone(),
-            provider_override: app.provider_override.clone(),
-            system_prompt: Some(lattice_runtime::coding_system_prompt(
-                &app.workdir,
-                &app.workdir,
-            )),
-            prompt_spec: None,
-            capabilities: lattice_orchestrator::CapabilitiesConfig {
-                presets: vec!["coding".into()],
-                bundles: Vec::new(),
-            },
-            tools: Default::default(),
-            behavior: Default::default(),
-            handoff: Default::default(),
-            memory: Default::default(),
-            project_root: Some(workdir.clone()),
-            cwd: Some(workdir),
-            thinking_effort: None,
-            preset: Some(AgentPreset::Coding),
-        }
-    }
+    fn test_runtime_session(
+        app: &App,
+        profile_name: &str,
+        session_id: &str,
+    ) -> RuntimeAgentSession {
+        let project = tempfile::tempdir().unwrap();
+        let dir = project
+            .path()
+            .join(".lattice")
+            .join("agents")
+            .join(profile_name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent.toml"),
+            format!(
+                r#"
+schema_version = 1
 
-    fn create_test_handle(app: &App, profile_name: &str) -> AgentHandleId {
-        app.runtime
-            .get_or_create_agent_handle_for_session(
-                test_turn_spec(app, profile_name),
-                app.security.clone(),
-                None,
-            )
-            .unwrap()
-    }
+[agent]
+name = "{profile_name}"
+model = "{model}"
 
-    fn test_plugin_context(name: &str) -> RunPluginContext {
-        RunPluginContext {
-            name: name.into(),
-            system_prompt: "Review code carefully.".into(),
-            output_contract_delta: Some("Return JSON.".into()),
-            tools: vec![ToolDefinition::new(
-                "plugin_read".into(),
-                "Read plugin data".into(),
-                serde_json::json!({"type": "object"}),
-            )],
-        }
+[prompt]
+system = "You are a deterministic TUI test agent."
+
+[tools]
+bundles = ["workspace", "filesystem"]
+enabled = []
+"#,
+                model = app.current_model
+            ),
+        )
+        .unwrap();
+        crate::profile_runtime::prepare_profile_runtime_session_with_security(
+            &app.runtime,
+            lattice_profile::ProfileSource::Name(profile_name.into()),
+            project.path().to_path_buf(),
+            project.path().join(".unused-global-agents"),
+            app.security.clone(),
+            Some(app.current_model.clone()),
+            app.provider_override.clone(),
+            Some(session_id.into()),
+            None,
+        )
+        .unwrap()
     }
 
     mod cancel_preserves {
         use super::*;
 
-        fn active_cancel_app() -> (App, AgentHandleId, TurnId) {
+        fn active_cancel_app() -> (App, String, TurnId) {
             let mut app = App::new();
-            let handle_id = AgentHandleId::new();
+            let session_id = RUNTIME_SESSION_ID.to_string();
             let runtime_turn_id = TurnId::new();
-            app.active_handle = Some(handle_id.clone());
+            app.active_session_id = Some(session_id.clone());
             app.active_runtime_turn = Some(runtime_turn_id.clone());
             app.status = AppStatus::Streaming;
             app.turn.active_turn_id = Some(11);
@@ -992,12 +894,12 @@ mod tests {
                 Role::Assistant,
                 "partial assistant output".into(),
             ));
-            (app, handle_id, runtime_turn_id)
+            (app, session_id, runtime_turn_id)
         }
 
         #[test]
         fn cancel_preserves_queued_inputs() {
-            let (mut app, _handle_id, _runtime_turn_id) = active_cancel_app();
+            let (mut app, _session_id, _runtime_turn_id) = active_cancel_app();
             app.turn.queued_inputs.push_back("queued follow-up".into());
 
             app.cancel_active_turn();
@@ -1011,18 +913,14 @@ mod tests {
 
         #[test]
         fn cancel_preserves_partial_assistant_output() {
-            let (mut app, handle_id, runtime_turn_id) = active_cancel_app();
+            let (mut app, session_id, runtime_turn_id) = active_cancel_app();
             app.turn.queued_inputs.push_back("queued follow-up".into());
 
             app.cancel_active_turn();
-            let completion = test_completion(
-                handle_id.clone(),
-                runtime_turn_id.clone(),
-                TurnStatus::Cancelled,
-            );
+            let completion = test_completion(runtime_turn_id.clone(), TurnStatus::Cancelled);
             app.apply_runtime_completion(
                 11,
-                &handle_id,
+                &session_id,
                 &runtime_turn_id,
                 TurnStatus::Cancelled,
                 Some(&completion),
@@ -1039,18 +937,14 @@ mod tests {
 
         #[test]
         fn cancelled_completion_is_non_success() {
-            let (mut app, handle_id, runtime_turn_id) = active_cancel_app();
+            let (mut app, session_id, runtime_turn_id) = active_cancel_app();
 
             app.cancel_active_turn();
-            let mut completion = test_completion(
-                handle_id.clone(),
-                runtime_turn_id.clone(),
-                TurnStatus::Cancelled,
-            );
+            let mut completion = test_completion(runtime_turn_id.clone(), TurnStatus::Cancelled);
             completion.final_report = Some("successful final report".into());
             app.apply_runtime_completion(
                 11,
-                &handle_id,
+                &session_id,
                 &runtime_turn_id,
                 TurnStatus::Cancelled,
                 Some(&completion),
@@ -1118,7 +1012,7 @@ mod tests {
         assert_eq!(app.current_model, "llama-3.1");
         assert!(app.current_provider.is_empty());
         assert_eq!(app.status, AppStatus::Ready);
-        assert!(app.normal_handle.is_none());
+        assert!(app.active_agent_session.is_none());
         assert_eq!(
             app.messages.last().unwrap().content,
             "Model switched to llama-3.1."
@@ -1255,7 +1149,7 @@ mod tests {
 
         assert_eq!(app.security.mode_label, "strict");
         assert_eq!(app.security_config.sandbox_mode, "strict");
-        assert!(app.normal_handle.is_none());
+        assert!(app.active_agent_session.is_none());
         assert!(app
             .messages
             .last()
@@ -1326,10 +1220,9 @@ mod tests {
     }
 
     #[test]
-    fn slash_approve_last_uses_runtime_handle_state() {
-        let mut app = app_with_test_runtime("slash-approve-runtime-model");
-        let handle = create_test_handle(&app, "coding");
-        app.normal_handle = Some(handle);
+    fn slash_approve_last_uses_runtime_task_state() {
+        let mut app = App::new();
+        app.last_approval_task_state = Some(lattice_agent::TaskState::new());
 
         assert!(app.handle_slash_command("/approve last"));
 
@@ -1339,35 +1232,30 @@ mod tests {
     }
 
     #[test]
-    fn slash_approve_last_prefers_latest_approval_handle() {
+    fn slash_approve_last_prefers_latest_approval_task_state() {
         let mut app = App::new();
-        let normal_handle = AgentHandleId::new();
-        let plugin_handle = AgentHandleId::new();
-        app.normal_handle = Some(normal_handle);
-        app.last_approval_handle = Some(plugin_handle.clone());
-
-        assert_eq!(
-            app.approval_handle_for_selector("last"),
-            Some(plugin_handle)
+        let mut task_state = lattice_agent::TaskState::new();
+        task_state.record_approval_proposal(
+            "Allow cargo test".into(),
+            "approve command_prefix cargo test".into(),
+            "mutate".into(),
         );
+        app.last_approval_task_state = Some(task_state);
+
+        assert!(app.approval_task_state_for_selector("last").is_some());
     }
 
     #[test]
-    fn runtime_completion_tracks_pending_approval_handle() {
+    fn runtime_completion_tracks_pending_approval_task_state() {
         let mut app = App::new();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
-        let mut completion = test_completion(
-            handle_id.clone(),
-            runtime_turn_id.clone(),
-            TurnStatus::Completed,
-        );
+        let mut completion = test_completion(runtime_turn_id.clone(), TurnStatus::Completed);
         completion.task_state_snapshot.record_approval_proposal(
             "Allow cargo test".into(),
             "approve command_prefix cargo test".into(),
             "mutate".into(),
         );
-        app.active_handle = Some(handle_id.clone());
+        app.active_session_id = Some(RUNTIME_SESSION_ID.into());
         app.active_runtime_turn = Some(runtime_turn_id.clone());
         app.status = AppStatus::Streaming;
         app.turn.active_turn_id = Some(9);
@@ -1377,23 +1265,26 @@ mod tests {
 
         app.apply_runtime_completion(
             9,
-            &handle_id,
+            RUNTIME_SESSION_ID,
             &runtime_turn_id,
             TurnStatus::Completed,
             Some(&completion),
             None,
         );
 
-        assert_eq!(app.last_approval_handle, Some(handle_id.clone()));
-        assert_eq!(app.approval_handle_for_selector("last"), Some(handle_id));
+        assert!(app
+            .last_approval_task_state
+            .as_ref()
+            .is_some_and(|state| state.latest_pending_approval().is_some()));
+        assert!(app.approval_task_state_for_selector("last").is_some());
     }
 
     #[test]
     fn slash_approve_busy_reports_runtime_busy() {
         let mut app = App::new();
 
-        app.push_approval_result(Err(lattice_runtime::RuntimeError::HandleBusy(
-            "handle-1".into(),
+        app.push_approval_result(Err(lattice_runtime::RuntimeError::TurnBusy(
+            "turn-1".into(),
         )));
 
         assert_eq!(
@@ -1429,21 +1320,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_plugin_plugin_submission_sets_runtime_overlay() {
-        let mut app = app_with_test_runtime("runtime-plugin-overlay-model");
-        let plugin = test_plugin_context("CodeReview");
-        let plugin_handle = create_test_handle(&app, "plugin:CodeReview");
-
-        app.apply_runtime_plugin_context(Some(&plugin), &plugin_handle)
-            .unwrap();
-
-        let snapshot = app.runtime.agent_handle_snapshot(&plugin_handle).unwrap();
-        assert_eq!(snapshot.plugin_overlay_name.as_deref(), Some("CodeReview"));
-    }
-
-    #[test]
-    fn runtime_plugin_plugin_and_normal_handles_share_security_by_default() {
-        let app = app_with_test_runtime("runtime-plugin-security-model");
+    fn active_agent_session_shares_runtime_security() {
+        let mut app = app_with_test_runtime("runtime-agent-security-model");
         app.security
             .approve_rule(ApprovedRule {
                 kind: ApprovalKind::CommandPrefix {
@@ -1453,108 +1331,65 @@ mod tests {
             })
             .unwrap();
 
-        let normal_handle = create_test_handle(&app, "coding");
-        let plugin_handle = create_test_handle(&app, "plugin:CodeReview");
+        let session = test_runtime_session(&app, "default", "agent-session");
+        app.active_agent_session = Some(session.clone());
 
-        let normal = app.runtime.agent_handle_snapshot(&normal_handle).unwrap();
-        let plugin = app.runtime.agent_handle_snapshot(&plugin_handle).unwrap();
-        assert_eq!(normal.approved_rule_count, 1);
-        assert_eq!(plugin.approved_rule_count, 1);
+        assert_eq!(
+            session
+                .invocation
+                .security
+                .approved_rules
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
-    fn runtime_plugin_switching_to_normal_clears_plugin_overlay() {
-        let mut app = app_with_test_runtime("runtime-plugin-clear-model");
-        let plugin = test_plugin_context("CodeReview");
-        let normal_handle = create_test_handle(&app, "coding");
-        let plugin_handle = create_test_handle(&app, "plugin:CodeReview");
-        app.plugin_handles
-            .insert(plugin.name.clone(), plugin_handle.clone());
-        app.active_handle = Some(plugin_handle.clone());
-        app.apply_runtime_plugin_context(Some(&plugin), &plugin_handle)
-            .unwrap();
-
-        app.apply_runtime_plugin_context(None, &normal_handle)
-            .unwrap();
-
-        let plugin_snapshot = app.runtime.agent_handle_snapshot(&plugin_handle).unwrap();
-        let normal_snapshot = app.runtime.agent_handle_snapshot(&normal_handle).unwrap();
-        assert!(plugin_snapshot.plugin_overlay_name.is_none());
-        assert!(normal_snapshot.plugin_overlay_name.is_none());
-        assert!(app.active_plugin_name().is_none());
-    }
-
-    #[test]
-    fn permissions_switch_permission_switch_clears_plugin_runtime_context() {
-        let mut app = app_with_test_runtime("permissions-plugin-clear-model");
-        let plugin = test_plugin_context("CodeReview");
-        let plugin_handle = create_test_handle(&app, "plugin:CodeReview");
-        app.plugin_handles
-            .insert(plugin.name.clone(), plugin_handle.clone());
-        app.active_handle = Some(plugin_handle.clone());
-        app.apply_runtime_plugin_context(Some(&plugin), &plugin_handle)
-            .unwrap();
+    fn permissions_switch_clears_active_agent_session() {
+        let mut app = app_with_test_runtime("permissions-agent-clear-model");
+        app.active_agent_session = Some(test_runtime_session(&app, "default", "agent-session"));
+        app.active_session_id = Some("agent-session".into());
 
         app.switch_permissions("strict");
 
         assert_eq!(app.security.mode_label, "strict");
-        assert!(app.normal_handle.is_none());
-        assert!(app.plugin_handles.is_empty());
-        assert!(app.active_handle.is_none());
-        assert!(app.active_plugin_name().is_none());
-        let snapshot = app.runtime.agent_handle_snapshot(&plugin_handle).unwrap();
-        assert!(snapshot.plugin_overlay_name.is_none());
+        assert!(app.active_agent_session.is_none());
+        assert!(app.active_session_id.is_none());
     }
 
     #[test]
-    fn slash_plugins_lists_registry() {
+    fn slash_registry_has_no_plugin_commands() {
         let mut app = App::new();
+        app.composer.set_input("/pl");
 
-        assert!(app.handle_slash_command("/plugins"));
+        let suggestions = app.slash_suggestions();
 
-        let msg = app.messages.last().unwrap().content.as_str();
-        assert!(msg.contains("plugin(s) loaded"));
-        assert!(msg.contains("/plugin <name> <prompt>"));
+        let plural = ["/", "plugins"].concat();
+        let singular = ["/", "plugin <name>"].concat();
+
+        assert!(!suggestions.iter().any(|s| s.command == plural));
+        assert!(!suggestions.iter().any(|s| s.command == singular));
     }
 
     #[test]
-    fn slash_plugin_prepares_plugin_submission() {
+    fn slash_plugin_is_not_handled() {
         let mut app = App::new();
 
-        assert!(app.handle_slash_command("/plugin CodeReview inspect this diff"));
+        let removed_command = ["/", "plugin CodeReview inspect this diff"].concat();
 
-        let prepared = app
-            .prepared_submission
-            .as_ref()
-            .expect("plugin command should prepare a submission");
-        assert!(prepared.display.starts_with("@CodeReview "));
-        assert!(prepared.prompt.contains("Review the following code"));
-        assert_eq!(prepared.plugin.as_ref().unwrap().name, "CodeReview");
+        assert!(app.handle_slash_command(&removed_command));
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].role, Role::System);
+        assert!(app.messages[0].content.contains("Unknown command: /plugin"));
     }
 
     #[test]
-    fn plugin_submission_does_not_fall_back_to_normal_handle() {
-        let mut app = App::new();
-        let normal_handle = AgentHandleId::new();
-        let plugin_handle = AgentHandleId::new();
-        let plugin = test_plugin_context("CodeReview");
-        app.normal_handle = Some(normal_handle.clone());
-
+    fn tui_completion_sets_snapshot_label() {
         assert_eq!(
-            app.existing_handle_for_submission(Some(&plugin)),
-            None,
-            "first plugin turn must not reuse the normal coding handle"
-        );
-
-        app.plugin_handles
-            .insert(plugin.name.clone(), plugin_handle.clone());
-        assert_eq!(
-            app.existing_handle_for_submission(Some(&plugin)),
-            Some(plugin_handle)
-        );
-        assert_eq!(
-            app.existing_handle_for_submission(None),
-            Some(normal_handle)
+            short_snapshot_label("abcdef1234567890"),
+            "snapshot:abcdef12"
         );
     }
 
@@ -1852,30 +1687,25 @@ mod tests {
         assert_eq!(app.current_provider, "old-provider");
         assert_eq!(app.messages.len(), 2);
         assert!(app.previous_model.is_empty());
-        assert!(app.normal_handle.is_none());
+        assert!(app.active_agent_session.is_none());
     }
 
     #[test]
     fn tui_completion_uses_runtime_completion_metadata() {
         let mut app = App::new();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
-        app.active_handle = Some(handle_id.clone());
+        app.active_session_id = Some(RUNTIME_SESSION_ID.into());
         app.active_runtime_turn = Some(runtime_turn_id.clone());
         app.status = AppStatus::Streaming;
         app.turn.active_turn_id = Some(3);
         app.turn.active_assistant_index = Some(0);
         app.messages
             .push(ChatMessage::new(Role::Assistant, "answer".into()));
-        let completion = test_completion(
-            handle_id.clone(),
-            runtime_turn_id.clone(),
-            TurnStatus::Completed,
-        );
+        let completion = test_completion(runtime_turn_id.clone(), TurnStatus::Completed);
 
         app.apply_runtime_completion(
             3,
-            &handle_id,
+            RUNTIME_SESSION_ID,
             &runtime_turn_id,
             TurnStatus::Completed,
             Some(&completion),
@@ -1886,7 +1716,7 @@ mod tests {
         assert_eq!(app.current_provider, "runtime-provider");
         assert_eq!(app.token_count, 5);
         assert_eq!(app.status, AppStatus::Ready);
-        assert!(app.active_handle.is_none());
+        assert!(app.active_session_id.is_none());
         assert!(app.active_runtime_turn.is_none());
     }
 
@@ -1896,9 +1726,8 @@ mod tests {
         app.save_sessions = true;
         app.session = Some(test_session());
         let original_session_id = app.session.as_ref().unwrap().id.clone();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
-        app.active_handle = Some(handle_id.clone());
+        app.active_session_id = Some(RUNTIME_SESSION_ID.into());
         app.active_runtime_turn = Some(runtime_turn_id.clone());
         app.status = AppStatus::Streaming;
         app.turn.active_turn_id = Some(4);
@@ -1906,15 +1735,11 @@ mod tests {
         app.turn.pending_user = Some("new question".into());
         app.messages
             .push(ChatMessage::new(Role::Assistant, "runtime answer".into()));
-        let completion = test_completion(
-            handle_id.clone(),
-            runtime_turn_id.clone(),
-            TurnStatus::Completed,
-        );
+        let completion = test_completion(runtime_turn_id.clone(), TurnStatus::Completed);
 
         app.apply_runtime_completion(
             4,
-            &handle_id,
+            RUNTIME_SESSION_ID,
             &runtime_turn_id,
             TurnStatus::Completed,
             Some(&completion),
@@ -1928,24 +1753,19 @@ mod tests {
     #[test]
     fn tui_completion_cancelled_keeps_partial_output_and_copy() {
         let mut app = App::new();
-        let handle_id = AgentHandleId::new();
         let runtime_turn_id = TurnId::new();
-        app.active_handle = Some(handle_id.clone());
+        app.active_session_id = Some(RUNTIME_SESSION_ID.into());
         app.active_runtime_turn = Some(runtime_turn_id.clone());
         app.status = AppStatus::Streaming;
         app.turn.active_turn_id = Some(5);
         app.turn.active_assistant_index = Some(0);
         app.messages
             .push(ChatMessage::new(Role::Assistant, "partial answer".into()));
-        let completion = test_completion(
-            handle_id.clone(),
-            runtime_turn_id.clone(),
-            TurnStatus::Cancelled,
-        );
+        let completion = test_completion(runtime_turn_id.clone(), TurnStatus::Cancelled);
 
         app.apply_runtime_completion(
             5,
-            &handle_id,
+            RUNTIME_SESSION_ID,
             &runtime_turn_id,
             TurnStatus::Cancelled,
             Some(&completion),
@@ -1958,34 +1778,26 @@ mod tests {
             app.messages.last().unwrap().content,
             "Cancelled. Partial output kept."
         );
-        assert!(app.active_handle.is_none());
+        assert!(app.active_session_id.is_none());
         assert!(app.active_runtime_turn.is_none());
     }
 
     #[test]
-    fn load_session_clears_runtime_handles_and_transient_state() {
-        let mut app = App::new();
-        app.normal_handle = Some(AgentHandleId::new());
-        app.plugin_handles
-            .insert("CodeReview".into(), AgentHandleId::new());
-        app.active_handle = Some(AgentHandleId::new());
+    fn load_session_clears_runtime_sessions_and_transient_state() {
+        let mut app = app_with_test_runtime("load-session-clear-model");
+        app.active_agent_session = Some(test_runtime_session(&app, "default", "agent-session"));
+        app.active_session_id = Some("agent-session".into());
         app.active_runtime_turn = Some(TurnId::new());
-        app.prepared_submission = Some(PreparedSubmission {
-            display: "display".into(),
-            prompt: "prompt".into(),
-            raw_prompt: None,
-            plugin: None,
-        });
+        app.snapshot_label = Some("snapshot:abcdef12".into());
         app.turn.queued_inputs.push_back("queued".into());
         app.start_search("old".into());
 
         app.load_session(test_session());
 
-        assert!(app.normal_handle.is_none());
-        assert!(app.plugin_handles.is_empty());
-        assert!(app.active_handle.is_none());
+        assert!(app.active_agent_session.is_none());
+        assert!(app.active_session_id.is_none());
         assert!(app.active_runtime_turn.is_none());
-        assert!(app.prepared_submission.is_none());
+        assert!(app.snapshot_label.is_none());
         assert!(app.turn.queued_inputs.is_empty());
         assert!(!app.activity.search.is_active());
     }
