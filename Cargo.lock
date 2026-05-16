@@ -1937,6 +1937,7 @@ dependencies = [
  "futures",
  "lattice-llm",
  "lattice-profile",
+ "lattice-session",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

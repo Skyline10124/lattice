@@ -9,6 +9,7 @@ description = "LATTICE v1.1 thin public API facade for session creation, turn ex
 [dependencies]
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
+lattice-session = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

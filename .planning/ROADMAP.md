@@ -14,7 +14,7 @@ Rewrite the active runtime around the minimal session-driven chain and remove or
 |---|-------|------|--------------|------------------|
 | 6 | Crate Topology and Main-Path Skeleton | 3/3 | Complete   | 2026-05-16 |
 | 7 | Functional LLM and Direct Profiles | 4/4 | Complete   | 2026-05-16 |
-| 8 | Session Graph Core | Make sessions the durable graph of commits, branches, messages, HEAD, and refs. | SESS-01..SESS-05 | 5 |
+| 8 | Session Graph Core | 4/4 | Complete   | 2026-05-16 |
 | 9 | Agent Loop, Tools, and API Facade | Connect session state, LLM calls, simple tools, and `lattice-api` turn execution. | AGENT-01, AGENT-02, TOOL-01..TOOL-04, API-01..API-03 | 6 |
 | 10 | CLI Cutover | Reduce supported user-facing commands to the v1.1 CLI surface. | CLI-01..CLI-04 | 5 |
 | 11 | Deletion, Budget, and Release Verification | Delete compatibility leftovers, prove boundaries, meet the source-size budget, and update docs. | SIMP-02, SIMP-03, CRATE-05, VER-01..VER-06 | 6 |

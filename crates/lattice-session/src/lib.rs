@@ -13,6 +13,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+pub mod graph;
+pub use graph::{
+    GraphDiff, GraphHead, GraphMessage, GraphRef, GraphRefKind, GraphSession, GraphToolCall,
+    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
+    TurnCommitInput, TurnCommitStatus, TurnLogEntry,
+};
+
+pub mod sqlite_graph;
+pub use sqlite_graph::SqliteSessionGraphStore;
+
 mod turn_tx;
 pub use turn_tx::{
     CommitTurnRequest, CommittedTurn, OpenTurnRequest, OpenedTurn, ProfileDrift, ProfileSnapshot,
@@ -20,7 +30,7 @@ pub use turn_tx::{
 };
 
 const MAX_SESSION_ID_LEN: usize = 128;
-const MAX_BRANCH_NAME_LEN: usize = 128;
+pub(crate) const MAX_BRANCH_NAME_LEN: usize = 128;
 const DEFAULT_BRANCH: &str = "main";
 const TURN_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
@@ -81,6 +91,10 @@ pub enum SessionError {
     Path(String),
     #[error("transaction conflict: {0}")]
     Conflict(String),
+    #[error("branch '{name}' not found in session '{session_id}'")]
+    MissingBranch { name: String, session_id: String },
+    #[error("commit '{0}' not found")]
+    MissingCommit(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3882,7 +3896,7 @@ fn validate_session_id(id: &str) -> Result<()> {
     }
 }
 
-fn validate_branch_name(name: &str) -> Result<()> {
+pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= MAX_BRANCH_NAME_LEN
         && !name.starts_with('-')

@@ -284,7 +284,7 @@ pub(crate) fn contains_secret_key(value: &serde_json::Value) -> bool {
 }
 
 fn is_secret_key(key: &str) -> bool {
-    SECRET_FIELD_NAMES.iter().any(|secret| key == *secret)
+    SECRET_FIELD_NAMES.contains(&key)
 }
 
 #[cfg(test)]

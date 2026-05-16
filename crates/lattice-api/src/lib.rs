@@ -23,6 +23,7 @@ mod turn;
 
 pub use session::{
     create_session, open_session, ApiError, ApiSession, CreateSessionRequest, OpenSessionRequest,
+    SessionApi,
 };
 pub use topology::{migration_homes, TopologyEntry};
 pub use turn::{
