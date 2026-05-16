@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProfile {
     pub schema_version: u64,
@@ -17,7 +17,7 @@ pub struct AgentProfile {
     pub behavior: Option<BehaviorSection>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSection {
     pub name: String,
@@ -26,7 +26,7 @@ pub struct AgentSection {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PromptSection {
     #[serde(default)]
@@ -35,7 +35,7 @@ pub struct PromptSection {
     pub system_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSection {
     #[serde(default)]
@@ -44,7 +44,7 @@ pub struct ToolsSection {
     pub enabled: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
     Project,
@@ -52,13 +52,13 @@ pub enum SandboxMode {
     Permissive,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SecuritySection {
     pub sandbox_mode: SandboxMode,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ContextSection {
     #[serde(default = "default_true")]
@@ -71,7 +71,7 @@ const fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct BehaviorSection {
     #[serde(default)]

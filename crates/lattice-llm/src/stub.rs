@@ -4,7 +4,8 @@
 //! credentials, no HTTP clients, and no real model routing. The stub produces
 //! deterministic output from the user prompt content.
 
-use crate::types::{ChatRequest, ChatResponse, LlmEvent, ModelRouter};
+use crate::router::ModelRouter;
+use crate::types::{ChatRequest, ChatResponse, LlmEvent};
 use futures::stream::{self, Stream};
 use std::pin::Pin;
 use thiserror::Error;
@@ -12,7 +13,10 @@ use thiserror::Error;
 /// Errors that can occur during LLM operations.
 #[derive(Debug, Error)]
 pub enum LlmError {
-    /// A stub-only error for Phase 6.
+    /// A model alias was not found in the router's alias table.
+    #[error("unknown model alias: '{0}'")]
+    UnknownModel(String),
+    /// A general LLM error.
     #[error("LLM error: {0}")]
     Other(String),
 }
@@ -41,28 +45,69 @@ impl StubLlm {
     /// the last user message for deterministic observability.
     /// Never calls provider transports or reads credentials.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
-        let model = self.router.resolve(&request.target);
+        let resolved = self.router.resolve(&request.target)?;
+        let mut stream = self.stream(request)?;
+        use futures::StreamExt;
 
-        let last_user_msg = request
-            .messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, crate::types::Role::User))
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
+        let mut content = String::new();
+        let mut reasoning_content = String::new();
+        let mut tool_calls: Option<Vec<crate::types::ToolCall>> = None;
+        let mut finish_reason = String::new();
+        let mut usage: Option<crate::types::TokenUsage> = None;
 
-        let content = if last_user_msg.is_empty() {
-            "stub response".to_string()
-        } else {
-            format!("stub response: {}", last_user_msg)
-        };
+        while let Some(event) = stream.next().await {
+            match event {
+                LlmEvent::Token { content: token } => content.push_str(&token),
+                LlmEvent::Reasoning { content: r } => reasoning_content.push_str(&r),
+                LlmEvent::ToolCallStart { id, name } => {
+                    let calls = tool_calls.get_or_insert_with(Vec::new);
+                    calls.push(crate::types::ToolCall {
+                        id,
+                        function: crate::types::FunctionCall {
+                            name,
+                            arguments: String::new(),
+                        },
+                    });
+                }
+                LlmEvent::ToolCallDelta {
+                    id,
+                    arguments_delta,
+                } => {
+                    if let Some(calls) = &mut tool_calls {
+                        if let Some(call) = calls.iter_mut().find(|c| c.id == id) {
+                            call.function.arguments.push_str(&arguments_delta);
+                        }
+                    }
+                }
+                LlmEvent::Done {
+                    finish_reason: fr,
+                    usage: u,
+                } => {
+                    finish_reason = fr;
+                    usage = u;
+                }
+                LlmEvent::Error { message } => {
+                    return Err(LlmError::Other(message));
+                }
+                _ => {}
+            }
+        }
 
         Ok(ChatResponse {
             content,
-            reasoning_content: None,
-            tool_calls: None,
-            finish_reason: "stop".to_string(),
-            model,
+            reasoning_content: if reasoning_content.is_empty() {
+                None
+            } else {
+                Some(reasoning_content)
+            },
+            tool_calls,
+            finish_reason: if finish_reason.is_empty() {
+                "stop".to_string()
+            } else {
+                finish_reason
+            },
+            model: resolved.alias,
+            usage,
         })
     }
 
@@ -71,6 +116,8 @@ impl StubLlm {
     /// Yields `Started`, a `Token("stub response")`, then `Done`.
     /// Never calls provider transports or reads credentials.
     pub fn stream(&self, request: ChatRequest) -> Result<LlmStream, LlmError> {
+        let _resolved = self.router.resolve(&request.target)?;
+
         let last_user_msg = request
             .messages
             .iter()
@@ -90,21 +137,94 @@ impl StubLlm {
             LlmEvent::Token {
                 content: token_content,
             },
-            LlmEvent::Done,
+            LlmEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: None,
+            },
         ];
 
         Ok(Box::pin(stream::iter(events)))
     }
 }
 
-/// Convenience function: run a chat completion through the default stub.
+/// Convenience function: run a chat completion through the real client.
+///
+/// Resolves the model alias, validates credentials, dispatches to the
+/// appropriate provider, and collects the stream into a [`ChatResponse`].
 pub async fn chat(request: ChatRequest) -> Result<ChatResponse, LlmError> {
-    StubLlm::new().chat(request).await
+    let resolved = ModelRouter::new().resolve(&request.target)?;
+    let model = resolved.alias.clone();
+    let mut stream = crate::client::dispatch_stream(request, resolved).await?;
+    use futures::StreamExt;
+
+    let mut content = String::new();
+    let mut reasoning_content = String::new();
+    let mut tool_calls: Option<Vec<crate::types::ToolCall>> = None;
+    let mut finish_reason = String::new();
+    let mut usage: Option<crate::types::TokenUsage> = None;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            LlmEvent::Token { content: token } => content.push_str(&token),
+            LlmEvent::Reasoning { content: r } => reasoning_content.push_str(&r),
+            LlmEvent::ToolCallStart { id, name } => {
+                let calls = tool_calls.get_or_insert_with(Vec::new);
+                calls.push(crate::types::ToolCall {
+                    id,
+                    function: crate::types::FunctionCall {
+                        name,
+                        arguments: String::new(),
+                    },
+                });
+            }
+            LlmEvent::ToolCallDelta {
+                id,
+                arguments_delta,
+            } => {
+                if let Some(calls) = &mut tool_calls {
+                    if let Some(call) = calls.iter_mut().find(|c| c.id == id) {
+                        call.function.arguments.push_str(&arguments_delta);
+                    }
+                }
+            }
+            LlmEvent::Done {
+                finish_reason: fr,
+                usage: u,
+            } => {
+                finish_reason = fr;
+                usage = u;
+            }
+            LlmEvent::Error { message } => {
+                return Err(LlmError::Other(message));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(ChatResponse {
+        content,
+        reasoning_content: if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
+        },
+        tool_calls,
+        finish_reason: if finish_reason.is_empty() {
+            "stop".to_string()
+        } else {
+            finish_reason
+        },
+        model,
+        usage,
+    })
 }
 
-/// Convenience function: stream a completion through the default stub.
-pub fn stream(request: ChatRequest) -> Result<LlmStream, LlmError> {
-    StubLlm::new().stream(request)
+/// Convenience function: stream a completion through the real client.
+///
+/// Resolves the model alias and dispatches to the appropriate provider.
+pub async fn stream(request: ChatRequest) -> Result<LlmStream, LlmError> {
+    let resolved = ModelRouter::new().resolve(&request.target)?;
+    crate::client::dispatch_stream(request, resolved).await
 }
 
 #[cfg(test)]
@@ -134,8 +254,10 @@ mod tests {
 
     #[tokio::test]
     async fn chat_default_stub_produces_deterministic_response() {
+        // Tests the StubLlm directly (real client requires credentials)
+        let stub = StubLlm::new();
         let req = make_request("hello");
-        let resp = chat(req).await.unwrap();
+        let resp = stub.chat(req).await.unwrap();
         assert!(
             !resp.content.is_empty(),
             "chat convenience fn should produce non-empty content"
@@ -161,15 +283,13 @@ mod tests {
             events[0]
         );
         assert!(
-            matches!(&events[events.len() - 1], LlmEvent::Done),
+            matches!(&events[events.len() - 1], LlmEvent::Done { .. }),
             "last event should be Done, got {:?}",
             events.last()
         );
 
         // At least one Token event should exist between Started and Done.
-        let has_token = events
-            .iter()
-            .any(|e| matches!(e, LlmEvent::Token { .. }));
+        let has_token = events.iter().any(|e| matches!(e, LlmEvent::Token { .. }));
         assert!(has_token, "stream should contain at least one Token event");
     }
 
@@ -183,7 +303,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, LlmEvent::Token { .. }))
             .collect();
-        assert!(!token_events.is_empty(), "should have at least one Token event");
+        assert!(
+            !token_events.is_empty(),
+            "should have at least one Token event"
+        );
         for token in token_events {
             if let LlmEvent::Token { content } = token {
                 assert!(
@@ -195,6 +318,41 @@ mod tests {
         }
     }
 
+    // ── chat_collects_stream ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn chat_collects_stream() {
+        let stub = StubLlm::new();
+        let req = make_request("hello world");
+        let resp = stub.chat(req).await.unwrap();
+        assert_eq!(resp.content, "stub response: hello world");
+        assert_eq!(resp.finish_reason, "stop");
+        assert_eq!(resp.model, "sonnet");
+        assert!(resp.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_still_works_for_empty_messages() {
+        let stub = StubLlm::new();
+        let req = ChatRequest::new(vec![], ModelTarget::default());
+        let resp = stub.chat(req).await.unwrap();
+        assert_eq!(resp.content, "stub response");
+    }
+
+    #[tokio::test]
+    async fn stream_resolves_model_before_yielding() {
+        let stub = StubLlm::new();
+        let req = make_request("test");
+        let stream = stub.stream(req).unwrap();
+        let events: Vec<LlmEvent> = stream.collect().await;
+        let last = events.last().unwrap();
+        assert!(
+            matches!(last, LlmEvent::Done { finish_reason, .. } if finish_reason == "stop"),
+            "Done should have finish_reason 'stop', got {:?}",
+            last
+        );
+    }
+
     // ── Boundary tests (must always pass) ──────────────────────────────────
 
     #[test]
@@ -204,6 +362,6 @@ mod tests {
         // We verify at the module level that no forbidden imports exist.
         let stub = StubLlm::new();
         // StubLlm must exist and be constructable.
-        assert!(stub.router.default_model.is_none());
+        assert_eq!(stub.router.default_model, Some("sonnet".to_string()));
     }
 }

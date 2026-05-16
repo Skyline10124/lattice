@@ -1936,6 +1936,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "lattice-llm",
+ "lattice-profile",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2038,10 +2039,13 @@ name = "lattice-llm"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "url",
+ "urlencoding",
 ]
 
 [[package]]

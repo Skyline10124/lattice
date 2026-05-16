@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Cut Off Cleverness
 status: ready_to_plan
-last_updated: 2026-05-16T09:09:08.657Z
-last_activity: 2026-05-16 -- Phase 06 execution started
+last_updated: 2026-05-16T14:11:24.214Z
+last_activity: 2026-05-16 -- Phase 07 execution started
 progress:
   total_phases: 6
-  completed_phases: 0
-  total_plans: 3
-  completed_plans: 26
-  percent: 0
-stopped_at: Phase 06 complete (3/3) — ready to discuss Phase 7
+  completed_phases: 1
+  total_plans: 7
+  completed_plans: 30
+  percent: 17
+stopped_at: Phase 07 complete (4/4) — ready to discuss Phase 8
 ---
 
 # Planning State
@@ -21,11 +21,11 @@ stopped_at: Phase 06 complete (3/3) — ready to discuss Phase 7
 See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Phase 7 — functional llm and direct profiles
+**Current focus:** Phase 8 — session graph core
 
 ## Current Position
 
-Phase: 7
+Phase: 8
 Plan: Not started
 Status: Ready to plan
 Last activity: 2026-05-16

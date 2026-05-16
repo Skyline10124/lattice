@@ -85,7 +85,11 @@ impl ApiSession {
 /// Generates a stable id via UUID v4 and returns an [`ApiSession`] handle.
 /// Does not touch disk in Phase 6.
 pub fn create_session(request: CreateSessionRequest) -> Result<ApiSession> {
-    Ok(ApiSession::new(request.label, request.profile, request.model))
+    Ok(ApiSession::new(
+        request.label,
+        request.profile,
+        request.model,
+    ))
 }
 
 /// Open an existing session by id.
@@ -194,7 +198,10 @@ mod tests {
             id: "abc123".to_string(),
         };
         let result = open_session(req);
-        assert!(result.is_err(), "open_session should return NotFound in Phase 6");
+        assert!(
+            result.is_err(),
+            "open_session should return NotFound in Phase 6"
+        );
         match result.unwrap_err() {
             ApiError::NotFound(id) => assert_eq!(id, "abc123"),
             other => panic!("expected NotFound, got {:?}", other),

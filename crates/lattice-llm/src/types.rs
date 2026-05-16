@@ -153,6 +153,8 @@ pub struct ChatResponse {
     pub tool_calls: Option<Vec<ToolCall>>,
     pub finish_reason: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 /// A streaming LLM event for the v1.1 API.
@@ -162,8 +164,19 @@ pub enum LlmEvent {
     Started,
     /// A chunk of generated text content.
     Token { content: String },
-    /// The stream is finished.
-    Done,
+    /// A chunk of reasoning / thinking content.
+    Reasoning { content: String },
+    /// Start of a tool call from the model.
+    ToolCallStart { id: String, name: String },
+    /// An incremental argument delta for an in-progress tool call.
+    ToolCallDelta { id: String, arguments_delta: String },
+    /// A tool call is complete.
+    ToolCallEnd { id: String },
+    /// The stream finished successfully.
+    Done {
+        finish_reason: String,
+        usage: Option<TokenUsage>,
+    },
     /// An error encountered during streaming.
     Error { message: String },
 }
@@ -195,27 +208,12 @@ impl ModelTarget {
     }
 }
 
-/// A minimal model router that maps aliases to provider-specific model ids.
-///
-/// Phase 6 stub: always returns the alias as the resolved model id.
-/// Phase 7 will add real alias resolution.
-#[derive(Clone, Debug, Default)]
-pub struct ModelRouter {
-    /// Optional default model alias when no target is specified.
-    pub default_model: Option<String>,
-}
-
-impl ModelRouter {
-    pub fn new() -> Self {
-        ModelRouter::default()
-    }
-
-    /// Resolve a model target to its provider-specific model id.
-    ///
-    /// In Phase 6, returns the alias unchanged.
-    pub fn resolve(&self, target: &ModelTarget) -> String {
-        target.model.clone()
-    }
+/// Token usage statistics returned by the provider in the final stream chunk.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }
 
 #[cfg(test)]
@@ -259,7 +257,10 @@ mod tests {
 
     #[test]
     fn tool_call_roundtrip() {
-        let tc = ToolCall::new("call_abc123", FunctionCall::new("get_weather", r#"{"city":"Paris"}"#));
+        let tc = ToolCall::new(
+            "call_abc123",
+            FunctionCall::new("get_weather", r#"{"city":"Paris"}"#),
+        );
         let json = serde_json::to_string(&tc).unwrap();
         let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
         assert_eq!(tc, deserialized);
@@ -354,6 +355,7 @@ mod tests {
             tool_calls: None,
             finish_reason: "stop".to_string(),
             model: "sonnet".to_string(),
+            usage: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deserialized: ChatResponse = serde_json::from_str(&json).unwrap();
@@ -369,7 +371,10 @@ mod tests {
             LlmEvent::Token {
                 content: "hello".to_string(),
             },
-            LlmEvent::Done,
+            LlmEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: None,
+            },
         ];
         for event in events {
             let json = serde_json::to_string(&event).unwrap();
@@ -378,19 +383,10 @@ mod tests {
         }
     }
 
-    // ── ModelTarget / ModelRouter ───────────────────────────────────────────
-
     #[test]
     fn model_target_default() {
         let t = ModelTarget::default();
         assert_eq!(t.model, "sonnet");
         assert!(t.provider.is_none());
-    }
-
-    #[test]
-    fn model_router_resolve_returns_alias_in_phase6() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-4o");
-        assert_eq!(router.resolve(&target), "gpt-4o");
     }
 }

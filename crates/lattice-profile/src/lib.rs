@@ -12,7 +12,9 @@ mod lowering;
 mod schema;
 mod spec;
 
-pub use defaults::default_agent_template;
+pub use defaults::{
+    default_agent_template, default_dev_template, default_editor_template, default_reader_template,
+};
 pub use discovery::{resolve_agent_profile, DiscoveryPaths, ProfileSource};
 pub use error::ProfileError;
 pub use load::{load_agent_profile, LoadedAgentProfile};

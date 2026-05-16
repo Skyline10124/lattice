@@ -17,6 +17,7 @@ pub async fn run(prompt: String) -> anyhow::Result<()> {
         session_id: None,
         profile: None,
         model: None,
+        loaded_profile: None,
     };
     let result = lattice_api::run_turn(request).await?;
     let output = render_result(&result);
@@ -56,12 +57,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires real API credentials — run manually with valid keys"]
     async fn run_v11_calls_api_and_returns_ok() {
+        // Phase 7 uses real lattice_llm::chat() which makes live API calls.
+        // This test is ignored by default; run manually with valid credentials.
         let result = run("hello".to_string()).await;
-        assert!(
-            result.is_ok(),
-            "run should succeed without provider credentials"
-        );
+        assert!(result.is_ok(), "run should succeed with credentials");
     }
 
     #[tokio::test]
@@ -71,34 +72,59 @@ mod tests {
             session_id: None,
             profile: None,
             model: None,
+            loaded_profile: None,
         };
-        let result = lattice_api::run_turn(request).await.unwrap();
-        assert!(
-            result.assistant_output.contains("stub response"),
-            "assistant_output should contain 'stub response', got: '{}'",
-            result.assistant_output
-        );
+        // Phase 7: run_turn uses real client, requires credentials.
+        // Skip if credentials are missing or invalid (HTTP 401/403).
+        let result = match lattice_api::run_turn(request).await {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("ANTHROPIC_API_KEY")
+                    || msg.contains("OPENAI_API_KEY")
+                    || msg.contains("HTTP 401")
+                    || msg.contains("HTTP 403")
+                {
+                    return; // skip — no working credentials available
+                }
+                panic!("unexpected error: {}", e);
+            }
+        };
         assert!(
             result.commit_id.is_none(),
-            "commit_id must be None in Phase 6"
+            "commit_id must be None in Phase 7"
         );
     }
 
     #[tokio::test]
-    async fn run_v11_does_not_need_credentials() {
-        // This test proves the handler works without any provider env vars set.
-        // The StubLlm never reads env vars, so the handler must succeed
-        // regardless of credential state.
+    async fn run_v11_requires_credentials_in_phase_7() {
+        // Phase 7 uses real lattice_llm::chat(). If no credentials are
+        // configured, run_turn must return an error naming the missing env var.
+        // If credentials exist but are invalid (HTTP 401/403), the real client
+        // was reached — that also succeeds this test.
         let req = lattice_api::RunTurnRequest {
             input: "credential-free test".to_string(),
             session_id: None,
             profile: None,
             model: None,
+            loaded_profile: None,
         };
         let result = lattice_api::run_turn(req).await;
-        assert!(
-            result.is_ok(),
-            "run_turn should never require provider credentials in Phase 6"
-        );
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("ANTHROPIC_API_KEY")
+                        || msg.contains("OPENAI_API_KEY")
+                        || msg.contains("HTTP 401")
+                        || msg.contains("HTTP 403"),
+                    "error should mention missing credential env var or indicate auth failure, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => {
+                // If we got here, credentials must have been present and valid — that's fine.
+            }
+        }
     }
 }

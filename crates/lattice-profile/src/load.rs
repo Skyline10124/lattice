@@ -4,7 +4,7 @@ use crate::error::ProfileError;
 use crate::schema::AgentProfile;
 
 /// A loaded and validated agent profile with resolved system prompt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LoadedAgentProfile {
     pub path: PathBuf,
     pub package_dir: PathBuf,

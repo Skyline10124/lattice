@@ -59,27 +59,21 @@ mod tests {
     #[test]
     fn migration_homes_includes_prompt() {
         let homes = migration_homes();
-        let prompt = homes
-            .iter()
-            .find(|e| e.legacy_crate == "lattice-prompt");
+        let prompt = homes.iter().find(|e| e.legacy_crate == "lattice-prompt");
         assert!(prompt.is_some(), "should include lattice-prompt entry");
     }
 
     #[test]
     fn migration_homes_includes_sandbox() {
         let homes = migration_homes();
-        let sandbox = homes
-            .iter()
-            .find(|e| e.legacy_crate == "lattice-sandbox");
+        let sandbox = homes.iter().find(|e| e.legacy_crate == "lattice-sandbox");
         assert!(sandbox.is_some(), "should include lattice-sandbox entry");
     }
 
     #[test]
     fn migration_homes_includes_policy() {
         let homes = migration_homes();
-        let policy = homes
-            .iter()
-            .find(|e| e.legacy_crate == "lattice-policy");
+        let policy = homes.iter().find(|e| e.legacy_crate == "lattice-policy");
         assert!(policy.is_some(), "should include lattice-policy entry");
     }
 
