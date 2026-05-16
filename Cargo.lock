@@ -1931,6 +1931,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-api"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "lattice-llm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
@@ -1944,6 +1957,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "lattice-agent",
+ "lattice-api",
  "lattice-core",
  "lattice-profile",
  "lattice-prompt",
@@ -2017,6 +2031,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "lattice-llm"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

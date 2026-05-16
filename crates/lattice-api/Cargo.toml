@@ -1,0 +1,18 @@
+[package]
+name = "lattice-api"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE v1.1 thin public API facade for session creation, turn execution, and streaming"
+
+[dependencies]
+lattice-llm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

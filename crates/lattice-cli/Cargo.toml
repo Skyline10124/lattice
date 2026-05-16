@@ -19,6 +19,7 @@ lattice-sandbox = { workspace = true }
 lattice-tools = { workspace = true }
 lattice-runtime = { workspace = true }
 lattice-profile = { workspace = true }
+lattice-api = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }

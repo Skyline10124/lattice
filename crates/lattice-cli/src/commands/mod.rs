@@ -7,6 +7,7 @@ pub mod models;
 pub mod new_agent;
 pub mod resolve;
 pub mod run;
+pub mod run_v11;
 pub mod sessions;
 pub mod stats;
 pub mod validate;

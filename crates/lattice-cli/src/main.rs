@@ -17,8 +17,8 @@ mod session_seed;
 mod test_support;
 
 use commands::{
-    config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run, sessions, stats,
-    validate,
+    config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run, run_v11, sessions,
+    stats, validate,
 };
 use config::Config;
 use credentials::CredentialStore;
@@ -127,6 +127,11 @@ enum Commands {
             help = "Print only after the run completes"
         )]
         no_stream: bool,
+    },
+    #[command(name = "run-v11", about = "Run the v1.1 skeleton path")]
+    RunV11 {
+        #[arg(help = "Prompt text to send through the v1.1 skeleton path")]
+        prompt: String,
     },
     #[command(about = "Debug mode: trace-level logging with colored output")]
     Debug {
@@ -308,6 +313,9 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
+        Some(Commands::RunV11 { prompt }) => {
+            run_v11::run(prompt).await?;
+        }
         Some(Commands::Debug {
             prompt,
             model,
@@ -454,5 +462,15 @@ mod tests {
 
         assert!(!stream);
         assert!(no_stream);
+    }
+
+    #[test]
+    fn run_v11_parses_prompt() {
+        let cli = Cli::parse_from(["lattice", "run-v11", "hello"]);
+        let Some(Commands::RunV11 { prompt }) = cli.command else {
+            panic!("expected run-v11 command");
+        };
+
+        assert_eq!(prompt, "hello");
     }
 }

@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/lattice-hooks",
+    "crates/lattice-llm",
+    "crates/lattice-api",
     "crates/lattice-core",
     "crates/lattice-session",
     "crates/lattice-prompt",
@@ -24,6 +26,8 @@ authors = ["LATTICE Contributors"]
 [workspace.dependencies]
 # Internal crates
 lattice-hooks    = { path = "crates/lattice-hooks" }
+lattice-llm      = { path = "crates/lattice-llm" }
+lattice-api      = { path = "crates/lattice-api" }
 lattice-core     = { path = "crates/lattice-core" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-prompt   = { path = "crates/lattice-prompt" }
