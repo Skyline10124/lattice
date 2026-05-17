@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use colored::Colorize;
 
@@ -29,7 +30,7 @@ pub fn run(config: &Config, json: bool, _creds: &CredentialStore) -> Result<()> 
     credential_entries.dedup_by(|a, b| a.0 == b.0);
 
     // Session store availability
-    let session_dir = crate::session::default_session_dir();
+    let session_dir = crate::commands::session::default_session_dir();
     let session_store_available = session_dir.exists();
 
     // Alias table state
@@ -68,7 +69,11 @@ pub fn run(config: &Config, json: bool, _creds: &CredentialStore) -> Result<()> 
     // Credentials
     println!("\n{}", "Credentials:".bold());
     for (env_var, status) in &credential_entries {
-        let icon = if status == "Present" { "\u{2713}" } else { "\u{2717}" };
+        let icon = if status == "Present" {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        };
         let label = if status == "Present" {
             "set".green()
         } else {
@@ -153,7 +158,10 @@ mod tests {
         let creds = empty_creds();
         let config = default_config();
         let result = run(&config, false, &creds);
-        assert!(result.is_ok(), "doctor session store check should not error");
+        assert!(
+            result.is_ok(),
+            "doctor session store check should not error"
+        );
     }
 
     #[test]

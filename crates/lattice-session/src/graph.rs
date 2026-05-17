@@ -2,8 +2,7 @@
 //!
 //! This module defines the durable graph vocabulary for sessions, commits,
 //! messages, branches, HEAD, and refs. It intentionally excludes legacy
-//! operations like merge, rebase, stash, tags, reflog, artifacts, turn
-//! manifests, and GC.
+//! operations like merge or rebase.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -120,7 +119,7 @@ pub struct GraphRef {
 
 /// HEAD state: either on a named branch or detached at a commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum GraphHead {
     /// HEAD is on a named branch.
     Branch { name: String },
@@ -161,8 +160,8 @@ impl TurnCommitStatus {
 /// Input for creating a durable turn commit.
 ///
 /// D-04/D-05: the v1.1 commit envelope is minimal and does not include
-/// prompt manifests, hook records, artifacts, stash state, reflog state,
-/// or context summary layers.
+/// prompt compiler records, hook records, external blobs, or context summary
+/// layers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCommitInput {
     /// The session this commit belongs to.
@@ -302,7 +301,7 @@ pub struct GraphDiff {
 /// Result of a reset operation.
 ///
 /// D-25: reset must return the old HEAD commit ID because v1.1 does not
-/// include reflog.
+/// include history side channels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResetResult {
     pub session_id: String,
@@ -320,8 +319,7 @@ pub struct ResetResult {
 ///
 /// D-12/D-13/D-14: exposes only create/open, status/list/log, commit_turn,
 /// checkout, branch, diff, and reset style operations. Does NOT include
-/// merge, rebase, stash, tags, reflog, artifacts, turn manifests, GC,
-/// or any legacy rich operations.
+/// merge, rebase, or any legacy rich operations.
 pub trait SessionGraphStore: Send + Sync {
     // -- Session lifecycle --
 
@@ -439,7 +437,7 @@ pub fn canonical_message_id(message: &GraphMessage, ordinal: usize) -> String {
 /// commit IDs, message IDs, profile snapshot identity, model, provider,
 /// status, commit_message, and a logical timestamp. It explicitly
 /// excludes: SQLite row IDs, object paths, filesystem paths, write order,
-/// reflog data, and turn manifest IDs.
+/// side-channel history and auxiliary request IDs.
 #[allow(clippy::too_many_arguments)]
 pub fn canonical_turn_commit_id(
     session_id: &str,
@@ -467,7 +465,7 @@ pub fn canonical_turn_commit_id(
     hash_json("v1_turn_commit", &payload)
 }
 
-/// SHA-256 hash of a kind-tagged JSON payload.
+/// SHA-256 hash of a type-prefixed JSON payload.
 fn hash_json(kind: &str, value: &serde_json::Value) -> String {
     let json = serde_json::to_string(value).expect("JSON serialization must succeed");
     let mut hasher = Sha256::new();
@@ -822,7 +820,7 @@ mod graph_contract {
     fn canonical_turn_commit_id_excludes_storage_metadata() {
         // The payload is built internally from logical fields only.
         // Verify by checking that the function does not accept parameters
-        // for rowid, object_path, filesystem_path, reflog, turn_manifest_ids,
+        // for rowid, object_path, filesystem_path, auxiliary history, request IDs,
         // or write_order. This is a compile-time/API-level assertion:
         // the function signature only accepts logical fields.
         let _ = canonical_turn_commit_id(
@@ -852,7 +850,10 @@ mod graph_contract {
     fn canonical_message_id_differs_by_content() {
         let msg1 = user_msg("Hello");
         let msg2 = user_msg("World");
-        assert_ne!(canonical_message_id(&msg1, 0), canonical_message_id(&msg2, 0));
+        assert_ne!(
+            canonical_message_id(&msg1, 0),
+            canonical_message_id(&msg2, 0)
+        );
     }
 
     #[test]
@@ -860,7 +861,10 @@ mod graph_contract {
         let msg = user_msg("Hello");
         let id0 = canonical_message_id(&msg, 0);
         let id1 = canonical_message_id(&msg, 1);
-        assert_ne!(id0, id1, "identical messages at different ordinals must produce different IDs");
+        assert_ne!(
+            id0, id1,
+            "identical messages at different ordinals must produce different IDs"
+        );
     }
 
     // -- HeadTranscript contract tests (Phase 09) --
@@ -870,10 +874,7 @@ mod graph_contract {
         let transcript = HeadTranscript {
             session_id: "sess-1".to_string(),
             parent_commit_id: Some("commit-abc".to_string()),
-            messages: vec![
-                user_msg("Hello"),
-                assistant_msg("Hi there!"),
-            ],
+            messages: vec![user_msg("Hello"), assistant_msg("Hi there!")],
         };
         let json = serde_json::to_string(&transcript).unwrap();
         assert!(json.contains("session_id"));

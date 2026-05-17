@@ -88,7 +88,7 @@ fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileErr
 
     for (key, _) in table {
         let lower = key.to_lowercase();
-        if FORBIDDEN_SECTIONS.iter().any(|s| *s == lower.as_str()) {
+        if FORBIDDEN_SECTIONS.contains(&lower.as_str()) {
             return Err(ProfileError::ForbiddenSection {
                 path: path.to_path_buf(),
                 section: key.clone(),

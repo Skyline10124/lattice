@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Cut Off Cleverness
-status: executing
-last_updated: "2026-05-17T14:30:00.000Z"
-last_activity: 2026-05-17 -- Phase 10 complete (6/6 plans, D-25 gap closed)
+status: milestone_complete
+last_updated: 2026-05-17T16:17:23.633Z
+last_activity: 2026-05-17 -- Phase 11 Wave 3 complete (11-04 agent collapse)
 progress:
   total_phases: 6
   completed_phases: 5
-  total_plans: 21
-  completed_plans: 21
-  percent: 100
+  total_plans: 29
+  completed_plans: 52
+  percent: 83
+stopped_at: Milestone complete (Phase 11 was final phase)
 ---
 
 # Planning State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Phase 11 — Deletion, Budget, and Release Verification
+**Current focus:** Milestone complete
 
 ## Current Position
 
-Phase: 10 (CLI Cutover) — COMPLETE
-Plan: 6 of 6
-Status: Phase complete, ready for Phase 11
-Last activity: 2026-05-17 -- Phase 10 complete (D-25 gap closed via 10-06)
+Phase: 11
+Plan: Not started
+Status: Milestone complete
+Last activity: 2026-05-17
 
 ## Accumulated Context
 
@@ -53,4 +54,4 @@ Last activity: 2026-05-17 -- Phase 10 complete (D-25 gap closed via 10-06)
 
 ### Todos
 
-- Discuss or plan Phase 6: Crate Topology and Main-Path Skeleton.
+- Continue Phase 11 Wave 4: 11-06 old crate/runtime deletion and manifest pruning.

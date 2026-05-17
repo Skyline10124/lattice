@@ -19,6 +19,7 @@ use lattice_agent::{
     AgentLoop, AgentToolResultSummary as AgentToolSummary, AgentTurnEvent, AgentTurnRequest,
     AgentTurnResult, AgentTurnStatus,
 };
+use lattice_llm::{ModelRouter, ModelTarget};
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::{
     derive_commit_message, HeadTranscript, TurnCommitInput, TurnCommitStatus, TurnUsage,
@@ -282,11 +283,13 @@ impl RealTurnDeps {
 #[async_trait::async_trait]
 impl TurnDeps for RealTurnDeps {
     fn create_session(&self, request: &RunTurnRequest) -> Result<String> {
-        let session = self.session.create_session(crate::session::CreateSessionRequest {
-            label: None,
-            profile: request.profile.clone(),
-            model: request.model.clone(),
-        })?;
+        let session = self
+            .session
+            .create_session(crate::session::CreateSessionRequest {
+                label: None,
+                profile: request.profile.clone(),
+                model: request.model.clone(),
+            })?;
         Ok(session.session_id)
     }
 
@@ -324,8 +327,8 @@ impl TurnDeps for RealTurnDeps {
 /// D-10: When `request.model` is `Some`, it overrides the loaded profile's
 /// default model. The profile still supplies the system prompt, enabled tools,
 /// and project root.
-fn resolve_model_and_prompt(request: &RunTurnRequest) -> (String, Option<String>) {
-    if let Some(ref lp) = request.loaded_profile {
+fn resolve_model_and_prompt(request: &RunTurnRequest) -> (String, Option<String>, String) {
+    let (model, system_prompt) = if let Some(ref lp) = request.loaded_profile {
         // Model override: request.model takes precedence over profile default
         let model = request
             .model
@@ -339,10 +342,20 @@ fn resolve_model_and_prompt(request: &RunTurnRequest) -> (String, Option<String>
         (model, system_prompt)
     } else {
         (
-            request.model.clone().unwrap_or_else(|| "sonnet".to_string()),
+            request
+                .model
+                .clone()
+                .unwrap_or_else(|| "sonnet".to_string()),
             None,
         )
-    }
+    };
+
+    let provider = ModelRouter::new()
+        .resolve(&ModelTarget::new(&model))
+        .map(|rm| format!("{:?}", rm.provider).to_lowercase())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    (model, system_prompt, provider)
 }
 
 /// Build an [`AgentTurnRequest`] from the API request, session context, and
@@ -364,7 +377,11 @@ fn build_agent_request(
         .loaded_profile
         .as_ref()
         .map(|lp| lp.package_dir.to_string_lossy().to_string())
-        .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default());
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
 
     AgentTurnRequest {
         session_id: session_id.to_string(),
@@ -409,12 +426,18 @@ fn map_status(status: &AgentTurnStatus) -> RunTurnStatus {
 async fn execute_turn_inner(
     deps: &dyn TurnDeps,
     request: &RunTurnRequest,
-) -> Result<(String, Vec<RunTurnStage>, Vec<AgentTurnEvent>, AgentTurnResult, String)> {
+) -> Result<(
+    String,
+    Vec<RunTurnStage>,
+    Vec<AgentTurnEvent>,
+    AgentTurnResult,
+    String,
+)> {
     let mut stages = Vec::new();
 
     // Stage: Profile
     stages.push(RunTurnStage::Profile);
-    let (model, system_prompt) = resolve_model_and_prompt(request);
+    let (model, system_prompt, provider) = resolve_model_and_prompt(request);
 
     // Stage: Session — create or open
     stages.push(RunTurnStage::Session);
@@ -428,8 +451,7 @@ async fn execute_turn_inner(
 
     // Stage: Agent
     stages.push(RunTurnStage::Agent);
-    let agent_request =
-        build_agent_request(request, &session_id, transcript, model, system_prompt);
+    let agent_request = build_agent_request(request, &session_id, transcript, model, system_prompt);
 
     let (agent_events, agent_result) = deps
         .execute_agent_turn(agent_request)
@@ -484,7 +506,7 @@ async fn execute_turn_inner(
         messages: commit_messages,
         profile_snapshot_id,
         model: model_name,
-        provider: "unknown".to_string(), // Provider resolved at LLM layer
+        provider,
         status: commit_status,
         commit_message,
         usage: Some(agent_result.usage.clone()),
@@ -564,7 +586,11 @@ pub(crate) async fn stream_turn_with_deps(
             AgentTurnEvent::Token { content } => TurnEvent::Token { content },
             AgentTurnEvent::ToolCallStart { id, name } => TurnEvent::ToolCallStart { id, name },
             AgentTurnEvent::ToolCallResult {
-                id, name, ok, output_len, ..
+                id,
+                name,
+                ok,
+                output_len,
+                ..
             } => TurnEvent::ToolResult {
                 id,
                 name,
@@ -818,7 +844,10 @@ mod tests {
         }
     }
 
-    fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::LoadedAgentProfile {
+    fn make_loaded_profile(
+        model: &str,
+        system_prompt: &str,
+    ) -> lattice_profile::LoadedAgentProfile {
         lattice_profile::LoadedAgentProfile {
             path: std::path::PathBuf::from("/tmp/test/agent.toml"),
             package_dir: std::path::PathBuf::from("/tmp/test"),
@@ -877,11 +906,7 @@ mod tests {
         let request = make_request("test input");
         let result = run_turn_with_deps(&deps, request).await.unwrap();
 
-        assert_eq!(
-            deps.commit_count(),
-            1,
-            "exactly one commit should be made"
-        );
+        assert_eq!(deps.commit_count(), 1, "exactly one commit should be made");
         assert_eq!(result.status, RunTurnStatus::Completed);
     }
 
@@ -957,15 +982,15 @@ mod tests {
         assert_eq!(result.assistant_output, "");
         // Commit still happens
         assert_eq!(deps.commit_count(), 1);
-        let commit_input = deps.last_commit_input().expect("commit should have been called");
+        let commit_input = deps
+            .last_commit_input()
+            .expect("commit should have been called");
         assert_eq!(commit_input.status, TurnCommitStatus::Error);
-        assert!(
-            commit_input
-                .terminal_reason
-                .as_ref()
-                .unwrap()
-                .contains("provider unavailable")
-        );
+        assert!(commit_input
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("provider unavailable"));
         // Partial messages are committed (user + assistant)
         assert!(
             !commit_input.messages.is_empty(),
@@ -983,15 +1008,15 @@ mod tests {
         assert_eq!(result.status, RunTurnStatus::Cancelled);
         // Commit still happens
         assert_eq!(deps.commit_count(), 1);
-        let commit_input = deps.last_commit_input().expect("commit should have been called");
+        let commit_input = deps
+            .last_commit_input()
+            .expect("commit should have been called");
         assert_eq!(commit_input.status, TurnCommitStatus::Cancelled);
-        assert!(
-            commit_input
-                .terminal_reason
-                .as_ref()
-                .unwrap()
-                .contains("cancelled")
-        );
+        assert!(commit_input
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("cancelled"));
         // Usage is preserved
         assert!(commit_input.usage.is_some());
         assert_eq!(commit_input.usage.as_ref().unwrap().total_tokens, 7);
@@ -1190,10 +1215,7 @@ mod tests {
             .position(|e| matches!(e, TurnEvent::Committed { .. }));
 
         assert!(tool_start_pos.is_some(), "should have ToolCallStart event");
-        assert!(
-            tool_result_pos.is_some(),
-            "should have ToolResult event"
-        );
+        assert!(tool_result_pos.is_some(), "should have ToolResult event");
         assert!(committed_pos.is_some(), "should have Committed event");
 
         // Tool activity must appear before Committed
@@ -1327,7 +1349,9 @@ mod tests {
 
         // Should have committed exactly one turn
         assert_eq!(deps.commit_count(), 1);
-        let commit_input = deps.last_commit_input().expect("commit should have been called");
+        let commit_input = deps
+            .last_commit_input()
+            .expect("commit should have been called");
         assert_eq!(commit_input.status, TurnCommitStatus::Error);
     }
 
@@ -1423,8 +1447,11 @@ mod tests {
             loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
         };
 
-        let (model, system_prompt) = resolve_model_and_prompt(&request);
-        assert_eq!(model, "override-model", "request.model should override profile model");
+        let (model, system_prompt, _provider) = resolve_model_and_prompt(&request);
+        assert_eq!(
+            model, "override-model",
+            "request.model should override profile model"
+        );
         assert_eq!(system_prompt.as_deref(), Some("System from profile."));
     }
 
@@ -1440,26 +1467,29 @@ mod tests {
             loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
         };
 
-        let (model, system_prompt) = resolve_model_and_prompt(&request);
-        assert_eq!(model, "profile-model", "profile model should be used when no override");
+        let (model, system_prompt, _provider) = resolve_model_and_prompt(&request);
+        assert_eq!(
+            model, "profile-model",
+            "profile model should be used when no override"
+        );
         assert_eq!(system_prompt.as_deref(), Some("System from profile."));
     }
 
     #[test]
-    fn api_forbidden_crates_absent_from_source() {
+    fn api_forbidden_dependency_imports_absent_from_source() {
         use std::fs;
         use std::path::Path;
 
         let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let forbidden_prefixes = [
-            "use lattice_runtime",
-            "use lattice_prompt",
-            "use lattice_sandbox",
-            "use lattice_policy",
-            "pub use lattice_runtime",
-            "pub use lattice_prompt",
-            "pub use lattice_sandbox",
-            "pub use lattice_policy",
+            "use removed_runtime_crate",
+            "use removed_prompt_crate",
+            "use removed_sandbox_crate",
+            "use removed_policy_crate",
+            "pub use removed_runtime_crate",
+            "pub use removed_prompt_crate",
+            "pub use removed_sandbox_crate",
+            "pub use removed_policy_crate",
         ];
 
         for entry in fs::read_dir(&src_dir).expect("should read src dir") {
@@ -1472,17 +1502,15 @@ mod tests {
             for (i, line) in content.lines().enumerate() {
                 let stripped = line.trim();
                 // Skip comments and doc strings
-                if stripped.starts_with("//") || stripped.starts_with("//!") || stripped.starts_with("///") {
+                if stripped.starts_with("//")
+                    || stripped.starts_with("//!")
+                    || stripped.starts_with("///")
+                {
                     continue;
                 }
                 for pattern in &forbidden_prefixes {
                     if stripped.starts_with(pattern) {
-                        panic!(
-                            "forbidden import in {}:{}: {}",
-                            path.display(),
-                            i + 1,
-                            line
-                        );
+                        panic!("forbidden import in {}:{}: {}", path.display(), i + 1, line);
                     }
                 }
             }

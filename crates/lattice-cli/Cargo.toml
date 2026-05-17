@@ -4,23 +4,20 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LATTICE CLI and TUI"
+description = "LATTICE CLI"
 
 [[bin]]
 name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-core = { workspace = true }
 lattice-session = { workspace = true }
-lattice-prompt = { workspace = true }
 lattice-agent = { workspace = true }
-lattice-sandbox = { workspace = true }
 lattice-tools = { workspace = true }
-lattice-runtime = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
 lattice-llm = { workspace = true }
+lattice-hooks = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -39,12 +36,6 @@ dotenvy = { workspace = true }
 sha2 = { workspace = true }
 uuid = { workspace = true }
 toml_edit = { workspace = true }
-ratatui = { workspace = true }
-crossterm = { workspace = true }
-unicode-width = { workspace = true }
-pulldown-cmark = { workspace = true }
-syntect = { workspace = true }
-similar = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
@@ -52,4 +43,3 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-blob-store = ["lattice-core/blob-store"]

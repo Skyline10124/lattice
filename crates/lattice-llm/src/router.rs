@@ -96,10 +96,9 @@ impl ModelRouter {
 
     /// Return the fixed v1.1 alias list with full metadata for each entry.
     ///
-    /// Iterates all known aliases and resolves each one, returning the
-    /// `ResolvedModel` for every alias whose env var lookup succeeds or
-    /// whose provider is credentialless. This is the single source of
-    /// truth for `models`, `resolve`, and `doctor` alias enumeration.
+    /// Returns ALL known aliases regardless of credential status, so callers
+    /// can distinguish "6 models available, credentials missing" from "no models".
+    /// The `CredentialStatus` on each `ResolvedModel` carries the credential info.
     pub fn aliases(&self) -> Vec<ResolvedModel> {
         let names = [
             "gpt-4o",
@@ -113,6 +112,8 @@ impl ModelRouter {
             .iter()
             .filter_map(|name| {
                 let target = ModelTarget::new(*name);
+                // resolve returns Ok even with Missing credentials — the status
+                // is on the ResolvedModel itself. Only filter out truly unknown models.
                 self.resolve(&target).ok()
             })
             .collect()
@@ -367,7 +368,14 @@ mod tests {
         let router = ModelRouter::new();
         let aliases = router.aliases();
         let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
-        for expected in &["gpt-4o", "gpt-4o-mini", "sonnet", "haiku", "gemini", "openai-compatible"] {
+        for expected in &[
+            "gpt-4o",
+            "gpt-4o-mini",
+            "sonnet",
+            "haiku",
+            "gemini",
+            "openai-compatible",
+        ] {
             assert!(
                 names.contains(expected),
                 "aliases() should include '{}', got: {:?}",

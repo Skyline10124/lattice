@@ -1,8 +1,8 @@
 //! v1.1 agent loop: sequences LLM calls and tool execution for a single turn.
 //!
 //! This module implements the stable public main-path `AgentLoop` that is
-//! independent of the legacy `Agent` loop. It uses `lattice-llm` types at the
-//! model boundary and `lattice-tools::enabled_tools` for tool authorization.
+//! It uses `lattice-llm` types at the model boundary and
+//! `lattice-tools::enabled_tools` for tool authorization.
 //!
 //! # Design decisions
 //!
@@ -10,7 +10,7 @@
 //! - D-02: Independent v1.1 minimal path, not a reuse of old `Agent`.
 //! - D-03/D-04: Final public names: `AgentLoop`, `AgentLoopConfig`,
 //!   `AgentTurnRequest`, `AgentTurnResult`, `AgentTurnEvent`, `AgentTurnStatus`.
-//! - D-05/D-06/D-07: Old `Agent` is retained as legacy; see `lib.rs` TODO.
+//! - D-05/D-06/D-07: Old `Agent` architecture is deleted from active source.
 //! - D-08: No fixed tool-round counter; loop until final assistant response.
 //! - D-09/D-10: External timeout/cancel as run protection.
 //! - D-11: Build model input from complete session transcript + user input.
@@ -155,8 +155,25 @@ impl AgentLoop {
             }
 
             // Call the LLM
-            let llm_messages: Vec<lattice_llm::Message> =
-                messages.iter().map(convert_to_llm_message).collect();
+            let llm_messages: Vec<lattice_llm::Message> = match messages
+                .iter()
+                .map(convert_to_llm_message)
+                .collect::<Result<Vec<_>, String>>()
+            {
+                Ok(msgs) => msgs,
+                Err(e) => {
+                    all_events.push(AgentTurnEvent::Error { message: e.clone() });
+                    return AgentTurnResult {
+                        messages: all_messages,
+                        assistant_output: String::new(),
+                        usage: accumulated_usage,
+                        tool_results: tool_summaries,
+                        status: AgentTurnStatus::Failed,
+                        terminal_reason: Some(e),
+                        events: all_events,
+                    };
+                }
+            };
 
             let chat_request = lattice_llm::ChatRequest {
                 messages: llm_messages,
@@ -252,10 +269,9 @@ impl AgentLoop {
                     name: call.function.name.clone(),
                 });
 
-                // Build a lattice_core::types::ToolCall for the executor
-                let executor_call = lattice_core::types::ToolCall {
+                let executor_call = lattice_llm::ToolCall {
                     id: call.id.clone(),
-                    function: lattice_core::types::FunctionCall {
+                    function: lattice_llm::FunctionCall {
                         name: call.function.name.clone(),
                         arguments: call.function.arguments.clone(),
                     },
@@ -266,14 +282,12 @@ impl AgentLoop {
                 all_events.push(AgentTurnEvent::ToolCallResult {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
-                    ok: !tool_output.starts_with("Error:")
-                        && !tool_output.contains("__denial_report__"),
+                    ok: tool_output_is_ok(&tool_output),
                     output_len: tool_output.len(),
                 });
 
                 // Build tool summary
-                let ok = !tool_output.starts_with("Error:")
-                    && !tool_output.contains("__denial_report__");
+                let ok = tool_output_is_ok(&tool_output);
                 tool_summaries.push(AgentToolResultSummary {
                     tool_call_id: call.id.clone(),
                     name: call.function.name.clone(),
@@ -466,7 +480,7 @@ pub trait LlmClient: Send + Sync {
 #[async_trait::async_trait]
 pub trait ToolCallExecutor: Send + Sync {
     /// Execute a tool call and return the output string.
-    async fn execute(&self, call: &lattice_core::types::ToolCall) -> String;
+    async fn execute(&self, call: &lattice_llm::ToolCall) -> String;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,16 +488,16 @@ pub trait ToolCallExecutor: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Convert a `GraphMessage` to an `lattice_llm::Message` for the LLM request.
-fn convert_to_llm_message(msg: &GraphMessage) -> lattice_llm::Message {
+fn convert_to_llm_message(msg: &GraphMessage) -> Result<lattice_llm::Message, String> {
     let role = match msg.role.as_str() {
         "system" => lattice_llm::Role::System,
         "user" => lattice_llm::Role::User,
         "assistant" => lattice_llm::Role::Assistant,
         "tool" => lattice_llm::Role::Tool,
-        _ => lattice_llm::Role::User,
+        other => return Err(format!("unknown message role '{}'", other)),
     };
 
-    lattice_llm::Message {
+    Ok(lattice_llm::Message {
         role,
         content: msg.content.clone(),
         reasoning_content: msg.reasoning_content.clone(),
@@ -501,7 +515,11 @@ fn convert_to_llm_message(msg: &GraphMessage) -> lattice_llm::Message {
         }),
         tool_call_id: msg.tool_call_id.clone(),
         name: msg.name.clone(),
-    }
+    })
+}
+
+fn tool_output_is_ok(output: &str) -> bool {
+    !output.starts_with("Error:") && !output.starts_with("Tool denied:")
 }
 
 // ---------------------------------------------------------------------------
@@ -526,10 +544,6 @@ mod tests {
                 call_count: AtomicUsize::new(0),
             }
         }
-
-        fn call_count(&self) -> usize {
-            self.call_count.load(Ordering::SeqCst)
-        }
     }
 
     #[async_trait::async_trait]
@@ -537,8 +551,7 @@ mod tests {
         async fn chat(
             &self,
             _request: lattice_llm::ChatRequest,
-        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
-        {
+        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
@@ -564,7 +577,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolCallExecutor for FakeToolExecutor {
-        async fn execute(&self, _call: &lattice_core::types::ToolCall) -> String {
+        async fn execute(&self, _call: &lattice_llm::ToolCall) -> String {
             let mut results = self.results.lock().unwrap();
             if results.is_empty() {
                 return "no more fake results".to_string();
@@ -766,10 +779,7 @@ mod tests {
         let captured = request_capture.lock().unwrap().take().unwrap();
         assert_eq!(captured.messages.len(), 2); // system + user
         assert_eq!(captured.messages[0].role, lattice_llm::Role::System);
-        assert_eq!(
-            captured.messages[0].content,
-            "You are a helpful assistant."
-        );
+        assert_eq!(captured.messages[0].content, "You are a helpful assistant.");
         assert_eq!(captured.messages[1].role, lattice_llm::Role::User);
         assert_eq!(captured.messages[1].content, "hello");
     }
@@ -844,9 +854,7 @@ mod tests {
             }),
         ]));
 
-        let executor = Arc::new(FakeToolExecutor::new(vec![
-            "file content here".to_string(),
-        ]));
+        let executor = Arc::new(FakeToolExecutor::new(vec!["file content here".to_string()]));
         let loop_inst = AgentLoop::new(AgentLoopConfig {
             llm,
             tool_executor: executor,
@@ -863,6 +871,7 @@ mod tests {
         assert_eq!(result.usage.prompt_tokens, 30); // 10 + 20
         assert_eq!(result.usage.completion_tokens, 15); // 5 + 10
         assert_eq!(result.usage.total_tokens, 45); // 15 + 30
+
         // Tool results
         assert_eq!(result.tool_results.len(), 1);
         assert_eq!(result.tool_results[0].name, "read_file");
@@ -924,15 +933,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ToolCallExecutor for OrderTrackingExecutor {
-            async fn execute(&self, call: &lattice_core::types::ToolCall) -> String {
+            async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
                 self.order.lock().unwrap().push(call.id.clone());
                 format!("content of {}", call.function.name)
             }
         }
 
-        let executor = Arc::new(OrderTrackingExecutor {
-            order: order_clone,
-        });
+        let executor = Arc::new(OrderTrackingExecutor { order: order_clone });
         let loop_inst = AgentLoop::new(AgentLoopConfig {
             llm,
             tool_executor: executor,
@@ -1117,11 +1124,7 @@ mod tests {
         let result = loop_inst.run_turn(request).await;
 
         assert_eq!(result.status, AgentTurnStatus::Failed);
-        assert!(result
-            .terminal_reason
-            .as_ref()
-            .unwrap()
-            .contains("timeout"));
+        assert!(result.terminal_reason.as_ref().unwrap().contains("timeout"));
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "timeout should return promptly"
@@ -1250,20 +1253,22 @@ mod tests {
             .any(|e| matches!(e, AgentTurnEvent::ToolCallStart { id, .. } if id == "call_1"));
         assert!(has_tool_start, "should have ToolCallStart event");
 
-        let has_tool_result = events.iter().any(|e| matches!(
-            e,
-            AgentTurnEvent::ToolCallResult {
-                id,
-                name,
-                ok: true,
-                ..
-            } if id == "call_1" && name == "read_file"
-        ));
+        let has_tool_result = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentTurnEvent::ToolCallResult {
+                    id,
+                    name,
+                    ok: true,
+                    ..
+                } if id == "call_1" && name == "read_file"
+            )
+        });
         assert!(has_tool_result, "should have ToolCallResult event");
 
-        let has_done = events
-            .iter()
-            .any(|e| matches!(e, AgentTurnEvent::Done { finish_reason } if finish_reason == "stop"));
+        let has_done = events.iter().any(
+            |e| matches!(e, AgentTurnEvent::Done { finish_reason } if finish_reason == "stop"),
+        );
         assert!(has_done, "should have Done event");
 
         let has_token = events

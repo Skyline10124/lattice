@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fmt;
@@ -5,15 +6,13 @@ use zeroize::Zeroize;
 
 use crate::config::Config;
 
-/// Nix Phase 1: Explicit credential store.
-/// Credentials are loaded once at startup and passed into Runtime model routing.
-/// via `with_credentials()`, eliminating the need for `std::env::set_var`.
+/// Credential store: loaded once at startup and passed into model routing.
 #[derive(Clone)]
 pub struct CredentialStore {
     values: HashMap<String, String>,
 }
 
-/// All env var names that the Runtime model router may look up.
+/// All env var names that the model router may look up.
 pub const KNOWN_ENV_VARS: &[&str] = &[
     "AI_GATEWAY_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -38,13 +37,9 @@ impl CredentialStore {
     pub fn from_config(config: &Config) -> Result<Self> {
         let mut values = HashMap::new();
 
-        // Load from config's providers section.
-        // api_key = "$ANTHROPIC_API_KEY"  -> read env var
-        // api_key = "sk-abc123"           -> use literal value
         for cfg in config.providers.values() {
             if let Some(ref key_spec) = cfg.api_key {
                 if key_spec.starts_with('$') {
-                    // Env var reference: $ANTHROPIC_API_KEY
                     let env_name = key_spec.trim_start_matches('$');
                     if let Ok(val) = std::env::var(env_name) {
                         if !val.is_empty() {
@@ -54,15 +49,21 @@ impl CredentialStore {
                 } else {
                     tracing::warn!(
                         "Literal API key found in config file. \
-                         Use environment variable references ($VAR_NAME) instead \
-                         to avoid leaking credentials in version control."
+                         Use environment variable references ($VAR_NAME) instead."
                     );
-                    values.insert(key_spec.clone(), key_spec.clone());
+                    // Avoid duplicating the literal key as both HashMap key and value.
+                    // Use a provider-prefixed key so the secret appears only as the value.
+                    let provider_name = config
+                        .providers
+                        .iter()
+                        .find(|(_, v)| v.api_key.as_ref() == Some(key_spec))
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_else(|| "unknown-provider".to_string());
+                    values.insert(format!("config:{}", provider_name), key_spec.clone());
                 }
             }
         }
 
-        // Scan known provider env vars.
         for var in KNOWN_ENV_VARS {
             if let Ok(val) = std::env::var(var) {
                 if !val.is_empty() {
@@ -78,19 +79,6 @@ impl CredentialStore {
     #[cfg(test)]
     pub(crate) fn from_values(values: HashMap<String, String>) -> Self {
         CredentialStore { values }
-    }
-
-    /// Return credentials as a HashMap for Runtime construction.
-    pub fn to_hashmap(&self) -> HashMap<String, String> {
-        self.values.clone()
-    }
-
-    /// Diagnostic: which env vars are present?
-    pub fn diagnostics(&self) -> Vec<(&str, bool)> {
-        KNOWN_ENV_VARS
-            .iter()
-            .map(|&v| (v, self.values.contains_key(v)))
-            .collect()
     }
 }
 

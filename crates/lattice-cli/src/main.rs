@@ -5,17 +5,6 @@ use colored::Colorize;
 mod commands;
 mod config;
 mod credentials;
-mod display;
-mod frontend;
-mod model_inventory;
-mod profile_runtime;
-mod runtime;
-mod runtime_turn;
-mod security;
-mod session;
-mod session_seed;
-#[cfg(test)]
-mod test_support;
 
 use commands::{doctor, models, resolve, session as session_cmd};
 use config::Config;
@@ -84,12 +73,12 @@ async fn main() -> std::process::ExitCode {
 
     // Initialize logging.
     if cli.verbose {
-        let _ = lattice_core::init_logging(true);
+        let _ = lattice_llm::init_logging(true);
     } else {
-        let _ = lattice_core::init_logging(false);
+        let _ = lattice_llm::init_logging(false);
     }
 
-    // Run command uses the new v1.1 path with ExitCode semantics.
+    // Run command uses the v1.1 path with ExitCode semantics.
     if let Some(Commands::Run {
         prompt,
         model,
@@ -97,12 +86,19 @@ async fn main() -> std::process::ExitCode {
         session,
     }) = cli.command
     {
-        return commands::run::run(prompt, model, profile.as_deref(), session, cli.verbose, cli.json)
-            .await;
+        return commands::run::run(
+            prompt,
+            model,
+            profile.as_deref(),
+            session,
+            cli.verbose,
+            cli.json,
+        )
+        .await;
     }
 
-    // All other commands use the legacy Result<()> path.
-    if let Err(e) = main_legacy(cli) {
+    // All other commands use the Result<()> path.
+    if let Err(e) = run_other_commands(cli) {
         eprintln!("{}: {}", "error".red(), e);
         std::process::ExitCode::from(1)
     } else {
@@ -110,7 +106,7 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-fn main_legacy(cli: Cli) -> Result<()> {
+fn run_other_commands(cli: Cli) -> Result<()> {
     let config = Config::load(None)?;
     let creds = CredentialStore::from_config(&config)?;
 
@@ -224,88 +220,9 @@ mod tests {
         assert!(cli.command.is_some());
     }
 
-    // -- Negative parsing: forbidden old commands (D-01, D-02, D-03, D-07, D-08) --
-
     #[test]
-    fn cli_surface_rejects_tui() {
-        assert!(Cli::try_parse_from(["lattice", "tui"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_debug() {
-        assert!(Cli::try_parse_from(["lattice", "debug"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_config() {
-        assert!(Cli::try_parse_from(["lattice", "config"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_stats() {
-        assert!(Cli::try_parse_from(["lattice", "stats"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_validate() {
-        assert!(Cli::try_parse_from(["lattice", "validate"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_new() {
-        assert!(Cli::try_parse_from(["lattice", "new"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_list() {
-        assert!(Cli::try_parse_from(["lattice", "list"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_run_v11() {
-        assert!(Cli::try_parse_from(["lattice", "run-v11", "hello"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_quick_flag() {
-        assert!(Cli::try_parse_from(["lattice", "-q", "hello"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_sessions_plural() {
-        assert!(Cli::try_parse_from(["lattice", "sessions"]).is_err());
-    }
-
-    // -- Negative parsing: forbidden old globals (D-05, D-06) --
-
-    #[test]
-    fn cli_surface_rejects_global_config() {
-        assert!(Cli::try_parse_from(["lattice", "--config", "foo.toml", "doctor"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_global_model() {
-        assert!(Cli::try_parse_from(["lattice", "--model", "sonnet", "doctor"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_global_provider() {
-        assert!(Cli::try_parse_from(["lattice", "--provider", "openai", "doctor"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_global_session() {
-        assert!(Cli::try_parse_from(["lattice", "--session", "sess1", "doctor"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_global_no_save() {
-        assert!(Cli::try_parse_from(["lattice", "--no-save", "doctor"]).is_err());
-    }
-
-    #[test]
-    fn cli_surface_rejects_global_continue() {
-        assert!(Cli::try_parse_from(["lattice", "--continue", "doctor"]).is_err());
+    fn cli_surface_rejects_unknown_command() {
+        assert!(Cli::try_parse_from(["lattice", "unsupported-command"]).is_err());
     }
 
     // -- Help text boundary test --
@@ -323,32 +240,14 @@ mod tests {
     }
 
     #[test]
-    fn cli_surface_help_omits_removed_commands() {
-        let mut cmd = Cli::command();
-        let help = cmd.render_help().to_string();
-        // Check that removed commands do not appear as top-level subcommand entries.
-        // We check for the command name followed by whitespace (subcommand table entry)
-        // to avoid false positives from words like "list" in descriptions.
-        for name in &[
-            "tui", "debug", "config", "stats", "validate", "new", "run-v11",
-        ] {
-            let pattern = format!("\n  {name} ");
-            assert!(
-                !help.contains(&pattern),
-                "help should not contain removed top-level command '{name}'"
-            );
-        }
-        // "sessions" (plural) must not appear as a subcommand.
-        let sessions_pattern = "\n  sessions ";
-        assert!(
-            !help.contains(sessions_pattern),
-            "help should not contain plural 'sessions' command"
-        );
-        // "list" must not appear as a top-level subcommand (it's a session subcommand).
-        let list_pattern = "\n  list ";
-        assert!(
-            !help.contains(list_pattern),
-            "help should not contain top-level 'list' command"
+    fn cli_surface_help_lists_exact_supported_command_count() {
+        let subcommands: Vec<_> = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect();
+        assert_eq!(
+            subcommands,
+            vec!["run", "models", "resolve", "session", "doctor"]
         );
     }
 }

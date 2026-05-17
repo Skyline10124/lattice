@@ -4,7 +4,7 @@ impl PatchErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
             PatchErrorCode::ParseError => "parse_error",
-            PatchErrorCode::SandboxDenied => "sandbox_denied",
+            PatchErrorCode::BoundaryDenied => "boundary_denied",
             PatchErrorCode::MissingFile => "missing_file",
             PatchErrorCode::AlreadyExists => "already_exists",
             PatchErrorCode::DuplicatePath => "duplicate_path",

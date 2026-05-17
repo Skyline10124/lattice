@@ -41,9 +41,9 @@ pub enum ProfileError {
         path: PathBuf,
         section: String,
         field: String,
-        value: String,
-        reason: String,
-        expected: String,
+        value: Box<str>,
+        reason: Box<str>,
+        expected: Box<str>,
     },
 
     #[error("both `system` and `system_path` set in [prompt] at {path}: exactly one is required")]

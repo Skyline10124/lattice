@@ -3,7 +3,7 @@
 //! This module implements `SessionGraphStore` over SQLite using the clean
 //! v1.1 table set: `graph_sessions`, `graph_refs`, `graph_commits`, and
 //! `graph_messages`. It intentionally does not use legacy tables like
-//! `objects`, `turn_manifests`, `stash`, `reflog`, or `artifacts`.
+//! old object tables or history side-channel tables.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +26,7 @@ const DEFAULT_BRANCH: &str = "main";
 /// v1.1 SQLite-backed session graph store.
 ///
 /// Uses clean tables (`graph_sessions`, `graph_refs`, `graph_commits`,
-/// `graph_messages`) and does not touch legacy CAS/stash/manifest tables.
+/// `graph_messages`) and does not touch legacy CAS tables.
 pub struct SqliteSessionGraphStore {
     dir: PathBuf,
     db_path: PathBuf,
@@ -269,8 +269,9 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                         source,
                     })?;
 
-                let tool_calls: Option<Vec<GraphToolCall>> =
-                    serde_json::from_str(&tool_calls_json).ok().filter(|v: &Vec<GraphToolCall>| !v.is_empty());
+                let tool_calls: Option<Vec<GraphToolCall>> = serde_json::from_str(&tool_calls_json)
+                    .ok()
+                    .filter(|v: &Vec<GraphToolCall>| !v.is_empty());
 
                 all_messages.push(GraphMessage {
                     role,
@@ -1307,7 +1308,7 @@ mod sqlite_graph_commit_turn {
         }
 
         // Verify legacy tables do NOT exist.
-        for table in &["turn_manifests", "stash", "reflog", "artifacts"] {
+        for table in &["objects", "commits", "refs", "meta"] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -1855,7 +1856,13 @@ mod sqlite_graph_head_transcript {
         let messages3 = vec![user_msg("Turn 2"), assistant_msg("Response 2")];
         let input3 = commit_input_with_usage(
             "sess-1",
-            vec![store.log("sess-1").expect("log").last().unwrap().commit_id.clone()],
+            vec![store
+                .log("sess-1")
+                .expect("log")
+                .last()
+                .unwrap()
+                .commit_id
+                .clone()],
             messages3,
             TurnCommitStatus::Completed,
             None,
@@ -1867,7 +1874,11 @@ mod sqlite_graph_head_transcript {
         let transcript = store.head_transcript("sess-1").expect("head_transcript");
 
         // Should have all 7 messages from 3 commits in order.
-        assert_eq!(transcript.messages.len(), 7, "expected 7 messages from 3 commits");
+        assert_eq!(
+            transcript.messages.len(),
+            7,
+            "expected 7 messages from 3 commits"
+        );
 
         // Verify chronological order: commit 0 messages, then commit 1, then commit 2.
         assert_eq!(transcript.messages[0].content, "Turn 0");
@@ -1925,7 +1936,11 @@ mod sqlite_graph_head_transcript {
 
         // Transcript on feature branch should have 4 messages.
         let feature_transcript = store.head_transcript("sess-1").expect("head_transcript");
-        assert_eq!(feature_transcript.messages.len(), 4, "feature branch should have 4 messages");
+        assert_eq!(
+            feature_transcript.messages.len(),
+            4,
+            "feature branch should have 4 messages"
+        );
 
         // Reset main to first commit, checkout main.
         store.reset("sess-1", &commit1.commit_id).expect("reset");
@@ -1933,7 +1948,11 @@ mod sqlite_graph_head_transcript {
 
         // Transcript on main should have only 2 messages.
         let main_transcript = store.head_transcript("sess-1").expect("head_transcript");
-        assert_eq!(main_transcript.messages.len(), 2, "main branch should have 2 messages after reset");
+        assert_eq!(
+            main_transcript.messages.len(),
+            2,
+            "main branch should have 2 messages after reset"
+        );
         assert_eq!(main_transcript.messages[0].content, "Main turn");
         assert_eq!(main_transcript.messages[1].content, "Main response");
     }
@@ -2010,15 +2029,38 @@ mod sqlite_graph_head_transcript {
 
         // Cancelled turn.
         assert!(log[2].usage.is_none());
-        assert_eq!(log[2].terminal_reason, Some("cancelled by user".to_string()));
+        assert_eq!(
+            log[2].terminal_reason,
+            Some("cancelled by user".to_string())
+        );
 
         // Verify usage round-trips through commit output.
-        assert_eq!(commit1.usage, Some(TurnUsage { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }));
+        assert_eq!(
+            commit1.usage,
+            Some(TurnUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150
+            })
+        );
         assert_eq!(commit1.terminal_reason, Some("stop".to_string()));
-        assert_eq!(commit2.usage, Some(TurnUsage { prompt_tokens: 200, completion_tokens: 0, total_tokens: 200 }));
-        assert_eq!(commit2.terminal_reason, Some("error: provider timeout".to_string()));
+        assert_eq!(
+            commit2.usage,
+            Some(TurnUsage {
+                prompt_tokens: 200,
+                completion_tokens: 0,
+                total_tokens: 200
+            })
+        );
+        assert_eq!(
+            commit2.terminal_reason,
+            Some("error: provider timeout".to_string())
+        );
         assert!(commit3.usage.is_none());
-        assert_eq!(commit3.terminal_reason, Some("cancelled by user".to_string()));
+        assert_eq!(
+            commit3.terminal_reason,
+            Some("cancelled by user".to_string())
+        );
     }
 }
 

@@ -5,49 +5,17 @@
 //! layer that runs those tools when the model requests them.
 
 use std::collections::{BTreeSet, HashSet};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use async_trait::async_trait;
 
-use crate::capabilities::ToolBundle;
 use crate::edit::{apply_patch as apply_structured_patch, content_hash, PatchResultEnvelope};
 use crate::tool_error::ToolError;
-use crate::{ToolExecutor, ToolOutcome};
-use lattice_sandbox::{
-    ApprovalKind, DenialKind, DenialReport, PolicyDecision, RiskClass, SandboxConfig, ToolCatalog,
-};
-
-/// Trait abstracting tool registry access. Provides custom tool handlers
-/// that DefaultToolExecutor checks before falling back to built-in tools.
-pub trait RegistryToolAccess: Send + Sync {
-    fn get_handler(
-        &self,
-        tool_name: &str,
-    ) -> Option<std::sync::Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>>;
-    fn get_definitions(&self) -> Vec<lattice_core::types::ToolDefinition>;
-}
-
-/// Adapter implementing [`ToolCatalog`] via [`ToolBundle`] for bundle
-/// resolution in `DefaultToolExecutor`.
-struct ToolBundleCatalog;
-
-impl ToolCatalog for ToolBundleCatalog {
-    fn tool_exists(&self, _name: &str) -> bool {
-        true // defer to bundle_contains for actual matching
-    }
-    fn bundle_exists(&self, name: &str) -> bool {
-        ToolBundle::from_str(name).is_ok()
-    }
-    fn bundle_contains(&self, bundle_name: &str, tool_name: &str) -> bool {
-        ToolBundle::from_str(bundle_name)
-            .map(|bundle| bundle.contains_tool(tool_name))
-            .unwrap_or(false)
-    }
-}
+use crate::ToolExecutor;
 
 /// Executes tools using the local filesystem and shell.
 ///
@@ -57,20 +25,32 @@ impl ToolCatalog for ToolBundleCatalog {
 /// The `project_root` is used by `write_file` and `patch`
 /// to restrict writes to project source directories.
 ///
-/// All tool operations are gated by the `sandbox` configuration
-/// (path validation, sensitive-file blocking, command allowlisting,
-/// URL scheme restrictions, and size/timeout limits).
-///
-/// When a `registry` is set, custom tool handlers from the registry are
-/// checked first before falling back to the default 7 tools.
+/// File/search/edit operations enforce project-root containment, parent
+/// traversal rejection, and size limits directly in this crate.
 pub struct DefaultToolExecutor {
     project_root: String,
-    sandbox: SandboxConfig,
+    limits: ToolLimits,
     http_client: reqwest::Client,
-    registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
     authorized_tools: Option<BTreeSet<String>>,
-    #[cfg(feature = "blob-store")]
-    blob_store: Option<std::sync::Arc<dyn crate::BlobFetcher>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolLimits {
+    pub max_read_size: usize,
+    pub max_write_size: usize,
+    pub max_http_response_size: usize,
+    pub max_command_timeout: u32,
+}
+
+impl Default for ToolLimits {
+    fn default() -> Self {
+        Self {
+            max_read_size: 10 * 1024 * 1024,
+            max_write_size: 1024 * 1024,
+            max_http_response_size: 10 * 1024 * 1024,
+            max_command_timeout: 30,
+        }
+    }
 }
 
 const DEFAULT_READ_LINE_LIMIT: usize = 2000;
@@ -95,39 +75,19 @@ impl DefaultToolExecutor {
     pub fn new(project_root: &str) -> Result<Self, String> {
         Ok(Self {
             project_root: project_root.to_string(),
-            sandbox: SandboxConfig::default(),
+            limits: ToolLimits::default(),
             http_client: Self::build_http_client()?,
-            registry: None,
             authorized_tools: None,
-            #[cfg(feature = "blob-store")]
-            blob_store: None,
-        })
-    }
-
-    pub fn new_with_registry(
-        project_root: &str,
-        registry: Option<std::sync::Arc<dyn RegistryToolAccess>>,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            project_root: project_root.to_string(),
-            sandbox: SandboxConfig::default(),
-            http_client: Self::build_http_client()?,
-            registry,
-            authorized_tools: None,
-            #[cfg(feature = "blob-store")]
-            blob_store: None,
         })
     }
 
     pub async fn execute_bash(
         project_root: &str,
-        sandbox: &SandboxConfig,
+        limits: &ToolLimits,
         command: &str,
     ) -> Result<std::process::Output, String> {
-        sandbox
-            .check_command(command)
-            .map_err(|e| format!("sandbox: {e}"))?;
-        execute_bash_command(command, sandbox, project_root).await
+        check_command(command)?;
+        execute_bash_command(command, limits, project_root).await
     }
 
     fn resolve_user_path(&self, path: &str) -> PathBuf {
@@ -166,16 +126,12 @@ impl DefaultToolExecutor {
         if let Err(e) = self.ensure_under_project_root(&canonical) {
             return e;
         }
-        let path_str = canonical.to_string_lossy();
-        if let Err(e) = self.sandbox.check_read(&path_str) {
-            return e;
-        }
         match tokio::fs::metadata(&canonical).await {
-            Ok(meta) if meta.len() > self.sandbox.max_read_size as u64 => {
+            Ok(meta) if meta.len() > self.limits.max_read_size as u64 => {
                 return format!(
-                    "Sandbox: file size {} exceeds max_read_size {}",
+                    "file size {} exceeds max_read_size {}",
                     meta.len(),
-                    self.sandbox.max_read_size
+                    self.limits.max_read_size
                 );
             }
             Err(e) => {
@@ -223,11 +179,6 @@ impl DefaultToolExecutor {
         if let Err(e) = self.ensure_under_project_root(&canonical) {
             return e;
         }
-        let path_str = canonical.to_string_lossy();
-        if let Err(e) = self.sandbox.check_read(&path_str) {
-            return e;
-        }
-
         let mut lines = vec![format!("Workspace: {}", canonical.display())];
         lines.push("Top-level entries:".into());
         match tokio::fs::read_dir(&canonical).await {
@@ -303,9 +254,8 @@ impl DefaultToolExecutor {
         lines.join("\n")
     }
 
-    /// Override the sandbox config (replaces the default).
-    pub fn with_sandbox(mut self, config: SandboxConfig) -> Self {
-        self.sandbox = config;
+    pub fn with_limits(mut self, limits: ToolLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -318,76 +268,14 @@ impl DefaultToolExecutor {
         self
     }
 
-    /// Typed version of [`authorization_denial`] returning a structured
-    /// `DenialReport` instead of a plain string on denial.
-    ///
-    /// The report includes the denied tool name, the list of enabled tools,
-    /// and a `RiskClass::Mutate` classification so the agent loop can
-    /// detect denials and present approval options.
-    fn authorization_denial_report(&self, tool_name: &str) -> Option<DenialReport> {
-        let authorized = self.authorized_tools.as_ref()?;
-        if authorized.contains(tool_name) {
-            return None;
-        }
-        if self.is_tool_dynamically_approved(tool_name) {
-            return None;
-        }
-
-        Some(DenialReport::new(
-            format!("tool '{}' is not enabled for this agent", tool_name),
-            RiskClass::Mutate,
-            DenialKind::Tool {
-                tool_name: tool_name.to_string(),
-                enabled_tools: authorized.iter().cloned().collect(),
-            },
-        ))
-    }
-
-    /// Backward-compatible wrapper: returns the `DenialReport` serialized
-    /// as a JSON string so existing call sites in [`execute`] continue to
-    /// receive a denial string.
     fn authorization_denial(&self, tool_name: &str) -> Option<String> {
-        self.authorization_denial_report(tool_name)
-            .map(|report| report.to_json())
-    }
-
-    fn is_tool_dynamically_approved(&self, tool_name: &str) -> bool {
-        if let Some(ref authority) = self.sandbox.policy_authority {
-            let catalog = ToolBundleCatalog;
-            let decision =
-                authority.decide_tool(tool_name, self.authorized_tools.as_ref(), Some(&catalog));
-            return matches!(decision, PolicyDecision::Allow);
-        }
-
-        // Fallback: inline matching against approved_rules (backward-compatible path)
-        let Some(ref rules) = self.sandbox.approved_rules else {
-            return false;
-        };
-        let rules = rules.lock().unwrap_or_else(|e| e.into_inner());
-        rules.iter().any(|rule| match &rule.kind {
-            ApprovalKind::Tool {
-                tool_name: approved,
-            } => approved == tool_name,
-            ApprovalKind::Bundle { bundle_name } => ToolBundle::from_str(bundle_name)
-                .map(|bundle| bundle.contains_tool(tool_name))
-                .unwrap_or(false),
-            _ => false,
-        })
-    }
-
-    /// Create a executor with an optional BlobFetcher for bus:fetch support.
-    #[cfg(feature = "blob-store")]
-    pub fn new_with_blob_store(
-        project_root: &str,
-        blob_store: Option<std::sync::Arc<dyn crate::BlobFetcher>>,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            project_root: project_root.to_string(),
-            sandbox: SandboxConfig::default(),
-            http_client: Self::build_http_client()?,
-            registry: None,
-            authorized_tools: None,
-            blob_store,
+        let authorized = self.authorized_tools.as_ref()?;
+        (!authorized.contains(tool_name)).then(|| {
+            format!(
+                "Tool denied: '{}' is not enabled for this agent. Enabled tools: {}",
+                tool_name,
+                render_enabled_tools(authorized)
+            )
         })
     }
 
@@ -397,11 +285,7 @@ impl DefaultToolExecutor {
     /// This constructor is the authoritative v1.1 boundary (D-19, D-20, D-21,
     /// D-22). It canonicalizes the project root, applies the explicit tool
     /// allowlist via `with_authorized_tools`, and sets up path containment
-    /// checks. It does NOT rely on `SandboxConfig` read/write allowlists as
-    /// the v1.1 containment boundary.
-    ///
-    /// No `policy_authority` or `approved_rules` backing store is created --
-    /// the v1.1 main path has no dynamic approval flow.
+    /// checks without a dynamic approval flow.
     pub fn for_project_root<I, S>(project_root: &str, enabled_tool_names: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = S>,
@@ -411,12 +295,9 @@ impl DefaultToolExecutor {
             .map_err(|e| format!("cannot canonicalize project root '{}': {}", project_root, e))?;
         Ok(Self {
             project_root: canonical.to_string_lossy().to_string(),
-            sandbox: SandboxConfig::default(),
+            limits: ToolLimits::default(),
             http_client: Self::build_http_client()?,
-            registry: None,
             authorized_tools: Some(enabled_tool_names.into_iter().map(Into::into).collect()),
-            #[cfg(feature = "blob-store")]
-            blob_store: None,
         })
     }
 
@@ -471,17 +352,7 @@ impl DefaultToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for DefaultToolExecutor {
-    async fn execute_outcome(&self, call: &lattice_core::types::ToolCall) -> ToolOutcome {
-        if serde_json::from_str::<serde_json::Value>(&call.function.arguments).is_ok() {
-            if let Some(denial) = self.authorization_denial_report(&call.function.name) {
-                return ToolOutcome::denied(denial);
-            }
-        }
-
-        ToolOutcome::from_text(self.execute(call).await)
-    }
-
-    async fn execute(&self, call: &lattice_core::types::ToolCall) -> String {
+    async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
         let args: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
             Ok(v) => v,
             Err(e) => {
@@ -496,13 +367,6 @@ impl ToolExecutor for DefaultToolExecutor {
 
         if let Some(denial) = self.authorization_denial(&call.function.name) {
             return denial;
-        }
-
-        // Check registry for custom tools first
-        if let Some(reg) = &self.registry {
-            if let Some(handler) = reg.get_handler(&call.function.name) {
-                return handler(args);
-            }
         }
 
         match call.function.name.as_str() {
@@ -599,7 +463,7 @@ impl ToolExecutor for DefaultToolExecutor {
                     pattern: &re,
                     project_root: &project_root,
                     results: &mut results,
-                    sandbox: &self.sandbox,
+                    limits: &self.limits,
                     visited: &mut visited,
                     max_results,
                     truncated: &mut truncated,
@@ -624,11 +488,8 @@ impl ToolExecutor for DefaultToolExecutor {
                     return e;
                 }
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let abs = std::path::PathBuf::from(format!(
-                    "{}/{}",
-                    self.project_root,
-                    path.trim_start_matches('/')
-                ));
+                let abs =
+                    std::path::PathBuf::from(&self.project_root).join(path.trim_start_matches('/'));
                 // Canonicalize parent directory (TOCTOU prevention)
                 let write_path = if let Some(parent) = abs.parent() {
                     match tokio::fs::canonicalize(parent).await {
@@ -638,10 +499,6 @@ impl ToolExecutor for DefaultToolExecutor {
                             if let Err(e) = self.ensure_under_project_root(&canonical) {
                                 return e;
                             }
-                            let path_str = canonical.to_string_lossy();
-                            if let Err(e) = self.sandbox.check_write(&path_str) {
-                                return e;
-                            }
                             canonical
                         }
                         Err(_) => {
@@ -649,20 +506,17 @@ impl ToolExecutor for DefaultToolExecutor {
                             // bypass canonicalize (TOCTOU: symlink could redirect
                             // a non-canonical path after the check)
                             return format!(
-                                "Sandbox: cannot write to '{}' — parent directory does not exist or cannot be resolved",
+                                "cannot write to '{}' because parent directory does not exist or cannot be resolved",
                                 path
                             );
                         }
                     }
                 } else {
-                    if let Err(e) = self.sandbox.check_write(path) {
-                        return e;
-                    }
                     abs.clone()
                 };
-                if content.len() > self.sandbox.max_write_size {
+                if content.len() > self.limits.max_write_size {
                     return ToolError::SizeLimit {
-                        limit: self.sandbox.max_write_size,
+                        limit: self.limits.max_write_size,
                         actual: content.len(),
                     }
                     .to_string();
@@ -702,10 +556,6 @@ impl ToolExecutor for DefaultToolExecutor {
                 };
                 // v1.1 project-root containment (D-19, D-21)
                 if let Err(e) = self.ensure_under_project_root(&canonical) {
-                    return e;
-                }
-                let path_str = canonical.to_string_lossy();
-                if let Err(e) = self.sandbox.check_read(&path_str) {
                     return e;
                 }
                 let mut entries = match tokio::fs::read_dir(&canonical).await {
@@ -776,11 +626,6 @@ impl ToolExecutor for DefaultToolExecutor {
                 if let Err(e) = self.ensure_under_project_root(&canonical) {
                     return e;
                 }
-                let path_str = canonical.to_string_lossy();
-                if let Err(e) = self.sandbox.check_read(&path_str) {
-                    return e;
-                }
-
                 let mut matches = Vec::new();
                 let mut visited = HashSet::new();
                 let mut truncated = false;
@@ -790,7 +635,6 @@ impl ToolExecutor for DefaultToolExecutor {
                     project_root: &project_root,
                     matches: &mut matches,
                     pattern,
-                    sandbox: &self.sandbox,
                     visited: &mut visited,
                     max_results: limit,
                     truncated: &mut truncated,
@@ -810,7 +654,7 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let result = Self::execute_bash(&self.project_root, &self.sandbox, cmd).await;
+                let result = Self::execute_bash(&self.project_root, &self.limits, cmd).await;
                 match result {
                     Ok(o) => {
                         let mut cmd_result = String::from_utf8_lossy(&o.stdout).to_string();
@@ -826,7 +670,7 @@ impl ToolExecutor for DefaultToolExecutor {
             "patch" => {
                 let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
                 let envelope: PatchResultEnvelope =
-                    apply_structured_patch(Path::new(&self.project_root), &self.sandbox, patch)
+                    apply_structured_patch(Path::new(&self.project_root), &self.limits, patch)
                         .await;
                 serde_json::to_string(&envelope).unwrap_or_else(|error| {
                     serde_json::json!({
@@ -850,12 +694,12 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "web_search" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                if let Err(e) = self.sandbox.check_url(url) {
+                if let Err(e) = check_url(url) {
                     return e;
                 }
                 match self.http_client.get(url).send().await {
                     Ok(response) => {
-                        let limit = self.sandbox.max_http_response_size;
+                        let limit = self.limits.max_http_response_size;
                         if let Some(content_length) = response.content_length() {
                             if content_length > limit as u64 {
                                 return ToolError::HttpError(format!(
@@ -899,24 +743,6 @@ impl ToolExecutor for DefaultToolExecutor {
                         }
                     }
                     Err(e) => ToolError::HttpError(e.to_string()).to_string(),
-                }
-            }
-            #[cfg(feature = "blob-store")]
-            "bus:fetch" => {
-                let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                if !key.starts_with("blob://") {
-                    format!(
-                        "Error: invalid blob key '{}', expected format blob://source/topic/hash",
-                        key
-                    )
-                } else {
-                    match &self.blob_store {
-                        Some(fetcher) => match fetcher.fetch(key).await {
-                            Ok(payload) => payload,
-                            Err(e) => format!("Error: blob '{}' fetch failed: {}", key, e),
-                        },
-                        None => "Error: blob storage not configured for this agent".to_string(),
-                    }
                 }
             }
             _ => format!("Unknown tool: {}", call.function.name),
@@ -1015,6 +841,119 @@ fn render_todos(args: &serde_json::Value) -> String {
     )];
     lines.extend(rendered);
     lines.join("\n")
+}
+
+fn render_enabled_tools(authorized: &BTreeSet<String>) -> String {
+    if authorized.is_empty() {
+        "<none>".to_string()
+    } else {
+        authorized.iter().cloned().collect::<Vec<_>>().join(", ")
+    }
+}
+
+fn check_command(command: &str) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("empty command".to_string());
+    }
+
+    if command.contains("$'") {
+        return Err(
+            "command contains ANSI-C quoting ($'...') which may expand to shell metacharacters"
+                .to_string(),
+        );
+    }
+
+    let upper = command.to_uppercase();
+    if upper.contains("PATH=") || upper.contains("LD_PRELOAD=") {
+        return Err(
+            "command contains environment variable override (PATH= or LD_PRELOAD=)".to_string(),
+        );
+    }
+
+    for meta in [
+        "&", ";", "|", "&&", "||", "$(", "${", "`", "$", "\n", "\r", ">", "<",
+    ] {
+        if command.contains(meta) {
+            return Err(format!(
+                "command contains dangerous shell metacharacter '{}'",
+                meta
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn check_url(url_str: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url_str).map_err(|error| format!("invalid URL: {error}"))?;
+    let scheme = parsed.scheme();
+    let host = parsed.host_str().unwrap_or("");
+
+    let rebinding_domains = ["nip.io", "xip.io"];
+    if rebinding_domains
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+    {
+        return Err(format!(
+            "URL not allowed: {url_str} (DNS rebinding domain '{host}' blocked)"
+        ));
+    }
+
+    if scheme == "http" && is_localhost(host) {
+        return Ok(());
+    }
+
+    if scheme != "https" {
+        return Err(format!(
+            "URL not allowed: {url_str}. Only https:// and http://localhost are permitted."
+        ));
+    }
+
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    reject_private_resolved_host(host, port)
+        .map_err(|reason| format!("HTTPS URL not allowed: {url_str} ({reason})"))
+}
+
+fn is_localhost(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn reject_private_resolved_host(host: &str, port: u16) -> Result<(), String> {
+    if is_localhost(host) {
+        return Err("host resolves to localhost".to_string());
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return reject_private_ip(ip);
+    }
+
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("DNS resolution failed for '{host}:{port}': {error}"))?;
+    for addr in addrs {
+        reject_private_ip(addr.ip())?;
+    }
+    Ok(())
+}
+
+fn reject_private_ip(ip: IpAddr) -> Result<(), String> {
+    match ip {
+        IpAddr::V4(v4)
+            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() =>
+        {
+            Err(format!("blocked private IPv4 address {v4}"))
+        }
+        IpAddr::V6(v6)
+            if v6.is_loopback()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || v6.is_unspecified() =>
+        {
+            Err(format!("blocked private IPv6 address {v6}"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn workspace_git_context(workdir: &Path) -> Option<Vec<String>> {
@@ -1169,7 +1108,6 @@ struct FindFilesContext<'a> {
     project_root: &'a Path,
     matches: &'a mut Vec<String>,
     pattern: &'a str,
-    sandbox: &'a lattice_sandbox::SandboxConfig,
     visited: &'a mut HashSet<PathBuf>,
     max_results: usize,
     truncated: &'a mut bool,
@@ -1194,11 +1132,6 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
     if resolved != context.project_root && !resolved.starts_with(context.project_root) {
         return;
     }
-    let path_str = resolved.to_string_lossy();
-    if context.sandbox.check_read(&path_str).is_err() {
-        return;
-    }
-
     if resolved != context.root {
         let relative = resolved
             .strip_prefix(context.root)
@@ -1246,13 +1179,13 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
 }
 
 /// Recursively search files under `path` for lines matching `pattern`.
-/// Respects sandbox limits: max_depth, max_read_size, check_read.
+/// Respects depth, project-root containment, and file-size limits.
 /// Skips hidden dirs, binary files, and follows symlinks with cycle detection.
 struct GrepContext<'a> {
     pattern: &'a regex::Regex,
     project_root: &'a Path,
     results: &'a mut Vec<String>,
-    sandbox: &'a lattice_sandbox::SandboxConfig,
+    limits: &'a ToolLimits,
     visited: &'a mut HashSet<PathBuf>,
     max_results: usize,
     truncated: &'a mut bool,
@@ -1266,7 +1199,7 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
         return;
     }
 
-    // Resolve symlinks to detect cycles AND use canonical path for sandbox checks
+    // Resolve symlinks to detect cycles and reject paths that escape the root.
     let resolved = match tokio::fs::canonicalize(path).await {
         Ok(p) => p,
         Err(_) => return,
@@ -1280,15 +1213,10 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
         return;
     }
 
-    let path_str = resolved.to_string_lossy();
-    if context.sandbox.check_read(&path_str).is_err() {
-        return;
-    }
-
     if resolved.is_file() {
         // Skip files too large
         if let Ok(meta) = tokio::fs::metadata(&resolved).await {
-            if meta.len() > context.sandbox.max_read_size as u64 {
+            if meta.len() > context.limits.max_read_size as u64 {
                 return;
             }
         }
@@ -1304,9 +1232,12 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
                         *context.truncated = true;
                         return;
                     }
-                    context
-                        .results
-                        .push(format!("{}:{}:{}", path_str, line_num + 1, line));
+                    context.results.push(format!(
+                        "{}:{}:{}",
+                        resolved.display(),
+                        line_num + 1,
+                        line
+                    ));
                 }
             }
         }
@@ -1336,19 +1267,15 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific bash execution helpers (Landlock + setrlimit)
+// Platform-specific bash execution helpers (setrlimit)
 // ---------------------------------------------------------------------------
 
-/// Execute a bash command with platform-specific sandboxing (Unix).
-///
-/// On Linux with `LandlockConfig` set, applies Landlock file isolation and
-/// resource limits via `pre_exec`. On other Unix (macOS, BSD), applies
-/// resource limits only.
+/// Execute a bash command with platform-specific resource limits (Unix).
 #[cfg(unix)]
 async fn execute_bash_command(
     command: &str,
-    sandbox: &SandboxConfig,
-    project_root: &str,
+    limits: &ToolLimits,
+    _project_root: &str,
 ) -> Result<std::process::Output, String> {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
@@ -1356,43 +1283,18 @@ async fn execute_bash_command(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    #[cfg(not(target_os = "linux"))]
-    let _ = project_root;
-
-    // Linux: Landlock + setrlimit
     #[cfg(target_os = "linux")]
-    {
-        let read_paths: Option<Vec<PathBuf>> = sandbox
-            .landlock
-            .as_ref()
-            .map(|lc| build_landlock_read_paths(project_root, &lc.extra_read_paths));
-        let write_paths: Option<Vec<PathBuf>> = sandbox
-            .landlock
-            .as_ref()
-            .map(|lc| build_landlock_write_paths(project_root, &lc.extra_write_paths));
-
-        // SAFETY: `pre_exec` runs in the forked child process before `exec`.
-        // The closure only calls `apply_resource_limits_linux` (POSIX setrlimit)
-        // and `apply_landlock_sandbox` (Linux-specific Landlock LSM), both of
-        // which are async-signal-safe. No allocations occur after fork. The
-        // closure returns `Ok(())` on success or logs a warning on failure —
-        // it never panics.
-        unsafe {
-            cmd.pre_exec(move || {
-                // Apply resource limits first (best-effort, warn on failure)
-                apply_resource_limits_linux();
-
-                // Apply Landlock (best-effort; silently skipped on old kernels)
-                if let (Some(read), Some(write)) = (&read_paths, &write_paths) {
-                    let _ = apply_landlock_sandbox(read, write);
-                }
-
-                Ok(())
-            });
-        }
+    // SAFETY: `pre_exec` runs in the forked child process before `exec`.
+    // The closure only calls `apply_resource_limits_linux` (POSIX setrlimit),
+    // which is async-signal-safe. No allocations occur after fork. The
+    // closure returns `Ok(())` on success or logs a warning on failure.
+    unsafe {
+        cmd.pre_exec(move || {
+            apply_resource_limits_linux();
+            Ok(())
+        });
     }
 
-    // macOS / other Unix: setrlimit only (no Landlock available)
     #[cfg(all(unix, not(target_os = "linux")))]
     // SAFETY: `pre_exec` runs in the forked child process before `exec`.
     // The closure only calls `apply_resource_limits_unix` (POSIX setrlimit),
@@ -1408,7 +1310,7 @@ async fn execute_bash_command(
 
     let mut tokio_cmd: tokio::process::Command = cmd.into();
     tokio_cmd.kill_on_drop(true);
-    let timeout_secs = std::cmp::max(sandbox.max_command_timeout, 1) as u64;
+    let timeout_secs = std::cmp::max(limits.max_command_timeout, 1) as u64;
     let child = tokio_cmd.spawn().map_err(|e| e.to_string())?;
 
     match tokio::time::timeout(
@@ -1424,20 +1326,20 @@ async fn execute_bash_command(
             // cleanup path when the timeout future is dropped.
             Err(format!(
                 "bash command timed out after {}s",
-                sandbox.max_command_timeout
+                limits.max_command_timeout
             ))
         }
     }
 }
 
-/// Execute a bash command on non-Unix platforms (no sandboxing available).
+/// Execute a bash command on non-Unix platforms.
 #[cfg(not(unix))]
 async fn execute_bash_command(
     command: &str,
-    sandbox: &SandboxConfig,
+    limits: &ToolLimits,
     _project_root: &str,
 ) -> Result<std::process::Output, String> {
-    let timeout_secs = std::cmp::max(sandbox.max_command_timeout, 1) as u64;
+    let timeout_secs = std::cmp::max(limits.max_command_timeout, 1) as u64;
     let mut cmd = tokio::process::Command::new("sh");
     cmd.args(["-c", command]).kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| e.to_string())?;
@@ -1452,7 +1354,7 @@ async fn execute_bash_command(
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err(format!(
             "bash command timed out after {}s",
-            sandbox.max_command_timeout
+            limits.max_command_timeout
         )),
     }
 }
@@ -1460,43 +1362,10 @@ async fn execute_bash_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_core::types::ToolDefinition;
-    use lattice_core::types::{FunctionCall, ToolCall};
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    };
-
-    struct TestRegistry {
-        called: Arc<AtomicBool>,
-    }
-
-    impl RegistryToolAccess for TestRegistry {
-        fn get_handler(
-            &self,
-            tool_name: &str,
-        ) -> Option<Arc<dyn Fn(serde_json::Value) -> String + Send + Sync>> {
-            if tool_name != "custom_tool" {
-                return None;
-            }
-
-            let called = Arc::clone(&self.called);
-            Some(Arc::new(move |_| {
-                called.store(true, Ordering::SeqCst);
-                "custom handler called".to_string()
-            }))
-        }
-
-        fn get_definitions(&self) -> Vec<ToolDefinition> {
-            Vec::new()
-        }
-    }
+    use lattice_llm::{FunctionCall, ToolCall};
 
     fn tool_call(name: &str, args: serde_json::Value) -> ToolCall {
-        ToolCall::new(
-            "call_test".into(),
-            FunctionCall::new(name.into(), args.to_string()),
-        )
+        ToolCall::new("call_test", FunctionCall::new(name, args.to_string()))
     }
 
     #[tokio::test]
@@ -1832,150 +1701,12 @@ mod tests {
             .await;
 
         assert!(
-            result.contains("\"__denial_report__\":true"),
-            "denial should be DenialReport JSON: {}",
+            result.contains("Tool denied: 'write_file' is not enabled"),
+            "denial should be plain enabled-tool text: {}",
             result
         );
-        assert!(result.contains("\"write_file\""));
+        assert!(result.contains("read_file"));
         assert!(!dir.path().join("denied.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn execute_outcome_returns_typed_denial_for_unlisted_builtin() {
-        let dir = tempfile::tempdir().unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_authorized_tools(["read_file"]);
-
-        let outcome = executor
-            .execute_outcome(&tool_call(
-                "write_file",
-                serde_json::json!({
-                    "path": "denied.txt",
-                    "content": "should not write"
-                }),
-            ))
-            .await;
-
-        let ToolOutcome::Denied(report) = outcome else {
-            panic!("expected typed denial outcome");
-        };
-        assert!(matches!(report.kind, DenialKind::Tool { .. }));
-        assert!(!dir.path().join("denied.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn approved_tool_rule_allows_unlisted_builtin() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut sandbox = SandboxConfig::default();
-        sandbox.approved_rules = Some(Arc::new(Mutex::new(vec![lattice_sandbox::ApprovedRule {
-            kind: ApprovalKind::Tool {
-                tool_name: "workspace_context".into(),
-            },
-            risk_class: RiskClass::Read,
-        }])));
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_sandbox(sandbox)
-            .with_authorized_tools(["read_file"]);
-
-        let result = executor
-            .execute(&tool_call(
-                "workspace_context",
-                serde_json::json!({"path": "."}),
-            ))
-            .await;
-
-        assert!(
-            result.contains("Workspace:"),
-            "approved tool should execute instead of returning denial: {}",
-            result
-        );
-    }
-
-    #[tokio::test]
-    async fn approved_bundle_rule_allows_bundle_tool() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut sandbox = SandboxConfig::default();
-        sandbox.approved_rules = Some(Arc::new(Mutex::new(vec![lattice_sandbox::ApprovedRule {
-            kind: ApprovalKind::Bundle {
-                bundle_name: "workspace".into(),
-            },
-            risk_class: RiskClass::Read,
-        }])));
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_sandbox(sandbox)
-            .with_authorized_tools(["read_file"]);
-
-        let result = executor
-            .execute(&tool_call(
-                "workspace_context",
-                serde_json::json!({"path": "."}),
-            ))
-            .await;
-
-        assert!(
-            result.contains("Workspace:"),
-            "approved bundle should execute instead of returning denial: {}",
-            result
-        );
-    }
-
-    #[tokio::test]
-    async fn policy_authority_bundle_rule_allows_unlisted_builtin() {
-        let dir = tempfile::tempdir().unwrap();
-        let shared = Arc::new(Mutex::new(vec![lattice_sandbox::ApprovedRule {
-            kind: ApprovalKind::Bundle {
-                bundle_name: "workspace".into(),
-            },
-            risk_class: RiskClass::Read,
-        }]));
-        let mut sandbox = SandboxConfig::default();
-        sandbox.approved_rules = Some(Arc::clone(&shared));
-        sandbox.policy_authority =
-            Some(lattice_sandbox::PolicyAuthority::from_shared_rules(shared));
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_sandbox(sandbox)
-            .with_authorized_tools(["read_file"]);
-
-        let result = executor
-            .execute(&tool_call(
-                "workspace_context",
-                serde_json::json!({"path": "."}),
-            ))
-            .await;
-
-        assert!(
-            result.contains("Workspace:"),
-            "policy authority bundle approval should execute instead of returning denial: {}",
-            result
-        );
-    }
-
-    #[tokio::test]
-    async fn authorized_executor_denies_registry_tool_before_handler_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let called = Arc::new(AtomicBool::new(false));
-        let registry = Arc::new(TestRegistry {
-            called: Arc::clone(&called),
-        });
-        let executor =
-            DefaultToolExecutor::new_with_registry(dir.path().to_str().unwrap(), Some(registry))
-                .unwrap()
-                .with_authorized_tools(["read_file"]);
-
-        let result = executor
-            .execute(&tool_call("custom_tool", serde_json::json!({})))
-            .await;
-
-        assert!(
-            result.contains("\"__denial_report__\":true"),
-            "denial should be DenialReport JSON: {}",
-            result
-        );
-        assert!(!called.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -1993,8 +1724,8 @@ mod tests {
             .await;
 
         assert!(
-            result.contains("\"__denial_report__\":true"),
-            "denial should be DenialReport JSON: {}",
+            result.contains("Tool denied: 'bash' is not enabled"),
+            "denial should be plain enabled-tool text: {}",
             result
         );
         assert!(!result.contains("Unknown tool:"));
@@ -2004,13 +1735,15 @@ mod tests {
     #[tokio::test]
     async fn bash_timeout_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
-        let mut sandbox = SandboxConfig::permissive();
-        sandbox.max_command_timeout = 1;
+        let limits = ToolLimits {
+            max_command_timeout: 1,
+            ..ToolLimits::default()
+        };
 
         let started = std::time::Instant::now();
         let result = DefaultToolExecutor::execute_bash(
             dir.path().to_str().unwrap(),
-            &sandbox,
+            &limits,
             "exec sleep 5",
         )
         .await;
@@ -2311,9 +2044,7 @@ mod tests {
             DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"])
                 .unwrap();
 
-        // The for_project_root constructor should not set up policy_authority
-        // or approved_rules. Verify by checking that an unlisted tool is
-        // denied (not dynamically approved).
+        // The for_project_root constructor has no dynamic approval flow.
         let result = executor
             .execute(&tool_call(
                 "bash",
@@ -2321,109 +2052,11 @@ mod tests {
             ))
             .await;
         assert!(
-            result.contains("\"__denial_report__\":true"),
-            "unlisted tool should be denied without dynamic approval: {}",
+            result.contains("Tool denied: 'bash' is not enabled"),
+            "unlisted tool should be denied: {}",
             result
         );
     }
-}
-
-// --- Linux Landlock helpers ------------------------------------------------
-
-#[cfg(target_os = "linux")]
-fn build_landlock_read_paths(project_root: &str, extra: &[PathBuf]) -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from(project_root),
-        PathBuf::from("/usr"),
-        PathBuf::from("/lib"),
-        PathBuf::from("/lib64"),
-        PathBuf::from("/etc"),
-        PathBuf::from("/proc/self"),
-    ];
-    paths.extend(extra.iter().cloned());
-    paths
-}
-
-#[cfg(target_os = "linux")]
-fn build_landlock_write_paths(project_root: &str, extra: &[PathBuf]) -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from(project_root), PathBuf::from("/tmp")];
-    paths.extend(extra.iter().cloned());
-    paths
-}
-
-/// Apply Landlock file isolation in the child process.
-///
-/// Denies all filesystem access by default, then adds permissive
-/// PathBeneath rules: read-only + execute for system paths, full
-/// access for write paths (project root + /tmp).
-///
-/// Returns `Ok(())` on success or if Landlock is not supported
-/// (kernel < 5.13). Only returns `Err` for unexpected OS errors.
-#[cfg(target_os = "linux")]
-fn apply_landlock_sandbox(read_paths: &[PathBuf], write_paths: &[PathBuf]) -> std::io::Result<()> {
-    use landlock::{Access, AccessFs, PathBeneath, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
-
-    // Progressive ABI: try highest first, fall back step by step.
-    // V4 (kernel 6.7+) adds network + io_uring isolation.
-    // V3 (kernel 6.0+) adds file truncation control.
-    // V2 (kernel 5.19+) adds file reparenting control.
-    // V1 (kernel 5.13+) provides filesystem isolation only.
-    let ruleset = [ABI::V4, ABI::V3, ABI::V2, ABI::V1]
-        .iter()
-        .find_map(|&abi| {
-            Ruleset::default()
-                .handle_access(AccessFs::from_all(abi))
-                .ok()
-                .and_then(|r| r.create().ok())
-        });
-
-    let ruleset = match ruleset {
-        Some(r) => r,
-        None => return Ok(()), // Landlock not supported on this kernel
-    };
-
-    // Use the ABI that was actually accepted for PathBeneath rules
-    let abi = ABI::V1; // V1-compatible read/write flags work on all ABIs
-
-    // Collect PathBeneath rules (needs file descriptors, not just paths)
-    let mut rules: Vec<PathBeneath<std::fs::File>> = Vec::new();
-
-    // Read-only + execute for read paths (only existing paths)
-    for path in read_paths {
-        if let Ok(file) = std::fs::File::open(path) {
-            rules.push(PathBeneath::new(
-                file,
-                AccessFs::from_read(abi) | AccessFs::Execute,
-            ));
-        }
-    }
-
-    // Full access for write paths (only existing paths)
-    for path in write_paths {
-        if let Ok(file) = std::fs::File::open(path) {
-            rules.push(PathBeneath::new(file, AccessFs::from_all(abi)));
-        }
-    }
-
-    // add_rules takes an iterator of Result<T, E> where T: Rule<U>
-    let rules_iter = rules
-        .into_iter()
-        .map(|r| -> Result<_, landlock::RulesetError> { Ok(r) });
-
-    let ruleset = match ruleset.add_rules(rules_iter) {
-        Ok(r) => r,
-        Err(_) => return Ok(()), // Failed to add rules, skip Landlock
-    };
-
-    // Enforce the ruleset
-    if let Err(e) = ruleset.restrict_self() {
-        tracing::warn!(
-            "Landlock restrict_self failed: {:?}; child runs without Landlock",
-            e
-        );
-    }
-
-    Ok(())
 }
 
 // --- Resource limit helpers ------------------------------------------------

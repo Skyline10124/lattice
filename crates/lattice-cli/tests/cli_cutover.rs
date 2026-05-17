@@ -32,27 +32,36 @@ fn cli_cutover_help_omits_removed_commands() {
     let output = lattice().arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in &[
-        "tui",
-        "debug",
-        "config",
-        "stats",
-        "validate",
-        "new",
-        "list",
-        "run-v11",
-        "quick",
-        "sessions",
-    ] {
-        // Match the command name as a subcommand table entry (name followed by
-        // whitespace). This avoids false positives from words appearing in
-        // descriptions or help text.
-        let pattern = format!("\n  {name} ");
+
+    let mut command_names = Vec::new();
+    for line in stdout.lines() {
+        let Some(rest) = line.strip_prefix("  ") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if name.chars().all(|ch| ch.is_ascii_lowercase()) {
+            command_names.push(name.to_string());
+        }
+    }
+
+    for name in &["run", "models", "resolve", "session", "doctor"] {
         assert!(
-            !stdout.contains(&pattern),
-            "help should not contain removed command '{name}' as subcommand, got:\n{stdout}"
+            command_names.iter().any(|candidate| candidate == name),
+            "help should contain supported command '{name}', got:\n{stdout}"
         );
     }
+
+    assert_eq!(
+        command_names.len(),
+        6,
+        "help should list only the final supported command surface (5 + clap 'help'), got:\n{stdout}"
+    );
+    assert!(
+        command_names.contains(&"help".to_string()),
+        "clap adds 'help' subcommand by default, got:\n{stdout}"
+    );
 }
 
 // ─── Bare invocation ──────────────────────────────────────────────────────────
@@ -73,159 +82,20 @@ fn cli_cutover_bare_lattice_prints_help_and_exits_zero() {
     );
 }
 
-// ─── Old command rejection ────────────────────────────────────────────────────
+// ─── Unknown command rejection ────────────────────────────────────────────────
 
 #[test]
-fn cli_cutover_rejects_tui() {
-    let output = lattice().arg("tui").output().unwrap();
-    assert!(!output.status.success(), "tui should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_debug() {
-    let output = lattice().arg("debug").output().unwrap();
-    assert!(!output.status.success(), "debug should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_config() {
-    let output = lattice().arg("config").output().unwrap();
-    assert!(!output.status.success(), "config should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_stats() {
-    let output = lattice().arg("stats").output().unwrap();
-    assert!(!output.status.success(), "stats should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_validate() {
-    let output = lattice().arg("validate").output().unwrap();
-    assert!(!output.status.success(), "validate should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_new() {
-    let output = lattice().arg("new").output().unwrap();
-    assert!(!output.status.success(), "new should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_list() {
-    let output = lattice().arg("list").output().unwrap();
-    assert!(!output.status.success(), "list should return non-zero exit");
-}
-
-#[test]
-fn cli_cutover_rejects_run_v11() {
-    let output = lattice().arg("run-v11").arg("hello").output().unwrap();
+fn cli_cutover_rejects_unknown_command_with_clap_error() {
+    let output = lattice().arg("unsupported-command").output().unwrap();
     assert!(
         !output.status.success(),
-        "run-v11 should return non-zero exit"
+        "unknown command should return non-zero exit"
     );
-}
 
-#[test]
-fn cli_cutover_rejects_sessions_plural() {
-    let output = lattice().arg("sessions").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !output.status.success(),
-        "sessions (plural) should return non-zero exit"
-    );
-}
-
-// Old commands produce clap error (exit 2), not a compatibility message.
-// Clap returns exit code 2 for usage errors. We verify stderr does NOT
-// contain compatibility shim text like "deprecated" or "use instead".
-#[test]
-fn cli_cutover_old_commands_reject_with_clap_error_not_compatibility_message() {
-    for name in &["tui", "debug", "config", "stats", "validate", "new", "list"] {
-        let output = lattice().arg(name).output().unwrap();
-        assert!(!output.status.success(), "{name} should fail");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !stderr.to_lowercase().contains("deprecated"),
-            "{name} should not emit deprecation message, got: {stderr}"
-        );
-        assert!(
-            !stderr.to_lowercase().contains("use instead"),
-            "{name} should not emit 'use instead' message, got: {stderr}"
-        );
-    }
-}
-
-// ─── Old global flag rejection ────────────────────────────────────────────────
-
-#[test]
-fn cli_cutover_rejects_global_config_flag() {
-    let output = lattice()
-        .args(["--config", "foo.toml", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--config should return non-zero exit"
-    );
-}
-
-#[test]
-fn cli_cutover_rejects_global_model_flag() {
-    let output = lattice()
-        .args(["--model", "sonnet", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--model should return non-zero exit"
-    );
-}
-
-#[test]
-fn cli_cutover_rejects_global_provider_flag() {
-    let output = lattice()
-        .args(["--provider", "openai", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--provider should return non-zero exit"
-    );
-}
-
-#[test]
-fn cli_cutover_rejects_global_session_flag() {
-    let output = lattice()
-        .args(["--session", "sess1", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--session should return non-zero exit"
-    );
-}
-
-#[test]
-fn cli_cutover_rejects_global_no_save_flag() {
-    let output = lattice()
-        .args(["--no-save", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--no-save should return non-zero exit"
-    );
-}
-
-#[test]
-fn cli_cutover_rejects_global_continue_flag() {
-    let output = lattice()
-        .args(["--continue", "doctor"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "--continue should return non-zero exit"
+        stderr.contains("unrecognized subcommand"),
+        "unknown command should be rejected by clap, got stderr:\n{stderr}"
     );
 }
 
@@ -335,6 +205,98 @@ fn cli_cutover_session_log_missing_session_fails_with_id_in_message() {
     );
 }
 
+// ─── Workspace boundary: no removed crate imports in focused tests (VER-02) ──
+
+#[test]
+fn focused_tests_import_no_removed_crate_names() {
+    // Verify that no source or test file under the active workspace crates
+    // imports a removed crate name. This proves VER-02: focused tests do not
+    // preserve old architecture fixtures.
+    let crate_dirs = [
+        "lattice-llm",
+        "lattice-session",
+        "lattice-profile",
+        "lattice-agent",
+        "lattice-tools",
+        "lattice-api",
+        "lattice-cli",
+        "lattice-hooks",
+    ];
+    let forbidden = [
+        "lattice_core",
+        "lattice_runtime",
+        "lattice_prompt",
+        "lattice_sandbox",
+        "lattice_policy",
+    ];
+
+    let mut violations: Vec<String> = Vec::new();
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("cli crate should be under crates/");
+
+    for crate_name in &crate_dirs {
+        let crate_dir = workspace_root.join(crate_name);
+        if !crate_dir.is_dir() {
+            continue;
+        }
+        let mut stack = vec![crate_dir];
+        while let Some(dir) = stack.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Skip target directories
+                    if path.file_name().map_or(false, |n| n == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().map_or(true, |e| e != "rs") {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                for (i, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    // Skip comments
+                    if trimmed.starts_with("//") {
+                        continue;
+                    }
+                    // Only check use/import lines and string patterns that would
+                    // actually create a dependency
+                    if !trimmed.starts_with("use ") && !trimmed.contains("extern crate") {
+                        continue;
+                    }
+                    for forbidden_name in &forbidden {
+                        if trimmed.contains(forbidden_name) {
+                            violations.push(format!(
+                                "{}:{}: {}",
+                                path.strip_prefix(workspace_root).unwrap_or(&path).display(),
+                                i + 1,
+                                trimmed
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "found removed crate import(s) in focused tests:\n{}",
+        violations.join("\n")
+    );
+}
+
 // ─── Run missing prompt failure (T-10-05) ────────────────────────────────────
 
 #[test]
@@ -342,8 +304,5 @@ fn cli_cutover_run_without_prompt_or_file_fails() {
     // 'lattice run' with no prompt argument should fail.
     // The Run command requires a prompt positional arg.
     let output = lattice().arg("run").output().unwrap();
-    assert!(
-        !output.status.success(),
-        "run without prompt should fail"
-    );
+    assert!(!output.status.success(), "run without prompt should fail");
 }

@@ -2,7 +2,7 @@
 
 ![LATTICE banner](logo-banner.svg)
 
-LATTICE is a Rust LLM runtime for running one well-instrumented generic agent with reliable model routing, profile-driven prompt assembly, sandboxed tool execution, session persistence, and CLI/TUI feedback.
+LATTICE is a Rust LLM runtime for running one session-centered agent with simple model routing, direct profile loading, commit-backed session history, and a CLI surface that does not hide extra architecture.
 
 ## Workspace
 
@@ -10,16 +10,13 @@ LATTICE is a Rust LLM runtime for running one well-instrumented generic agent wi
 lattice/
 ├── crates/
 │   ├── lattice-hooks/       # Lifecycle hook points
-│   ├── lattice-core/        # Core types, transport, streaming, model resolution
+│   ├── lattice-llm/         # Transport, streaming, model resolution, tool types
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
-│   ├── lattice-prompt/      # Prompt layers, context providers, compilation
-│   ├── lattice-sandbox/     # Landlock isolation, path/command/URL policy, audit
-│   ├── lattice-tools/       # Tool schemas, capability bundles, executor
+│   ├── lattice-profile/     # Agent profile specification, discovery, defaults
+│   ├── lattice-tools/       # Tool schemas, executor trait, edit operations
 │   ├── lattice-agent/       # Multi-turn agent loop, state, memory, hooks
-│   ├── lattice-policy/      # Shared approval/denial foundation
-│   ├── lattice-profile/     # Agent profile specification and lowering
-│   ├── lattice-runtime/     # Top-level runtime assembly and session wiring
-│   └── lattice-cli/         # CLI and TUI
+│   ├── lattice-api/         # API surface types and shared protocol
+│   └── lattice-cli/         # CLI (run, models, resolve, session, doctor)
 ├── benches/
 ├── examples/
 └── tests/
@@ -38,15 +35,22 @@ cargo fmt --all --check
 
 ```sh
 cargo run -p lattice-cli -- run "1+1=?" -m sonnet
-cargo run -p lattice-cli -- run "review src/" --agent reviewer
-cargo run -p lattice-cli -- resolve sonnet --trace
+cargo run -p lattice-cli -- resolve sonnet
 cargo run -p lattice-cli -- models --auth
-cargo run -p lattice-cli -- sessions list
-cargo run -p lattice-cli -- config show
-cargo run -p lattice-cli -- debug "test prompt" -m sonnet
+cargo run -p lattice-cli -- session status
+cargo run -p lattice-cli -- session log <session_id>
 cargo run -p lattice-cli -- doctor
-cargo run -p lattice-cli -- tui -m sonnet
 ```
+
+## Future Work
+
+The following capabilities are deferred beyond the current release:
+
+- **TUI (deferred)** — A minimal terminal UI will be rebuilt on top of the `lattice-api` facade in a later milestone.
+- **Rich prompt compilation (deferred)** — Layer priorities, token budgets, and provider-specific prompt assembly will be reintroduced after the main path is small and stable.
+- **Redesigned security model (deferred)** — A new sandbox and approval system will be built on the simplified API/session substrate in a future milestone.
+- **Plugins and orchestration (deferred)** — Plugin contracts and DAG runners will be reconsidered after the session and API boundaries are stable.
+- **Swarm and multi-agent collaboration (deferred)** — Coordination features will use the session graph as a foundation in a later milestone.
 
 ## Environment
 

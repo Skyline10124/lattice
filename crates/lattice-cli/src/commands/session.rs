@@ -3,6 +3,7 @@
 //! Supports exactly: status, list, log, checkout, branch, diff, reset.
 //! Does not import or call old session manager surfaces.
 
+#![allow(dead_code)]
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -11,7 +12,7 @@ use colored::Colorize;
 use lattice_api::SessionApi;
 use lattice_session::GraphHead;
 
-fn default_session_dir() -> PathBuf {
+pub(crate) fn default_session_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("lattice")
@@ -83,9 +84,7 @@ pub fn run(action: SessionAction, json: bool) -> Result<()> {
 /// and delegates here. Tests pass a temp-backed `SessionApi` directly.
 pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) -> Result<()> {
     match action {
-        SessionAction::Status { session_id } => {
-            cmd_status_api(api, session_id.as_deref(), json)?
-        }
+        SessionAction::Status { session_id } => cmd_status_api(api, session_id.as_deref(), json)?,
         SessionAction::List => cmd_list_api(api, json)?,
         SessionAction::Log { session_id } => cmd_log_api(api, &session_id, json)?,
         SessionAction::Checkout { session_id, target } => {
@@ -112,11 +111,7 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
 // SessionApi-backed handlers (v1.1 per-session scoped operations)
 // ---------------------------------------------------------------------------
 
-fn cmd_status_api(
-    api: &SessionApi,
-    session_id: Option<&str>,
-    json: bool,
-) -> Result<()> {
+fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Result<()> {
     match session_id {
         Some(id) => {
             let status = api.status(id)?;
@@ -240,12 +235,7 @@ fn cmd_log_api(api: &SessionApi, session_id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_checkout_api(
-    api: &SessionApi,
-    session_id: &str,
-    target: &str,
-    json: bool,
-) -> Result<()> {
+fn cmd_checkout_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -> Result<()> {
     let head = api.checkout(session_id, target)?;
     if json {
         let value = serde_json::json!({
@@ -373,12 +363,7 @@ fn cmd_diff_api(
     Ok(())
 }
 
-fn cmd_reset_api(
-    api: &SessionApi,
-    session_id: &str,
-    target: &str,
-    json: bool,
-) -> Result<()> {
+fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -> Result<()> {
     let result = api.reset(session_id, target)?;
     if json {
         let value = serde_json::json!({
@@ -399,6 +384,7 @@ fn cmd_reset_api(
     Ok(())
 }
 
+#[cfg(test)]
 fn not_found(kind: &str, id: &str) -> anyhow::Error {
     anyhow::anyhow!("{} '{}' not found", kind, id)
 }
@@ -750,8 +736,7 @@ mod d25_scoped_session {
     use super::*;
     use lattice_api::SessionApi;
     use lattice_session::{
-        GraphMessage, SessionGraphStore, SqliteSessionGraphStore, TurnCommitInput,
-        TurnCommitStatus,
+        GraphMessage, SessionGraphStore, SqliteSessionGraphStore, TurnCommitInput, TurnCommitStatus,
     };
 
     /// Seed a session with N committed turns using the graph store directly.
@@ -990,21 +975,18 @@ mod d25_scoped_session {
         // Verify the diff resolved within sess-a.
         let diff = api.diff("sess-a", "main", "feature").unwrap();
         assert_eq!(
-            diff.from_commit_id,
-            commits_a[2],
+            diff.from_commit_id, commits_a[2],
             "from should be sess-a main HEAD"
         );
         assert_eq!(
-            diff.to_commit_id,
-            commits_a[0],
+            diff.to_commit_id, commits_a[0],
             "to should be sess-a feature commit"
         );
 
         // Verify sess-b's feature is a different commit (proving isolation).
         let diff_b = api.diff("sess-b", "main", "feature").unwrap();
         assert_eq!(
-            diff_b.to_commit_id,
-            commits_b[1],
+            diff_b.to_commit_id, commits_b[1],
             "sess-b feature should resolve to sess-b's commit"
         );
         assert_ne!(

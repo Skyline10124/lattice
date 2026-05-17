@@ -115,7 +115,7 @@ pub enum FileOperationKind {
 #[serde(rename_all = "snake_case")]
 pub enum PatchErrorCode {
     ParseError,
-    SandboxDenied,
+    BoundaryDenied,
     MissingFile,
     AlreadyExists,
     DuplicatePath,
@@ -202,7 +202,7 @@ mod tests {
     fn serializes_every_required_patch_error_code() {
         let cases = [
             (PatchErrorCode::ParseError, "parse_error"),
-            (PatchErrorCode::SandboxDenied, "sandbox_denied"),
+            (PatchErrorCode::BoundaryDenied, "boundary_denied"),
             (PatchErrorCode::MissingFile, "missing_file"),
             (PatchErrorCode::AlreadyExists, "already_exists"),
             (PatchErrorCode::DuplicatePath, "duplicate_path"),

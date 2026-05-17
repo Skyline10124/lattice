@@ -3,7 +3,7 @@
 //! Separated from [`crate::executor::DefaultToolExecutor`] to allow consumers
 //! to reference tool definitions without importing the full executor.
 
-use lattice_core::types::ToolDefinition;
+use lattice_llm::ToolDefinition;
 
 /// Returns the built-in tool schema inventory.
 ///
@@ -13,8 +13,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
     #[allow(unused_mut)]
     let mut defs = vec![
         ToolDefinition::new(
-            "workspace_context".into(),
-            "Summarize the current workspace: top-level entries, git state, project instruction files, and likely verification commands.".into(),
+            "workspace_context",
+            "Summarize the current workspace: top-level entries, git state, project instruction files, and likely verification commands.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -32,8 +32,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "todo_write".into(),
-            "Record the current task plan as a concise todo list. Use for multi-step coding work and keep at most one item in_progress.".into(),
+            "todo_write",
+            "Record the current task plan as a concise todo list. Use for multi-step coding work and keep at most one item in_progress.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -61,8 +61,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "read_file".into(),
-            "Read a text file. Supports optional 1-based line offset/limit and line-number output for targeted inspection.".into(),
+            "read_file",
+            "Read a text file. Supports optional 1-based line offset/limit and line-number output for targeted inspection.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -89,8 +89,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "read_files".into(),
-            "Read multiple text files in one call. Each file supports optional 1-based line offset/limit and line-number output.".into(),
+            "read_files",
+            "Read multiple text files in one call. Each file supports optional 1-based line offset/limit and line-number output.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -128,8 +128,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "grep".into(),
-            "Search for a regex pattern in files under a path. Results are capped; narrow the path or pattern if truncated.".into(),
+            "grep",
+            "Search for a regex pattern in files under a path. Results are capped; narrow the path or pattern if truncated.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -151,8 +151,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "write_file".into(),
-            "Write content to a file. Only allowed under the project source directories.".into(),
+            "write_file",
+            "Write content to a file. Only allowed under the project source directories.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -169,8 +169,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "list_directory".into(),
-            "List files and directories in a path with stable sorting and output limits.".into(),
+            "list_directory",
+            "List files and directories in a path with stable sorting and output limits.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -188,8 +188,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "find_files".into(),
-            "Find files or directories by a glob-like pattern matched against names and relative paths. Results are stable and capped.".into(),
+            "find_files",
+            "Find files or directories by a glob-like pattern matched against names and relative paths. Results are stable and capped.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -211,8 +211,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "bash".into(),
-            "Run a command and return its output. Prefer other tools when possible.".into(),
+            "bash",
+            "Run a command and return its output. Prefer other tools when possible.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -225,8 +225,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "patch".into(),
-            "Apply structured patch text with multi-file add, update, and delete operations. Prefer this for edits after reading current file hashes.".into(),
+            "patch",
+            "Apply structured patch text with multi-file add, update, and delete operations. Prefer this for edits after reading current file hashes.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -239,8 +239,8 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "web_search".into(),
-            "Fetch a URL and return its text content.".into(),
+            "web_search",
+            "Fetch a URL and return its text content.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -253,22 +253,6 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
     ];
-
-    #[cfg(feature = "blob-store")]
-    defs.push(ToolDefinition::new(
-        "bus:fetch".into(),
-        "Retrieve the full content of a blob referenced in the current prompt.".into(),
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "key": {
-                    "type": "string",
-                    "description": "Blob key from the context (e.g. blob://events/code_review/a1b2c3d4)"
-                }
-            },
-            "required": ["key"]
-        }),
-    ));
 
     defs
 }

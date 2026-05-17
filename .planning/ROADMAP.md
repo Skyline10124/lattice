@@ -17,7 +17,7 @@ Rewrite the active runtime around the minimal session-driven chain and remove or
 | 8 | Session Graph Core | 4/4 | Complete   | 2026-05-16 |
 | 9 | Agent Loop, Tools, and API Facade | 4/4 | Complete    | 2026-05-16 |
 | 10 | CLI Cutover | 6/6 | Complete   | 2026-05-17 |
-| 11 | Deletion, Budget, and Release Verification | Delete compatibility leftovers, prove boundaries, meet the source-size budget, and update docs. | SIMP-02, SIMP-03, CRATE-05, VER-01..VER-06 | 6 |
+| 11 | Deletion, Budget, and Release Verification | 8/8 | Complete    | 2026-05-17 |
 
 ## Dependency Shape
 
@@ -197,6 +197,35 @@ Plans:
 
 - This phase should be deletion-heavy. If the source-size budget is missed, the phase is not complete.
 - Use targeted checks first, then broader workspace gates once the rename/removal churn settles.
+
+**Plans:** 8/8 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 11-01-PLAN.md — Add strict LOC, boundary, docs drift, and verification evidence gates.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 11-02-PLAN.md — Delete unsupported CLI command modules and the old TUI frontend source. (completed 2026-05-17)
+- [x] 11-03-PLAN.md — Rehome tools and hooks onto final crate contracts without old core/prompt/sandbox/policy dependencies. (completed 2026-05-17)
+- [x] 11-05-PLAN.md — Collapse session/API source to final graph store and facade contracts. (completed 2026-05-17)
+
+**Wave 3** *(blocked on Wave 2 tool contract completion)*
+
+- [x] 11-04-PLAN.md — Collapse lattice-agent to the AgentLoop-only public surface. (completed 2026-05-17)
+
+**Wave 4** *(blocked on Wave 2 and Wave 3 completion)*
+
+- [x] 11-06-PLAN.md — Delete old crate directories, prune manifests/lockfile, and enforce LOC/boundary gates.
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 11-07-PLAN.md — Repair focused tests and add isolated CLI release smoke coverage.
+
+**Wave 6** *(blocked on Wave 5 completion)*
+
+- [x] 11-08-PLAN.md — Refresh release docs/codebase maps and record full release verification.
 
 ## Coverage
 

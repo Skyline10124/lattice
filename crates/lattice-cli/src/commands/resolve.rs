@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::Result;
 use colored::Colorize;
 
@@ -14,7 +15,9 @@ use crate::credentials::CredentialStore;
 pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> Result<()> {
     let router = lattice_llm::ModelRouter::new();
     let target = lattice_llm::ModelTarget::new(model);
-    let resolved = router.resolve(&target).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let resolved = router
+        .resolve(&target)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if json {
         let out = serde_json::json!({
@@ -32,8 +35,11 @@ pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> 
     if verbose {
         println!(
             "{}",
-            format!("resolve: {} -> {}@{:?}", model, resolved.provider_model, resolved.provider)
-                .cyan()
+            format!(
+                "resolve: {} -> {}@{:?}",
+                model, resolved.provider_model, resolved.provider
+            )
+            .cyan()
         );
         println!("  {}: {}", "Alias".bold(), resolved.alias);
         println!("  {}: {:?}", "Provider".bold(), resolved.provider);
@@ -144,7 +150,10 @@ mod tests {
         with_env_var("ANTHROPIC_API_KEY", "sk-resolve-noprovider", || {
             let creds = empty_creds();
             let result = run("sonnet", false, false, &creds);
-            assert!(result.is_ok(), "resolve without provider override should work");
+            assert!(
+                result.is_ok(),
+                "resolve without provider override should work"
+            );
         });
     }
 }

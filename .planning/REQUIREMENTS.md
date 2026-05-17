@@ -8,8 +8,8 @@
 ### Simplification
 
 - [ ] **SIMP-01**: Developer can trace the normal `run` flow as one explicit chain: load profile, checkout session branch, build agent, call LLM, execute tools, commit turn, update branch, render result.
-- [ ] **SIMP-02**: Active Rust source under `crates/*/src` is reduced to roughly 20k lines or less, excluding tests, examples, benches, and planning docs.
-- [ ] **SIMP-03**: Deleted or merged abstractions are absent from active public APIs rather than hidden behind compatibility wrappers.
+- [x] **SIMP-02**: Active Rust source under `crates/*/src` is reduced to roughly 20k lines or less, excluding tests, examples, benches, and planning docs.
+- [x] **SIMP-03**: Deleted or merged abstractions are absent from active public APIs rather than hidden behind compatibility wrappers.
 
 ### Crate Topology
 
@@ -17,7 +17,7 @@
 - [ ] **CRATE-02**: `lattice-core` is renamed or replaced by `lattice-llm` for provider transports, streaming events, and model alias resolution.
 - [ ] **CRATE-03**: `lattice-runtime` is renamed or replaced by `lattice-api` as a thin public facade.
 - [ ] **CRATE-04**: `lattice-sandbox`, `lattice-policy`, and `lattice-prompt` are removed or merged into narrower modules that directly serve the v1.1 main path.
-- [ ] **CRATE-05**: Active source no longer imports removed crate names or exposes removed concepts in root workspace manifests.
+- [x] **CRATE-05**: Active source no longer imports removed crate names or exposes removed concepts in root workspace manifests.
 
 ### LLM and Models
 
@@ -62,12 +62,12 @@
 
 ### Verification
 
-- [ ] **VER-01**: `cargo check --workspace` succeeds after crate rename/removal.
-- [ ] **VER-02**: Focused tests cover LLM routing, profile parsing, session graph operations, agent tool loop, API facade, and CLI commands.
-- [ ] **VER-03**: Boundary checks prove removed crates/concepts are absent from active source and manifests.
-- [ ] **VER-04**: CLI smoke checks prove `run`, `models --auth`, `resolve`, `session status`, `session log`, and `doctor` work or fail with clear missing-credential messages.
-- [ ] **VER-05**: A source-size check reports `crates/*/src` Rust LOC at roughly 20k or less.
-- [ ] **VER-06**: README, AGENTS.md, CLAUDE.md, and codebase maps describe the v1.1 architecture and deferred features accurately.
+- [x] **VER-01**: `cargo check --workspace` succeeds after crate rename/removal.
+- [x] **VER-02**: Focused tests cover LLM routing, profile parsing, session graph operations, agent tool loop, API facade, and CLI commands.
+- [x] **VER-03**: Boundary checks prove removed crates/concepts are absent from active source and manifests.
+- [x] **VER-04**: CLI smoke checks prove `run`, `models --auth`, `resolve`, `session status`, `session log`, and `doctor` work or fail with clear missing-credential messages.
+- [x] **VER-05**: A source-size check reports `crates/*/src` Rust LOC at roughly 20k or less.
+- [x] **VER-06**: README, AGENTS.md, CLAUDE.md, and codebase maps describe the v1.1 architecture and deferred features accurately.
 
 ## Future Requirements
 
@@ -96,13 +96,13 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | SIMP-01 | Phase 6 | Pending |
-| SIMP-02 | Phase 11 | Pending |
-| SIMP-03 | Phase 11 | Pending |
+| SIMP-02 | Phase 11 | Complete |
+| SIMP-03 | Phase 11 | Complete |
 | CRATE-01 | Phase 6 | Pending |
 | CRATE-02 | Phase 6 | Pending |
 | CRATE-03 | Phase 6 | Pending |
 | CRATE-04 | Phase 6 | Pending |
-| CRATE-05 | Phase 11 | Pending |
+| CRATE-05 | Phase 11 | Complete |
 | LLM-01 | Phase 7 | Pending |
 | LLM-02 | Phase 7 | Pending |
 | LLM-03 | Phase 7 | Pending |
@@ -129,12 +129,12 @@
 | CLI-02 | Phase 10 | Pending |
 | CLI-03 | Phase 10 | Pending |
 | CLI-04 | Phase 10 | Pending |
-| VER-01 | Phase 11 | Pending |
-| VER-02 | Phase 11 | Pending |
-| VER-03 | Phase 11 | Pending |
-| VER-04 | Phase 11 | Pending |
-| VER-05 | Phase 11 | Pending |
-| VER-06 | Phase 11 | Pending |
+| VER-01 | Phase 11 | Complete |
+| VER-02 | Phase 11 | Complete |
+| VER-03 | Phase 11 | Complete |
+| VER-04 | Phase 11 | Complete |
+| VER-05 | Phase 11 | Complete |
+| VER-06 | Phase 11 | Complete |
 
 **Coverage:**
 - v1.1 requirements: 40 total

@@ -4,12 +4,10 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Tool definitions, registry, execution framework, and sandbox policy"
+description = "Tool definitions, registry, and execution framework"
 
 [dependencies]
-lattice-core = { workspace = true }
 lattice-llm = { workspace = true }
-lattice-sandbox = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }
@@ -23,9 +21,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-landlock = { workspace = true }
-
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
@@ -35,4 +30,3 @@ uuid = { workspace = true }
 
 [features]
 default = []
-blob-store = ["lattice-core/blob-store"]
