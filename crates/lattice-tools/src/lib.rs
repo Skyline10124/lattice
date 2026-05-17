@@ -1,5 +1,6 @@
 pub mod capabilities;
 pub mod edit;
+pub mod enabled_tools;
 pub mod executor;
 pub mod tool_definitions;
 pub mod tool_error;
@@ -68,3 +69,4 @@ pub use tool_definitions::default_tool_definitions;
 pub use capabilities::{
     resolve_capabilities, resolve_tool_names, CapabilitySelection, ResolvedCapabilities, ToolBundle,
 };
+pub use enabled_tools::{resolve_enabled_tools, EnabledToolError, EnabledTools};

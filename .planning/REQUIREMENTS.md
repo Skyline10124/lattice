@@ -43,18 +43,18 @@
 
 ### Agent and Tools
 
-- [ ] **AGENT-01**: The agent loop reads current session state and user input, builds messages, calls the LLM, executes requested tools sequentially, and repeats until a final assistant response is produced.
-- [ ] **AGENT-02**: The loop returns generated messages, tool results, and usage/statistics needed for the session commit.
-- [ ] **TOOL-01**: Built-in tools cover reading files, reading multiple files, writing files, applying patches, grepping content, finding files, listing directories, and writing TODO markers.
-- [ ] **TOOL-02**: Optional `web_search` and `bash` tools are available only when the active profile enables them.
-- [ ] **TOOL-03**: File tools enforce project-root containment, reject `..` traversal, and enforce file-size limits.
-- [ ] **TOOL-04**: Complex sandbox, approval, and policy decisions are not exposed as v1.1 runtime features.
+- [x] **AGENT-01**: The agent loop reads current session state and user input, builds messages, calls the LLM, executes requested tools sequentially, and repeats until a final assistant response is produced.
+- [x] **AGENT-02**: The loop returns generated messages, tool results, and usage/statistics needed for the session commit.
+- [x] **TOOL-01**: Built-in tools cover reading files, reading multiple files, writing files, applying patches, grepping content, finding files, listing directories, and writing TODO markers.
+- [x] **TOOL-02**: Optional `web_search` and `bash` tools are available only when the active profile enables them.
+- [x] **TOOL-03**: File tools enforce project-root containment, reject `..` traversal, and enforce file-size limits.
+- [x] **TOOL-04**: Complex sandbox, approval, and policy decisions are not exposed as v1.1 runtime features.
 
 ### API and CLI
 
-- [ ] **API-01**: `lattice-api` exposes `create_session(profile, opts)`, `open_session(session_id)`, `run_turn(session_id, input, profile)`, and `stream_turn(session_id, input, profile)`.
-- [ ] **API-02**: `lattice-api` exposes basic session operations for checkout, branch, log, diff, and reset.
-- [ ] **API-03**: `lattice-api` does not expose long-running runtime handles, policy objects, prompt compiler internals, or sandbox approval plumbing.
+- [x] **API-01**: `lattice-api` exposes `create_session(profile, opts)`, `open_session(session_id)`, `run_turn(session_id, input, profile)`, and `stream_turn(session_id, input, profile)`.
+- [x] **API-02**: `lattice-api` exposes basic session operations for checkout, branch, log, diff, and reset.
+- [x] **API-03**: `lattice-api` does not expose long-running runtime handles, policy objects, prompt compiler internals, or sandbox approval plumbing.
 - [ ] **CLI-01**: CLI keeps only `run`, `models`, `resolve`, `session ...`, `doctor`, and help as supported v1.1 commands.
 - [ ] **CLI-02**: CLI `run <prompt> [--model|-m] [--profile] [--session]` creates or resumes a session and commits the turn.
 - [ ] **CLI-03**: `models --auth` and `resolve <model>` display explicit alias/provider/auth information.
@@ -116,15 +116,15 @@
 | PROF-01 | Phase 7 | Pending |
 | PROF-02 | Phase 7 | Pending |
 | PROF-03 | Phase 7 | Pending |
-| AGENT-01 | Phase 9 | Pending |
-| AGENT-02 | Phase 9 | Pending |
-| TOOL-01 | Phase 9 | Pending |
-| TOOL-02 | Phase 9 | Pending |
-| TOOL-03 | Phase 9 | Pending |
-| TOOL-04 | Phase 9 | Pending |
-| API-01 | Phase 9 | Pending |
-| API-02 | Phase 9 | Pending |
-| API-03 | Phase 9 | Pending |
+| AGENT-01 | Phase 9 | Complete |
+| AGENT-02 | Phase 9 | Complete |
+| TOOL-01 | Phase 9 | Complete |
+| TOOL-02 | Phase 9 | Complete |
+| TOOL-03 | Phase 9 | Complete |
+| TOOL-04 | Phase 9 | Complete |
+| API-01 | Phase 9 | Complete |
+| API-02 | Phase 9 | Complete |
+| API-03 | Phase 9 | Complete |
 | CLI-01 | Phase 10 | Pending |
 | CLI-02 | Phase 10 | Pending |
 | CLI-03 | Phase 10 | Pending |

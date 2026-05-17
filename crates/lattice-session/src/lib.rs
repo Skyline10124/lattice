@@ -15,9 +15,10 @@ use uuid::Uuid;
 
 pub mod graph;
 pub use graph::{
-    GraphDiff, GraphHead, GraphMessage, GraphRef, GraphRefKind, GraphSession, GraphToolCall,
-    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
-    TurnCommitInput, TurnCommitStatus, TurnLogEntry,
+    derive_commit_message, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphRefKind,
+    GraphSession, GraphToolCall, HeadTranscript, ResetResult, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnCommitStatus,
+    TurnLogEntry, TurnUsage,
 };
 
 pub mod sqlite_graph;

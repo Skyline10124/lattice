@@ -7,6 +7,8 @@ authors.workspace = true
 description = "LATTICE v1.1 thin public API facade for session creation, turn execution, and streaming"
 
 [dependencies]
+async-trait = { workspace = true }
+lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-session = { workspace = true }

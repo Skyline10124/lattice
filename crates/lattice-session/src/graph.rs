@@ -46,6 +46,30 @@ pub struct GraphToolCall {
     pub arguments: String,
 }
 
+/// Complete ordered transcript for the current branch HEAD.
+///
+/// D-11/D-12: the agent loop reads this to build model input. Contains the
+/// session ID, the parent commit ID (None if no commits yet), and the full
+/// ordered message list from root through current HEAD.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HeadTranscript {
+    pub session_id: String,
+    #[serde(default)]
+    pub parent_commit_id: Option<String>,
+    pub messages: Vec<GraphMessage>,
+}
+
+/// Token usage statistics for a completed turn.
+///
+/// D-28/D-31: persisted as part of turn commit metadata. Token counts are
+/// provider-reported and stored as opaque integers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Session container
 // ---------------------------------------------------------------------------
@@ -157,6 +181,12 @@ pub struct TurnCommitInput {
     pub status: TurnCommitStatus,
     /// Human-facing commit message (derived from first user message).
     pub commit_message: String,
+    /// Token usage statistics for this turn.
+    #[serde(default)]
+    pub usage: Option<TurnUsage>,
+    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
 }
 
 /// An immutable turn commit in the v1.1 graph.
@@ -185,6 +215,12 @@ pub struct TurnCommit {
     pub status: TurnCommitStatus,
     /// Human-facing commit message.
     pub commit_message: String,
+    /// Token usage statistics for this turn.
+    #[serde(default)]
+    pub usage: Option<TurnUsage>,
+    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
     /// When the commit was created.
     pub created_at: String,
 }
@@ -207,6 +243,12 @@ pub struct TurnLogEntry {
     pub commit_message: String,
     pub message_count: usize,
     pub tool_message_count: usize,
+    /// Token usage statistics for this turn.
+    #[serde(default)]
+    pub usage: Option<TurnUsage>,
+    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
     pub created_at: String,
 }
 
@@ -306,6 +348,15 @@ pub trait SessionGraphStore: Send + Sync {
 
     /// Get the turn log for a session (one entry per turn commit).
     fn log(&self, session_id: &str) -> crate::Result<Vec<TurnLogEntry>>;
+
+    // -- Transcript read --
+
+    /// Read the complete ordered transcript for the current branch HEAD.
+    ///
+    /// D-11: the agent loop calls this to build model input from the full
+    /// branch history. Returns `parent_commit_id` as None when no commits
+    /// exist yet (empty session).
+    fn head_transcript(&self, session_id: &str) -> crate::Result<HeadTranscript>;
 
     // -- Commit --
 
@@ -504,6 +555,8 @@ mod graph_contract {
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
             commit_message: "Hello".to_string(),
+            usage: None,
+            terminal_reason: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("session_id"));
@@ -519,6 +572,8 @@ mod graph_contract {
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
             commit_message: "Hello".to_string(),
+            usage: None,
+            terminal_reason: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         assert_eq!(commit.commit_id, "commit-abc");
@@ -581,6 +636,8 @@ mod graph_contract {
             commit_message: "Hello world".to_string(),
             message_count: 2,
             tool_message_count: 0,
+            usage: None,
+            terminal_reason: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
         };
         assert_eq!(entry.message_count, 2);
@@ -804,5 +861,102 @@ mod graph_contract {
         let id0 = canonical_message_id(&msg, 0);
         let id1 = canonical_message_id(&msg, 1);
         assert_ne!(id0, id1, "identical messages at different ordinals must produce different IDs");
+    }
+
+    // -- HeadTranscript contract tests (Phase 09) --
+
+    #[test]
+    fn head_transcript_contract_serializes() {
+        let transcript = HeadTranscript {
+            session_id: "sess-1".to_string(),
+            parent_commit_id: Some("commit-abc".to_string()),
+            messages: vec![
+                user_msg("Hello"),
+                assistant_msg("Hi there!"),
+            ],
+        };
+        let json = serde_json::to_string(&transcript).unwrap();
+        assert!(json.contains("session_id"));
+        assert!(json.contains("parent_commit_id"));
+        assert!(json.contains("messages"));
+
+        // Round-trip.
+        let decoded: HeadTranscript = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.session_id, "sess-1");
+        assert_eq!(decoded.parent_commit_id, Some("commit-abc".to_string()));
+        assert_eq!(decoded.messages.len(), 2);
+        assert_eq!(decoded.messages[0].role, "user");
+        assert_eq!(decoded.messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn head_transcript_parent_is_none_for_empty_session() {
+        let transcript = HeadTranscript {
+            session_id: "sess-empty".to_string(),
+            parent_commit_id: None,
+            messages: vec![],
+        };
+        let json = serde_json::to_string(&transcript).unwrap();
+        let decoded: HeadTranscript = serde_json::from_str(&json).unwrap();
+        assert!(decoded.parent_commit_id.is_none());
+        assert!(decoded.messages.is_empty());
+    }
+
+    // -- TurnUsage contract tests (Phase 09) --
+
+    #[test]
+    fn turn_usage_serializes_for_commit_metadata() {
+        let usage = TurnUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        assert!(json.contains("prompt_tokens"));
+        assert!(json.contains("completion_tokens"));
+        assert!(json.contains("total_tokens"));
+
+        // Round-trip.
+        let decoded: TurnUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.prompt_tokens, 100);
+        assert_eq!(decoded.completion_tokens, 50);
+        assert_eq!(decoded.total_tokens, 150);
+    }
+
+    // -- TurnCommitInput extended fields tests (Phase 09) --
+
+    #[test]
+    fn turn_commit_input_accepts_usage_and_terminal_reason() {
+        let input = TurnCommitInput {
+            session_id: "sess-1".to_string(),
+            parent_ids: vec![],
+            messages: vec![user_msg("Hello")],
+            profile_snapshot_id: Some("profile-hash".to_string()),
+            model: "sonnet".to_string(),
+            provider: "anthropic".to_string(),
+            status: TurnCommitStatus::Completed,
+            commit_message: "Hello".to_string(),
+            usage: Some(TurnUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+            }),
+            terminal_reason: Some("stop".to_string()),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("usage"));
+        assert!(json.contains("terminal_reason"));
+
+        // Round-trip.
+        let decoded: TurnCommitInput = serde_json::from_str(&json).unwrap();
+        assert!(decoded.usage.is_some());
+        let u = decoded.usage.unwrap();
+        assert_eq!(u.total_tokens, 150);
+        assert_eq!(decoded.terminal_reason, Some("stop".to_string()));
+
+        // Existing fields are preserved.
+        assert_eq!(decoded.session_id, "sess-1");
+        assert_eq!(decoded.model, "sonnet");
+        assert_eq!(decoded.provider, "anthropic");
     }
 }

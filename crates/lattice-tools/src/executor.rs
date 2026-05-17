@@ -146,6 +146,10 @@ impl DefaultToolExecutor {
         limit: usize,
         line_numbers: bool,
     ) -> String {
+        // Reject parent traversal before any filesystem access
+        if let Err(e) = Self::reject_parent_traversal(path) {
+            return e;
+        }
         let requested = self.resolve_user_path(path);
         // Canonicalize path to resolve symlinks (TOCTOU prevention)
         let canonical = match tokio::fs::canonicalize(&requested).await {
@@ -158,6 +162,10 @@ impl DefaultToolExecutor {
                 .to_string()
             }
         };
+        // v1.1 project-root containment (D-19, D-21)
+        if let Err(e) = self.ensure_under_project_root(&canonical) {
+            return e;
+        }
         let path_str = canonical.to_string_lossy();
         if let Err(e) = self.sandbox.check_read(&path_str) {
             return e;
@@ -198,6 +206,9 @@ impl DefaultToolExecutor {
     }
 
     async fn workspace_context(&self, path: &str, limit: usize) -> String {
+        if let Err(e) = Self::reject_parent_traversal(path) {
+            return e;
+        }
         let requested = self.resolve_user_path(path);
         let canonical = match tokio::fs::canonicalize(&requested).await {
             Ok(p) => p,
@@ -209,6 +220,9 @@ impl DefaultToolExecutor {
                 .to_string()
             }
         };
+        if let Err(e) = self.ensure_under_project_root(&canonical) {
+            return e;
+        }
         let path_str = canonical.to_string_lossy();
         if let Err(e) = self.sandbox.check_read(&path_str) {
             return e;
@@ -376,6 +390,83 @@ impl DefaultToolExecutor {
             blob_store,
         })
     }
+
+    /// v1.1 main-path constructor: create an executor bound to a project root
+    /// with an explicit tool allowlist.
+    ///
+    /// This constructor is the authoritative v1.1 boundary (D-19, D-20, D-21,
+    /// D-22). It canonicalizes the project root, applies the explicit tool
+    /// allowlist via `with_authorized_tools`, and sets up path containment
+    /// checks. It does NOT rely on `SandboxConfig` read/write allowlists as
+    /// the v1.1 containment boundary.
+    ///
+    /// No `policy_authority` or `approved_rules` backing store is created --
+    /// the v1.1 main path has no dynamic approval flow.
+    pub fn for_project_root<I, S>(project_root: &str, enabled_tool_names: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let canonical = std::fs::canonicalize(project_root)
+            .map_err(|e| format!("cannot canonicalize project root '{}': {}", project_root, e))?;
+        Ok(Self {
+            project_root: canonical.to_string_lossy().to_string(),
+            sandbox: SandboxConfig::default(),
+            http_client: Self::build_http_client()?,
+            registry: None,
+            authorized_tools: Some(enabled_tool_names.into_iter().map(Into::into).collect()),
+            #[cfg(feature = "blob-store")]
+            blob_store: None,
+        })
+    }
+
+    /// Reject paths containing `..` traversal components.
+    ///
+    /// This is a fast pre-check applied before filesystem access. It catches
+    /// obvious traversal attempts without requiring canonicalization. Paths
+    /// that pass this check may still be rejected by
+    /// [`ensure_under_project_root`] if symlinks resolve outside the root.
+    fn reject_parent_traversal(path: &str) -> Result<(), String> {
+        // Check for literal ".." components
+        for component in path.split('/') {
+            if component == ".." {
+                return Err(format!(
+                    "path traversal denied: '{}' contains '..' component",
+                    path
+                ));
+            }
+        }
+        // Also check for backslash-separated traversal on Windows-style paths
+        for component in path.split('\\') {
+            if component == ".." {
+                return Err(format!(
+                    "path traversal denied: '{}' contains '..' component",
+                    path
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify that a canonical path is under the project root.
+    ///
+    /// Called after canonicalization (symlink resolution) to ensure the
+    /// resolved path is contained within the project root boundary (D-19,
+    /// D-21).
+    fn ensure_under_project_root(&self, canonical: &Path) -> Result<(), String> {
+        let root = Path::new(&self.project_root);
+        if canonical == root {
+            return Ok(());
+        }
+        if !canonical.starts_with(root) {
+            return Err(format!(
+                "path '{}' is outside the project root '{}'",
+                canonical.display(),
+                self.project_root
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -485,6 +576,9 @@ impl ToolExecutor for DefaultToolExecutor {
             "grep" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                if let Err(e) = Self::reject_parent_traversal(path) {
+                    return e;
+                }
                 let max_results = args
                     .get("max_results")
                     .and_then(|v| v.as_u64())
@@ -500,8 +594,10 @@ impl ToolExecutor for DefaultToolExecutor {
                 let mut results = Vec::new();
                 let mut visited = HashSet::new();
                 let mut truncated = false;
+                let project_root = PathBuf::from(&self.project_root);
                 let mut context = GrepContext {
                     pattern: &re,
+                    project_root: &project_root,
                     results: &mut results,
                     sandbox: &self.sandbox,
                     visited: &mut visited,
@@ -524,6 +620,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "write_file" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if let Err(e) = Self::reject_parent_traversal(path) {
+                    return e;
+                }
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 let abs = std::path::PathBuf::from(format!(
                     "{}/{}",
@@ -535,6 +634,10 @@ impl ToolExecutor for DefaultToolExecutor {
                     match tokio::fs::canonicalize(parent).await {
                         Ok(canonical_parent) => {
                             let canonical = canonical_parent.join(abs.file_name().unwrap());
+                            // v1.1 project-root containment (D-19, D-21)
+                            if let Err(e) = self.ensure_under_project_root(&canonical) {
+                                return e;
+                            }
                             let path_str = canonical.to_string_lossy();
                             if let Err(e) = self.sandbox.check_write(&path_str) {
                                 return e;
@@ -576,6 +679,9 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "list_directory" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                if let Err(e) = Self::reject_parent_traversal(path) {
+                    return e;
+                }
                 let limit = args
                     .get("limit")
                     .and_then(|v| v.as_u64())
@@ -594,6 +700,10 @@ impl ToolExecutor for DefaultToolExecutor {
                         .to_string()
                     }
                 };
+                // v1.1 project-root containment (D-19, D-21)
+                if let Err(e) = self.ensure_under_project_root(&canonical) {
+                    return e;
+                }
                 let path_str = canonical.to_string_lossy();
                 if let Err(e) = self.sandbox.check_read(&path_str) {
                     return e;
@@ -642,6 +752,9 @@ impl ToolExecutor for DefaultToolExecutor {
             "find_files" => {
                 let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                if let Err(e) = Self::reject_parent_traversal(path) {
+                    return e;
+                }
                 let limit = args
                     .get("limit")
                     .and_then(|v| v.as_u64())
@@ -659,6 +772,10 @@ impl ToolExecutor for DefaultToolExecutor {
                         .to_string()
                     }
                 };
+                // v1.1 project-root containment (D-19, D-21)
+                if let Err(e) = self.ensure_under_project_root(&canonical) {
+                    return e;
+                }
                 let path_str = canonical.to_string_lossy();
                 if let Err(e) = self.sandbox.check_read(&path_str) {
                     return e;
@@ -667,8 +784,10 @@ impl ToolExecutor for DefaultToolExecutor {
                 let mut matches = Vec::new();
                 let mut visited = HashSet::new();
                 let mut truncated = false;
+                let project_root = PathBuf::from(&self.project_root);
                 let mut context = FindFilesContext {
                     root: &canonical,
+                    project_root: &project_root,
                     matches: &mut matches,
                     pattern,
                     sandbox: &self.sandbox,
@@ -1047,6 +1166,7 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 
 struct FindFilesContext<'a> {
     root: &'a Path,
+    project_root: &'a Path,
     matches: &'a mut Vec<String>,
     pattern: &'a str,
     sandbox: &'a lattice_sandbox::SandboxConfig,
@@ -1068,6 +1188,10 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
         Err(_) => return,
     };
     if !context.visited.insert(resolved.clone()) {
+        return;
+    }
+    // v1.1 project-root containment: reject symlinks escaping the root (D-19)
+    if resolved != context.project_root && !resolved.starts_with(context.project_root) {
         return;
     }
     let path_str = resolved.to_string_lossy();
@@ -1126,6 +1250,7 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
 /// Skips hidden dirs, binary files, and follows symlinks with cycle detection.
 struct GrepContext<'a> {
     pattern: &'a regex::Regex,
+    project_root: &'a Path,
     results: &'a mut Vec<String>,
     sandbox: &'a lattice_sandbox::SandboxConfig,
     visited: &'a mut HashSet<PathBuf>,
@@ -1148,6 +1273,11 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
     };
     if !context.visited.insert(resolved.clone()) {
         return; // symlink cycle
+    }
+
+    // v1.1 project-root containment: reject symlinks escaping the root (D-19)
+    if resolved != context.project_root && !resolved.starts_with(context.project_root) {
+        return;
     }
 
     let path_str = resolved.to_string_lossy();
@@ -1889,6 +2019,311 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(3),
             "timeout should return without waiting for the full command duration"
+        );
+    }
+
+    // ── project-root executor tests (v1.1 path containment) ──────────────
+
+    #[tokio::test]
+    async fn project_root_executor_rejects_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "secret").unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("ok.txt"), "ok").unwrap();
+        let executor = DefaultToolExecutor::for_project_root(
+            sub.to_str().unwrap(),
+            [
+                "read_file",
+                "read_files",
+                "write_file",
+                "grep",
+                "list_directory",
+                "find_files",
+            ],
+        )
+        .unwrap();
+
+        // read_file with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "read_file",
+                serde_json::json!({"path": "../secret.txt"}),
+            ))
+            .await;
+        assert!(
+            result.contains("traversal denied"),
+            "should reject .. traversal, got: {}",
+            result
+        );
+
+        // read_files with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "read_files",
+                serde_json::json!({"files": [{"path": "../secret.txt"}]}),
+            ))
+            .await;
+        assert!(
+            result.contains("traversal denied"),
+            "read_files: {}",
+            result
+        );
+
+        // write_file with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "write_file",
+                serde_json::json!({"path": "../evil.txt", "content": "bad"}),
+            ))
+            .await;
+        assert!(
+            result.contains("traversal denied"),
+            "write_file: {}",
+            result
+        );
+
+        // grep with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "grep",
+                serde_json::json!({"pattern": "secret", "path": ".."}),
+            ))
+            .await;
+        assert!(result.contains("traversal denied"), "grep: {}", result);
+
+        // list_directory with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "list_directory",
+                serde_json::json!({"path": ".."}),
+            ))
+            .await;
+        assert!(
+            result.contains("traversal denied"),
+            "list_directory: {}",
+            result
+        );
+
+        // find_files with .. traversal
+        let result = executor
+            .execute(&tool_call(
+                "find_files",
+                serde_json::json!({"pattern": "*.txt", "path": ".."}),
+            ))
+            .await;
+        assert!(
+            result.contains("traversal denied"),
+            "find_files: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn project_root_executor_rejects_symlink_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "secret data").unwrap();
+
+        // Create a symlink inside project pointing outside
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, project.join("escape_link")).unwrap();
+
+        let executor = DefaultToolExecutor::for_project_root(
+            project.to_str().unwrap(),
+            ["read_file", "grep", "list_directory", "find_files"],
+        )
+        .unwrap();
+
+        // read_file through symlink escape
+        let result = executor
+            .execute(&tool_call(
+                "read_file",
+                serde_json::json!({"path": "escape_link/secret.txt"}),
+            ))
+            .await;
+        assert!(
+            result.contains("outside the project root") || result.contains("IoError"),
+            "should deny symlink escape for read_file, got: {}",
+            result
+        );
+
+        // list_directory through symlink escape
+        let result = executor
+            .execute(&tool_call(
+                "list_directory",
+                serde_json::json!({"path": "escape_link"}),
+            ))
+            .await;
+        assert!(
+            result.contains("outside the project root"),
+            "should deny symlink escape for list_directory, got: {}",
+            result
+        );
+
+        // grep through symlink escape
+        let result = executor
+            .execute(&tool_call(
+                "grep",
+                serde_json::json!({"pattern": "secret", "path": "escape_link"}),
+            ))
+            .await;
+        // grep_recursive silently skips paths outside root (returns no matches)
+        assert!(
+            result.contains("(no matches)") || result.contains("outside"),
+            "grep should not find matches outside root, got: {}",
+            result
+        );
+
+        // find_files through symlink escape
+        let result = executor
+            .execute(&tool_call(
+                "find_files",
+                serde_json::json!({"pattern": "*.txt", "path": "escape_link"}),
+            ))
+            .await;
+        assert!(
+            result.contains("(no matches)") || result.contains("outside"),
+            "find_files should not find matches outside root, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn project_root_executor_allows_inside_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "hello world\n").unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let executor = DefaultToolExecutor::for_project_root(
+            dir.path().to_str().unwrap(),
+            [
+                "read_file",
+                "write_file",
+                "grep",
+                "list_directory",
+                "find_files",
+                "patch",
+            ],
+        )
+        .unwrap();
+
+        // read_file inside root
+        let result = executor
+            .execute(&tool_call(
+                "read_file",
+                serde_json::json!({"path": "hello.txt"}),
+            ))
+            .await;
+        assert!(result.contains("hello world"), "read_file: {}", result);
+
+        // grep inside root
+        let result = executor
+            .execute(&tool_call(
+                "grep",
+                serde_json::json!({"pattern": "hello", "path": "."}),
+            ))
+            .await;
+        assert!(result.contains("hello.txt"), "grep: {}", result);
+
+        // list_directory inside root
+        let result = executor
+            .execute(&tool_call(
+                "list_directory",
+                serde_json::json!({"path": "."}),
+            ))
+            .await;
+        assert!(
+            result.contains("FILE  hello.txt"),
+            "list_directory: {}",
+            result
+        );
+        assert!(result.contains("DIR  src"), "list_directory: {}", result);
+
+        // find_files inside root
+        let result = executor
+            .execute(&tool_call(
+                "find_files",
+                serde_json::json!({"pattern": "*.rs"}),
+            ))
+            .await;
+        assert!(result.contains("main.rs"), "find_files: {}", result);
+
+        // write_file inside root
+        let result = executor
+            .execute(&tool_call(
+                "write_file",
+                serde_json::json!({"path": "output.txt", "content": "written"}),
+            ))
+            .await;
+        assert!(result.contains("Wrote"), "write_file: {}", result);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("output.txt")).unwrap(),
+            "written"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_root_executor_keeps_output_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: String = (0..3000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("big.txt"), &content).unwrap();
+
+        let executor = DefaultToolExecutor::for_project_root(
+            dir.path().to_str().unwrap(),
+            ["read_file", "grep", "list_directory", "find_files"],
+        )
+        .unwrap();
+
+        // read_file respects DEFAULT_READ_LINE_LIMIT (2000)
+        let result = executor
+            .execute(&tool_call(
+                "read_file",
+                serde_json::json!({"path": "big.txt"}),
+            ))
+            .await;
+        assert!(
+            result.contains("[TRUNCATED"),
+            "read_file should truncate at line limit"
+        );
+
+        // grep respects DEFAULT_GREP_LIMIT (200)
+        let result = executor
+            .execute(&tool_call(
+                "grep",
+                serde_json::json!({"pattern": "line", "path": "."}),
+            ))
+            .await;
+        assert!(
+            result.contains("[TRUNCATED"),
+            "grep should truncate at result limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_root_executor_has_no_dynamic_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let executor =
+            DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"])
+                .unwrap();
+
+        // The for_project_root constructor should not set up policy_authority
+        // or approved_rules. Verify by checking that an unlisted tool is
+        // denied (not dynamically approved).
+        let result = executor
+            .execute(&tool_call(
+                "bash",
+                serde_json::json!({"command": "echo test"}),
+            ))
+            .await;
+        assert!(
+            result.contains("\"__denial_report__\":true"),
+            "unlisted tool should be denied without dynamic approval: {}",
+            result
         );
     }
 }

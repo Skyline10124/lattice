@@ -27,6 +27,6 @@ pub use session::{
 };
 pub use topology::{migration_homes, TopologyEntry};
 pub use turn::{
-    run_turn, stream_turn, RunTurnRequest, RunTurnResult, RunTurnStage, StreamTurnRequest,
-    TurnEvent, TurnEventStream,
+    run_turn, stream_turn, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
+    StreamTurnRequest, ToolResultSummary, TurnEvent, TurnEventStream, TurnUsageSummary,
 };

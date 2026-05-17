@@ -20,6 +20,8 @@ lattice-tools = { workspace = true }
 lattice-runtime = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
+lattice-llm = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 clap = { workspace = true }

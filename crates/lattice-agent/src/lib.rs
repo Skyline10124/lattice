@@ -1,3 +1,4 @@
+pub mod agent_loop;
 pub mod audit;
 pub mod behavior;
 pub mod bus_event_collector;
@@ -36,6 +37,12 @@ use lattice_tools::ToolExecutor;
 /// Max retries for mid-stream errors in Agent::run().
 const MAX_STREAM_RETRIES: u32 = 2;
 
+// Re-export v1.1 main-path names from agent_loop.
+pub use agent_loop::{
+    AgentLoop, AgentLoopConfig, AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest,
+    AgentTurnResult, AgentTurnStatus,
+};
+
 // Re-export shared types for convenience.
 pub use bus_event_collector::ContextEvent;
 pub use context_manager::{CompactReport, ContextManager, ContextStats};
@@ -53,6 +60,8 @@ pub use state::{
     ToolFailureRecord, VerificationRecord, VerificationStatus,
 };
 
+// TODO Phase 11 delete legacy Agent path — retained as compile bridge only.
+// The v1.1 main path uses `AgentLoop` from `agent_loop` module.
 /// An async LLM agent with tool execution and conversation state.
 ///
 /// # Runtime model

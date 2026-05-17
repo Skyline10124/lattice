@@ -1911,9 +1911,11 @@ dependencies = [
  "landlock",
  "lattice-core",
  "lattice-hooks",
+ "lattice-llm",
  "lattice-policy",
  "lattice-prompt",
  "lattice-sandbox",
+ "lattice-session",
  "lattice-tools",
  "libc",
  "regex",
@@ -1934,7 +1936,9 @@ dependencies = [
 name = "lattice-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures",
+ "lattice-agent",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
@@ -1950,6 +1954,7 @@ name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "chrono",
  "clap",
@@ -1961,6 +1966,7 @@ dependencies = [
  "lattice-agent",
  "lattice-api",
  "lattice-core",
+ "lattice-llm",
  "lattice-profile",
  "lattice-prompt",
  "lattice-runtime",
@@ -2146,6 +2152,7 @@ dependencies = [
  "indexmap",
  "landlock",
  "lattice-core",
+ "lattice-llm",
  "lattice-sandbox",
  "libc",
  "regex",

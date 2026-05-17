@@ -12,9 +12,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     graph::{
-        canonical_message_id, canonical_turn_commit_id, GraphDiff, GraphHead, GraphRef,
-        GraphRefKind, GraphSession, ResetResult, SessionGraphStore, SessionGraphSummary,
-        SessionStatus, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry,
+        canonical_message_id, canonical_turn_commit_id, GraphDiff, GraphHead, GraphMessage,
+        GraphRef, GraphRefKind, GraphSession, GraphToolCall, HeadTranscript, ResetResult,
+        SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput,
+        TurnCommitStatus, TurnLogEntry, TurnUsage,
     },
     Result, SessionError,
 };
@@ -95,6 +96,8 @@ impl SqliteSessionGraphStore {
                 provider             TEXT NOT NULL,
                 status               TEXT NOT NULL,
                 commit_message       TEXT NOT NULL,
+                usage_json           TEXT,
+                terminal_reason      TEXT,
                 created_at           TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES graph_sessions(session_id)
             );
@@ -112,12 +115,38 @@ impl SqliteSessionGraphStore {
                 ordinal        INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES graph_sessions(session_id)
             );
+
+            -- Idempotent migration for existing databases: add usage_json and
+            -- terminal_reason columns to graph_commits if missing.
+            PRAGMA table_info(graph_commits);
             ",
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
             source,
         })?;
+
+        // Idempotent column additions for existing databases.
+        // SQLite does not support IF NOT EXISTS on ALTER TABLE, so we catch
+        // the "duplicate column name" error and ignore it.
+        for col_sql in &[
+            "ALTER TABLE graph_commits ADD COLUMN usage_json TEXT",
+            "ALTER TABLE graph_commits ADD COLUMN terminal_reason TEXT",
+        ] {
+            match conn.execute_batch(col_sql) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column name") {
+                        return Err(SessionError::Database {
+                            path: self.db_path.clone(),
+                            source: e,
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(conn)
     }
 }
@@ -167,6 +196,101 @@ impl SqliteSessionGraphStore {
 }
 
 impl SessionGraphStore for SqliteSessionGraphStore {
+    fn head_transcript(&self, session_id: &str) -> crate::Result<HeadTranscript> {
+        let conn = self.conn()?;
+
+        // Resolve the current branch commit ID (HEAD).
+        let head_commit_id = self.current_branch_commit_id(&conn, session_id)?;
+
+        // Empty session: no commits yet.
+        let parent_commit_id = match &head_commit_id {
+            None => {
+                return Ok(HeadTranscript {
+                    session_id: session_id.to_string(),
+                    parent_commit_id: None,
+                    messages: Vec::new(),
+                });
+            }
+            Some(cid) => cid.clone(),
+        };
+
+        // Walk first-parent ancestry from root to HEAD to collect ordered
+        // commit IDs. We reverse at the end to get root-first order.
+        let mut commit_ids_rev: Vec<String> = Vec::new();
+        let mut current = Some(parent_commit_id.clone());
+        while let Some(cid) = current {
+            commit_ids_rev.push(cid.clone());
+            let parents = self.get_parent_ids(&conn, &cid)?;
+            current = parents.into_iter().next();
+        }
+        commit_ids_rev.reverse();
+
+        // For each commit in order, read its message_ids_json and load the
+        // actual messages from graph_messages in stored ordinal order.
+        let mut all_messages: Vec<GraphMessage> = Vec::new();
+        for cid in &commit_ids_rev {
+            let message_ids_json: String = conn
+                .query_row(
+                    "SELECT message_ids_json FROM graph_commits WHERE commit_id=?1",
+                    params![cid],
+                    |row| row.get(0),
+                )
+                .map_err(|_| SessionError::MissingCommit(cid.clone()))?;
+
+            let message_ids: Vec<String> =
+                serde_json::from_str(&message_ids_json).unwrap_or_default();
+
+            for mid in &message_ids {
+                let (role, content, reasoning_content, tool_call_id, name, tool_calls_json): (
+                    String,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                ) = conn
+                    .query_row(
+                        "SELECT role, content, reasoning_content, tool_call_id, name, tool_calls_json
+                         FROM graph_messages WHERE message_id=?1",
+                        params![mid],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                                row.get(5)?,
+                            ))
+                        },
+                    )
+                    .map_err(|source| SessionError::Database {
+                        path: self.db_path.clone(),
+                        source,
+                    })?;
+
+                let tool_calls: Option<Vec<GraphToolCall>> =
+                    serde_json::from_str(&tool_calls_json).ok().filter(|v: &Vec<GraphToolCall>| !v.is_empty());
+
+                all_messages.push(GraphMessage {
+                    role,
+                    content,
+                    reasoning_content,
+                    tool_calls,
+                    tool_call_id,
+                    name,
+                });
+            }
+        }
+
+        // The parent commit ID is the HEAD commit (the last in the chain).
+        Ok(HeadTranscript {
+            session_id: session_id.to_string(),
+            parent_commit_id: Some(parent_commit_id),
+            messages: all_messages,
+        })
+    }
+
     fn create_session(
         &self,
         session_id: &str,
@@ -355,7 +479,7 @@ impl SessionGraphStore for SqliteSessionGraphStore {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT commit_id, parents_json, status, model, provider, commit_message, created_at, message_ids_json
+                "SELECT commit_id, parents_json, status, model, provider, commit_message, created_at, message_ids_json, usage_json, terminal_reason
                  FROM graph_commits WHERE session_id=?1 ORDER BY created_at ASC",
             )
             .map_err(|source| SessionError::Database {
@@ -373,6 +497,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
             commit_message: String,
             created_at: String,
             message_ids: Vec<String>,
+            usage: Option<TurnUsage>,
+            terminal_reason: Option<String>,
         }
 
         let rows: Vec<RawRow> = stmt
@@ -385,6 +511,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                 let commit_message: String = row.get(5)?;
                 let created_at: String = row.get(6)?;
                 let message_ids_json: String = row.get(7)?;
+                let usage_json: Option<String> = row.get(8)?;
+                let terminal_reason: Option<String> = row.get(9)?;
 
                 let parent_ids: Vec<String> =
                     serde_json::from_str(&parents_json).unwrap_or_default();
@@ -396,6 +524,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                     "cancelled" => TurnCommitStatus::Cancelled,
                     _ => TurnCommitStatus::Completed,
                 };
+                let usage: Option<TurnUsage> =
+                    usage_json.and_then(|json| serde_json::from_str(&json).ok());
 
                 Ok(RawRow {
                     commit_id,
@@ -406,6 +536,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                     commit_message,
                     created_at,
                     message_ids,
+                    usage,
+                    terminal_reason,
                 })
             })
             .map_err(|source| SessionError::Database {
@@ -478,6 +610,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                     commit_message: r.commit_message,
                     message_count: r.message_ids.len(),
                     tool_message_count,
+                    usage: r.usage,
+                    terminal_reason: r.terminal_reason,
                     created_at: r.created_at,
                 }
             })
@@ -872,9 +1006,14 @@ impl SqliteSessionGraphStore {
         let message_ids_json =
             serde_json::to_string(&message_ids).unwrap_or_else(|_| "[]".to_string());
 
+        let usage_json = input
+            .usage
+            .as_ref()
+            .map(|u| serde_json::to_string(u).unwrap_or_else(|_| "{}".to_string()));
+
         conn.execute(
-            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, profile_snapshot_id, model, provider, status, commit_message, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, profile_snapshot_id, model, provider, status, commit_message, usage_json, terminal_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 commit_id,
                 input.session_id,
@@ -885,6 +1024,8 @@ impl SqliteSessionGraphStore {
                 input.provider,
                 input.status.as_str(),
                 input.commit_message,
+                usage_json,
+                input.terminal_reason,
                 now,
             ],
         )
@@ -927,6 +1068,8 @@ impl SqliteSessionGraphStore {
             provider: input.provider.clone(),
             status: input.status.clone(),
             commit_message: input.commit_message.clone(),
+            usage: input.usage.clone(),
+            terminal_reason: input.terminal_reason.clone(),
             created_at: now,
         })
     }
@@ -1085,6 +1228,8 @@ impl SqliteSessionGraphStore {
                     commit_message,
                     message_count: message_ids.len(),
                     tool_message_count: 0, // simplified for diff; not counting tools here
+                    usage: None,
+                    terminal_reason: None,
                     created_at,
                 });
 
@@ -1223,6 +1368,8 @@ mod sqlite_graph_commit_turn {
             provider: "test-provider".to_string(),
             status,
             commit_message: derive_commit_message(&messages),
+            usage: None,
+            terminal_reason: None,
         }
     }
 
@@ -1503,6 +1650,8 @@ mod sqlite_graph_commit_turn {
                 provider: "test-provider".to_string(),
                 status: status.clone(),
                 commit_message: format!("Turn {i}"),
+                usage: None,
+                terminal_reason: None,
             };
 
             let commit = store
@@ -1566,6 +1715,310 @@ mod sqlite_graph_commit_turn {
         let commit2 = store.commit_turn(input2).expect("second commit");
 
         assert_eq!(commit2.parent_ids, vec![commit1.commit_id]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Head transcript and usage metadata tests (Plan 09-01)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sqlite_graph_head_transcript {
+    use super::*;
+    use crate::graph::{derive_commit_message, GraphMessage, TurnUsage};
+    use std::env;
+    use std::fs;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = env::temp_dir()
+            .join("lattice-session-head-transcript-tests")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn user_msg(text: &str) -> GraphMessage {
+        GraphMessage {
+            role: "user".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn assistant_msg(text: &str) -> GraphMessage {
+        GraphMessage {
+            role: "assistant".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
+        GraphMessage {
+            role: "tool".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn commit_input_with_usage(
+        session_id: &str,
+        parent_ids: Vec<String>,
+        messages: Vec<GraphMessage>,
+        status: TurnCommitStatus,
+        usage: Option<TurnUsage>,
+        terminal_reason: Option<String>,
+    ) -> TurnCommitInput {
+        TurnCommitInput {
+            session_id: session_id.to_string(),
+            parent_ids,
+            messages: messages.clone(),
+            profile_snapshot_id: Some("test-profile".to_string()),
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            status,
+            commit_message: derive_commit_message(&messages),
+            usage,
+            terminal_reason,
+        }
+    }
+
+    #[test]
+    fn head_transcript_empty_session_has_no_parent_and_no_messages() {
+        let dir = temp_dir("empty_session");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        let transcript = store.head_transcript("sess-1").expect("head_transcript");
+
+        assert_eq!(transcript.session_id, "sess-1");
+        assert!(
+            transcript.parent_commit_id.is_none(),
+            "empty session should have no parent commit"
+        );
+        assert!(
+            transcript.messages.is_empty(),
+            "empty session should have no messages"
+        );
+    }
+
+    #[test]
+    fn head_transcript_reads_current_branch_history_in_commit_order() {
+        let dir = temp_dir("history_order");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // First commit: user + assistant.
+        let messages1 = vec![user_msg("Turn 0"), assistant_msg("Response 0")];
+        let input1 = commit_input_with_usage(
+            "sess-1",
+            vec![],
+            messages1,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        let commit1 = store.commit_turn(input1).expect("first commit");
+
+        // Second commit: user + assistant + tool.
+        let messages2 = vec![
+            user_msg("Turn 1"),
+            assistant_msg("Calling tool"),
+            tool_msg("tool output", "call_1", "shell"),
+        ];
+        let input2 = commit_input_with_usage(
+            "sess-1",
+            vec![commit1.commit_id.clone()],
+            messages2,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        store.commit_turn(input2).expect("second commit");
+
+        // Third commit: user + assistant.
+        let messages3 = vec![user_msg("Turn 2"), assistant_msg("Response 2")];
+        let input3 = commit_input_with_usage(
+            "sess-1",
+            vec![store.log("sess-1").expect("log").last().unwrap().commit_id.clone()],
+            messages3,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        store.commit_turn(input3).expect("third commit");
+
+        // Read transcript.
+        let transcript = store.head_transcript("sess-1").expect("head_transcript");
+
+        // Should have all 7 messages from 3 commits in order.
+        assert_eq!(transcript.messages.len(), 7, "expected 7 messages from 3 commits");
+
+        // Verify chronological order: commit 0 messages, then commit 1, then commit 2.
+        assert_eq!(transcript.messages[0].content, "Turn 0");
+        assert_eq!(transcript.messages[1].content, "Response 0");
+        assert_eq!(transcript.messages[2].content, "Turn 1");
+        assert_eq!(transcript.messages[3].content, "Calling tool");
+        assert_eq!(transcript.messages[4].content, "tool output");
+        assert_eq!(transcript.messages[4].role, "tool");
+        assert_eq!(transcript.messages[5].content, "Turn 2");
+        assert_eq!(transcript.messages[6].content, "Response 2");
+
+        // Parent should be the last commit's ID.
+        assert!(transcript.parent_commit_id.is_some());
+    }
+
+    #[test]
+    fn head_transcript_respects_checkout_or_branch_head() {
+        let dir = temp_dir("checkout_transcript");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // First commit on main.
+        let messages1 = vec![user_msg("Main turn"), assistant_msg("Main response")];
+        let input1 = commit_input_with_usage(
+            "sess-1",
+            vec![],
+            messages1,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        let commit1 = store.commit_turn(input1).expect("first commit");
+
+        // Create feature branch from first commit.
+        store
+            .branch("sess-1", "feature", Some(&commit1.commit_id))
+            .expect("branch");
+
+        // Checkout feature, commit one more turn.
+        store.checkout("sess-1", "feature").expect("checkout");
+
+        let messages2 = vec![user_msg("Feature turn"), assistant_msg("Feature response")];
+        let input2 = commit_input_with_usage(
+            "sess-1",
+            vec![commit1.commit_id.clone()],
+            messages2,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        store.commit_turn(input2).expect("feature commit");
+
+        // Transcript on feature branch should have 4 messages.
+        let feature_transcript = store.head_transcript("sess-1").expect("head_transcript");
+        assert_eq!(feature_transcript.messages.len(), 4, "feature branch should have 4 messages");
+
+        // Reset main to first commit, checkout main.
+        store.reset("sess-1", &commit1.commit_id).expect("reset");
+        store.checkout("sess-1", "main").expect("checkout");
+
+        // Transcript on main should have only 2 messages.
+        let main_transcript = store.head_transcript("sess-1").expect("head_transcript");
+        assert_eq!(main_transcript.messages.len(), 2, "main branch should have 2 messages after reset");
+        assert_eq!(main_transcript.messages[0].content, "Main turn");
+        assert_eq!(main_transcript.messages[1].content, "Main response");
+    }
+
+    #[test]
+    fn commit_turn_persists_usage_and_terminal_reason() {
+        let dir = temp_dir("usage_persist");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // Completed turn with usage.
+        let messages1 = vec![user_msg("Hello"), assistant_msg("Hi!")];
+        let usage1 = TurnUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        let input1 = commit_input_with_usage(
+            "sess-1",
+            vec![],
+            messages1,
+            TurnCommitStatus::Completed,
+            Some(usage1.clone()),
+            Some("stop".to_string()),
+        );
+        let commit1 = store.commit_turn(input1).expect("commit completed");
+
+        // Error turn with usage.
+        let messages2 = vec![user_msg("Fail"), assistant_msg("Error occurred")];
+        let usage2 = TurnUsage {
+            prompt_tokens: 200,
+            completion_tokens: 0,
+            total_tokens: 200,
+        };
+        let input2 = commit_input_with_usage(
+            "sess-1",
+            vec![commit1.commit_id.clone()],
+            messages2,
+            TurnCommitStatus::Error,
+            Some(usage2.clone()),
+            Some("error: provider timeout".to_string()),
+        );
+        let commit2 = store.commit_turn(input2).expect("commit error");
+
+        // Cancelled turn without usage.
+        let messages3 = vec![user_msg("Cancel me")];
+        let input3 = commit_input_with_usage(
+            "sess-1",
+            vec![commit2.commit_id.clone()],
+            messages3,
+            TurnCommitStatus::Cancelled,
+            None,
+            Some("cancelled by user".to_string()),
+        );
+        let commit3 = store.commit_turn(input3).expect("commit cancelled");
+
+        // Verify usage round-trips through log.
+        let log = store.log("sess-1").expect("log");
+        assert_eq!(log.len(), 3);
+
+        // Completed turn.
+        assert_eq!(log[0].usage, Some(usage1));
+        assert_eq!(log[0].terminal_reason, Some("stop".to_string()));
+
+        // Error turn.
+        assert_eq!(log[1].usage, Some(usage2));
+        assert_eq!(
+            log[1].terminal_reason,
+            Some("error: provider timeout".to_string())
+        );
+
+        // Cancelled turn.
+        assert!(log[2].usage.is_none());
+        assert_eq!(log[2].terminal_reason, Some("cancelled by user".to_string()));
+
+        // Verify usage round-trips through commit output.
+        assert_eq!(commit1.usage, Some(TurnUsage { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 }));
+        assert_eq!(commit1.terminal_reason, Some("stop".to_string()));
+        assert_eq!(commit2.usage, Some(TurnUsage { prompt_tokens: 200, completion_tokens: 0, total_tokens: 200 }));
+        assert_eq!(commit2.terminal_reason, Some("error: provider timeout".to_string()));
+        assert!(commit3.usage.is_none());
+        assert_eq!(commit3.terminal_reason, Some("cancelled by user".to_string()));
     }
 }
 
@@ -1636,6 +2089,8 @@ mod session_graph_pointer_ops {
             provider: "test-provider".to_string(),
             status,
             commit_message: derive_commit_message(&messages),
+            usage: None,
+            terminal_reason: None,
         }
     }
 
@@ -1670,6 +2125,8 @@ mod session_graph_pointer_ops {
                 provider: "anthropic".to_string(),
                 status: TurnCommitStatus::Completed,
                 commit_message: format!("Turn {i}"),
+                usage: None,
+                terminal_reason: None,
             };
             let commit = store.commit_turn(input).expect("commit_turn");
             commits.push(commit);
@@ -1942,6 +2399,8 @@ mod session_graph_pointer_ops {
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
             commit_message: derive_commit_message(&feature_messages),
+            usage: None,
+            terminal_reason: None,
         };
         let feature_commit = store.commit_turn(feature_input).expect("commit feature");
 

@@ -9,9 +9,11 @@ description = "Agent state, prompt assembly, and memory management"
 [dependencies]
 lattice-core = { workspace = true }
 lattice-hooks = { workspace = true }
+lattice-llm = { workspace = true }
 lattice-policy = { workspace = true }
 lattice-prompt = { workspace = true }
 lattice-sandbox = { workspace = true }
+lattice-session = { workspace = true }
 lattice-tools = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }

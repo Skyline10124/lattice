@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Cut Off Cleverness
 status: ready_to_plan
-last_updated: 2026-05-16T17:52:53.329Z
-last_activity: 2026-05-16 -- Phase 07 execution started
+last_updated: 2026-05-16T22:14:23.595Z
+last_activity: 2026-05-16
 progress:
   total_phases: 6
-  completed_phases: 1
-  total_plans: 7
-  completed_plans: 34
-  percent: 17
-stopped_at: Phase 08 complete (4/4) — ready to discuss Phase 9
+  completed_phases: 4
+  total_plans: 15
+  completed_plans: 38
+  percent: 67
+stopped_at: Phase 9 complete (4/4) — ready to discuss Phase 10
 ---
 
 # Planning State
@@ -21,11 +21,11 @@ stopped_at: Phase 08 complete (4/4) — ready to discuss Phase 9
 See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Phase 9 — agent loop, tools, and api facade
+**Current focus:** Phase 10 — cli cutover
 
 ## Current Position
 
-Phase: 9
+Phase: 10
 Plan: Not started
 Status: Ready to plan
 Last activity: 2026-05-16
@@ -40,6 +40,13 @@ Last activity: 2026-05-16
 - Target crate set is `lattice-llm`, `lattice-session`, `lattice-profile`, `lattice-agent`, `lattice-tools`, `lattice-api`, `lattice-cli`, and `lattice-hooks`.
 - TUI, plugins, orchestrator/swarm behavior, rich prompt compiler layers, and complex security policy are deferred beyond v1.1.
 - Active `crates/*/src` Rust source should end around 20k lines or less.
+- Store-owned transcript reads: `SessionGraphStore::head_transcript` provides ordered current-HEAD messages; `lattice-api` must not query SQLite directly.
+- AgentLoop uses injectable `LlmClient` and `ToolCallExecutor` async traits for test doubles (D-01..D-07).
+- No fixed tool-round counter; the agent loop repeats until the model returns a final assistant response or a terminal error/cancellation occurs (D-08).
+- External timeout via `tokio::time::timeout` and cancel via `Arc<AtomicBool>` as run protection (D-09/D-10).
+- `TurnDeps` trait provides crate-private dependency injection for `run_turn`/`stream_turn` testability without exposing AgentLoop publicly.
+- `execute_turn_inner` shared helper ensures `run_turn` and `stream_turn` have identical session/commit semantics.
+- Phase 9 is complete: all 4 plans executed, all requirements AGENT-01/AGENT-02/TOOL-01..TOOL-04/API-01..API-03 covered.
 
 ### Blockers
 

@@ -15,7 +15,7 @@ Rewrite the active runtime around the minimal session-driven chain and remove or
 | 6 | Crate Topology and Main-Path Skeleton | 3/3 | Complete   | 2026-05-16 |
 | 7 | Functional LLM and Direct Profiles | 4/4 | Complete   | 2026-05-16 |
 | 8 | Session Graph Core | 4/4 | Complete   | 2026-05-16 |
-| 9 | Agent Loop, Tools, and API Facade | Connect session state, LLM calls, simple tools, and `lattice-api` turn execution. | AGENT-01, AGENT-02, TOOL-01..TOOL-04, API-01..API-03 | 6 |
+| 9 | Agent Loop, Tools, and API Facade | 4/4 | Complete    | 2026-05-16 |
 | 10 | CLI Cutover | Reduce supported user-facing commands to the v1.1 CLI surface. | CLI-01..CLI-04 | 5 |
 | 11 | Deletion, Budget, and Release Verification | Delete compatibility leftovers, prove boundaries, meet the source-size budget, and update docs. | SIMP-02, SIMP-03, CRATE-05, VER-01..VER-06 | 6 |
 
@@ -114,6 +114,22 @@ Plans:
 5. `lattice-api` exposes create/open/run/stream and basic session operations without policy/prompt/sandbox internals.
 6. Integration tests prove `run_turn` commits a full turn and `stream_turn` exposes useful events.
 
+**Plans:** 4/4 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 09-01-PLAN.md — Add current-HEAD transcript reads and turn usage/terminal metadata in `lattice-session`.
+- [x] 09-02-PLAN.md — Add explicit enabled-tool resolution and project-root executor path in `lattice-tools`.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 09-03-PLAN.md — Add stable `lattice-agent::AgentLoop` with fake-LLM tests and sequential tool execution.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 09-04-PLAN.md — Wire durable `lattice-api` `run_turn`/`stream_turn` commits and public event/result mapping.
+
 **Notes:**
 
 - This is the first phase that should wire Phase 7 and Phase 8 outputs together.
@@ -183,15 +199,15 @@ Plans:
 | PROF-01 | Phase 7 | Pending |
 | PROF-02 | Phase 7 | Pending |
 | PROF-03 | Phase 7 | Pending |
-| AGENT-01 | Phase 9 | Pending |
-| AGENT-02 | Phase 9 | Pending |
-| TOOL-01 | Phase 9 | Pending |
-| TOOL-02 | Phase 9 | Pending |
-| TOOL-03 | Phase 9 | Pending |
-| TOOL-04 | Phase 9 | Pending |
-| API-01 | Phase 9 | Pending |
-| API-02 | Phase 9 | Pending |
-| API-03 | Phase 9 | Pending |
+| AGENT-01 | Phase 9 | Complete | 2026-05-16 |
+| AGENT-02 | Phase 9 | Complete | 2026-05-16 |
+| TOOL-01 | Phase 9 | Complete | 2026-05-16 |
+| TOOL-02 | Phase 9 | Complete | 2026-05-16 |
+| TOOL-03 | Phase 9 | Complete | 2026-05-16 |
+| TOOL-04 | Phase 9 | Complete | 2026-05-16 |
+| API-01 | Phase 9 | Complete | 2026-05-16 |
+| API-02 | Phase 9 | Complete | 2026-05-16 |
+| API-03 | Phase 9 | Complete | 2026-05-16 |
 | CLI-01 | Phase 10 | Pending |
 | CLI-02 | Phase 10 | Pending |
 | CLI-03 | Phase 10 | Pending |

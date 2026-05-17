@@ -9,8 +9,9 @@
 //! branch/diff/reset operations.
 
 use lattice_session::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphStore,
-    SessionGraphSummary, SessionStatus, SqliteSessionGraphStore, TurnLogEntry,
+    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, ResetResult, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, SqliteSessionGraphStore, TurnCommit, TurnCommitInput,
+    TurnLogEntry,
 };
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -282,6 +283,24 @@ impl SessionApi {
             .reset(session_id, target)
             .map_err(map_session_error)
     }
+
+    /// Read the complete ordered transcript for the current branch HEAD.
+    ///
+    /// Returns all messages from root through current HEAD plus the parent
+    /// commit ID (None if no commits yet).
+    pub(crate) fn head_transcript(&self, session_id: &str) -> Result<HeadTranscript> {
+        self.store
+            .head_transcript(session_id)
+            .map_err(map_session_error)
+    }
+
+    /// Commit a completed turn atomically.
+    ///
+    /// Writes messages, commit object, and branch/HEAD ref update in one
+    /// transaction. Returns the created [`TurnCommit`].
+    pub(crate) fn commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+        self.store.commit_turn(input).map_err(map_session_error)
+    }
 }
 
 /// Map a [`lattice_session::SessionError`] to an [`ApiError`].
@@ -436,6 +455,8 @@ mod session_graph {
                 provider: "anthropic".to_string(),
                 status: TurnCommitStatus::Completed,
                 commit_message: format!("Turn {i}"),
+                usage: None,
+                terminal_reason: None,
             };
             let commit = api.store().commit_turn(input).expect("commit_turn");
             commit_ids.push(commit.commit_id);
@@ -594,6 +615,8 @@ mod session_graph {
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
             commit_message: "Feature work".to_string(),
+            usage: None,
+            terminal_reason: None,
         };
         let feature_commit = api.store().commit_turn(feature_input).expect("commit");
 
@@ -623,25 +646,6 @@ mod session_graph {
         assert_eq!(result.old_commit_id, Some(commit_ids[2].clone()));
         assert_eq!(result.new_commit_id, commit_ids[0]);
         assert_eq!(result.branch, "main");
-    }
-
-    // -- run_turn still returns commit_id: None --
-
-    #[test]
-    fn run_turn_commit_id_is_none() {
-        // Verify the run_turn free function is unchanged: commit_id is None in Phase 8.
-        // We test the type shape directly since run_turn needs provider credentials.
-        use crate::turn::{RunTurnResult, RunTurnStage};
-
-        let result = RunTurnResult {
-            assistant_output: "test".to_string(),
-            commit_id: None,
-            stages: vec![RunTurnStage::Render],
-        };
-        assert!(
-            result.commit_id.is_none(),
-            "commit_id must remain None in Phase 8"
-        );
     }
 
     // -- Boundary checks: compile-time enforcement --

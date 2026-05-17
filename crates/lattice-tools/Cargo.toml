@@ -8,6 +8,7 @@ description = "Tool definitions, registry, execution framework, and sandbox poli
 
 [dependencies]
 lattice-core = { workspace = true }
+lattice-llm = { workspace = true }
 lattice-sandbox = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
