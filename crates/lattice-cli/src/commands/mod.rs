@@ -1,16 +1,9 @@
 pub mod agent_inventory;
-pub mod config_cmd;
-pub mod debug;
 pub mod doctor;
-pub mod list_agents;
 pub mod models;
-pub mod new_agent;
 pub mod resolve;
 pub mod run;
-pub mod run_v11;
-pub mod sessions;
-pub mod stats;
-pub mod validate;
+pub mod session;
 
 use std::path::{Path, PathBuf};
 

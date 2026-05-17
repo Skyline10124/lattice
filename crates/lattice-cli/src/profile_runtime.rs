@@ -90,6 +90,29 @@ pub(crate) fn prepare_profile_runtime_session_with_security(
         .map_err(Into::into)
 }
 
+/// Resolve a `ProfileSource` from the `--profile` CLI argument.
+///
+/// `None` or empty/whitespace returns `ProfileSource::Default`.
+/// Values containing path separators, starting with `./` or `../`,
+/// or ending with `.toml` are treated as explicit paths.
+/// All other non-empty values are treated as named profiles.
+pub(crate) fn profile_source_from_profile_arg(profile: Option<&str>) -> ProfileSource {
+    let Some(value) = profile.map(str::trim).filter(|v| !v.is_empty()) else {
+        return ProfileSource::Default;
+    };
+    let has_path_separator = value.contains('/') || (cfg!(windows) && value.contains('\\'));
+    let is_path = Path::new(value).is_absolute()
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || has_path_separator
+        || value.ends_with(".toml");
+    if is_path {
+        ProfileSource::Path(PathBuf::from(value))
+    } else {
+        ProfileSource::Name(value.to_string())
+    }
+}
+
 pub(crate) fn profile_source_from_agent_arg(agent: Option<&str>) -> ProfileSource {
     let Some(agent) = agent.map(str::trim).filter(|value| !value.is_empty()) else {
         return ProfileSource::Default;
@@ -349,5 +372,40 @@ enabled = []
         assert_eq!(session.spec.model, "override-model");
         assert_eq!(session.spec.system_prompt, "Keep this prompt.");
         assert_eq!(session.spec.tools.bundles, vec!["workspace"]);
+    }
+
+    // ── run_cutover: profile_source_from_profile_arg tests ────────────────
+
+    #[test]
+    fn run_cutover_profile_source_none_uses_default() {
+        assert!(matches!(
+            profile_source_from_profile_arg(None),
+            ProfileSource::Default
+        ));
+        assert!(matches!(
+            profile_source_from_profile_arg(Some("  ")),
+            ProfileSource::Default
+        ));
+    }
+
+    #[test]
+    fn run_cutover_profile_source_name() {
+        match profile_source_from_profile_arg(Some("reader")) {
+            ProfileSource::Name(name) => assert_eq!(name, "reader"),
+            other => panic!("expected Name source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_cutover_profile_source_path() {
+        for value in ["./agent.toml", "../profiles/agent.toml", "/tmp/agent.toml"] {
+            assert!(
+                matches!(
+                    profile_source_from_profile_arg(Some(value)),
+                    ProfileSource::Path(_)
+                ),
+                "{value} should parse as path"
+            );
+        }
     }
 }

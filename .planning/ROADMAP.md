@@ -16,7 +16,7 @@ Rewrite the active runtime around the minimal session-driven chain and remove or
 | 7 | Functional LLM and Direct Profiles | 4/4 | Complete   | 2026-05-16 |
 | 8 | Session Graph Core | 4/4 | Complete   | 2026-05-16 |
 | 9 | Agent Loop, Tools, and API Facade | 4/4 | Complete    | 2026-05-16 |
-| 10 | CLI Cutover | Reduce supported user-facing commands to the v1.1 CLI surface. | CLI-01..CLI-04 | 5 |
+| 10 | CLI Cutover | 6/6 | Complete   | 2026-05-17 |
 | 11 | Deletion, Budget, and Release Verification | Delete compatibility leftovers, prove boundaries, meet the source-size budget, and update docs. | SIMP-02, SIMP-03, CRATE-05, VER-01..VER-06 | 6 |
 
 ## Dependency Shape
@@ -154,6 +154,30 @@ Plans:
 - If a short-lived compatibility stub is needed, it must point users at the supported CLI path and not call old runtime code.
 - Keep command output concise and scriptable.
 
+**Plans:** 6/6 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 10-01-PLAN.md — Cut the public parser/help contract to the locked command surface.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 10-02-PLAN.md — Replace official `run` with the `lattice-api::run_turn` path.
+- [x] 10-03-PLAN.md — Implement the singular `session` command over `SessionApi`.
+
+**Wave 3** *(blocked on Wave 1 completion)*
+
+- [x] 10-04-PLAN.md — Narrow `models`, `resolve`, and `doctor` diagnostics around the v1.1 router contract.
+
+**Wave 4** *(blocked on Wave 2 and Wave 3 completion)*
+
+- [x] 10-05-PLAN.md — Add Phase 10 boundary smoke and source verification. (completed 2026-05-17)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [x] 10-06-PLAN.md — Close D-25 by moving session pointer operations to per-session `SessionApi`. (completed 2026-05-17)
+
 ### Phase 11: Deletion, Budget, and Release Verification
 
 **Goal:** Delete compatibility leftovers, prove boundaries, meet the source-size budget, and update docs.
@@ -208,10 +232,10 @@ Plans:
 | API-01 | Phase 9 | Complete | 2026-05-16 |
 | API-02 | Phase 9 | Complete | 2026-05-16 |
 | API-03 | Phase 9 | Complete | 2026-05-16 |
-| CLI-01 | Phase 10 | Pending |
-| CLI-02 | Phase 10 | Pending |
-| CLI-03 | Phase 10 | Pending |
-| CLI-04 | Phase 10 | Pending |
+| CLI-01 | Phase 10 | Complete | 2026-05-17 |
+| CLI-02 | Phase 10 | Complete | 2026-05-17 |
+| CLI-03 | Phase 10 | Complete | 2026-05-17 |
+| CLI-04 | Phase 10 | Complete | 2026-05-17 |
 | VER-01 | Phase 11 | Pending |
 | VER-02 | Phase 11 | Pending |
 | VER-03 | Phase 11 | Pending |

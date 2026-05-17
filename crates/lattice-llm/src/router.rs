@@ -94,6 +94,30 @@ impl ModelRouter {
         ModelRouter::default()
     }
 
+    /// Return the fixed v1.1 alias list with full metadata for each entry.
+    ///
+    /// Iterates all known aliases and resolves each one, returning the
+    /// `ResolvedModel` for every alias whose env var lookup succeeds or
+    /// whose provider is credentialless. This is the single source of
+    /// truth for `models`, `resolve`, and `doctor` alias enumeration.
+    pub fn aliases(&self) -> Vec<ResolvedModel> {
+        let names = [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "sonnet",
+            "haiku",
+            "gemini",
+            "openai-compatible",
+        ];
+        names
+            .iter()
+            .filter_map(|name| {
+                let target = ModelTarget::new(*name);
+                self.resolve(&target).ok()
+            })
+            .collect()
+    }
+
     /// Resolve a model target to explicit provider metadata.
     ///
     /// Returns `Ok(ResolvedModel)` for known aliases.
@@ -334,5 +358,71 @@ mod tests {
     fn model_router_default_has_sonnet_default() {
         let router = ModelRouter::default();
         assert_eq!(router.default_model, Some("sonnet".to_string()));
+    }
+
+    // ── ModelRouter::aliases — router_cli_diagnostics ─────────────────────
+
+    #[test]
+    fn router_cli_diagnostics_aliases_include_expected_names() {
+        let router = ModelRouter::new();
+        let aliases = router.aliases();
+        let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
+        for expected in &["gpt-4o", "gpt-4o-mini", "sonnet", "haiku", "gemini", "openai-compatible"] {
+            assert!(
+                names.contains(expected),
+                "aliases() should include '{}', got: {:?}",
+                expected,
+                names
+            );
+        }
+    }
+
+    #[test]
+    fn router_cli_diagnostics_aliases_carry_provider_metadata() {
+        let router = ModelRouter::new();
+        let aliases = router.aliases();
+        for alias in &aliases {
+            assert!(
+                !alias.api_key_env.is_empty(),
+                "alias '{}' should have non-empty api_key_env",
+                alias.alias
+            );
+            assert!(
+                !alias.base_url.is_empty() || alias.alias == "openai-compatible",
+                "alias '{}' should have non-empty base_url (except openai-compatible which reads from env)",
+                alias.alias
+            );
+        }
+    }
+
+    #[test]
+    fn router_cli_diagnostics_aliases_never_leak_credential_values() {
+        // Seed a fake secret and verify aliases() output never contains it.
+        std::env::set_var("OPENAI_API_KEY", "sk-router-alias-secret");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-router-ant-secret");
+        std::env::set_var("GEMINI_API_KEY", "sk-router-gem-secret");
+        let router = ModelRouter::new();
+        let aliases = router.aliases();
+        for alias in &aliases {
+            let debug = format!("{:?}", alias);
+            assert!(
+                !debug.contains("sk-router-alias-secret"),
+                "alias '{}' debug must not leak OPENAI_API_KEY value",
+                alias.alias
+            );
+            assert!(
+                !debug.contains("sk-router-ant-secret"),
+                "alias '{}' debug must not leak ANTHROPIC_API_KEY value",
+                alias.alias
+            );
+            assert!(
+                !debug.contains("sk-router-gem-secret"),
+                "alias '{}' debug must not leak GEMINI_API_KEY value",
+                alias.alias
+            );
+        }
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("GEMINI_API_KEY");
     }
 }

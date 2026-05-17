@@ -320,16 +320,23 @@ impl TurnDeps for RealTurnDeps {
 // ── Internal helpers ─────────────────────────────────────────────────────
 
 /// Resolve model alias and system prompt from the request.
+///
+/// D-10: When `request.model` is `Some`, it overrides the loaded profile's
+/// default model. The profile still supplies the system prompt, enabled tools,
+/// and project root.
 fn resolve_model_and_prompt(request: &RunTurnRequest) -> (String, Option<String>) {
     if let Some(ref lp) = request.loaded_profile {
-        (
-            lp.profile.agent.model.clone(),
-            if lp.system_prompt.is_empty() {
-                None
-            } else {
-                Some(lp.system_prompt.clone())
-            },
-        )
+        // Model override: request.model takes precedence over profile default
+        let model = request
+            .model
+            .clone()
+            .unwrap_or_else(|| lp.profile.agent.model.clone());
+        let system_prompt = if lp.system_prompt.is_empty() {
+            None
+        } else {
+            Some(lp.system_prompt.clone())
+        };
+        (model, system_prompt)
     } else {
         (
             request.model.clone().unwrap_or_else(|| "sonnet".to_string()),
@@ -808,6 +815,30 @@ mod tests {
             profile: None,
             model: None,
             loaded_profile: None,
+        }
+    }
+
+    fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::LoadedAgentProfile {
+        lattice_profile::LoadedAgentProfile {
+            path: std::path::PathBuf::from("/tmp/test/agent.toml"),
+            package_dir: std::path::PathBuf::from("/tmp/test"),
+            profile: lattice_profile::AgentProfile {
+                schema_version: 1,
+                agent: lattice_profile::AgentSection {
+                    name: "test".to_string(),
+                    model: model.to_string(),
+                    description: None,
+                },
+                prompt: lattice_profile::PromptSection {
+                    system: Some(system_prompt.to_string()),
+                    system_path: None,
+                },
+                tools: lattice_profile::ToolsSection::default(),
+                security: None,
+                context: None,
+                behavior: None,
+            },
+            system_prompt: system_prompt.to_string(),
         }
     }
 
@@ -1377,6 +1408,43 @@ mod tests {
     /// Source guard: verify no forbidden crate `use` statements exist in
     /// lattice-api source. Only checks actual `use` imports, not comments
     /// or string literals.
+    // ── run_cutover: model override precedence (D-10) ────────────────────
+
+    #[test]
+    fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
+        // When request.model is Some and loaded_profile is present,
+        // resolve_model_and_prompt should use request.model, not the
+        // profile's model. The profile still supplies the system prompt.
+        let request = RunTurnRequest {
+            input: "test".to_string(),
+            session_id: None,
+            profile: None,
+            model: Some("override-model".to_string()),
+            loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+        };
+
+        let (model, system_prompt) = resolve_model_and_prompt(&request);
+        assert_eq!(model, "override-model", "request.model should override profile model");
+        assert_eq!(system_prompt.as_deref(), Some("System from profile."));
+    }
+
+    #[test]
+    fn run_cutover_profile_model_used_when_no_override() {
+        // When request.model is None and loaded_profile is present,
+        // resolve_model_and_prompt should use the profile's model.
+        let request = RunTurnRequest {
+            input: "test".to_string(),
+            session_id: None,
+            profile: None,
+            model: None,
+            loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+        };
+
+        let (model, system_prompt) = resolve_model_and_prompt(&request);
+        assert_eq!(model, "profile-model", "profile model should be used when no override");
+        assert_eq!(system_prompt.as_deref(), Some("System from profile."));
+    }
+
     #[test]
     fn api_forbidden_crates_absent_from_source() {
         use std::fs;

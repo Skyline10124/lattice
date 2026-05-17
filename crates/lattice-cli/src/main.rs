@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use colored::Colorize;
 
 mod commands;
 mod config;
@@ -16,42 +17,20 @@ mod session_seed;
 #[cfg(test)]
 mod test_support;
 
-use commands::{
-    config_cmd, debug, doctor, list_agents, models, new_agent, resolve, run, run_v11, sessions,
-    stats, validate,
-};
+use commands::{doctor, models, resolve, session as session_cmd};
 use config::Config;
 use credentials::CredentialStore;
 
 #[derive(Parser)]
 #[command(name = "lattice")]
-#[command(about = "󰚩 LATTICE — model-centric LLM engine")]
+#[command(about = "LATTICE — model-centric LLM engine")]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, help = "Quick single-turn query (no tool execution)")]
-    quick: Option<String>,
-
-    #[arg(
-        short,
-        long,
-        help = "Default model alias (can be overridden by subcommand --model)"
-    )]
-    model: Option<String>,
-
-    #[arg(long, help = "Provider override")]
-    provider: Option<String>,
-
-    #[arg(short, long, global = true, help = "Continue current session (HEAD)")]
-    continue_session: bool,
-
-    #[arg(long, global = true, help = "Checkout a specific session id or branch")]
-    session: Option<String>,
-
-    #[arg(long, global = true, help = "Do not save session")]
-    no_save: bool,
+    #[arg(short, long, global = true, help = "JSON output")]
+    json: bool,
 
     #[arg(
         short,
@@ -60,417 +39,316 @@ struct Cli {
         help = "Verbose output (show resolve trace)"
     )]
     verbose: bool,
-
-    #[arg(short, long, global = true, help = "JSON output")]
-    json: bool,
-
-    #[arg(long, help = "Configuration file path")]
-    config: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Resolve a model alias to provider details")]
-    Resolve {
-        model: String,
-        #[arg(long, help = "Show resolve trace")]
-        trace: bool,
-        #[arg(long, help = "Provider override")]
-        provider: Option<String>,
+    /// Run a prompt through an agent profile.
+    Run {
+        /// Prompt text.
+        prompt: String,
+        /// Model alias or canonical ID.
+        #[arg(short = 'm', long = "model")]
+        model: Option<String>,
+        /// Agent profile name or path.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Session id to resume.
+        #[arg(long)]
+        session: Option<String>,
     },
-    #[command(about = "List available models")]
+    /// List available models.
     Models {
-        #[arg(long, help = "Only show authenticated models")]
+        /// Only show authenticated models.
+        #[arg(long)]
         auth: bool,
     },
-    #[command(about = "Run diagnostics")]
+    /// Resolve a model alias to provider details.
+    Resolve {
+        /// Model alias to resolve.
+        model: String,
+    },
+    /// Manage sessions.
+    Session {
+        #[command(subcommand)]
+        action: session_cmd::SessionAction,
+    },
+    /// Run diagnostics.
     Doctor,
-    #[command(about = "Session statistics")]
-    Stats,
-    #[command(about = "Manage configuration")]
-    Config {
-        #[command(subcommand)]
-        action: commands::config_cmd::ConfigAction,
-    },
-    #[command(about = "Manage sessions")]
-    Sessions {
-        #[command(subcommand)]
-        action: commands::sessions::SessionAction,
-    },
-    #[command(about = "Run a prompt through an agent profile")]
-    Run {
-        #[arg(help = "Prompt text, or use --file to read from a file")]
-        prompt: Option<String>,
-        #[arg(short = 'f', long = "file", help = "Read prompt text from a file")]
-        file: Option<String>,
-        #[arg(long, help = "Agent profile name or path (default: default)")]
-        agent: Option<String>,
-        #[arg(short, long, help = "Model alias or canonical ID")]
-        model: Option<String>,
-        #[arg(long, help = "Provider override")]
-        provider: Option<String>,
-        #[arg(long, help = "Dry-run: compile prompt and print without calling LLM")]
-        dry_run: bool,
-        #[arg(long, help = "System prompt for prompt engine test")]
-        system_prompt: Option<String>,
-        #[arg(long, default_value_t = 10, help = "Maximum agent turns")]
-        max_turns: u32,
-        #[arg(
-            long,
-            overrides_with = "no_stream",
-            help = "Stream tokens as they arrive"
-        )]
-        stream: bool,
-        #[arg(
-            long,
-            overrides_with = "stream",
-            help = "Print only after the run completes"
-        )]
-        no_stream: bool,
-    },
-    #[command(name = "run-v11", about = "Run the v1.1 skeleton path")]
-    RunV11 {
-        #[arg(help = "Prompt text to send through the v1.1 skeleton path")]
-        prompt: String,
-    },
-    #[command(about = "Debug mode: trace-level logging with colored output")]
-    Debug {
-        #[arg(help = "Model alias or canonical ID (positional)")]
-        model: Option<String>,
-        #[arg(long, help = "Prompt to send (for chat debugging)")]
-        prompt: Option<String>,
-        #[arg(long, help = "Provider override")]
-        provider: Option<String>,
-        #[arg(long, help = "Only resolve, don't chat")]
-        resolve_only: bool,
-    },
-    #[command(about = "Validate agent profiles in ~/.lattice/agents/")]
-    Validate {
-        #[arg(help = "Optional path to agents directory")]
-        dir: Option<String>,
-    },
-    #[command(about = "Create a new agent profile")]
-    New {
-        #[command(subcommand)]
-        action: NewAction,
-    },
-    #[command(about = "List agents, models, etc.")]
-    List {
-        #[command(subcommand)]
-        action: ListCommands,
-    },
-    #[command(about = "Launch the terminal UI (TUI)")]
-    Tui {
-        #[arg(long, help = "Optional prompt to pre-fill")]
-        prompt: Option<String>,
-        #[arg(long, help = "Agent profile name or path (default: default)")]
-        agent: Option<String>,
-        #[arg(long, help = "Model alias or canonical ID")]
-        model: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum NewAction {
-    #[command(about = "Create a new agent profile from template")]
-    Agent {
-        #[arg(help = "Agent name")]
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum ListCommands {
-    #[command(about = "List loaded agent profiles")]
-    Agents,
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
 
-    // Initialize logging based on verbose or debug mode.
+    // Initialize logging.
     if cli.verbose {
         let _ = lattice_core::init_logging(true);
-    } else if matches!(cli.command, Some(Commands::Debug { .. })) {
-        let log_dir = dirs::home_dir()
-            .map(|h| h.join(".lattice"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        let log_path = log_dir.join("debug.log");
-        let _ =
-            lattice_core::init_debug_logging(log_path.to_str().unwrap_or("/tmp/lattice-debug.log"));
     } else {
         let _ = lattice_core::init_logging(false);
     }
 
-    let config = Config::load(cli.config.as_deref())?;
-    let creds = CredentialStore::from_config(&config)?;
-    let save_sessions = config.core.save_sessions && !cli.no_save;
-    let cwd = std::env::current_dir()?;
-
-    // Quick mode (single-turn, no tool execution, pipe-friendly)
-    if let Some(prompt) = cli.quick {
-        let explicit_model = cli.model.clone();
-        let model = explicit_model
-            .clone()
-            .unwrap_or_else(|| config.default_model());
-        let previous_session =
-            load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-        return run::run(
-            prompt,
-            model,
-            explicit_model,
-            None,
-            cli.provider.as_deref(),
-            cli.verbose,
-            cli.json,
-            &creds,
-            save_sessions,
-            previous_session,
-            false,
-            None,
-            1,
-            !cli.json,
-            cwd,
-            config.security.clone(),
-            profile_runtime::default_global_agents_dir(),
-        )
-        .await;
+    // Run command uses the new v1.1 path with ExitCode semantics.
+    if let Some(Commands::Run {
+        prompt,
+        model,
+        profile,
+        session,
+    }) = cli.command
+    {
+        return commands::run::run(prompt, model, profile.as_deref(), session, cli.verbose, cli.json)
+            .await;
     }
 
-    // Dispatch subcommand
+    // All other commands use the legacy Result<()> path.
+    if let Err(e) = main_legacy(cli) {
+        eprintln!("{}: {}", "error".red(), e);
+        std::process::ExitCode::from(1)
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
+}
+
+fn main_legacy(cli: Cli) -> Result<()> {
+    let config = Config::load(None)?;
+    let creds = CredentialStore::from_config(&config)?;
+
     match cli.command {
-        Some(Commands::Resolve {
-            model,
-            trace,
-            provider,
-        }) => {
-            resolve::run(&model, provider.as_deref(), trace, cli.json, &creds)?;
-        }
+        Some(Commands::Run { .. }) => unreachable!("handled above"),
         Some(Commands::Models { auth }) => {
-            models::run(auth, &creds)?;
+            models::run(auth, cli.json, &creds)?;
+        }
+        Some(Commands::Resolve { model }) => {
+            resolve::run(&model, cli.verbose, cli.json, &creds)?;
+        }
+        Some(Commands::Session { action }) => {
+            session_cmd::run(action, cli.json)?;
         }
         Some(Commands::Doctor) => {
-            doctor::run(&config, &creds)?;
+            doctor::run(&config, cli.json, &creds)?;
         }
-        Some(Commands::Stats) => {
-            stats::run()?;
-        }
-        Some(Commands::Config { action }) => {
-            config_cmd::run(action)?;
-        }
-        Some(Commands::Sessions { action }) => {
-            sessions::run(action)?;
-        }
-        Some(Commands::Run {
-            prompt,
-            file,
-            agent,
-            model,
-            provider,
-            dry_run,
-            system_prompt,
-            max_turns,
-            stream,
-            no_stream,
-        }) => {
-            let prompt = load_run_prompt(prompt, file.as_deref())?;
-            let explicit_model = model.or_else(|| cli.model.clone());
-            let model = explicit_model
-                .clone()
-                .unwrap_or_else(|| config.default_model());
-            let provider = provider.or_else(|| cli.provider.clone());
-            let previous_session =
-                load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-            let stream_output = if cli.json {
-                false
-            } else if stream {
-                true
-            } else if no_stream {
-                false
-            } else {
-                config.core.stream
-            };
-            run::run(
-                prompt,
-                model,
-                explicit_model,
-                agent.as_deref(),
-                provider.as_deref(),
-                cli.verbose,
-                cli.json,
-                &creds,
-                save_sessions,
-                previous_session,
-                dry_run,
-                system_prompt.as_deref(),
-                max_turns,
-                stream_output,
-                cwd,
-                config.security.clone(),
-                profile_runtime::default_global_agents_dir(),
-            )
-            .await?;
-        }
-        Some(Commands::RunV11 { prompt }) => {
-            run_v11::run(prompt).await?;
-        }
-        Some(Commands::Debug {
-            prompt,
-            model,
-            provider,
-            resolve_only,
-        }) => {
-            let model = model
-                .or_else(|| cli.model.clone())
-                .unwrap_or_else(|| config.default_model());
-            let provider = provider.or_else(|| cli.provider.clone());
-            debug::run(prompt, model, provider, resolve_only, &creds).await?;
-        }
-        Some(Commands::Validate { dir }) => {
-            validate::run(dir)?;
-        }
-        Some(Commands::Tui {
-            prompt,
-            agent,
-            model,
-        }) => {
-            let previous_session =
-                load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-            let options = frontend::tui::options_from_config(
-                prompt,
-                agent,
-                model.or_else(|| cli.model.clone()),
-                cli.provider.clone(),
-                &config,
-                &creds,
-                save_sessions,
-                previous_session,
-                config.security.clone(),
-            );
-            frontend::tui::run(options).await?;
-        }
-        Some(Commands::New { action }) => match action {
-            NewAction::Agent { name } => new_agent::run(name)?,
-        },
-        Some(Commands::List { action }) => match action {
-            ListCommands::Agents => list_agents::run()?,
-        },
         None => {
-            // No subcommand — launch TUI like Claude Code
-            let previous_session =
-                load_requested_session(cli.session.as_deref(), cli.continue_session)?;
-            let options = frontend::tui::options_from_config(
-                None,
-                None,
-                cli.model.clone(),
-                cli.provider.clone(),
-                &config,
-                &creds,
-                save_sessions,
-                previous_session,
-                config.security.clone(),
-            );
-            frontend::tui::run(options).await?;
+            let _ = Cli::command().print_help();
+            println!();
         }
     }
 
     Ok(())
 }
 
-fn load_requested_session(
-    id: Option<&str>,
-    continue_latest: bool,
-) -> Result<Option<crate::session::Session>> {
-    let runtime = crate::runtime::model_runtime(Default::default());
-    let Some(manager) = runtime.session_store() else {
-        return Ok(None);
-    };
-    if let Some(id) = id {
-        return Ok(Some(manager.checkout(id)?));
-    }
-    if continue_latest {
-        return match manager.current()? {
-            Some(session) => Ok(Some(session)),
-            None => Ok(manager.latest()?),
-        };
-    }
-    Ok(None)
-}
-
-fn load_run_prompt(prompt: Option<String>, file: Option<&str>) -> Result<String> {
-    match (prompt, file) {
-        (Some(_), Some(_)) => anyhow::bail!("Use either PROMPT or --file, not both"),
-        (Some(prompt), None) => Ok(prompt),
-        (None, Some(path)) => std::fs::read_to_string(path)
-            .map_err(|err| anyhow::anyhow!("Failed to read prompt file '{}': {}", path, err)),
-        (None, None) => anyhow::bail!("Missing prompt text or --file"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{load_run_prompt, Cli, Commands};
-    use clap::Parser;
-    use std::fs;
+    use super::Cli;
+    use clap::{CommandFactory, Parser};
+
+    // -- Positive parsing: Phase 10 supported commands --
 
     #[test]
-    fn load_run_prompt_reads_file_verbatim() {
-        let path =
-            std::env::temp_dir().join(format!("lattice-run-prompt-{}.txt", std::process::id()));
-        let content = "line 1\nquote: \"hello\"\nslash: \\\n";
-        fs::write(&path, content).expect("write prompt fixture");
-
-        let loaded = load_run_prompt(None, path.to_str());
-
-        fs::remove_file(&path).ok();
-        assert_eq!(loaded.expect("prompt file should load"), content);
+    fn cli_surface_run_parses_prompt() {
+        let cli = Cli::try_parse_from(["lattice", "run", "hello"]).unwrap();
+        assert!(cli.command.is_some());
     }
 
     #[test]
-    fn load_run_prompt_rejects_prompt_and_file_together() {
-        let err = load_run_prompt(Some("inline".into()), Some("prompt.txt"))
-            .expect_err("prompt and file should conflict");
-
-        assert!(err.to_string().contains("either PROMPT or --file"));
+    fn cli_surface_run_with_model_profile_session() {
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "run",
+            "hello",
+            "-m",
+            "sonnet",
+            "--profile",
+            "default",
+            "--session",
+            "sess1",
+        ])
+        .unwrap();
+        assert!(cli.command.is_some());
     }
 
     #[test]
-    fn run_stream_flags_default_to_config_control() {
-        let cli = Cli::parse_from(["lattice", "run", "hello"]);
-        let Some(Commands::Run {
-            stream, no_stream, ..
-        }) = cli.command
-        else {
-            panic!("expected run command");
-        };
-
-        assert!(!stream);
-        assert!(!no_stream);
+    fn cli_surface_models_auth() {
+        let cli = Cli::try_parse_from(["lattice", "models", "--auth"]).unwrap();
+        assert!(cli.command.is_some());
     }
 
     #[test]
-    fn run_no_stream_overrides_stream_flag() {
-        let cli = Cli::parse_from(["lattice", "run", "hello", "--stream", "--no-stream"]);
-        let Some(Commands::Run {
-            stream, no_stream, ..
-        }) = cli.command
-        else {
-            panic!("expected run command");
-        };
-
-        assert!(!stream);
-        assert!(no_stream);
+    fn cli_surface_resolve() {
+        let cli = Cli::try_parse_from(["lattice", "resolve", "sonnet"]).unwrap();
+        assert!(cli.command.is_some());
     }
 
     #[test]
-    fn run_v11_parses_prompt() {
-        let cli = Cli::parse_from(["lattice", "run-v11", "hello"]);
-        let Some(Commands::RunV11 { prompt }) = cli.command else {
-            panic!("expected run-v11 command");
-        };
+    fn cli_surface_session_status() {
+        let cli = Cli::try_parse_from(["lattice", "session", "status"]).unwrap();
+        assert!(cli.command.is_some());
+    }
 
-        assert_eq!(prompt, "hello");
+    #[test]
+    fn cli_surface_session_log() {
+        let cli = Cli::try_parse_from(["lattice", "session", "log", "sess1"]).unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_surface_session_checkout() {
+        let cli = Cli::try_parse_from(["lattice", "session", "checkout", "sess1", "main"]).unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_surface_session_branch_with_from() {
+        let cli = Cli::try_parse_from([
+            "lattice", "session", "branch", "sess1", "feature", "--from", "commit1",
+        ])
+        .unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_surface_session_diff() {
+        let cli = Cli::try_parse_from(["lattice", "session", "diff", "sess1", "a", "b"]).unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_surface_session_reset() {
+        let cli = Cli::try_parse_from(["lattice", "session", "reset", "sess1", "commit1"]).unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    #[test]
+    fn cli_surface_doctor() {
+        let cli = Cli::try_parse_from(["lattice", "doctor"]).unwrap();
+        assert!(cli.command.is_some());
+    }
+
+    // -- Negative parsing: forbidden old commands (D-01, D-02, D-03, D-07, D-08) --
+
+    #[test]
+    fn cli_surface_rejects_tui() {
+        assert!(Cli::try_parse_from(["lattice", "tui"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_debug() {
+        assert!(Cli::try_parse_from(["lattice", "debug"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_config() {
+        assert!(Cli::try_parse_from(["lattice", "config"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_stats() {
+        assert!(Cli::try_parse_from(["lattice", "stats"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_validate() {
+        assert!(Cli::try_parse_from(["lattice", "validate"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_new() {
+        assert!(Cli::try_parse_from(["lattice", "new"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_list() {
+        assert!(Cli::try_parse_from(["lattice", "list"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_run_v11() {
+        assert!(Cli::try_parse_from(["lattice", "run-v11", "hello"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_quick_flag() {
+        assert!(Cli::try_parse_from(["lattice", "-q", "hello"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_sessions_plural() {
+        assert!(Cli::try_parse_from(["lattice", "sessions"]).is_err());
+    }
+
+    // -- Negative parsing: forbidden old globals (D-05, D-06) --
+
+    #[test]
+    fn cli_surface_rejects_global_config() {
+        assert!(Cli::try_parse_from(["lattice", "--config", "foo.toml", "doctor"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_global_model() {
+        assert!(Cli::try_parse_from(["lattice", "--model", "sonnet", "doctor"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_global_provider() {
+        assert!(Cli::try_parse_from(["lattice", "--provider", "openai", "doctor"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_global_session() {
+        assert!(Cli::try_parse_from(["lattice", "--session", "sess1", "doctor"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_global_no_save() {
+        assert!(Cli::try_parse_from(["lattice", "--no-save", "doctor"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_rejects_global_continue() {
+        assert!(Cli::try_parse_from(["lattice", "--continue", "doctor"]).is_err());
+    }
+
+    // -- Help text boundary test --
+
+    #[test]
+    fn cli_surface_help_contains_supported_commands() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_help().to_string();
+        for name in &["run", "models", "resolve", "session", "doctor"] {
+            assert!(
+                help.contains(name),
+                "help should contain supported command '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_surface_help_omits_removed_commands() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_help().to_string();
+        // Check that removed commands do not appear as top-level subcommand entries.
+        // We check for the command name followed by whitespace (subcommand table entry)
+        // to avoid false positives from words like "list" in descriptions.
+        for name in &[
+            "tui", "debug", "config", "stats", "validate", "new", "run-v11",
+        ] {
+            let pattern = format!("\n  {name} ");
+            assert!(
+                !help.contains(&pattern),
+                "help should not contain removed top-level command '{name}'"
+            );
+        }
+        // "sessions" (plural) must not appear as a subcommand.
+        let sessions_pattern = "\n  sessions ";
+        assert!(
+            !help.contains(sessions_pattern),
+            "help should not contain plural 'sessions' command"
+        );
+        // "list" must not appear as a top-level subcommand (it's a session subcommand).
+        let list_pattern = "\n  list ";
+        assert!(
+            !help.contains(list_pattern),
+            "help should not contain top-level 'list' command"
+        );
     }
 }
