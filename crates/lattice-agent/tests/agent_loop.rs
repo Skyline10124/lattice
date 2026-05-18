@@ -3,10 +3,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lattice_agent::{
-    AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus,
-    LlmClient, ToolCallExecutor,
+    AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
+    ToolCallExecutor,
 };
-use lattice_session::{GraphMessage, HeadTranscript, TurnUsage};
+use lattice_session::{GraphMessage, HeadTranscript};
 
 struct FakeLlm {
     responses: std::sync::Mutex<Vec<Result<lattice_llm::ChatResponse, String>>>,

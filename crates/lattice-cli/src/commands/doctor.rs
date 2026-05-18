@@ -1,7 +1,7 @@
 use anyhow::Result;
 use colored::Colorize;
+use std::path::PathBuf;
 
-use crate::config::Config;
 /// Report structure for doctor diagnostics.
 pub struct DoctorReport {
     pub config_loaded: bool,
@@ -18,11 +18,18 @@ pub struct CredentialEntry {
     pub status: String,
 }
 
+fn default_config_path() -> PathBuf {
+    dirs::config_dir()
+        .map(|dir| dir.join("lattice").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from("lattice.toml"))
+}
+
 /// Build a diagnostic report.
-pub fn build_report(config: &Config) -> DoctorReport {
+pub fn build_report() -> DoctorReport {
     // Config
-    let config_loaded = config.path.exists();
-    let config_path = config.path.display().to_string();
+    let config_path = default_config_path();
+    let config_loaded = config_path.exists();
+    let config_path = config_path.display().to_string();
 
     // Credentials: check router-relevant env vars via ModelRouter aliases
     let router = lattice_llm::ModelRouter::new();
@@ -120,7 +127,7 @@ pub fn render_text(report: &DoctorReport) -> String {
             "not found".red()
         }
     ));
-    output.push_str(&format!("  {}: {}\n", "Dir".bold(), report.session_dir));
+    output.push_str(&format!("  {} {}\n", "Dir:".bold(), report.session_dir));
 
     // Alias table
     output.push_str(&format!("\n{}\n", "Alias Table:".bold()));
@@ -136,8 +143,8 @@ pub fn render_text(report: &DoctorReport) -> String {
 ///
 /// Never prints credential values — only env var names and present/missing status.
 /// Does not reference old Catalog, Runtime::list_models, or inspect_model.
-pub fn run(config: &Config, json: bool) -> Result<()> {
-    let report = build_report(config);
+pub fn run(json: bool) -> Result<()> {
+    let report = build_report();
     if json {
         println!("{}", render_json(&report)?);
     } else {
@@ -150,14 +157,9 @@ pub fn run(config: &Config, json: bool) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn default_config() -> Config {
-        Config::default()
-    }
-
     #[test]
     fn doctor_report_contains_expected_keys() {
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
 
         // Report should have all expected fields
         assert!(report.config_path.contains("lattice.toml") || !report.config_path.is_empty());
@@ -167,8 +169,7 @@ mod tests {
 
     #[test]
     fn doctor_json_output_has_expected_structure() {
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let json = render_json(&report).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
@@ -183,8 +184,7 @@ mod tests {
 
     #[test]
     fn doctor_text_output_includes_credential_env_var_names() {
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let text = render_text(&report);
 
         // Should mention expected credential env vars
@@ -194,8 +194,7 @@ mod tests {
 
     #[test]
     fn doctor_text_output_includes_session_dir() {
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let text = render_text(&report);
 
         assert!(text.contains("Session Store:"));
@@ -205,8 +204,7 @@ mod tests {
 
     #[test]
     fn doctor_text_output_includes_alias_count() {
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let text = render_text(&report);
 
         assert!(text.contains("Alias Table:"));
@@ -216,8 +214,7 @@ mod tests {
     #[test]
     fn doctor_json_does_not_leak_secret_values() {
         std::env::set_var("ANTHROPIC_API_KEY", "sk-secret-test-key-12345");
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let json = render_json(&report).unwrap();
 
         // The secret value should NOT appear in the JSON
@@ -230,8 +227,7 @@ mod tests {
     #[test]
     fn doctor_text_does_not_leak_secret_values() {
         std::env::set_var("OPENAI_API_KEY", "sk-another-secret-67890");
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
         let text = render_text(&report);
 
         // The secret value should NOT appear in the text
@@ -244,8 +240,7 @@ mod tests {
     #[test]
     fn doctor_credentials_reflect_present_status() {
         std::env::set_var("GEMINI_API_KEY", "sk-gemini-test");
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
 
         let gemini = report
             .credentials
@@ -262,8 +257,7 @@ mod tests {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("OPENAI_API_KEY");
 
-        let config = default_config();
-        let report = build_report(&config);
+        let report = build_report();
 
         // At least one should have Missing status
         let has_missing = report.credentials.iter().any(|c| c.status == "Missing");

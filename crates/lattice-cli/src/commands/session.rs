@@ -924,9 +924,6 @@ mod d25_scoped_session {
         let (_dir, api, commits_a, commits_b) = setup_two_sessions();
 
         // Create same-named "feature" branch in both sessions from different commits.
-        let (_dir, api, commits_a, commits_b) = setup_two_sessions();
-
-        // Create same-named "feature" branch in both sessions from different commits.
         api.branch("sess-a", "feature", Some(&commits_a[0]))
             .unwrap();
         api.branch("sess-b", "feature", Some(&commits_b[1]))

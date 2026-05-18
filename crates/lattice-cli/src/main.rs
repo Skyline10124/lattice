@@ -3,9 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod commands;
-mod config;
 use commands::{doctor, models, resolve, session as session_cmd};
-use config::Config;
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -104,8 +102,6 @@ async fn main() -> std::process::ExitCode {
 }
 
 fn run_other_commands(cli: Cli) -> Result<()> {
-    let config = Config::load(None)?;
-
     match cli.command {
         Some(Commands::Run { .. }) => unreachable!("handled above"),
         Some(Commands::Models { auth }) => {
@@ -118,7 +114,7 @@ fn run_other_commands(cli: Cli) -> Result<()> {
             session_cmd::run(action, cli.json)?;
         }
         Some(Commands::Doctor) => {
-            doctor::run(&config, cli.json)?;
+            doctor::run(cli.json)?;
         }
         None => {
             let _ = Cli::command().print_help();

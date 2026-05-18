@@ -150,9 +150,7 @@ async fn todo_write_validates_single_in_progress_item() {
         ))
         .await;
 
-    assert!(
-        result.contains("Todo list updated: 3 item(s), 1 pending, 1 in_progress, 1 completed")
-    );
+    assert!(result.contains("Todo list updated: 3 item(s), 1 pending, 1 in_progress, 1 completed"));
     assert!(result.contains("2. [in_progress] Apply patch"));
 
     let invalid = executor
@@ -317,11 +315,8 @@ async fn patch_failure_json_keeps_changed_files_empty_and_attempts_populated() {
 #[tokio::test]
 async fn authorized_executor_denies_unlisted_builtin_before_execution() {
     let dir = tempfile::tempdir().unwrap();
-    let executor = DefaultToolExecutor::for_project_root(
-        dir.path().to_str().unwrap(),
-        ["read_file"],
-    )
-    .unwrap();
+    let executor =
+        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
         .execute(&tool_call(
@@ -345,11 +340,8 @@ async fn authorized_executor_denies_unlisted_builtin_before_execution() {
 #[tokio::test]
 async fn denied_tool_is_not_unknown_tool() {
     let dir = tempfile::tempdir().unwrap();
-    let executor = DefaultToolExecutor::for_project_root(
-        dir.path().to_str().unwrap(),
-        ["read_file"],
-    )
-    .unwrap();
+    let executor =
+        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
         .execute(&tool_call(
@@ -376,12 +368,9 @@ async fn bash_timeout_returns_promptly() {
         ..ToolLimits::default()
     };
 
-    let executor = DefaultToolExecutor::for_project_root(
-        dir.path().to_str().unwrap(),
-        ["bash"],
-    )
-    .unwrap()
-    .with_limits(limits);
+    let executor = DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["bash"])
+        .unwrap()
+        .with_limits(limits);
 
     let started = std::time::Instant::now();
 
@@ -403,11 +392,8 @@ async fn bash_timeout_returns_promptly() {
 #[tokio::test]
 async fn bash_rejects_empty_command() {
     let dir = tempfile::tempdir().unwrap();
-    let executor = DefaultToolExecutor::for_project_root(
-        dir.path().to_str().unwrap(),
-        ["bash"],
-    )
-    .unwrap();
+    let executor =
+        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["bash"]).unwrap();
 
     let result = executor
         .execute(&tool_call("bash", serde_json::json!({"command": "   "})))
@@ -420,11 +406,8 @@ async fn bash_rejects_empty_command() {
 #[tokio::test]
 async fn bash_allows_normal_shell_operators() {
     let dir = tempfile::tempdir().unwrap();
-    let executor = DefaultToolExecutor::for_project_root(
-        dir.path().to_str().unwrap(),
-        ["bash"],
-    )
-    .unwrap();
+    let executor =
+        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["bash"]).unwrap();
 
     let result = executor
         .execute(&tool_call(
@@ -723,8 +706,7 @@ async fn project_root_executor_keeps_output_limits() {
 async fn project_root_executor_has_no_dynamic_approval() {
     let dir = tempfile::tempdir().unwrap();
     let executor =
-        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"])
-            .unwrap();
+        DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
         .execute(&tool_call(
