@@ -20,3 +20,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = { workspace = true }
+lattice-tools = { workspace = true }
+lattice-profile = { workspace = true }
+blake3 = { workspace = true }
