@@ -10,8 +10,7 @@ mod tests {
     use crate::turn::deps::TurnDeps;
     use crate::turn::execute::{run_turn_with_deps, stream_turn_with_deps};
     use crate::turn::types::{
-        RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
-        TurnUsageSummary,
+        RunTurnRequest, RunTurnStage, RunTurnStatus, TurnEvent, TurnUsageSummary,
     };
 
     struct FakeTurnDeps {
@@ -402,6 +401,15 @@ mod tests {
         assert_eq!(
             agent_req.model, "override-model",
             "request.model should override profile model"
+        );
+
+        // Commit metadata should also use the override model.
+        let commit_input = deps
+            .last_commit_input()
+            .expect("commit should have been called");
+        assert_eq!(
+            commit_input.model, "override-model",
+            "commit metadata should record the actual override model, not profile model"
         );
     }
 

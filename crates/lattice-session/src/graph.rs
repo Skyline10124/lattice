@@ -255,9 +255,16 @@ pub fn derive_commit_message(messages: &[GraphMessage]) -> String {
     normalized.chars().take(COMMIT_MESSAGE_MAX_CHARS).collect()
 }
 
-/// Compute canonical message ID.
-pub fn canonical_message_id(message: &GraphMessage, ordinal: usize) -> String {
+/// Compute canonical message ID scoped to session and turn.
+pub fn canonical_message_id(
+    session_id: &str,
+    turn_seed: &str,
+    message: &GraphMessage,
+    ordinal: usize,
+) -> String {
     let payload = serde_json::json!({
+        "session_id": session_id,
+        "turn_seed": turn_seed,
         "role": message.role,
         "content": message.content,
         "reasoning_content": message.reasoning_content,
@@ -267,6 +274,28 @@ pub fn canonical_message_id(message: &GraphMessage, ordinal: usize) -> String {
         "ordinal": ordinal,
     });
     hash_json("v1_message", &payload)
+}
+
+/// Compute a stable turn seed for scoping message IDs within a commit.
+pub fn canonical_turn_seed(
+    session_id: &str,
+    parent_ids: &[String],
+    created_at: &str,
+    model: &str,
+    provider: &str,
+    status: &TurnCommitStatus,
+    commit_message: &str,
+) -> String {
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "parents": parent_ids,
+        "created_at": created_at,
+        "model": model,
+        "provider": provider,
+        "status": status.as_str(),
+        "commit_message": commit_message,
+    });
+    hash_json("v1_turn_seed", &payload)
 }
 
 /// Compute canonical turn commit ID.
@@ -665,8 +694,8 @@ mod graph_contract {
     #[test]
     fn canonical_message_id_is_deterministic() {
         let msg = user_msg("Hello");
-        let id1 = canonical_message_id(&msg, 0);
-        let id2 = canonical_message_id(&msg, 0);
+        let id1 = canonical_message_id("sess-1", "seed-1", &msg, 0);
+        let id2 = canonical_message_id("sess-1", "seed-1", &msg, 0);
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 64);
     }
@@ -676,19 +705,41 @@ mod graph_contract {
         let msg1 = user_msg("Hello");
         let msg2 = user_msg("World");
         assert_ne!(
-            canonical_message_id(&msg1, 0),
-            canonical_message_id(&msg2, 0)
+            canonical_message_id("sess-1", "seed-1", &msg1, 0),
+            canonical_message_id("sess-1", "seed-1", &msg2, 0)
         );
     }
 
     #[test]
     fn canonical_message_id_differs_by_ordinal() {
         let msg = user_msg("Hello");
-        let id0 = canonical_message_id(&msg, 0);
-        let id1 = canonical_message_id(&msg, 1);
+        let id0 = canonical_message_id("sess-1", "seed-1", &msg, 0);
+        let id1 = canonical_message_id("sess-1", "seed-1", &msg, 1);
         assert_ne!(
             id0, id1,
             "identical messages at different ordinals must produce different IDs"
+        );
+    }
+
+    #[test]
+    fn canonical_message_id_differs_by_session() {
+        let msg = user_msg("Hello");
+        let id_a = canonical_message_id("sess-a", "seed-1", &msg, 0);
+        let id_b = canonical_message_id("sess-b", "seed-1", &msg, 0);
+        assert_ne!(
+            id_a, id_b,
+            "identical messages in different sessions must produce different IDs"
+        );
+    }
+
+    #[test]
+    fn canonical_message_id_differs_by_turn_seed() {
+        let msg = user_msg("Hello");
+        let id_a = canonical_message_id("sess-1", "seed-a", &msg, 0);
+        let id_b = canonical_message_id("sess-1", "seed-b", &msg, 0);
+        assert_ne!(
+            id_a, id_b,
+            "identical messages in different turns must produce different IDs"
         );
     }
 

@@ -37,7 +37,13 @@ async fn execute_turn_inner(
     let transcript = deps.head_transcript(&session_id)?;
 
     stages.push(RunTurnStage::Agent);
-    let agent_request = build_agent_request(request, &session_id, transcript, model, system_prompt);
+    let agent_request = build_agent_request(
+        request,
+        &session_id,
+        transcript,
+        model.clone(),
+        system_prompt,
+    );
 
     let (agent_events, agent_result) = deps
         .execute_agent_turn(agent_request)
@@ -74,19 +80,12 @@ async fn execute_turn_inner(
         .as_ref()
         .map(|lp| lp.profile.agent.name.clone());
 
-    let model_name = request
-        .loaded_profile
-        .as_ref()
-        .map(|lp| lp.profile.agent.model.clone())
-        .or_else(|| request.model.clone())
-        .unwrap_or_else(|| "sonnet".to_string());
-
     let commit_input = TurnCommitInput {
         session_id: session_id.clone(),
         parent_ids,
         messages: commit_messages,
         profile_snapshot_id,
-        model: model_name,
+        model: model.clone(),
         provider,
         status: commit_status,
         commit_message,

@@ -9,10 +9,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     graph::{
-        canonical_message_id, canonical_turn_commit_id, GraphDiff, GraphHead, GraphMessage,
-        GraphRef, GraphRefKind, GraphSession, GraphToolCall, HeadTranscript, ResetResult,
-        SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput,
-        TurnCommitStatus, TurnLogEntry, TurnUsage,
+        canonical_message_id, canonical_turn_commit_id, canonical_turn_seed, GraphDiff, GraphHead,
+        GraphMessage, GraphRef, GraphRefKind, GraphSession, GraphToolCall, HeadTranscript,
+        ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
+        TurnCommitInput, TurnCommitStatus, TurnLogEntry, TurnUsage,
     },
     Result, SessionError,
 };
@@ -139,45 +139,54 @@ impl SqliteSessionGraphStore {
 }
 
 impl SqliteSessionGraphStore {
-    fn current_branch_commit_id(
+    /// Resolve the current HEAD commit ID.
+    ///
+    /// For attached HEAD (branch), reads the branch ref's commit_id.
+    /// For detached HEAD, reads graph_sessions.head_commit_id directly.
+    fn current_head_commit_id(
         &self,
         conn: &Connection,
         session_id: &str,
     ) -> Result<Option<String>> {
-        // First get the session's active branch name.
-        let head_ref: Option<String> = conn
+        let (head_ref, head_commit_id): (Option<String>, Option<String>) = conn
             .query_row(
-                "SELECT head_ref FROM graph_sessions WHERE session_id=?1",
+                "SELECT head_ref, head_commit_id FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
-                |row| row.get(0),
+                |row| {
+                    let hr: Option<String> = row.get(0)?;
+                    let hcid: Option<String> = row.get(1)?;
+                    Ok((hr, hcid))
+                },
             )
-            .optional()
-            .map_err(|source| SessionError::Database {
-                path: self.db_path.clone(),
-                source,
-            })?
-            .flatten();
+            .map_err(|_| SessionError::NotFound(session_id.to_string()))?;
 
-        let branch_name = match head_ref {
-            Some(name) => name,
-            None => return Ok(None),
-        };
+        match head_ref {
+            Some(branch_name) => {
+                // Attached HEAD: read commit_id from the branch ref.
+                let branch_row: Option<Option<String>> = conn
+                    .query_row(
+                        "SELECT commit_id FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
+                        params![session_id, branch_name],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map_err(|source| SessionError::Database {
+                        path: self.db_path.clone(),
+                        source,
+                    })?;
 
-        // Then get the commit_id from graph_refs for that branch.
-        let commit_id: Option<String> = conn
-            .query_row(
-                "SELECT commit_id FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
-                params![session_id, branch_name],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| SessionError::Database {
-                path: self.db_path.clone(),
-                source,
-            })?
-            .flatten();
-
-        Ok(commit_id)
+                match branch_row {
+                    Some(commit_id) => Ok(commit_id),
+                    None => Err(SessionError::NotFound(format!(
+                        "branch '{branch_name}' not found for session '{session_id}'"
+                    ))),
+                }
+            }
+            None => {
+                // Detached HEAD: use head_commit_id directly.
+                Ok(head_commit_id)
+            }
+        }
     }
 }
 
@@ -185,11 +194,11 @@ impl SessionGraphStore for SqliteSessionGraphStore {
     fn head_transcript(&self, session_id: &str) -> crate::Result<HeadTranscript> {
         let conn = self.conn()?;
 
-        // Resolve the current branch commit ID (HEAD).
-        let head_commit_id = self.current_branch_commit_id(&conn, session_id)?;
+        // Resolve the current HEAD commit ID (attached or detached).
+        let head_cid = self.current_head_commit_id(&conn, session_id)?;
 
-        // Empty session: no commits yet.
-        let parent_commit_id = match &head_commit_id {
+        // No commits on current HEAD.
+        let parent_commit_id = match &head_cid {
             None => {
                 return Ok(HeadTranscript {
                     session_id: session_id.to_string(),
@@ -650,21 +659,21 @@ impl SessionGraphStore for SqliteSessionGraphStore {
             .map_err(|_| SessionError::NotFound(session_id.to_string()))?;
 
         // Try target as a branch name first.
-        let branch_commit: Option<String> = conn
+        // Distinguish "branch exists with NULL commit_id" from "branch missing".
+        let branch_row: Option<Option<String>> = conn
             .query_row(
                 "SELECT commit_id FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
                 params![session_id, target],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
             .map_err(|source| SessionError::Database {
                 path: self.db_path.clone(),
                 source,
-            })?
-            .flatten();
+            })?;
 
-        if let Some(commit_id) = branch_commit {
-            // Target is an existing branch.
+        if let Some(commit_id) = branch_row {
+            // Branch exists (commit_id may be NULL).
             conn.execute(
                 "UPDATE graph_sessions SET head_ref=?1, head_commit_id=?2, updated_at=?3 WHERE session_id=?4",
                 params![target, commit_id, now, session_id],
@@ -734,8 +743,8 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                 cid.to_string()
             }
             None => {
-                // Use current HEAD commit.
-                self.current_branch_commit_id(&conn, session_id)?
+                // Use current HEAD commit (attached or detached).
+                self.current_head_commit_id(&conn, session_id)?
                     .ok_or_else(|| {
                         SessionError::Conflict(
                             "cannot create branch: no commits on current HEAD".to_string(),
@@ -837,7 +846,14 @@ impl SessionGraphStore for SqliteSessionGraphStore {
             })?
             .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
 
-        let branch_name = head_ref.unwrap_or_else(|| DEFAULT_BRANCH.to_string());
+        let branch_name = match head_ref {
+            Some(name) => name,
+            None => {
+                return Err(SessionError::Conflict(
+                    "cannot reset while HEAD is detached; checkout a branch first".to_string(),
+                ));
+            }
+        };
 
         // Resolve target to a commit ID.
         let target_commit_id = self.resolve_target_to_commit_id(&conn, session_id, target)?;
@@ -909,8 +925,8 @@ impl SqliteSessionGraphStore {
     fn commit_turn_inner(&self, conn: &Connection, input: &TurnCommitInput) -> Result<TurnCommit> {
         let now = Utc::now().to_rfc3339();
 
-        // 1. Read current branch/HEAD commit.
-        let current_commit_id = self.current_branch_commit_id(conn, &input.session_id)?;
+        // 1. Read current HEAD commit.
+        let current_commit_id = self.current_head_commit_id(conn, &input.session_id)?;
 
         // 2. Validate expected parent matches current HEAD (T-08-05).
         if input.parent_ids.is_empty() {
@@ -941,9 +957,18 @@ impl SqliteSessionGraphStore {
         }
 
         // 3. Write message rows and compute message IDs.
+        let turn_seed = canonical_turn_seed(
+            &input.session_id,
+            &input.parent_ids,
+            &now,
+            &input.model,
+            &input.provider,
+            &input.status,
+            &input.commit_message,
+        );
         let mut message_ids = Vec::new();
         for (i, msg) in input.messages.iter().enumerate() {
-            let message_id = canonical_message_id(msg, i);
+            let message_id = canonical_message_id(&input.session_id, &turn_seed, msg, i);
             let tool_calls_json = match &msg.tool_calls {
                 Some(calls) => serde_json::to_string(calls).unwrap_or_else(|_| "[]".to_string()),
                 None => "[]".to_string(),
@@ -1020,29 +1045,39 @@ impl SqliteSessionGraphStore {
             source,
         })?;
 
-        // 6. Update branch ref to new commit.
-        let branch_name = self
-            .current_branch_name(conn, &input.session_id)?
-            .unwrap_or_else(|| DEFAULT_BRANCH.to_string());
-
-        conn.execute(
-            "UPDATE graph_refs SET commit_id=?1, updated_at=?2 WHERE session_id=?3 AND kind='branch' AND name=?4",
-            params![commit_id, now, input.session_id, branch_name],
-        )
-        .map_err(|source| SessionError::Database {
-            path: self.db_path.clone(),
-            source,
-        })?;
-
-        // 7. Update session head_commit_id.
-        conn.execute(
-            "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3",
-            params![commit_id, now, input.session_id],
-        )
-        .map_err(|source| SessionError::Database {
-            path: self.db_path.clone(),
-            source,
-        })?;
+        // 6. Update branch ref (only if HEAD is attached) and session head_commit_id.
+        match self.current_branch_name(conn, &input.session_id)? {
+            Some(branch_name) => {
+                // Attached HEAD: update the branch ref and head_commit_id.
+                conn.execute(
+                    "UPDATE graph_refs SET commit_id=?1, updated_at=?2 WHERE session_id=?3 AND kind='branch' AND name=?4",
+                    params![commit_id, now, input.session_id, branch_name],
+                )
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+                conn.execute(
+                    "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3",
+                    params![commit_id, now, input.session_id],
+                )
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+            }
+            None => {
+                // Detached HEAD: only update head_commit_id, preserve head_ref=NULL.
+                conn.execute(
+                    "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3",
+                    params![commit_id, now, input.session_id],
+                )
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+            }
+        }
 
         Ok(TurnCommit {
             commit_id,
@@ -1061,11 +1096,13 @@ impl SqliteSessionGraphStore {
     }
 
     fn current_branch_name(&self, conn: &Connection, session_id: &str) -> Result<Option<String>> {
-        let name: Option<String> = conn
+        // head_ref is NULL for detached HEAD, so read as Option<String>.
+        // .optional() wraps "no rows" in outer Option; inner Option handles NULL.
+        let name: Option<Option<String>> = conn
             .query_row(
                 "SELECT head_ref FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
-                |row| row.get(0),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
             .map_err(|source| SessionError::Database {
@@ -1073,7 +1110,7 @@ impl SqliteSessionGraphStore {
                 source,
             })?;
 
-        Ok(name)
+        Ok(name.flatten())
     }
 
     fn resolve_target_to_commit_id(
@@ -2034,6 +2071,51 @@ mod sqlite_graph_head_transcript {
             Some("cancelled by user".to_string())
         );
     }
+
+    #[test]
+    fn head_transcript_uses_detached_head_commit_id() {
+        let dir = temp_dir("detached_transcript");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // Commit first turn on main.
+        let messages1 = vec![user_msg("Hello"), assistant_msg("Hi there!")];
+        let input1 = commit_input_with_usage(
+            "sess-1",
+            vec![],
+            messages1,
+            TurnCommitStatus::Completed,
+            None,
+            None,
+        );
+        let commit1 = store.commit_turn(input1).expect("first commit");
+
+        // Checkout the commit ID to enter detached HEAD.
+        let head = store
+            .checkout("sess-1", &commit1.commit_id)
+            .expect("checkout to detached");
+        assert!(
+            matches!(head, GraphHead::Detached { .. }),
+            "should be detached HEAD"
+        );
+
+        // head_transcript should still return the messages from the detached commit.
+        let transcript = store.head_transcript("sess-1").expect("head_transcript");
+
+        assert_eq!(
+            transcript.parent_commit_id,
+            Some(commit1.commit_id.clone()),
+            "transcript parent should be the detached commit"
+        );
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[0].content, "Hello");
+        assert_eq!(transcript.messages[0].role, "user");
+        assert_eq!(transcript.messages[1].content, "Hi there!");
+        assert_eq!(transcript.messages[1].role, "assistant");
+    }
 }
 
 // Pointer operations tests
@@ -2433,5 +2515,216 @@ mod session_graph_pointer_ops {
         assert!(!diff.only_in_from[0].commit_message.is_empty());
         assert_eq!(diff.only_in_to[0].status, TurnCommitStatus::Completed);
         assert!(!diff.only_in_to[0].commit_message.is_empty());
+    }
+
+    #[test]
+    fn checkout_existing_empty_branch_succeeds() {
+        let dir = temp_dir("checkout_empty_branch");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // main branch was created by create_session with NULL commit_id.
+        // Checkout should succeed even though the branch has no commits.
+        let head = store.checkout("sess-1", "main").expect("checkout main");
+        assert!(
+            matches!(head, GraphHead::Branch { name } if name == "main"),
+            "should return Branch with name 'main'"
+        );
+
+        // Status should still show branch main with no commit.
+        let status = store.status("sess-1").expect("status");
+        assert!(
+            matches!(status.head, GraphHead::Branch { name } if name == "main"),
+            "status HEAD should be Branch main"
+        );
+        assert!(
+            status.current_commit_id.is_none(),
+            "current_commit_id should be None for empty branch"
+        );
+    }
+
+    #[test]
+    fn reset_rejects_detached_head() {
+        let dir = temp_dir("reset_detached");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        let commits = setup_session_with_commits(&store, "sess-1", 2, None);
+        let first_id = commits[0].commit_id.clone();
+        let second_id = commits[1].commit_id.clone();
+
+        // Checkout first commit to enter detached HEAD.
+        store
+            .checkout("sess-1", &first_id)
+            .expect("checkout detached");
+
+        // Reset should be rejected while detached.
+        let result = store.reset("sess-1", &second_id);
+        assert!(result.is_err(), "reset should fail while detached");
+        match result {
+            Err(SessionError::Conflict(msg)) => {
+                assert!(
+                    msg.contains("detached"),
+                    "error should mention detached HEAD: {msg}"
+                );
+            }
+            other => panic!("expected Conflict error, got {other:?}"),
+        }
+
+        // Verify main branch was NOT moved — still points to second_id.
+        let conn = store.conn().expect("conn");
+        let main_commit: Option<String> = conn
+            .query_row(
+                "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            main_commit,
+            Some(second_id.clone()),
+            "main branch should still point to second commit"
+        );
+    }
+
+    #[test]
+    fn commit_turn_while_detached_does_not_move_main_branch() {
+        let dir = temp_dir("commit_detached");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // Commit A on main.
+        let messages_a = vec![user_msg("A"), assistant_msg("Response A")];
+        let input_a = commit_input("sess-1", vec![], messages_a, TurnCommitStatus::Completed);
+        let commit_a = store.commit_turn(input_a).expect("commit A");
+
+        // Checkout A to enter detached HEAD.
+        store
+            .checkout("sess-1", &commit_a.commit_id)
+            .expect("checkout detached");
+
+        // Commit B with parent A (while detached).
+        let messages_b = vec![user_msg("B"), assistant_msg("Response B")];
+        let input_b = commit_input(
+            "sess-1",
+            vec![commit_a.commit_id.clone()],
+            messages_b,
+            TurnCommitStatus::Completed,
+        );
+        let commit_b = store.commit_turn(input_b).expect("commit B while detached");
+
+        // Status should show detached at B.
+        let status = store.status("sess-1").expect("status");
+        assert!(
+            matches!(&status.head, GraphHead::Detached { commit_id } if *commit_id == commit_b.commit_id),
+            "HEAD should be detached at commit B, got {:?}",
+            status.head
+        );
+
+        // main branch should still point to A.
+        let conn = store.conn().expect("conn");
+        let main_commit: Option<String> = conn
+            .query_row(
+                "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(
+            main_commit,
+            Some(commit_a.commit_id.clone()),
+            "main branch should still point to commit A"
+        );
+
+        // head_transcript should include messages from both A and B.
+        let transcript = store.head_transcript("sess-1").expect("head_transcript");
+        assert_eq!(transcript.messages.len(), 4, "should have A+B messages");
+        assert_eq!(transcript.messages[0].content, "A");
+        assert_eq!(transcript.messages[1].content, "Response A");
+        assert_eq!(transcript.messages[2].content, "B");
+        assert_eq!(transcript.messages[3].content, "Response B");
+        assert_eq!(
+            transcript.parent_commit_id,
+            Some(commit_b.commit_id),
+            "transcript parent should be commit B"
+        );
+    }
+
+    #[test]
+    fn branch_from_detached_head_uses_detached_commit() {
+        let dir = temp_dir("branch_from_detached");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        let commits = setup_session_with_commits(&store, "sess-1", 2, None);
+        let first_id = commits[0].commit_id.clone();
+
+        // Checkout first commit to enter detached HEAD.
+        store
+            .checkout("sess-1", &first_id)
+            .expect("checkout detached");
+
+        // Create branch from detached HEAD (from=None should use current HEAD).
+        let branch_ref = store
+            .branch("sess-1", "detached-copy", None)
+            .expect("branch from detached");
+
+        assert_eq!(
+            branch_ref.commit_id,
+            Some(first_id.clone()),
+            "branch should point to the detached commit"
+        );
+    }
+
+    #[test]
+    fn commit_turn_allows_repeated_identical_user_message_across_turns() {
+        let dir = temp_dir("repeated_messages");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        store
+            .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+            .expect("create");
+
+        // First turn with user "hello" and assistant "hi".
+        let messages1 = vec![user_msg("hello"), assistant_msg("hi")];
+        let input1 = commit_input("sess-1", vec![], messages1, TurnCommitStatus::Completed);
+        let commit1 = store.commit_turn(input1).expect("first commit");
+
+        // Second turn with identical user "hello" and assistant "hi".
+        let messages2 = vec![user_msg("hello"), assistant_msg("hi")];
+        let input2 = commit_input(
+            "sess-1",
+            vec![commit1.commit_id.clone()],
+            messages2,
+            TurnCommitStatus::Completed,
+        );
+        let commit2 = store.commit_turn(input2).expect("second commit");
+
+        // Both commits should succeed.
+        assert_ne!(
+            commit1.commit_id, commit2.commit_id,
+            "commit IDs should differ"
+        );
+
+        // Message IDs should differ between the two commits.
+        assert_ne!(
+            commit1.message_ids, commit2.message_ids,
+            "message IDs should differ across turns even for identical content"
+        );
+
+        // Verify all messages exist in the database.
+        let conn = store.conn().expect("conn");
+        let msg_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM graph_messages WHERE session_id='sess-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(msg_count, 4, "should have 4 message rows total");
     }
 }
