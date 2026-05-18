@@ -127,6 +127,8 @@ pub struct ChatRequest {
     pub target: ModelTarget,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    /// OpenAI-specific: max completion tokens (replaces max_tokens for o-series)
+    pub max_completion_tokens: Option<u32>,
     pub stream: bool,
 }
 
@@ -138,6 +140,7 @@ impl ChatRequest {
             target,
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: false,
         }
     }
@@ -179,6 +182,17 @@ pub enum LlmEvent {
     },
     /// An error encountered during streaming.
     Error { message: String },
+    /// Citation from model (Anthropic extended field).
+    Citation { index: usize, cite_text: String },
+    /// Function signature for verification.
+    Signature { signature: String },
+    /// Grounding metadata (Gemini).
+    GroundingChunk { text: String, url: Option<String> },
+    /// Safety rating from model (Gemini).
+    SafetyRating {
+        category: String,
+        probability: String,
+    },
 }
 
 /// A model target specifying which model alias to route to.
@@ -339,6 +353,7 @@ mod tests {
             target: ModelTarget::default(),
             temperature: Some(0.7),
             max_tokens: None,
+            max_completion_tokens: None,
             stream: false,
         };
         let json = serde_json::to_string(&req).unwrap();

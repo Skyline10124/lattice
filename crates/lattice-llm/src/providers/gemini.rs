@@ -5,7 +5,7 @@
 //! `functionCall` / `functionResponse`, and `x-goog-api-key` auth.
 
 use crate::router::ResolvedModel;
-use crate::types::{ChatRequest, LlmEvent, Role, TokenUsage};
+use crate::types::{ChatRequest, LlmEvent, Role};
 
 /// Build the JSON body for a Gemini `streamGenerateContent` request.
 ///
@@ -17,13 +17,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
 
     for msg in &request.messages {
         match msg.role {
-            Role::System => match system_instruction {
-                Some(ref mut existing) => {
-                    existing.push_str("\n\n");
-                    existing.push_str(&msg.content);
-                }
-                None => system_instruction = Some(msg.content.clone()),
-            },
+            Role::System => super::push_system_text(&mut system_instruction, &msg.content),
             Role::User => {
                 let parts = serde_json::json!([{"text": msg.content}]);
                 contents.push(serde_json::json!({
@@ -168,29 +162,14 @@ impl GeminiSseParser {
 
     /// Parse a Gemini SSE data chunk into [`LlmEvent`] values.
     pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
-        let trimmed = data.trim();
-        if trimmed.is_empty() || trimmed == "[DONE]" {
-            return vec![];
-        }
-
-        let root: serde_json::Value = match serde_json::from_str(trimmed) {
+        let root = match super::parse_json_data("Gemini", data) {
             Ok(v) => v,
-            Err(e) => {
-                return vec![LlmEvent::Error {
-                    message: format!("Gemini SSE JSON parse error: {}", e),
-                }];
-            }
+            Err(LlmEvent::Started) => return vec![],
+            Err(e) => return vec![e],
         };
 
-        // Handle API error
-        if let Some(error) = root.get("error") {
-            let msg = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown Gemini streaming error");
-            return vec![LlmEvent::Error {
-                message: msg.to_string(),
-            }];
+        if let Some(error_event) = super::extract_api_error(&root) {
+            return vec![error_event];
         }
 
         let mut events = Vec::new();
@@ -262,25 +241,61 @@ impl GeminiSseParser {
                         events.push(LlmEvent::ToolCallEnd { id });
                     }
 
+                    // Safety ratings
+                    if let Some(ratings) = cand.get("safetyRatings").and_then(|r| r.as_array()) {
+                        for rating in ratings {
+                            if let (Some(cat), Some(prob)) = (
+                                rating.get("category").and_then(|c| c.as_str()),
+                                rating.get("probability").and_then(|p| p.as_str()),
+                            ) {
+                                events.push(LlmEvent::SafetyRating {
+                                    category: cat.to_string(),
+                                    probability: prob.to_string(),
+                                });
+                            }
+                        }
+                    }
+
+                    // Grounding metadata (web search / Google Search)
+                    if let Some(grounding) = cand.get("groundingMetadata") {
+                        if let Some(chunks) =
+                            grounding.get("groundingChunks").and_then(|c| c.as_array())
+                        {
+                            for chunk in chunks {
+                                if let Some(web) = chunk.get("web") {
+                                    let text = web
+                                        .get("title")
+                                        .or_else(|| web.get("snippet"))
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("");
+                                    let url = web
+                                        .get("uri")
+                                        .and_then(|u| u.as_str())
+                                        .map(|s| s.to_string());
+                                    if !text.is_empty() || url.is_some() {
+                                        events.push(LlmEvent::GroundingChunk {
+                                            text: text.to_string(),
+                                            url,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let mapped = if had_tool_calls {
                         "tool_calls".to_string()
                     } else {
                         Self::map_finish_reason(reason)
                     };
 
-                    let usage = root.get("usageMetadata").map(|u| TokenUsage {
-                        prompt_tokens: u
-                            .get("promptTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        completion_tokens: u
-                            .get("candidatesTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        total_tokens: u
-                            .get("totalTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
+                    let usage = root.get("usageMetadata").map(|u| {
+                        super::token_usage_from_keys(
+                            u,
+                            "promptTokenCount",
+                            "candidatesTokenCount",
+                            "totalTokenCount",
+                        )
                     });
 
                     events.push(LlmEvent::Done {
@@ -297,20 +312,12 @@ impl GeminiSseParser {
             if let Some(u) = root.get("usageMetadata") {
                 events.push(LlmEvent::Done {
                     finish_reason: "stop".to_string(),
-                    usage: Some(TokenUsage {
-                        prompt_tokens: u
-                            .get("promptTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        completion_tokens: u
-                            .get("candidatesTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        total_tokens: u
-                            .get("totalTokenCount")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                    }),
+                    usage: Some(super::token_usage_from_keys(
+                        u,
+                        "promptTokenCount",
+                        "candidatesTokenCount",
+                        "totalTokenCount",
+                    )),
                 });
             }
         }
@@ -322,6 +329,7 @@ impl GeminiSseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::GEMINI_BASE_URL;
     use crate::router::{CredentialStatus, ProviderKind};
     use crate::types::{ChatRequest, Message, ModelTarget, Role, ToolDefinition};
 
@@ -330,7 +338,7 @@ mod tests {
             alias: "gemini".to_string(),
             provider: ProviderKind::Gemini,
             provider_model: "gemini-2.5-flash".to_string(),
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            base_url: GEMINI_BASE_URL.to_string(),
             api_key_env: "GEMINI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         }
@@ -346,6 +354,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -364,6 +373,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -380,6 +390,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -406,6 +417,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -437,6 +449,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -465,6 +478,7 @@ mod tests {
             target: ModelTarget::new("gemini"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -478,10 +492,7 @@ mod tests {
 
     #[test]
     fn build_stream_url_includes_url_encoded_model() {
-        let url = build_stream_url(
-            "https://generativelanguage.googleapis.com/v1beta",
-            "gemini-2.5-flash",
-        );
+        let url = build_stream_url(GEMINI_BASE_URL, "gemini-2.5-flash");
         assert!(
             url.contains("gemini-2.5-flash"),
             "URL should contain model name, got: {}",

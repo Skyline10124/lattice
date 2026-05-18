@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::Result;
 use std::collections::HashMap;
 use std::fmt;

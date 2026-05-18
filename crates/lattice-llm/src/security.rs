@@ -126,6 +126,7 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::{ANTHROPIC_BASE_URL, OPENAI_BASE_URL};
 
     #[test]
     fn reject_file_scheme() {
@@ -171,8 +172,8 @@ mod tests {
 
     #[test]
     fn allow_https_public() {
-        assert!(validate_base_url("https://api.openai.com/v1").is_ok());
-        assert!(validate_base_url("https://api.anthropic.com").is_ok());
+        assert!(validate_base_url(OPENAI_BASE_URL).is_ok());
+        assert!(validate_base_url(ANTHROPIC_BASE_URL).is_ok());
     }
 
     #[test]

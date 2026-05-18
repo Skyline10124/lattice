@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::Result;
 use colored::Colorize;
 
@@ -20,14 +19,7 @@ pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> 
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if json {
-        let out = serde_json::json!({
-            "alias": resolved.alias,
-            "provider": format!("{:?}", resolved.provider),
-            "provider_model": resolved.provider_model,
-            "api_key_env": resolved.api_key_env,
-            "credential_status": format!("{:?}", resolved.credential_status),
-            "base_url": resolved.base_url,
-        });
+        let out = super::model_render::resolved_model_json(&resolved);
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
@@ -63,23 +55,11 @@ pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> 
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
 
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    use crate::commands::test_env::with_env_var;
 
     fn empty_creds() -> CredentialStore {
         CredentialStore::from_values(HashMap::new())
-    }
-
-    fn with_env_var(key: &str, value: &str, f: impl FnOnce()) {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        f();
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     // ── cli_diagnostics: resolve default text ─────────────────────────────
@@ -106,8 +86,8 @@ mod tests {
     fn cli_diagnostics_resolve_json_includes_all_fields() {
         with_env_var("OPENAI_API_KEY", "sk-resolve-json", || {
             let creds = empty_creds();
-            let result = run("gpt-4o", false, true, &creds);
-            assert!(result.is_ok(), "resolve gpt-4o json should succeed");
+            let result = run("gpt-5.5", false, true, &creds);
+            assert!(result.is_ok(), "resolve gpt-5.5 json should succeed");
         });
     }
 

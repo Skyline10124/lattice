@@ -6,7 +6,6 @@
 //! - 1: Provider/API/tool execution failure (`RunTurnStatus::Failed` or `Cancelled`)
 //! - 2: Input/configuration error (missing profile, missing credentials, missing session)
 
-#![allow(dead_code)]
 use anyhow::Result;
 use colored::Colorize;
 use lattice_agent::{AgentLoop, AgentLoopConfig};

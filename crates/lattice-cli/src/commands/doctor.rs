@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::Result;
 use colored::Colorize;
 
@@ -110,23 +109,11 @@ pub fn run(config: &Config, json: bool, _creds: &CredentialStore) -> Result<()> 
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
 
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    use crate::commands::test_env::with_env_var;
 
     fn empty_creds() -> CredentialStore {
         CredentialStore::from_values(HashMap::new())
-    }
-
-    fn with_env_var(key: &str, value: &str, f: impl FnOnce()) {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        f();
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     fn default_config() -> Config {

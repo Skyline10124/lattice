@@ -248,6 +248,7 @@ pub async fn dispatch_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::{ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL};
     use crate::router::{CredentialStatus, ModelRouter};
     use crate::types::{Message, ModelTarget};
 
@@ -263,7 +264,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "OPENAI_API_KEY_MISSING_TEST".to_string(),
             credential_status: CredentialStatus::Missing,
         };
@@ -284,7 +285,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "LATTICE_TEST_CLIENT_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
@@ -304,7 +305,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "LATTICE_TEST_MISSING_KEY".to_string(),
             credential_status: CredentialStatus::Missing,
         };
@@ -330,7 +331,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "LATTICE_TEST_EMPTY_KEY".to_string(),
             credential_status: CredentialStatus::Missing,
         };
@@ -344,14 +345,14 @@ mod tests {
     #[test]
     fn dispatch_does_not_use_registry_or_plugins() {
         let router = make_router();
-        let target = ModelTarget::new("gpt-4o");
+        let target = ModelTarget::new("gpt-5.5");
         let resolved = router.resolve(&target).unwrap();
         assert_eq!(resolved.provider, ProviderKind::OpenAi);
         // If this compiles without lattice_core, the test passes.
         // Verify build_request_body dispatches by kind
         let req = ChatRequest::new(vec![Message::user("hi")], target);
         let json = build_request_body(&req, &resolved);
-        assert_eq!(json["model"], "gpt-4o");
+        assert_eq!(json["model"], "gpt-5.5");
     }
 
     #[test]
@@ -377,7 +378,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
@@ -392,8 +393,8 @@ mod tests {
         let resolved = ResolvedModel {
             alias: "sonnet".to_string(),
             provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-20250514".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
+            provider_model: "claude-sonnet-4-6".to_string(),
+            base_url: ANTHROPIC_BASE_URL.to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
@@ -411,7 +412,7 @@ mod tests {
             alias: "gemini".to_string(),
             provider: ProviderKind::Gemini,
             provider_model: "gemini-2.5-flash".to_string(),
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            base_url: GEMINI_BASE_URL.to_string(),
             api_key_env: "GEMINI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
@@ -429,12 +430,12 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
         let url = build_endpoint_url(&resolved);
-        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(url, format!("{}/chat/completions", OPENAI_BASE_URL));
     }
 
     #[test]
@@ -442,13 +443,13 @@ mod tests {
         let resolved = ResolvedModel {
             alias: "sonnet".to_string(),
             provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-20250514".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
+            provider_model: "claude-sonnet-4-6".to_string(),
+            base_url: ANTHROPIC_BASE_URL.to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };
         let url = build_endpoint_url(&resolved);
-        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+        assert_eq!(url, format!("{}/v1/messages", ANTHROPIC_BASE_URL));
     }
 
     #[test]
@@ -457,7 +458,7 @@ mod tests {
             alias: "gemini".to_string(),
             provider: ProviderKind::Gemini,
             provider_model: "gemini-2.5-flash".to_string(),
-            base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            base_url: GEMINI_BASE_URL.to_string(),
             api_key_env: "GEMINI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         };

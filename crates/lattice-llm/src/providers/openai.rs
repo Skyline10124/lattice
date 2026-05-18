@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::router::ResolvedModel;
-use crate::types::{ChatRequest, LlmEvent, Role, TokenUsage};
+use crate::types::{ChatRequest, LlmEvent, Role};
 
 /// Build the JSON body for an OpenAI Chat Completions request.
 ///
@@ -90,8 +90,16 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         body["temperature"] = serde_json::json!(temperature);
     }
 
-    if let Some(max_tokens) = request.max_tokens {
+    // max_completion_tokens takes precedence over max_tokens for o-series models
+    if let Some(max_comp_tokens) = request.max_completion_tokens {
+        body["max_completion_tokens"] = serde_json::json!(max_comp_tokens);
+    } else if let Some(max_tokens) = request.max_tokens {
         body["max_tokens"] = serde_json::json!(max_tokens);
+    }
+
+    // Request usage in streaming responses for accurate token counts
+    if request.stream {
+        body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
 
     body
@@ -124,32 +132,14 @@ impl OpenAiSseParser {
     /// The `event_type` parameter is unused by OpenAI SSE (which uses unnamed
     /// `data:` lines), but is accepted for interface compatibility.
     pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
-        let trimmed = data.trim();
-        if trimmed.is_empty() {
-            return vec![];
-        }
-        if trimmed == "[DONE]" {
-            return vec![];
-        }
-
-        let root: serde_json::Value = match serde_json::from_str(trimmed) {
+        let root = match super::parse_json_data("OpenAI", data) {
             Ok(v) => v,
-            Err(e) => {
-                return vec![LlmEvent::Error {
-                    message: format!("SSE JSON parse error: {}", e),
-                }];
-            }
+            Err(LlmEvent::Started) => return vec![],
+            Err(e) => return vec![e],
         };
 
-        // Handle API error
-        if let Some(error) = root.get("error") {
-            let msg = error
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown API error");
-            return vec![LlmEvent::Error {
-                message: msg.to_string(),
-            }];
+        if let Some(error_event) = super::extract_api_error(&root) {
+            return vec![error_event];
         }
 
         let mut events = Vec::new();
@@ -222,19 +212,13 @@ impl OpenAiSseParser {
                             events.push(LlmEvent::ToolCallEnd { id });
                         }
 
-                        let usage = root.get("usage").map(|u| TokenUsage {
-                            prompt_tokens: u
-                                .get("prompt_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
-                            completion_tokens: u
-                                .get("completion_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
-                            total_tokens: u
-                                .get("total_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as u32,
+                        let usage = root.get("usage").map(|u| {
+                            super::token_usage_from_keys(
+                                u,
+                                "prompt_tokens",
+                                "completion_tokens",
+                                "total_tokens",
+                            )
                         });
 
                         events.push(LlmEvent::Done {
@@ -253,6 +237,7 @@ impl OpenAiSseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::OPENAI_BASE_URL;
     use crate::router::{CredentialStatus, ProviderKind};
     use crate::types::{ChatRequest, Message, ModelTarget, Role, ToolDefinition};
 
@@ -261,7 +246,7 @@ mod tests {
             alias: "gpt-4o".to_string(),
             provider: ProviderKind::OpenAi,
             provider_model: "gpt-4o".to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url: OPENAI_BASE_URL.to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         }
@@ -285,6 +270,7 @@ mod tests {
             target: ModelTarget::new("gpt-4o"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -317,6 +303,7 @@ mod tests {
             target: ModelTarget::new("gpt-4o"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -339,6 +326,7 @@ mod tests {
             target: ModelTarget::new("gpt-4o"),
             temperature: Some(0.7),
             max_tokens: Some(1024),
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -375,6 +363,7 @@ mod tests {
             target: ModelTarget::new("gpt-4o"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -402,6 +391,7 @@ mod tests {
             target: ModelTarget::new("gpt-4o"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();

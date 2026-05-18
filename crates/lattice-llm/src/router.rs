@@ -7,6 +7,9 @@
 
 use std::env;
 
+use crate::endpoints::{
+    ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL, OPENAI_COMPATIBLE_DEFAULT_BASE_URL,
+};
 use crate::stub::LlmError;
 use crate::types::ModelTarget;
 
@@ -101,10 +104,16 @@ impl ModelRouter {
     /// The `CredentialStatus` on each `ResolvedModel` carries the credential info.
     pub fn aliases(&self) -> Vec<ResolvedModel> {
         let names = [
-            "gpt-4o",
+            // OpenAI GPT series
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.3-codex",
             "gpt-4o-mini",
+            // Anthropic Claude series
+            "opus",
             "sonnet",
             "haiku",
+            // Other
             "gemini",
             "openai-compatible",
         ];
@@ -129,7 +138,7 @@ impl ModelRouter {
 
         if alias == "openai-compatible" {
             let base_url = std::env::var("OPENAI_COMPATIBLE_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434/v1".to_string());
+                .unwrap_or_else(|_| OPENAI_COMPATIBLE_DEFAULT_BASE_URL.to_string());
             return Ok(ResolvedModel {
                 alias: alias.to_string(),
                 provider: ProviderKind::OpenAiCompatible,
@@ -141,34 +150,55 @@ impl ModelRouter {
         }
 
         let (provider, provider_model, base_url, api_key_env) = match alias {
-            "gpt-4o" => (
+            // OpenAI GPT series
+            "gpt-5.5" | "gpt-5" => (
                 ProviderKind::OpenAi,
-                "gpt-4o",
-                "https://api.openai.com/v1",
+                "gpt-5.5",
+                OPENAI_BASE_URL,
+                "OPENAI_API_KEY",
+            ),
+            "gpt-5.4" => (
+                ProviderKind::OpenAi,
+                "gpt-5.4",
+                OPENAI_BASE_URL,
+                "OPENAI_API_KEY",
+            ),
+            "gpt-5.3-codex" => (
+                ProviderKind::OpenAi,
+                "gpt-5.3-codex",
+                OPENAI_BASE_URL,
                 "OPENAI_API_KEY",
             ),
             "gpt-4o-mini" => (
                 ProviderKind::OpenAi,
                 "gpt-4o-mini",
-                "https://api.openai.com/v1",
+                OPENAI_BASE_URL,
                 "OPENAI_API_KEY",
+            ),
+            // Anthropic Claude series
+            "opus" => (
+                ProviderKind::Anthropic,
+                "claude-opus-4-7",
+                ANTHROPIC_BASE_URL,
+                "ANTHROPIC_API_KEY",
             ),
             "sonnet" => (
                 ProviderKind::Anthropic,
-                "claude-sonnet-4-20250514",
-                "https://api.anthropic.com",
+                "claude-sonnet-4-6",
+                ANTHROPIC_BASE_URL,
                 "ANTHROPIC_API_KEY",
             ),
             "haiku" => (
                 ProviderKind::Anthropic,
-                "claude-3-5-haiku-20241022",
-                "https://api.anthropic.com",
+                "claude-haiku-4-5",
+                ANTHROPIC_BASE_URL,
                 "ANTHROPIC_API_KEY",
             ),
+            // Gemini
             "gemini" => (
                 ProviderKind::Gemini,
                 "gemini-2.5-flash",
-                "https://generativelanguage.googleapis.com/v1beta",
+                GEMINI_BASE_URL,
                 "GEMINI_API_KEY",
             ),
             _ => {
@@ -220,14 +250,14 @@ mod tests {
     // ── ModelRouter::resolve — known aliases ──────────────────────────────
 
     #[test]
-    fn resolve_gpt4o() {
+    fn resolve_gpt55() {
         let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-4o");
-        let resolved = router.resolve(&target).expect("gpt-4o should resolve");
-        assert_eq!(resolved.alias, "gpt-4o");
+        let target = ModelTarget::new("gpt-5.5");
+        let resolved = router.resolve(&target).expect("gpt-5.5 should resolve");
+        assert_eq!(resolved.alias, "gpt-5.5");
         assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        assert_eq!(resolved.provider_model, "gpt-4o");
-        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
+        assert_eq!(resolved.provider_model, "gpt-5.5");
+        assert_eq!(resolved.base_url, OPENAI_BASE_URL);
         assert_eq!(resolved.api_key_env, "OPENAI_API_KEY");
     }
 
@@ -238,7 +268,7 @@ mod tests {
         let resolved = router.resolve(&target).expect("gpt-4o-mini should resolve");
         assert_eq!(resolved.provider, ProviderKind::OpenAi);
         assert_eq!(resolved.provider_model, "gpt-4o-mini");
-        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
+        assert_eq!(resolved.base_url, OPENAI_BASE_URL);
         assert_eq!(resolved.api_key_env, "OPENAI_API_KEY");
     }
 
@@ -249,8 +279,8 @@ mod tests {
         let resolved = router.resolve(&target).expect("sonnet should resolve");
         assert_eq!(resolved.alias, "sonnet");
         assert_eq!(resolved.provider, ProviderKind::Anthropic);
-        assert_eq!(resolved.provider_model, "claude-sonnet-4-20250514");
-        assert_eq!(resolved.base_url, "https://api.anthropic.com");
+        assert_eq!(resolved.provider_model, "claude-sonnet-4-6");
+        assert_eq!(resolved.base_url, ANTHROPIC_BASE_URL);
         assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
     }
 
@@ -260,7 +290,7 @@ mod tests {
         let target = ModelTarget::new("haiku");
         let resolved = router.resolve(&target).expect("haiku should resolve");
         assert_eq!(resolved.provider, ProviderKind::Anthropic);
-        assert_eq!(resolved.provider_model, "claude-3-5-haiku-20241022");
+        assert_eq!(resolved.provider_model, "claude-haiku-4-5");
         assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
     }
 
@@ -271,10 +301,7 @@ mod tests {
         let resolved = router.resolve(&target).expect("gemini should resolve");
         assert_eq!(resolved.provider, ProviderKind::Gemini);
         assert_eq!(resolved.provider_model, "gemini-2.5-flash");
-        assert_eq!(
-            resolved.base_url,
-            "https://generativelanguage.googleapis.com/v1beta"
-        );
+        assert_eq!(resolved.base_url, GEMINI_BASE_URL);
         assert_eq!(resolved.api_key_env, "GEMINI_API_KEY");
     }
 
@@ -324,8 +351,8 @@ mod tests {
         // Set a credential env var to simulate an available key
         std::env::set_var("OPENAI_API_KEY", "sk-secret-value-123");
         let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-4o");
-        let resolved = router.resolve(&target).expect("gpt-4o should resolve");
+        let target = ModelTarget::new("gpt-5.5");
+        let resolved = router.resolve(&target).expect("gpt-5.5 should resolve");
         let debug_str = format!("{:?}", resolved);
         assert!(
             !debug_str.contains("sk-secret-value-123"),
@@ -369,8 +396,11 @@ mod tests {
         let aliases = router.aliases();
         let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
         for expected in &[
-            "gpt-4o",
+            "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.3-codex",
             "gpt-4o-mini",
+            "opus",
             "sonnet",
             "haiku",
             "gemini",

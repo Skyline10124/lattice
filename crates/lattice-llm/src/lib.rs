@@ -10,6 +10,7 @@
 //! `lattice-sandbox`, or `lattice-policy`.
 
 mod client;
+mod endpoints;
 mod logging;
 mod providers;
 mod router;

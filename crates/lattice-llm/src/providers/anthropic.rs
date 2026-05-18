@@ -38,13 +38,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
 
     for msg in &request.messages {
         match msg.role {
-            Role::System => match system {
-                Some(ref mut existing) => {
-                    existing.push_str("\n\n");
-                    existing.push_str(&msg.content);
-                }
-                None => system = Some(msg.content.clone()),
-            },
+            Role::System => super::push_system_text(&mut system, &msg.content),
             Role::User => {
                 let content = if msg.content.is_empty() {
                     serde_json::json!([{"type": "text", "text": "(empty message)"}])
@@ -186,17 +180,10 @@ impl AnthropicSseParser {
 
     /// Parse an Anthropic SSE event into [`LlmEvent`] values.
     pub fn parse_chunk(&mut self, event_type: &str, data: &str) -> Vec<LlmEvent> {
-        if data.trim().is_empty() {
-            return vec![];
-        }
-
-        let root: serde_json::Value = match serde_json::from_str(data) {
+        let root = match super::parse_json_data("Anthropic", data) {
             Ok(v) => v,
-            Err(e) => {
-                return vec![LlmEvent::Error {
-                    message: format!("Anthropic SSE JSON parse error: {}", e),
-                }];
-            }
+            Err(LlmEvent::Started) => return vec![],
+            Err(e) => return vec![e],
         };
 
         match event_type {
@@ -256,6 +243,27 @@ impl AnthropicSseParser {
                             vec![]
                         }
                     }
+                    Some("citation_delta") => {
+                        let cite_text = delta["cite_text"].as_str().unwrap_or("");
+                        if cite_text.is_empty() {
+                            vec![]
+                        } else {
+                            vec![LlmEvent::Citation {
+                                index: idx as usize,
+                                cite_text: cite_text.to_string(),
+                            }]
+                        }
+                    }
+                    Some("signature_delta") => {
+                        let signature = delta["signature"].as_str().unwrap_or("");
+                        if signature.is_empty() {
+                            vec![]
+                        } else {
+                            vec![LlmEvent::Signature {
+                                signature: signature.to_string(),
+                            }]
+                        }
+                    }
                     _ => vec![],
                 }
             }
@@ -299,6 +307,7 @@ impl AnthropicSseParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::endpoints::ANTHROPIC_BASE_URL;
     use crate::router::{CredentialStatus, ProviderKind};
     use crate::types::{ChatRequest, Message, ModelTarget, Role, ToolDefinition};
 
@@ -306,8 +315,8 @@ mod tests {
         ResolvedModel {
             alias: "sonnet".to_string(),
             provider: ProviderKind::Anthropic,
-            provider_model: "claude-sonnet-4-20250514".to_string(),
-            base_url: "https://api.anthropic.com".to_string(),
+            provider_model: "claude-sonnet-4-6".to_string(),
+            base_url: ANTHROPIC_BASE_URL.to_string(),
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             credential_status: CredentialStatus::Present,
         }
@@ -320,7 +329,7 @@ mod tests {
         let req = ChatRequest::new(vec![Message::user("hello")], ModelTarget::new("sonnet"));
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
-        assert_eq!(json["model"], "claude-sonnet-4-20250514");
+        assert_eq!(json["model"], "claude-sonnet-4-6");
         assert_eq!(json["max_tokens"], 4096);
     }
 
@@ -332,6 +341,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -354,6 +364,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -369,6 +380,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -399,6 +411,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -428,6 +441,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -452,6 +466,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -471,6 +486,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: None,
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -486,6 +502,7 @@ mod tests {
             target: ModelTarget::new("sonnet"),
             temperature: None,
             max_tokens: Some(2048),
+            max_completion_tokens: None,
             stream: true,
         };
         let resolved = make_resolved();
@@ -572,7 +589,7 @@ mod tests {
     #[test]
     fn parse_sse_message_start_tracks_input_tokens() {
         let mut parser = AnthropicSseParser::new();
-        let data = r#"{"type":"message_start","message":{"id":"msg_001","type":"message","role":"assistant","model":"claude-sonnet-4-20250514","usage":{"input_tokens":42}}}"#;
+        let data = r#"{"type":"message_start","message":{"id":"msg_001","type":"message","role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":42}}}"#;
         let events = parser.parse_chunk("message_start", data);
         assert!(events.is_empty(), "message_start should not emit events");
         // Later: message_delta should include input_tokens in usage
@@ -626,6 +643,6 @@ mod tests {
             &ChatRequest::new(vec![Message::user("test")], ModelTarget::new("sonnet")),
             &make_resolved(),
         );
-        assert_eq!(json["model"], "claude-sonnet-4-20250514");
+        assert_eq!(json["model"], "claude-sonnet-4-6");
     }
 }

@@ -3,7 +3,6 @@
 //! Supports exactly: status, list, log, checkout, branch, diff, reset.
 //! Does not import or call old session manager surfaces.
 
-#![allow(dead_code)]
 use std::path::PathBuf;
 
 use anyhow::Result;

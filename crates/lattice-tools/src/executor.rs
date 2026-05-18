@@ -1270,6 +1270,27 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
 // Platform-specific bash execution helpers (setrlimit)
 // ---------------------------------------------------------------------------
 
+/// Wait for a child process with a timeout, producing a uniform result.
+async fn wait_with_timeout(
+    child: tokio::process::Child,
+    timeout_secs: u64,
+    configured_timeout: u32,
+) -> Result<std::process::Output, String> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "bash command timed out after {}s",
+            configured_timeout
+        )),
+    }
+}
+
 /// Execute a bash command with platform-specific resource limits (Unix).
 #[cfg(unix)]
 async fn execute_bash_command(
@@ -1312,24 +1333,7 @@ async fn execute_bash_command(
     tokio_cmd.kill_on_drop(true);
     let timeout_secs = std::cmp::max(limits.max_command_timeout, 1) as u64;
     let child = tokio_cmd.spawn().map_err(|e| e.to_string())?;
-
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => Ok(o),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => {
-            // `wait_with_output` owns the child, so `kill_on_drop(true)` is the
-            // cleanup path when the timeout future is dropped.
-            Err(format!(
-                "bash command timed out after {}s",
-                limits.max_command_timeout
-            ))
-        }
-    }
+    wait_with_timeout(child, timeout_secs, limits.max_command_timeout).await
 }
 
 /// Execute a bash command on non-Unix platforms.
@@ -1343,20 +1347,7 @@ async fn execute_bash_command(
     let mut cmd = tokio::process::Command::new("sh");
     cmd.args(["-c", command]).kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| e.to_string())?;
-
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => Ok(o),
-        Ok(Err(e)) => Err(e.to_string()),
-        Err(_) => Err(format!(
-            "bash command timed out after {}s",
-            limits.max_command_timeout
-        )),
-    }
+    wait_with_timeout(child, timeout_secs, limits.max_command_timeout).await
 }
 
 #[cfg(test)]
