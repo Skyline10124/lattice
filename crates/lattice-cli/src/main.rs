@@ -4,11 +4,8 @@ use colored::Colorize;
 
 mod commands;
 mod config;
-mod credentials;
-
 use commands::{doctor, models, resolve, session as session_cmd};
 use config::Config;
-use credentials::CredentialStore;
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -108,21 +105,20 @@ async fn main() -> std::process::ExitCode {
 
 fn run_other_commands(cli: Cli) -> Result<()> {
     let config = Config::load(None)?;
-    let creds = CredentialStore::from_config(&config)?;
 
     match cli.command {
         Some(Commands::Run { .. }) => unreachable!("handled above"),
         Some(Commands::Models { auth }) => {
-            models::run(auth, cli.json, &creds)?;
+            models::run(auth, cli.json)?;
         }
         Some(Commands::Resolve { model }) => {
-            resolve::run(&model, cli.verbose, cli.json, &creds)?;
+            resolve::run(&model, cli.verbose, cli.json)?;
         }
         Some(Commands::Session { action }) => {
             session_cmd::run(action, cli.json)?;
         }
         Some(Commands::Doctor) => {
-            doctor::run(&config, cli.json, &creds)?;
+            doctor::run(&config, cli.json)?;
         }
         None => {
             let _ = Cli::command().print_help();

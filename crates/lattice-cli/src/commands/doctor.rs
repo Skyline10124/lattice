@@ -2,8 +2,6 @@ use anyhow::Result;
 use colored::Colorize;
 
 use crate::config::Config;
-use crate::credentials::CredentialStore;
-
 /// Report structure for doctor diagnostics.
 pub struct DoctorReport {
     pub config_loaded: bool,
@@ -138,7 +136,7 @@ pub fn render_text(report: &DoctorReport) -> String {
 ///
 /// Never prints credential values — only env var names and present/missing status.
 /// Does not reference old Catalog, Runtime::list_models, or inspect_model.
-pub fn run(config: &Config, json: bool, _creds: &CredentialStore) -> Result<()> {
+pub fn run(config: &Config, json: bool) -> Result<()> {
     let report = build_report(config);
     if json {
         println!("{}", render_json(&report)?);

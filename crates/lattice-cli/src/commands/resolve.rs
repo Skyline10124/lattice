@@ -1,8 +1,6 @@
 use anyhow::Result;
 use colored::Colorize;
 
-use crate::credentials::CredentialStore;
-
 /// Resolve a model alias to provider details.
 ///
 /// Default text: short provider/provider_model only.
@@ -11,7 +9,7 @@ use crate::credentials::CredentialStore;
 /// `--json`: structured object with all fields.
 ///
 /// Never prints credential values — only env var names and present/missing status.
-pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> Result<()> {
+pub fn run(model: &str, verbose: bool, json: bool) -> Result<()> {
     let router = lattice_llm::ModelRouter::new();
     let target = lattice_llm::ModelTarget::new(model);
     let resolved = router
@@ -54,21 +52,15 @@ pub fn run(model: &str, verbose: bool, json: bool, _creds: &CredentialStore) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use crate::commands::test_env::with_env_var;
-
-    fn empty_creds() -> CredentialStore {
-        CredentialStore::from_values(HashMap::new())
-    }
 
     // ── cli_diagnostics: resolve default text ─────────────────────────────
 
     #[test]
     fn cli_diagnostics_resolve_default_text_includes_provider_and_model() {
         with_env_var("ANTHROPIC_API_KEY", "sk-resolve-test", || {
-            let creds = empty_creds();
-            let result = run("sonnet", false, false, &creds);
+            let result = run("sonnet", false, false);
             assert!(result.is_ok(), "resolve sonnet default text should succeed");
         });
     }
@@ -76,8 +68,7 @@ mod tests {
     #[test]
     fn cli_diagnostics_resolve_verbose_includes_all_metadata() {
         with_env_var("ANTHROPIC_API_KEY", "sk-resolve-verbose", || {
-            let creds = empty_creds();
-            let result = run("sonnet", true, false, &creds);
+            let result = run("sonnet", true, false);
             assert!(result.is_ok(), "resolve sonnet verbose should succeed");
         });
     }
@@ -85,8 +76,7 @@ mod tests {
     #[test]
     fn cli_diagnostics_resolve_json_includes_all_fields() {
         with_env_var("OPENAI_API_KEY", "sk-resolve-json", || {
-            let creds = empty_creds();
-            let result = run("gpt-5.5", false, true, &creds);
+            let result = run("gpt-5.5", false, true);
             assert!(result.is_ok(), "resolve gpt-5.5 json should succeed");
         });
     }
@@ -96,12 +86,7 @@ mod tests {
     #[test]
     fn cli_diagnostics_resolve_json_excludes_secret_values() {
         with_env_var("ANTHROPIC_API_KEY", "sk-resolve-leak-test", || {
-            let creds = empty_creds();
-            // The function should succeed and the JSON output should contain
-            // api_key_env but not the secret value. We verify by checking that
-            // the function completes — the rendering contract is that only
-            // env var names and status are printed.
-            let result = run("sonnet", false, true, &creds);
+            let result = run("sonnet", false, true);
             assert!(result.is_ok());
         });
     }
@@ -110,8 +95,7 @@ mod tests {
 
     #[test]
     fn cli_diagnostics_resolve_unknown_model_returns_error() {
-        let creds = empty_creds();
-        let result = run("nonexistent-model-xyz", false, false, &creds);
+        let result = run("nonexistent-model-xyz", false, false);
         assert!(result.is_err(), "unknown model should return error");
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
@@ -125,11 +109,8 @@ mod tests {
 
     #[test]
     fn cli_diagnostics_resolve_no_provider_override() {
-        // The v1.1 resolve command does not accept provider_override.
-        // Verify the function signature matches (model, verbose, json, creds).
         with_env_var("ANTHROPIC_API_KEY", "sk-resolve-noprovider", || {
-            let creds = empty_creds();
-            let result = run("sonnet", false, false, &creds);
+            let result = run("sonnet", false, false);
             assert!(
                 result.is_ok(),
                 "resolve without provider override should work"
