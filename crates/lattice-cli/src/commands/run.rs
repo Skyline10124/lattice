@@ -192,7 +192,7 @@ fn handle_profile_error(
                 return Ok(std::process::ExitCode::from(2));
             }
             eprint!(
-                "No default agent profile exists. Create .lattice/agents/default/agent.toml and continue this run? [y/N] "
+                "No default agent profile exists. Create .lattice/agents/default/agent.toml now? [y/N] "
             );
             std::io::stderr().flush()?;
             let mut answer = String::new();
@@ -203,7 +203,7 @@ fn handle_profile_error(
             }
             let path = create_default_profile(dir, template)?;
             eprintln!(
-                "Created {}. Edit it later to change prompt, tools, model, or security settings.",
+                "Created {}. Edit it if needed, then re-run the command.",
                 path.strip_prefix(project_root).unwrap_or(&path).display()
             );
             Err(anyhow::anyhow!(
@@ -254,7 +254,7 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
     let path_str = canonical.to_string_lossy();
 
     let dangerous_prefixes = [
-        "/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot", "/root",
+        "/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot",
     ];
     for prefix in &dangerous_prefixes {
         if path_str.starts_with(prefix) {
