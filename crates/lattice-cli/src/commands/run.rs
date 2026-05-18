@@ -98,7 +98,7 @@ async fn run_inner(
 
     // Build AgentLoop with real LLM client and tool executor
     let enabled_tools = loaded_profile.profile.tools.enabled.clone();
-    let project_root_str = loaded_profile.package_dir.to_string_lossy().to_string();
+    let project_root_str = project_root.to_string_lossy().to_string();
     let tool_executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
         &project_root_str,
         enabled_tools,
@@ -492,6 +492,50 @@ mod tests {
     }
 
     // ── Boundary: no old crate imports ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
+        // Regression: run_inner used to pass loaded_profile.package_dir
+        // (.lattice/agents/default) as the tool executor's project_root,
+        // which broke read_file/grep/etc for files outside that subdirectory.
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+
+        // Create workspace content: src/lib.rs at the workspace root
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
+
+        // Create profile directory that is a *subdirectory* of the workspace
+        let profile_dir = ws.join(".lattice/agents/default");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
+
+        // Build tool executor with the *workspace root* (the fix), not profile_dir
+        let enabled = vec!["read_file".to_string()];
+        let executor =
+            lattice_tools::executor::DefaultToolExecutor::for_project_root(
+                &ws.to_string_lossy(),
+                enabled,
+            )
+            .expect("executor creation must succeed");
+
+        // read_file("src/lib.rs") must resolve against workspace root, not profile_dir
+        let call = lattice_llm::ToolCall::new(
+            "test-call",
+            lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
+        );
+        use lattice_tools::ToolExecutor as _;
+        let result = executor.execute(&call).await;
+
+        assert!(
+            result.contains("fn main()"),
+            "read_file must succeed via workspace root; got: {result}"
+        );
+        assert!(
+            !result.contains("outside the project root"),
+            "must not be rejected as out-of-root"
+        );
+    }
 
     #[test]
     fn run_source_has_no_old_crate_imports() {
