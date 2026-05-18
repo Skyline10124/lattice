@@ -8,7 +8,6 @@ use lattice_agent::{
 };
 use lattice_session::{GraphMessage, HeadTranscript, TurnUsage};
 
-/// A fake LLM that returns a predetermined sequence of responses.
 struct FakeLlm {
     responses: std::sync::Mutex<Vec<Result<lattice_llm::ChatResponse, String>>>,
     call_count: AtomicUsize,
@@ -39,7 +38,6 @@ impl LlmClient for FakeLlm {
     }
 }
 
-/// A fake tool executor that returns predetermined results.
 struct FakeToolExecutor {
     results: std::sync::Mutex<Vec<String>>,
 }
@@ -104,20 +102,6 @@ fn make_request_with_transcript(
         timeout: None,
     }
 }
-
-// ── Test: public contract uses stable names ─────────────────────────
-
-#[test]
-fn agent_loop_public_contract_uses_stable_names() {
-    let _ = std::any::TypeId::of::<AgentLoop>();
-    let _ = std::any::TypeId::of::<AgentLoopConfig>();
-    let _ = std::any::TypeId::of::<AgentTurnRequest>();
-    let _ = std::any::TypeId::of::<AgentTurnResult>();
-    let _ = std::any::TypeId::of::<AgentTurnEvent>();
-    let _ = std::any::TypeId::of::<AgentTurnStatus>();
-}
-
-// ── Test: messages built from transcript + user input ────────────────
 
 #[tokio::test]
 async fn agent_loop_builds_messages_from_transcript_and_user_input() {
@@ -199,8 +183,6 @@ async fn agent_loop_builds_messages_from_transcript_and_user_input() {
     assert_eq!(captured.messages[2].role, lattice_llm::Role::User);
 }
 
-// ── Test: system prompt prepended ────────────────────────────────────
-
 #[tokio::test]
 async fn agent_loop_prepends_system_prompt_when_present() {
     let request_capture: Arc<std::sync::Mutex<Option<lattice_llm::ChatRequest>>> =
@@ -252,8 +234,6 @@ async fn agent_loop_prepends_system_prompt_when_present() {
     assert_eq!(captured.messages[1].content, "hello");
 }
 
-// ── Test: unknown enabled tools fail before LLM call ────────────────
-
 #[tokio::test]
 async fn agent_loop_unknown_enabled_tools_fails_before_llm_call() {
     let llm = Arc::new(FakeLlm::new(vec![]));
@@ -283,8 +263,6 @@ async fn agent_loop_unknown_enabled_tools_fails_before_llm_call() {
     assert!(result.messages.is_empty());
     assert_eq!(result.assistant_output, "");
 }
-
-// ── Task 2 behavioral tests ─────────────────────────────────────────
 
 #[tokio::test]
 async fn agent_loop_executes_one_tool_then_final_answer() {

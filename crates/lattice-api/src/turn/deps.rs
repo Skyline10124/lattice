@@ -7,31 +7,23 @@ use super::types::RunTurnRequest;
 use crate::session::{ApiError, Result, SessionApi};
 
 /// Dependency injection seam for turn execution.
-///
-/// Tests inject a fake implementation; production uses [`RealTurnDeps`].
 #[async_trait::async_trait]
 pub trait TurnDeps: Send + Sync {
-    /// Create a new session and return its ID.
     fn create_session(&self, request: &RunTurnRequest) -> std::result::Result<String, ApiError>;
 
-    /// Open an existing session and return its ID (or error if not found).
     fn open_session(&self, session_id: &str) -> std::result::Result<String, ApiError>;
 
-    /// Read the current HEAD transcript for a session.
     fn head_transcript(&self, session_id: &str) -> std::result::Result<HeadTranscript, ApiError>;
 
-    /// Execute the agent turn. Returns (events, result).
     async fn execute_agent_turn(
         &self,
         request: AgentTurnRequest,
     ) -> std::result::Result<(Vec<AgentTurnEvent>, AgentTurnResult), ApiError>;
 
-    /// Commit a turn to durable storage. Returns the commit ID.
     fn commit_turn(&self, input: TurnCommitInput) -> std::result::Result<String, ApiError>;
 }
 
-/// Production implementation of [`TurnDeps`] backed by [`SessionApi`] and
-/// [`AgentLoop`].
+/// Production implementation of TurnDeps backed by SessionApi and AgentLoop.
 pub struct RealTurnDeps {
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,

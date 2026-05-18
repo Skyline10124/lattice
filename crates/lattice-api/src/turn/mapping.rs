@@ -6,10 +6,6 @@ use super::types::{RunTurnRequest, RunTurnStatus, ToolResultSummary};
 use lattice_agent::AgentTurnRequest;
 
 /// Resolve model alias and system prompt from the request.
-///
-/// D-10: When `request.model` is `Some`, it overrides the loaded profile's
-/// default model. The profile still supplies the system prompt, enabled tools,
-/// and project root.
 pub(crate) fn resolve_model_and_prompt(
     request: &RunTurnRequest,
 ) -> (String, Option<String>, String) {
@@ -43,8 +39,7 @@ pub(crate) fn resolve_model_and_prompt(
     (model, system_prompt, provider)
 }
 
-/// Build an [`AgentTurnRequest`] from the API request, session context, and
-/// resolved model/prompt.
+/// Build an AgentTurnRequest from the API request, session context, and resolved model/prompt.
 pub(crate) fn build_agent_request(
     request: &RunTurnRequest,
     session_id: &str,

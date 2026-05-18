@@ -1,4 +1,4 @@
-//! Lightweight lifecycle hook vocabulary for the v1.1 runtime.
+//! Lightweight lifecycle hook vocabulary for the runtime.
 //!
 //! This crate intentionally owns only hook points, hook payloads, dispatch, and
 //! registration. Hook payloads are local typed wrappers around

@@ -1,19 +1,8 @@
 //! Explicit enabled-tool resolver and LLM schema adapter for v1.1 main path.
 //!
-//! This module replaces bundle-based capability resolution for the v1.1 main
-//! path. Only tool names explicitly listed in `profile.tools.enabled` are
-//! exposed to the model and allowed for execution. Bundle expansion
-//! (`resolve_capabilities`) is not used here.
-//!
-//! # Design decisions
-//!
-//! - D-13: Only explicit `tools.enabled` names are used.
-//! - D-14: No `ToolBundle` expansion enters the v1.1 main path.
-//! - D-15: Definitions come from the built-in inventory, filtered by exact names.
-//! - D-16: Unknown names fail before any model or executor call.
-//! - D-17: `bash` and `web_search` are ordinary tools -- no special authorization.
-//! - D-18: No second authorization field or approval/policy flow for shell/web.
-//! - D-03/D-04: Module is named `enabled_tools`, not `v11` or `simple`.
+//! Only tool names explicitly listed in `profile.tools.enabled` are exposed to
+//! the model and allowed for execution. Bundle expansion is intentionally not
+//! part of the v1.1 main path.
 
 use std::collections::BTreeSet;
 
@@ -23,10 +12,7 @@ use crate::tool_definitions::default_tool_definitions;
 /// definitions, derived from the profile `tools.enabled` list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnabledTools {
-    /// Deterministic set of enabled tool names.
     pub tool_names: BTreeSet<String>,
-    /// Ordered LLM tool definitions matching the enabled names, suitable for
-    /// inclusion in `ChatRequest.tools`.
     pub definitions: Vec<lattice_llm::ToolDefinition>,
 }
 
@@ -35,9 +21,7 @@ pub struct EnabledTools {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown enabled tools: {unknown:?}; available built-in tools: {available:?}")]
 pub struct EnabledToolError {
-    /// Names from the `enabled` list that were not found in the inventory.
     pub unknown: Vec<String>,
-    /// All tool names available in the built-in inventory.
     pub available: Vec<String>,
 }
 
@@ -48,8 +32,7 @@ pub struct EnabledToolError {
 /// available built-in tool names, so the caller can produce a clear diagnostic
 /// before any model or executor call.
 ///
-/// Bundle expansion is intentionally not performed (D-14). If you need
-/// bundle-based resolution, use [`crate::capabilities::resolve_capabilities`].
+/// Bundle expansion is intentionally not part of the v1.1 main path.
 pub fn resolve_enabled_tools(enabled: &[String]) -> Result<EnabledTools, EnabledToolError> {
     let inventory = default_tool_definitions();
     let available: BTreeSet<String> = inventory.iter().map(|d| d.name.clone()).collect();
@@ -155,8 +138,7 @@ mod tests {
 
     #[test]
     fn bundle_resolver_is_not_used_by_enabled_tools() {
-        // Selecting no explicit names exposes no tools, even though legacy
-        // bundles still exist elsewhere in the codebase.
+        // Selecting no explicit names exposes no tools.
         let empty: Vec<String> = vec![];
         let result = resolve_enabled_tools(&empty).expect("empty is valid");
         assert!(

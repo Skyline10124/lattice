@@ -1,8 +1,8 @@
 //! v1.1 agent loop: sequences LLM calls and tool execution for a single turn.
 //!
-//! This module implements the stable public main-path `AgentLoop` that is
-//! It uses `lattice-llm` types at the model boundary and
-//! `lattice-tools::enabled_tools` for tool authorization.
+//! This module implements the stable public main-path `AgentLoop`. It uses
+//! `lattice-llm` types at the model boundary and `lattice-tools::enabled_tools`
+//! for tool authorization.
 //!
 //! # Design decisions
 //!
@@ -42,10 +42,6 @@ pub use types::{
     AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus,
 };
 
-// ---------------------------------------------------------------------------
-// AgentLoopConfig
-// ---------------------------------------------------------------------------
-
 /// Configuration for an [`AgentLoop`] instance.
 ///
 /// Holds the injectable LLM client and tool executor. The loop itself is
@@ -66,10 +62,6 @@ impl fmt::Debug for AgentLoopConfig {
             .finish()
     }
 }
-
-// ---------------------------------------------------------------------------
-// AgentLoop
-// ---------------------------------------------------------------------------
 
 /// The v1.1 agent loop.
 ///

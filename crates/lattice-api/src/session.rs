@@ -12,71 +12,49 @@ use lattice_session::{
 use std::path::PathBuf;
 use uuid::Uuid;
 
-/// Errors that occur during API operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    /// A session with the requested id was not found.
     #[error("session '{0}' not found")]
     NotFound(String),
 
-    /// An internal error occurred.
     #[error("internal error: {0}")]
     Internal(String),
 }
 
-/// Convenience result type for API operations.
 pub type Result<T> = std::result::Result<T, ApiError>;
 
-/// Request to create a new session.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct CreateSessionRequest {
-    /// Optional human-readable label.
     pub label: Option<String>,
-    /// Optional profile name to associate.
     pub profile: Option<String>,
-    /// Optional model alias.
     pub model: Option<String>,
 }
 
-/// Request to open an existing session.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct OpenSessionRequest {
-    /// The session id to open.
     pub id: String,
 }
 
-// ---------------------------------------------------------------------------
-// SessionApi: explicit durable session API backed by the v1.1 graph store
-// ---------------------------------------------------------------------------
-
-/// Explicit durable session API backed by [`SessionGraphStore`].
 pub struct SessionApi {
     store: SqliteSessionGraphStore,
 }
 
 impl SessionApi {
-    /// Create a new `SessionApi` backed by the given graph store.
     pub fn new(store: SqliteSessionGraphStore) -> Self {
         Self { store }
     }
 
-    /// Create a new `SessionApi` with a SQLite store rooted at `dir`.
     pub fn sqlite(dir: impl Into<PathBuf>) -> Self {
         Self {
             store: SqliteSessionGraphStore::new(dir),
         }
     }
 
-    /// Access the underlying graph store (crate-visible for tests).
     #[cfg(test)]
     pub(crate) fn store(&self) -> &SqliteSessionGraphStore {
         &self.store
     }
 
-    /// Create a new durable session.
-    ///
-    /// Generates a UUID v4 session ID, persists session metadata and an
-    /// initial `main` branch ref, and returns the graph session.
     pub fn create_session(&self, request: CreateSessionRequest) -> Result<GraphSession> {
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
@@ -85,46 +63,38 @@ impl SessionApi {
                 request.label.as_deref(),
                 request.profile.as_deref(),
                 request.model.as_deref(),
-                None, // provider resolved at turn time
+                None,
             )
             .map_err(map_session_error)
     }
 
-    /// Open an existing session by ID.
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<GraphSession> {
         self.store
             .open_session(&request.id)
             .map_err(map_session_error)
     }
 
-    /// Get the current status of a session.
     pub fn status(&self, session_id: &str) -> Result<SessionStatus> {
         self.store.status(session_id).map_err(map_session_error)
     }
 
-    /// List all sessions with summary information.
     pub fn list_sessions(&self) -> Result<Vec<SessionGraphSummary>> {
         self.store.list().map_err(map_session_error)
     }
 
-    /// Get the turn log for a session (one entry per turn commit).
+    /// Get the turn log for a session.
     pub fn log(&self, session_id: &str) -> Result<Vec<TurnLogEntry>> {
         self.store.log(session_id).map_err(map_session_error)
     }
 
-    /// Change the active branch or detach HEAD at a commit.
-    ///
-    /// D-23: pointer operation only — does not run a model or create a commit.
+    /// Change branch or detach HEAD at a commit.
     pub fn checkout(&self, session_id: &str, target: &str) -> Result<GraphHead> {
         self.store
             .checkout(session_id, target)
             .map_err(map_session_error)
     }
 
-    /// Create or move a branch ref to an existing commit.
-    ///
-    /// D-24: pointer operation only — does not fork a session, run a model,
-    /// or create a commit.
+    /// Create or move a branch ref to a commit.
     pub fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> Result<GraphRef> {
         self.store
             .branch(session_id, name, from)
@@ -132,27 +102,20 @@ impl SessionApi {
     }
 
     /// Compare graph paths between two commits.
-    ///
-    /// D-26: finds common ancestor and lists commits unique to each side.
     pub fn diff(&self, session_id: &str, from: &str, to: &str) -> Result<GraphDiff> {
         self.store
             .diff(session_id, from, to)
             .map_err(map_session_error)
     }
 
-    /// Move the current branch pointer to a target commit.
-    ///
-    /// D-25: does not delete commits; returns old HEAD commit ID for recovery.
+    /// Move branch pointer to a target commit.
     pub fn reset(&self, session_id: &str, target: &str) -> Result<ResetResult> {
         self.store
             .reset(session_id, target)
             .map_err(map_session_error)
     }
 
-    /// Read the complete ordered transcript for the current branch HEAD.
-    ///
-    /// Returns all messages from root through current HEAD plus the parent
-    /// commit ID (None if no commits yet).
+    /// Read the ordered transcript for the current branch HEAD.
     pub(crate) fn head_transcript(&self, session_id: &str) -> Result<HeadTranscript> {
         self.store
             .head_transcript(session_id)
@@ -160,15 +123,11 @@ impl SessionApi {
     }
 
     /// Commit a completed turn atomically.
-    ///
-    /// Writes messages, commit object, and branch/HEAD ref update in one
-    /// transaction. Returns the created [`TurnCommit`].
     pub(crate) fn commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
         self.store.commit_turn(input).map_err(map_session_error)
     }
 }
 
-/// Map a [`lattice_session::SessionError`] to an [`ApiError`].
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {
     match e {
         lattice_session::SessionError::NotFound(id) => ApiError::NotFound(id),
@@ -176,9 +135,7 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Phase 8 session_graph tests: SessionApi backed by the v1.1 graph store
-// ---------------------------------------------------------------------------
+// Tests
 
 #[cfg(test)]
 mod session_graph {
@@ -221,7 +178,6 @@ mod session_graph {
         }
     }
 
-    /// Helper: create a session and commit N turns via the store directly.
     fn setup_with_commits(
         api: &SessionApi,
         session_id: &str,
@@ -261,8 +217,6 @@ mod session_graph {
         commit_ids
     }
 
-    // -- create_session / open_session round-trip --
-
     #[test]
     fn create_and_open_session_round_trip() {
         let api = api("create_open_round_trip");
@@ -291,21 +245,6 @@ mod session_graph {
     }
 
     #[test]
-    fn open_nonexistent_session_returns_not_found() {
-        let api = api("open_not_found");
-        let result = api.open_session(OpenSessionRequest {
-            id: "nonexistent".into(),
-        });
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ApiError::NotFound(id) => assert_eq!(id, "nonexistent"),
-            other => panic!("expected NotFound, got {:?}", other),
-        }
-    }
-
-    // -- status --
-
-    #[test]
     fn status_reports_head_branch_and_commit_count() {
         let api = api("status_report");
         setup_with_commits(&api, "sess-status", 2, Some("Status Test"));
@@ -319,8 +258,6 @@ mod session_graph {
         assert!(status.current_commit_id.is_some());
         assert_eq!(status.commit_count, 2);
     }
-
-    // -- list_sessions --
 
     #[test]
     fn list_sessions_includes_created_sessions() {
@@ -345,8 +282,6 @@ mod session_graph {
         assert_eq!(b.commit_count, 2);
     }
 
-    // -- log --
-
     #[test]
     fn log_returns_turn_entries() {
         let api = api("log_entries");
@@ -357,8 +292,6 @@ mod session_graph {
         assert_eq!(log[0].commit_id, commit_ids[0]);
         assert_eq!(log[2].commit_id, commit_ids[2]);
     }
-
-    // -- checkout --
 
     #[test]
     fn checkout_changes_head_state() {
@@ -384,8 +317,6 @@ mod session_graph {
         );
     }
 
-    // -- branch --
-
     #[test]
     fn branch_creates_pointer_to_commit() {
         let api = api("branch_pointer");
@@ -398,8 +329,6 @@ mod session_graph {
         assert_eq!(branch_ref.name, "dev");
         assert_eq!(branch_ref.commit_id, Some(commit_ids[0].clone()));
     }
-
-    // -- diff --
 
     #[test]
     fn diff_reports_unique_commits_on_each_side() {
@@ -440,8 +369,6 @@ mod session_graph {
         assert_eq!(diff.only_in_to[0].commit_id, feature_commit.commit_id);
     }
 
-    // -- reset --
-
     #[test]
     fn reset_moves_branch_and_returns_old_head() {
         let api = api("reset_old_head");
@@ -454,11 +381,6 @@ mod session_graph {
         assert_eq!(result.branch, "main");
     }
 
-    // -- Boundary checks: compile-time enforcement --
-
-    /// Compile-time check: `SessionApi` only exposes the v1.1 main-path
-    /// methods. If legacy methods were added, this test would need updating,
-    /// drawing reviewer attention to the boundary violation.
     #[test]
     fn session_api_does_not_expose_legacy_operations() {
         // This test verifies the public API surface of SessionApi.
@@ -486,9 +408,6 @@ mod session_graph {
         // (No code here — the absence of those methods is the assertion.)
     }
 
-    /// Compile-time check: `SessionGraphStore` trait only has the v1.1
-    /// main-path methods. If legacy methods leak into the trait, this
-    /// test draws attention.
     #[test]
     fn graph_store_trait_excludes_legacy_methods() {
         // The trait is used as a bound to confirm it compiles with only

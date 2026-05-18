@@ -15,7 +15,6 @@ mod turn;
 
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
-    run_turn, run_turn_with_deps, stream_turn, stream_turn_with_deps, RealTurnDeps, RunTurnRequest,
-    RunTurnResult, RunTurnStage, RunTurnStatus, StreamTurnRequest, ToolResultSummary, TurnDeps,
-    TurnEvent, TurnEventStream, TurnUsageSummary,
+    run_turn, stream_turn, RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus,
+    StreamTurnRequest, ToolResultSummary, TurnEvent, TurnEventStream, TurnUsageSummary,
 };

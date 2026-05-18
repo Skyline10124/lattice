@@ -6,9 +6,6 @@
 use lattice_llm::ToolDefinition;
 
 /// Returns the built-in tool schema inventory.
-///
-/// This is not an exposure policy: callers should use capability resolution to
-/// decide which definitions an agent receives.
 pub fn default_tool_definitions() -> Vec<ToolDefinition> {
     #[allow(unused_mut)]
     let mut defs = vec![

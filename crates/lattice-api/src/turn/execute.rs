@@ -12,9 +12,7 @@ use super::types::{
 };
 use crate::session::{ApiError, Result, SessionApi};
 
-/// Core turn orchestration shared by `run_turn_with_deps` and `stream_turn_with_deps`.
-///
-/// Returns: (session_id, stages, agent_events, agent_result, commit_id)
+/// Core turn orchestration.
 async fn execute_turn_inner(
     deps: &dyn TurnDeps,
     request: &RunTurnRequest,
@@ -27,21 +25,17 @@ async fn execute_turn_inner(
 )> {
     let mut stages = Vec::new();
 
-    // Stage: Profile
     stages.push(RunTurnStage::Profile);
     let (model, system_prompt, provider) = resolve_model_and_prompt(request);
 
-    // Stage: Session — create or open
     stages.push(RunTurnStage::Session);
     let session_id = match &request.session_id {
         Some(id) => deps.open_session(id)?,
         None => deps.create_session(request)?,
     };
 
-    // Read transcript
     let transcript = deps.head_transcript(&session_id)?;
 
-    // Stage: Agent
     stages.push(RunTurnStage::Agent);
     let agent_request = build_agent_request(request, &session_id, transcript, model, system_prompt);
 
@@ -50,16 +44,12 @@ async fn execute_turn_inner(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    // Stage: LLM (agent loop completed the LLM calls)
     stages.push(RunTurnStage::Llm);
 
-    // Stage: Tools (agent loop executed tools if any)
     stages.push(RunTurnStage::Tools);
 
-    // Build commit input from agent result
     let commit_status = map_status(&agent_result.status).to_commit_status();
 
-    // Build the messages to commit: user input + all generated messages
     let mut commit_messages = Vec::new();
     commit_messages.push(lattice_session::GraphMessage {
         role: "user".to_string(),
@@ -73,7 +63,6 @@ async fn execute_turn_inner(
 
     let commit_message = derive_commit_message(&commit_messages);
 
-    // Re-read transcript to get parent_commit_id for the commit
     let transcript_for_parent = deps.head_transcript(&session_id)?;
     let parent_ids = transcript_for_parent
         .parent_commit_id
@@ -105,21 +94,15 @@ async fn execute_turn_inner(
         terminal_reason: agent_result.terminal_reason.clone(),
     };
 
-    // Stage: Commit
     stages.push(RunTurnStage::Commit);
     let commit_id = deps.commit_turn(commit_input)?;
 
-    // Stage: Render
     stages.push(RunTurnStage::Render);
 
     Ok((session_id, stages, agent_events, agent_result, commit_id))
 }
 
 /// Execute a synchronous turn with injected dependencies.
-///
-/// This is the testable entry point. Tests inject a fake [`TurnDeps`] to
-/// avoid live provider calls, direct SQLite, or public exposure of internal
-/// handles.
 pub async fn run_turn_with_deps(
     deps: &dyn TurnDeps,
     request: RunTurnRequest,
@@ -139,14 +122,6 @@ pub async fn run_turn_with_deps(
 }
 
 /// Execute a synchronous turn.
-///
-/// Creates or opens a session, reads the current transcript, invokes the
-/// agent loop, commits exactly one turn-level commit, and returns the
-/// complete typed result.
-///
-/// When `session_id` is `None`, a new session is automatically created (D-42).
-/// When `session_id` is provided, the existing session is opened and its
-/// transcript is used as context.
 pub async fn run_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
@@ -157,8 +132,6 @@ pub async fn run_turn(
 }
 
 /// Execute a streaming turn with injected dependencies.
-///
-/// This is the testable entry point for streaming.
 pub async fn stream_turn_with_deps(
     deps: &dyn TurnDeps,
     request: RunTurnRequest,
@@ -168,7 +141,6 @@ pub async fn stream_turn_with_deps(
 
     let status = map_status(&agent_result.status);
 
-    // Convert agent events to public TurnEvents
     let mut turn_events: Vec<TurnEvent> = agent_events
         .into_iter()
         .map(|e| match e {
@@ -193,7 +165,6 @@ pub async fn stream_turn_with_deps(
         })
         .collect();
 
-    // Append final Committed event after persistence
     turn_events.push(TurnEvent::Committed {
         session_id,
         commit_id,
@@ -204,10 +175,6 @@ pub async fn stream_turn_with_deps(
 }
 
 /// Execute a streaming turn.
-///
-/// Creates or opens a session, invokes the agent loop, forwards live
-/// agent/token/tool events, commits the turn, and appends a final
-/// `Committed` event with the durable persistence outcome.
 pub async fn stream_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,

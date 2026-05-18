@@ -106,10 +106,6 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// SessionApi-backed handlers (v1.1 per-session scoped operations)
-// ---------------------------------------------------------------------------
-
 fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Result<()> {
     match session_id {
         Some(id) => {
@@ -294,7 +290,7 @@ fn cmd_branch_api(
             }
         }
         None => {
-            // D-20: branch listing reads SessionStatus.branches for the
+            // Branch listing reads SessionStatus.branches for the
             // addressed session, not store-global branch state.
             let status = api.status(session_id)?;
             if json {
@@ -427,10 +423,6 @@ mod session_cli {
         full_args.extend_from_slice(args);
         TestCli::try_parse_from(full_args).map(|cli| cli.action)
     }
-
-    // ─────────────────────────────────────────────────────
-    // Parser acceptance tests (D-18, D-20, D-22)
-    // ─────────────────────────────────────────────────────
 
     #[test]
     fn parse_status_no_args() {
@@ -601,10 +593,6 @@ mod session_cli {
         assert!(action.is_err(), "reset should require session_id");
     }
 
-    // ─────────────────────────────────────────────────────
-    // Parser rejection tests for forbidden old subcommands (D-19)
-    // ─────────────────────────────────────────────────────
-
     #[test]
     fn reject_old_subcommand_current() {
         assert!(try_parse(&["current"]).is_err());
@@ -680,10 +668,6 @@ mod session_cli {
         assert!(try_parse(&["rm"]).is_err());
     }
 
-    // ─────────────────────────────────────────────────────
-    // Not-found test (D-35)
-    // ─────────────────────────────────────────────────────
-
     #[test]
     fn not_found_error_includes_object_id() {
         let err = not_found("session", "missing-id-123");
@@ -691,10 +675,6 @@ mod session_cli {
         assert!(msg.contains("session"), "should mention object type");
         assert!(msg.contains("missing-id-123"), "should include the id");
     }
-
-    // ─────────────────────────────────────────────────────
-    // Summarize helper
-    // ─────────────────────────────────────────────────────
 
     #[test]
     fn summarize_short_text_unchanged() {
@@ -723,12 +703,8 @@ mod session_cli {
     }
 }
 
-// ---------------------------------------------------------------------------
-// D-25 scoped session regression tests
-//
-// These tests prove that checkout, branch, reset, diff, and branch listing
-// are scoped to the addressed session_id and do not affect other sessions.
-// ---------------------------------------------------------------------------
+// Scoped session regression tests: prove that checkout, branch, reset,
+// diff, and branch listing are scoped to the addressed session_id.
 
 #[cfg(test)]
 mod d25_scoped_session {
@@ -804,8 +780,6 @@ mod d25_scoped_session {
         (dir, api, commits_a, commits_b)
     }
 
-    // -- Test 1: branch listing scoped to addressed session --
-
     #[test]
     fn branch_listing_reads_only_addressed_session_refs() {
         let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
@@ -851,8 +825,6 @@ mod d25_scoped_session {
         );
     }
 
-    // -- Test 2: checkout scoped to addressed session --
-
     #[test]
     fn checkout_changes_only_addressed_session_head() {
         let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
@@ -883,8 +855,6 @@ mod d25_scoped_session {
         }
     }
 
-    // -- Test 3: branch create scoped to addressed session --
-
     #[test]
     fn branch_create_affects_only_addressed_session() {
         let (_dir, api, commits_a, _commits_b) = setup_two_sessions();
@@ -911,8 +881,6 @@ mod d25_scoped_session {
             "sess-b should NOT have 'work' branch"
         );
     }
-
-    // -- Test 4: reset scoped to addressed session --
 
     #[test]
     fn reset_changes_only_addressed_session_branch_pointer() {
@@ -951,10 +919,11 @@ mod d25_scoped_session {
         );
     }
 
-    // -- Test 5: diff scoped to addressed session --
-
     #[test]
     fn diff_resolves_refs_inside_addressed_session_only() {
+        let (_dir, api, commits_a, commits_b) = setup_two_sessions();
+
+        // Create same-named "feature" branch in both sessions from different commits.
         let (_dir, api, commits_a, commits_b) = setup_two_sessions();
 
         // Create same-named "feature" branch in both sessions from different commits.
@@ -993,13 +962,6 @@ mod d25_scoped_session {
             "same branch name should resolve to different commits in different sessions"
         );
     }
-
-    // -- Test 6: boundary grep for legacy store-global patterns --
-    //
-    // Verifies the session command uses only the v1.1 SessionApi facade.
-    // Since include_str! includes this test's own source, we check for
-    // structural patterns (import lines, positive assertions) that prove
-    // the migration is complete.
 
     #[test]
     fn boundary_no_legacy_session_store_patterns() {

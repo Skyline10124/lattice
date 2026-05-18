@@ -31,7 +31,7 @@ pub struct DefaultToolExecutor {
     project_root: String,
     limits: ToolLimits,
     http_client: reqwest::Client,
-    authorized_tools: Option<BTreeSet<String>>,
+    authorized_tools: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,12 +72,22 @@ impl DefaultToolExecutor {
             .map_err(|e| format!("failed to build reqwest client: {e}"))
     }
 
-    pub fn new(project_root: &str) -> Result<Self, String> {
+    /// Create an executor with all built-in tools authorized.
+    ///
+    /// Prefer [`for_project_root`] in production; this constructor is
+    /// available for tests that need a ready-to-use executor without
+    /// specifying individual tool names.
+    #[cfg(test)]
+    pub(crate) fn new_unrestricted_for_tests(project_root: &str) -> Result<Self, String> {
+        let all_tools: BTreeSet<String> = crate::tool_definitions::default_tool_definitions()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         Ok(Self {
             project_root: project_root.to_string(),
             limits: ToolLimits::default(),
             http_client: Self::build_http_client()?,
-            authorized_tools: None,
+            authorized_tools: all_tools,
         })
     }
 
@@ -122,7 +132,7 @@ impl DefaultToolExecutor {
                 .to_string()
             }
         };
-        // v1.1 project-root containment (D-19, D-21)
+        // Project-root containment
         if let Err(e) = self.ensure_under_project_root(&canonical) {
             return e;
         }
@@ -264,17 +274,22 @@ impl DefaultToolExecutor {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.authorized_tools = Some(tool_names.into_iter().map(Into::into).collect());
+        self.authorized_tools = tool_names.into_iter().map(Into::into).collect();
         self
     }
 
     fn authorization_denial(&self, tool_name: &str) -> Option<String> {
-        let authorized = self.authorized_tools.as_ref()?;
-        (!authorized.contains(tool_name)).then(|| {
+        if self.authorized_tools.is_empty() {
+            return Some(format!(
+                "Tool denied: '{}' — no tools are enabled for this agent.",
+                tool_name
+            ));
+        }
+        (!self.authorized_tools.contains(tool_name)).then(|| {
             format!(
                 "Tool denied: '{}' is not enabled for this agent. Enabled tools: {}",
                 tool_name,
-                render_enabled_tools(authorized)
+                render_enabled_tools(&self.authorized_tools)
             )
         })
     }
@@ -282,10 +297,10 @@ impl DefaultToolExecutor {
     /// v1.1 main-path constructor: create an executor bound to a project root
     /// with an explicit tool allowlist.
     ///
-    /// This constructor is the authoritative v1.1 boundary (D-19, D-20, D-21,
-    /// D-22). It canonicalizes the project root, applies the explicit tool
-    /// allowlist via `with_authorized_tools`, and sets up path containment
-    /// checks without a dynamic approval flow.
+    /// This constructor is the authoritative v1.1 boundary. It canonicalizes
+    /// the project root, applies the explicit tool allowlist via
+    /// `with_authorized_tools`, and sets up path containment checks without
+    /// a dynamic approval flow.
     pub fn for_project_root<I, S>(project_root: &str, enabled_tool_names: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = S>,
@@ -297,7 +312,7 @@ impl DefaultToolExecutor {
             project_root: canonical.to_string_lossy().to_string(),
             limits: ToolLimits::default(),
             http_client: Self::build_http_client()?,
-            authorized_tools: Some(enabled_tool_names.into_iter().map(Into::into).collect()),
+            authorized_tools: enabled_tool_names.into_iter().map(Into::into).collect(),
         })
     }
 
@@ -332,8 +347,7 @@ impl DefaultToolExecutor {
     /// Verify that a canonical path is under the project root.
     ///
     /// Called after canonicalization (symlink resolution) to ensure the
-    /// resolved path is contained within the project root boundary (D-19,
-    /// D-21).
+    /// resolved path is contained within the project root boundary.
     fn ensure_under_project_root(&self, canonical: &Path) -> Result<(), String> {
         let root = Path::new(&self.project_root);
         if canonical == root {
@@ -495,7 +509,7 @@ impl ToolExecutor for DefaultToolExecutor {
                     match tokio::fs::canonicalize(parent).await {
                         Ok(canonical_parent) => {
                             let canonical = canonical_parent.join(abs.file_name().unwrap());
-                            // v1.1 project-root containment (D-19, D-21)
+                            // Project-root containment
                             if let Err(e) = self.ensure_under_project_root(&canonical) {
                                 return e;
                             }
@@ -554,7 +568,7 @@ impl ToolExecutor for DefaultToolExecutor {
                         .to_string()
                     }
                 };
-                // v1.1 project-root containment (D-19, D-21)
+                // Project-root containment
                 if let Err(e) = self.ensure_under_project_root(&canonical) {
                     return e;
                 }
@@ -622,7 +636,7 @@ impl ToolExecutor for DefaultToolExecutor {
                         .to_string()
                     }
                 };
-                // v1.1 project-root containment (D-19, D-21)
+                // Project-root containment
                 if let Err(e) = self.ensure_under_project_root(&canonical) {
                     return e;
                 }
@@ -688,9 +702,6 @@ impl ToolExecutor for DefaultToolExecutor {
                     })
                     .to_string()
                 })
-            }
-            "multi_patch" => {
-                "Tool retired: multi_patch. Use patch with structured patch text.".to_string()
             }
             "web_search" => {
                 let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -1128,7 +1139,7 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
     if !context.visited.insert(resolved.clone()) {
         return;
     }
-    // v1.1 project-root containment: reject symlinks escaping the root (D-19)
+    // Project-root containment: reject symlinks escaping the root
     if resolved != context.project_root && !resolved.starts_with(context.project_root) {
         return;
     }
@@ -1208,7 +1219,7 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
         return; // symlink cycle
     }
 
-    // v1.1 project-root containment: reject symlinks escaping the root (D-19)
+    // Project-root containment: reject symlinks escaping the root
     if resolved != context.project_root && !resolved.starts_with(context.project_root) {
         return;
     }
@@ -1266,11 +1277,7 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Platform-specific bash execution helpers (setrlimit)
-// ---------------------------------------------------------------------------
-
-/// Wait for a child process with a timeout, producing a uniform result.
+/// Platform-specific bash execution helpers
 async fn wait_with_timeout(
     child: tokio::process::Child,
     timeout_secs: u64,
@@ -1363,7 +1370,8 @@ mod tests {
     async fn read_file_supports_relative_paths_line_ranges_and_line_numbers() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("sample.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1387,7 +1395,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "a1\na2\na3\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "b1\nb2\n").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1413,7 +1422,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "a1\na2\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "b1\n").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let single = executor
             .execute(&tool_call(
@@ -1446,7 +1456,8 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
         std::fs::write(dir.path().join("AGENTS.md"), "rules").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1469,7 +1480,8 @@ mod tests {
     #[tokio::test]
     async fn todo_write_validates_single_in_progress_item() {
         let dir = tempfile::tempdir().unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1508,7 +1520,8 @@ mod tests {
     async fn grep_caps_results_and_reports_truncation() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("sample.txt"), "hit 1\nhit 2\nhit 3\n").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1533,7 +1546,8 @@ mod tests {
         for name in ["a.txt", "b.txt", "c.txt"] {
             std::fs::write(dir.path().join(name), name).unwrap();
         }
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1558,7 +1572,8 @@ mod tests {
         std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
         std::fs::write(dir.path().join("src/bin/main.rs"), "").unwrap();
         std::fs::write(dir.path().join("README.md"), "").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
 
         let result = executor
             .execute(&tool_call(
@@ -1582,7 +1597,8 @@ mod tests {
         let path = dir.path().join("sample.txt");
         let before = "alpha\nbeta\ngamma\n";
         std::fs::write(&path, before).unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
         let old_hash = crate::edit::content_hash(before.as_bytes());
 
         let result = executor
@@ -1621,7 +1637,8 @@ mod tests {
         let path = dir.path().join("sample.txt");
         let before = "alpha\n";
         std::fs::write(&path, before).unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap()).unwrap();
         let old_hash = crate::edit::content_hash(before.as_bytes());
 
         let result = executor
@@ -1649,37 +1666,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_multi_patch_call_returns_retired_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sample.txt");
-        std::fs::write(&path, "alpha\n").unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap()).unwrap();
-
-        let result = executor
-            .execute(&tool_call(
-                "multi_patch",
-                serde_json::json!({
-                    "file_path": "sample.txt",
-                    "edits": [
-                        {"search": "alpha", "insert": "beta"}
-                    ]
-                }),
-            ))
-            .await;
-
-        assert_eq!(
-            result,
-            "Tool retired: multi_patch. Use patch with structured patch text."
-        );
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "alpha\n");
-    }
-
-    #[tokio::test]
     async fn authorized_executor_denies_unlisted_builtin_before_execution() {
         let dir = tempfile::tempdir().unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_authorized_tools(["read_file"]);
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap())
+                .unwrap()
+                .with_authorized_tools(["read_file"]);
 
         let result = executor
             .execute(&tool_call(
@@ -1703,9 +1695,10 @@ mod tests {
     #[tokio::test]
     async fn denied_tool_is_not_unknown_tool() {
         let dir = tempfile::tempdir().unwrap();
-        let executor = DefaultToolExecutor::new(dir.path().to_str().unwrap())
-            .unwrap()
-            .with_authorized_tools(["read_file"]);
+        let executor =
+            DefaultToolExecutor::new_unrestricted_for_tests(dir.path().to_str().unwrap())
+                .unwrap()
+                .with_authorized_tools(["read_file"]);
 
         let result = executor
             .execute(&tool_call(
