@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use lattice_sandbox::SandboxConfig;
-
+use crate::executor::ToolLimits;
 use crate::tool_error::ToolError;
 
 use super::hash::content_hash;
@@ -15,7 +14,7 @@ use super::types::{
 
 pub async fn apply_patch(
     project_root: &Path,
-    sandbox: &SandboxConfig,
+    limits: &ToolLimits,
     patch: &str,
 ) -> PatchResultEnvelope {
     let document = match parse_patch_document(patch) {
@@ -36,8 +35,7 @@ pub async fn apply_patch(
         .map(|(index, operation)| AttemptedOperation::from_operation(index, operation))
         .collect::<Vec<_>>();
 
-    let plan = match build_apply_plan(project_root, sandbox, &document, attempted_operations).await
-    {
+    let plan = match build_apply_plan(project_root, limits, &document, attempted_operations).await {
         Ok(plan) => plan,
         Err((diagnostics, attempted_operations)) => {
             return failure_envelope(
@@ -73,7 +71,7 @@ pub async fn apply_patch(
 
 async fn build_apply_plan(
     project_root: &Path,
-    sandbox: &SandboxConfig,
+    limits: &ToolLimits,
     document: &PatchDocument,
     attempted_operations: Vec<AttemptedOperation>,
 ) -> Result<ApplyPlan, (Vec<PatchDiagnostic>, Vec<AttemptedOperation>)> {
@@ -120,19 +118,9 @@ async fn build_apply_plan(
             }
         };
 
-        let path_str = resolved.target_path.to_string_lossy();
-        if let Err(error) = sandbox.check_write(&path_str) {
-            diagnostics.push(
-                PatchDiagnostic::new(PatchErrorCode::SandboxDenied, error)
-                    .with_path(path)
-                    .with_operation_index(operation_index),
-            );
-            continue;
-        }
-
         let change = match operation {
             PatchOperation::AddFile { path, lines } => {
-                plan_add_file(path, lines, &resolved.target_path, operation_index, sandbox)
+                plan_add_file(path, lines, &resolved.target_path, operation_index, limits)
             }
             PatchOperation::UpdateFile {
                 path,
@@ -145,7 +133,7 @@ async fn build_apply_plan(
                     hunks,
                     &resolved.target_path,
                     operation_index,
-                    sandbox,
+                    limits,
                 )
                 .await
             }
@@ -184,7 +172,7 @@ async fn resolve_target(
 
     if relative.is_absolute() || has_disallowed_component(relative) {
         return Err(PatchDiagnostic::new(
-            PatchErrorCode::SandboxDenied,
+            PatchErrorCode::BoundaryDenied,
             format!("patch path '{path}' must be relative and stay under the project root"),
         )
         .with_path(path.to_string())
@@ -224,7 +212,7 @@ async fn resolve_target(
             })?;
             if !canonical_parent.starts_with(root) {
                 return Err(PatchDiagnostic::new(
-                    PatchErrorCode::SandboxDenied,
+                    PatchErrorCode::BoundaryDenied,
                     format!("patch path '{path}' resolves outside the project root"),
                 )
                 .with_path(path.to_string())
@@ -255,7 +243,7 @@ async fn resolve_target(
             })?;
             if !canonical.starts_with(root) {
                 return Err(PatchDiagnostic::new(
-                    PatchErrorCode::SandboxDenied,
+                    PatchErrorCode::BoundaryDenied,
                     format!("patch path '{path}' resolves outside the project root"),
                 )
                 .with_path(path.to_string())
@@ -282,7 +270,7 @@ fn plan_add_file(
     lines: &[String],
     target_path: &Path,
     operation_index: usize,
-    sandbox: &SandboxConfig,
+    limits: &ToolLimits,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
     let content = lines.join("\n");
     let after = if lines.is_empty() {
@@ -290,11 +278,11 @@ fn plan_add_file(
     } else {
         format!("{content}\n").into_bytes()
     };
-    if after.len() > sandbox.max_write_size {
+    if after.len() > limits.max_write_size {
         return Err(PatchDiagnostic::new(
             PatchErrorCode::IoError,
             ToolError::SizeLimit {
-                limit: sandbox.max_write_size,
+                limit: limits.max_write_size,
                 actual: after.len(),
             }
             .to_string(),
@@ -320,7 +308,7 @@ async fn plan_update_file(
     hunks: &[PatchHunk],
     target_path: &Path,
     operation_index: usize,
-    sandbox: &SandboxConfig,
+    limits: &ToolLimits,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
     let before = read_file_bytes(path, target_path, operation_index).await?;
     validate_old_hash(path, old_hash, &before, operation_index)?;
@@ -335,11 +323,11 @@ async fn plan_update_file(
     let after_text = apply_hunks(path, &before_text, hunks, operation_index)?;
     let after = after_text.into_bytes();
 
-    if after.len() > sandbox.max_write_size {
+    if after.len() > limits.max_write_size {
         return Err(PatchDiagnostic::new(
             PatchErrorCode::IoError,
             ToolError::SizeLimit {
-                limit: sandbox.max_write_size,
+                limit: limits.max_write_size,
                 actual: after.len(),
             }
             .to_string(),
@@ -742,7 +730,7 @@ mod tests {
 +new
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -761,7 +749,7 @@ mod tests {
 *** Delete File: sample.txt
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -790,7 +778,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), &patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hash_mismatch");
@@ -818,7 +806,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), &patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hunk_ambiguous");
@@ -857,7 +845,7 @@ mod tests {
             hash(second_before)
         );
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), &patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
 
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!result.ok);
@@ -896,7 +884,7 @@ mod tests {
             hash(delete_before)
         );
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), &patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
         let value = parse_envelope(&result);
 
         assert!(result.ok);
@@ -934,7 +922,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &SandboxConfig::permissive(), &patch).await;
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hunk_missing");

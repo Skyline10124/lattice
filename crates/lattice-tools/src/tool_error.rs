@@ -10,8 +10,8 @@ pub enum ToolError {
         error: std::io::Error,
     },
 
-    #[error("sandbox violation: {0}")]
-    SandboxViolation(String),
+    #[error("tool boundary violation: {0}")]
+    BoundaryViolation(String),
 
     #[error("invalid regex pattern: {0}")]
     RegexError(String),

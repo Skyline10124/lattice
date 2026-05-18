@@ -1,79 +1,268 @@
 use anyhow::Result;
 use colored::Colorize;
-use lattice_core::catalog::Catalog;
+use std::path::PathBuf;
 
-use crate::config::Config;
-use crate::credentials::CredentialStore;
-use crate::display::{credential_label, status_icon};
+/// Report structure for doctor diagnostics.
+pub struct DoctorReport {
+    pub config_loaded: bool,
+    pub config_path: String,
+    pub credentials: Vec<CredentialEntry>,
+    pub session_store_available: bool,
+    pub session_dir: String,
+    pub alias_count: usize,
+}
 
-pub fn run(config: &Config, creds: &CredentialStore) -> Result<()> {
-    println!("{} LATTICE v0.1.0\n", "\u{F06A9}".dimmed());
+/// A credential entry showing env var name and status.
+pub struct CredentialEntry {
+    pub env_var: String,
+    pub status: String,
+}
 
-    // Credentials
-    println!("{}", "Credentials:".bold());
-    for (key, status) in creds.diagnostics() {
-        println!(
-            "  {} {}: {}",
-            status_icon(status),
-            key,
-            if status {
-                credential_label(true)
-            } else {
-                credential_label(false)
-            }
-        );
+fn default_config_path() -> PathBuf {
+    dirs::config_dir()
+        .map(|dir| dir.join("lattice").join("config.toml"))
+        .unwrap_or_else(|| PathBuf::from("lattice.toml"))
+}
+
+/// Build a diagnostic report.
+pub fn build_report() -> DoctorReport {
+    // Config
+    let config_path = default_config_path();
+    let config_loaded = config_path.exists();
+    let config_path = config_path.display().to_string();
+
+    // Credentials: check router-relevant env vars via ModelRouter aliases
+    let router = lattice_llm::ModelRouter::new();
+    let aliases = router.aliases();
+    let mut credential_entries: Vec<CredentialEntry> = Vec::new();
+    for alias in &aliases {
+        let status = format!("{:?}", alias.credential_status);
+        credential_entries.push(CredentialEntry {
+            env_var: alias.api_key_env.clone(),
+            status,
+        });
     }
+    // Deduplicate by env var name
+    credential_entries.sort_by(|a, b| a.env_var.cmp(&b.env_var));
+    credential_entries.dedup_by(|a, b| a.env_var == b.env_var);
 
-    // Models
-    println!("\n{}", "Models:".bold());
-    let runtime = crate::runtime::model_runtime(creds.to_hashmap());
-    let authed = runtime.list_authenticated_models();
-    let all = runtime.list_models();
-    let authed_set: std::collections::HashSet<_> = authed.iter().cloned().collect();
+    // Session store availability
+    let session_dir = crate::commands::session::default_session_dir();
+    let session_store_available = session_dir.exists();
 
-    for m in &all[..all.len().min(20)] {
-        let icon = status_icon(authed_set.contains(m));
-        let color = if authed_set.contains(m) {
-            m.green()
-        } else {
-            m.red()
-        };
-        println!("  {} {}", icon, color);
+    // Alias table state
+    let alias_count = aliases.len();
+
+    DoctorReport {
+        config_loaded,
+        config_path,
+        credentials: credential_entries,
+        session_store_available,
+        session_dir: session_dir.display().to_string(),
+        alias_count,
     }
-    if all.len() > 20 {
-        println!("  ... and {} more", all.len() - 20);
-    }
+}
 
-    // Detailed model status via inspect_model
-    println!("\n{}", "Model Details:".bold());
-    for m in &all[..all.len().min(20)] {
-        let result = runtime.inspect_model(m);
-        match result {
-            Ok(model) => {
-                let status = match model.credential_status {
-                    lattice_core::CredentialStatus::Present => "callable".green(),
-                    lattice_core::CredentialStatus::Missing => "no credential".red(),
-                    lattice_core::CredentialStatus::NotRequired => "no key needed".dimmed(),
-                };
-                println!("  {} -> {} [{}]", m, model.provider, status);
-            }
-            Err(e) => {
-                println!("  {} -> {}", m, e.to_string().red());
-            }
-        }
-    }
+/// Render report as JSON.
+pub fn render_json(report: &DoctorReport) -> Result<String> {
+    let out = serde_json::json!({
+        "config_loaded": report.config_loaded,
+        "config_path": report.config_path,
+        "credentials": report.credentials.iter().map(|c| {
+            serde_json::json!({ "env_var": c.env_var, "status": c.status })
+        }).collect::<Vec<_>>(),
+        "session_store_available": report.session_store_available,
+        "session_dir": report.session_dir,
+        "alias_count": report.alias_count,
+    });
+    Ok(serde_json::to_string_pretty(&out)?)
+}
 
-    // Catalog
-    let catalog = Catalog::get()?;
-    println!(
-        "\n{}: {} models, {} aliases",
-        "Catalog".bold(),
-        catalog.model_count(),
-        catalog.aliases().len()
-    );
+/// Render report as text.
+pub fn render_text(report: &DoctorReport) -> String {
+    let mut output = String::new();
+
+    output.push_str(&format!("{} LATTICE v1.1\n", "doctor".dimmed()));
 
     // Config
-    println!("\n{}: {}", "Config".bold(), config.path.display());
+    output.push_str(&format!(
+        "{}: {} ({})\n",
+        "Config".bold(),
+        report.config_path,
+        if report.config_loaded {
+            "loaded".green()
+        } else {
+            "default".dimmed()
+        }
+    ));
 
+    // Credentials
+    output.push_str(&format!("\n{}\n", "Credentials:".bold()));
+    for cred in &report.credentials {
+        let icon = if cred.status == "Present" {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        };
+        let label = if cred.status == "Present" {
+            "set".green()
+        } else {
+            "missing".red()
+        };
+        output.push_str(&format!("  {} {}: {}\n", icon, cred.env_var, label));
+    }
+
+    // Session store
+    output.push_str(&format!("\n{}\n", "Session Store:".bold()));
+    output.push_str(&format!(
+        "  {} {}\n",
+        if report.session_store_available {
+            "\u{2713}"
+        } else {
+            "\u{2717}"
+        },
+        if report.session_store_available {
+            "available".green()
+        } else {
+            "not found".red()
+        }
+    ));
+    output.push_str(&format!("  {} {}\n", "Dir:".bold(), report.session_dir));
+
+    // Alias table
+    output.push_str(&format!("\n{}\n", "Alias Table:".bold()));
+    output.push_str(&format!("  {} known aliases\n", report.alias_count));
+
+    output
+}
+
+/// Run v1.1 CLI/API health diagnostics.
+///
+/// Reports: config loading, credential status by env var name,
+/// session store availability, and small alias table state.
+///
+/// Never prints credential values — only env var names and present/missing status.
+/// Does not reference old Catalog, Runtime::list_models, or inspect_model.
+pub fn run(json: bool) -> Result<()> {
+    let report = build_report();
+    if json {
+        println!("{}", render_json(&report)?);
+    } else {
+        print!("{}", render_text(&report));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::test_env::{with_env_var, without_env_vars};
+
+    #[test]
+    fn doctor_report_contains_expected_keys() {
+        let report = build_report();
+
+        // Report should have all expected fields
+        assert!(report.config_path.contains("lattice.toml") || !report.config_path.is_empty());
+        assert!(report.alias_count > 0, "should have known aliases");
+        assert!(report.session_dir.contains("sessions") || !report.session_dir.is_empty());
+    }
+
+    #[test]
+    fn doctor_json_output_has_expected_structure() {
+        let report = build_report();
+        let json = render_json(&report).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Verify JSON structure
+        assert!(parsed.get("config_loaded").is_some());
+        assert!(parsed.get("config_path").is_some());
+        assert!(parsed.get("credentials").is_some());
+        assert!(parsed.get("session_store_available").is_some());
+        assert!(parsed.get("session_dir").is_some());
+        assert!(parsed.get("alias_count").is_some());
+    }
+
+    #[test]
+    fn doctor_text_output_includes_credential_env_var_names() {
+        let report = build_report();
+        let text = render_text(&report);
+
+        // Should mention expected credential env vars
+        assert!(text.contains("Credentials:"));
+        assert!(text.contains("ANTHROPIC_API_KEY") || text.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn doctor_text_output_includes_session_dir() {
+        let report = build_report();
+        let text = render_text(&report);
+
+        assert!(text.contains("Session Store:"));
+        assert!(text.contains("Dir:"));
+        assert!(text.contains(&report.session_dir));
+    }
+
+    #[test]
+    fn doctor_text_output_includes_alias_count() {
+        let report = build_report();
+        let text = render_text(&report);
+
+        assert!(text.contains("Alias Table:"));
+        assert!(text.contains(&format!("{} known aliases", report.alias_count)));
+    }
+
+    #[test]
+    fn doctor_json_does_not_leak_secret_values() {
+        with_env_var("ANTHROPIC_API_KEY", "sk-secret-test-key-12345", || {
+            let report = build_report();
+            let json = render_json(&report).unwrap();
+
+            // The secret value should NOT appear in the JSON
+            assert!(!json.contains("sk-secret-test-key-12345"));
+            // But the env var name SHOULD appear
+            assert!(json.contains("ANTHROPIC_API_KEY"));
+        });
+    }
+
+    #[test]
+    fn doctor_text_does_not_leak_secret_values() {
+        with_env_var("OPENAI_API_KEY", "sk-another-secret-67890", || {
+            let report = build_report();
+            let text = render_text(&report);
+
+            // The secret value should NOT appear in the text
+            assert!(!text.contains("sk-another-secret-67890"));
+            // But the env var name SHOULD appear
+            assert!(text.contains("OPENAI_API_KEY"));
+        });
+    }
+
+    #[test]
+    fn doctor_credentials_reflect_present_status() {
+        with_env_var("GEMINI_API_KEY", "sk-gemini-test", || {
+            let report = build_report();
+
+            let gemini = report
+                .credentials
+                .iter()
+                .find(|c| c.env_var == "GEMINI_API_KEY");
+            assert!(gemini.is_some(), "should have GEMINI_API_KEY entry");
+            assert_eq!(gemini.unwrap().status, "Present");
+        });
+    }
+
+    #[test]
+    fn doctor_credentials_reflect_missing_status() {
+        without_env_vars(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], || {
+            let report = build_report();
+
+            // At least one should have Missing status
+            let has_missing = report.credentials.iter().any(|c| c.status == "Missing");
+            assert!(
+                has_missing,
+                "should have at least one credential with Missing status"
+            );
+        });
+    }
 }

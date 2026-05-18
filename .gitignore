@@ -14,3 +14,5 @@ __pycache__/
 *.py[cod]
 book/
 findings/
+*.db
+.lattice/

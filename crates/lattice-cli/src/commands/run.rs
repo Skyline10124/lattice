@@ -1,397 +1,559 @@
+//! v1.1 official `run` command over `lattice-api::run_turn`.
+//!
+//! # Exit codes
+//!
+//! - 0: Turn completed successfully (`RunTurnStatus::Completed`)
+//! - 1: Provider/API/tool execution failure (`RunTurnStatus::Failed` or `Cancelled`)
+//! - 2: Input/configuration error (missing profile, missing credentials, missing session)
+
 use anyhow::Result;
 use colored::Colorize;
-use futures::StreamExt;
-use lattice_core::types::Role;
+use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_profile::{ProfileError, ProfileSource};
-use lattice_prompt as prompt;
-use lattice_runtime::{Runtime, RuntimeAgentSession, TurnCompletion, TurnRequest};
-use std::collections::HashMap;
+use lattice_tools::ToolExecutor as _;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-#[allow(clippy::too_many_arguments)]
+use lattice_api::{RunTurnRequest, RunTurnResult, RunTurnStatus};
+
+// ── Real dependency adapters ─────────────────────────────────────────────
+
+/// Production LlmClient that delegates to `lattice_llm::chat`.
+struct RealLlmClient;
+
+#[async_trait::async_trait]
+impl lattice_agent::agent_loop::LlmClient for RealLlmClient {
+    async fn chat(
+        &self,
+        request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
+    {
+        lattice_llm::chat(request)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    }
+}
+
+/// Adapter wrapping `DefaultToolExecutor` for the agent loop's `ToolCallExecutor` trait.
+struct ToolExecutorAdapter {
+    inner: lattice_tools::executor::DefaultToolExecutor,
+}
+
+#[async_trait::async_trait]
+impl lattice_agent::agent_loop::ToolCallExecutor for ToolExecutorAdapter {
+    async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
+        self.inner.execute(call).await
+    }
+}
+
+// ── Public entry point ───────────────────────────────────────────────────
+
+/// Execute the v1.1 `run` command.
 pub async fn run(
     prompt: String,
-    model: String,
-    model_override: Option<String>,
-    agent: Option<&str>,
-    provider_override: Option<&str>,
+    model: Option<String>,
+    profile: Option<&str>,
+    session_id: Option<String>,
     verbose: bool,
     json: bool,
-    creds: &crate::credentials::CredentialStore,
-    save: bool,
-    previous_session: Option<crate::session::Session>,
-    dry_run: bool,
-    system_prompt: Option<&str>,
-    max_turns: u32,
-    stream_output: bool,
-    project_root: PathBuf,
-    security_config: crate::config::SecurityConfig,
-    global_agents_dir: PathBuf,
-) -> Result<()> {
-    // Dry-run: compile prompt through engine and print, no LLM call, no credential needed
-    if dry_run {
-        return dry_run_prompt(&prompt, &model, system_prompt, previous_session.as_ref()).await;
-    }
-
-    if verbose {
-        eprintln!("{}", format!("resolve: {} ...", model).dimmed());
-    }
-
-    let runtime = crate::runtime::model_runtime(creds.to_hashmap());
-    if prompt.trim() == "/compact" {
-        let Some(session) = previous_session else {
-            anyhow::bail!("No session selected for /compact. Use --continue or --session.");
-        };
-        let compacted = runtime.compact_session(session, &model, provider_override, 8)?;
-        if save {
-            if let Some(store) = runtime.session_store() {
-                store.save(&compacted)?;
-            }
+) -> std::process::ExitCode {
+    match run_inner(prompt, model, profile, session_id, verbose, json).await {
+        Ok(exit_code) => exit_code,
+        Err(error) => {
+            eprintln!("{}: {}", "error".red(), error);
+            std::process::ExitCode::from(2)
         }
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "session_id": compacted.id,
-                    "parent_id": compacted.parent_id,
-                    "message_count": compacted.messages.len(),
-                    "compact": compacted.messages.first().and_then(|message| message.compact.clone()),
-                }))?
-            );
-        } else {
-            println!("compacted session: {}", display_id(&compacted.id));
-        }
-        return Ok(());
     }
-    let session_id = previous_session.as_ref().map(|session| session.id.clone());
-    let task_state_seed =
-        crate::session_seed::load_latest_manifest_metadata(&runtime, previous_session.as_ref());
-    let security = crate::security::build_runtime_security(&security_config, &project_root)?;
-    let source = crate::profile_runtime::profile_source_from_agent_arg(agent);
-    let session = prepare_run_profile_session(
-        &runtime,
-        source,
-        model_override,
-        project_root.clone(),
-        global_agents_dir,
-        security.clone(),
-        security_config,
-        provider_override.map(str::to_string),
-        session_id.clone(),
-        task_state_seed,
-    )?;
-    let resolved = runtime.resolve_with_provider(&model, provider_override)?;
+}
+
+async fn run_inner(
+    prompt: String,
+    model: Option<String>,
+    profile: Option<&str>,
+    session_id: Option<String>,
+    verbose: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    let project_root = std::env::current_dir()?;
+    let source = profile_source_from_profile_arg(profile);
+
+    let loaded_profile = match load_profile(&source, &project_root) {
+        Ok(lp) => lp,
+        Err(error) => {
+            return handle_profile_error(error, &source, &project_root);
+        }
+    };
 
     if verbose {
         eprintln!(
             "{}",
-            format!("resolved: {}@{}", resolved.canonical_id, resolved.provider).cyan()
+            format!("profile: {}", loaded_profile.path.display()).dimmed()
         );
     }
 
-    if verbose {
-        eprintln!("{}", "streaming...".dimmed());
-    }
+    // Build SessionApi backed by SQLite
+    let session_dir = default_session_dir();
+    let session_api = lattice_api::SessionApi::sqlite(session_dir);
 
-    let request = TurnRequest {
-        input: prompt.clone(),
-        max_turns,
-        persist_session: save,
+    // Build AgentLoop with real LLM client and tool executor
+    let enabled_tools = loaded_profile.profile.tools.enabled.clone();
+    let project_root_str = project_root.to_string_lossy().to_string();
+    let tool_executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+        &project_root_str,
+        enabled_tools,
+    )
+    .map_err(|e| anyhow::anyhow!("tool executor setup: {e}"))?;
+
+    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
+        llm: Arc::new(RealLlmClient),
+        tool_executor: Arc::new(ToolExecutorAdapter {
+            inner: tool_executor,
+        }),
+    }));
+
+    let request = RunTurnRequest {
+        input: prompt,
         session_id,
-        cancellation_id: None,
+        profile: profile.map(str::to_string),
+        model,
+        loaded_profile: Some(loaded_profile),
     };
-    let completion = if json || !stream_output {
-        submit_run_runtime_turn(&runtime, session, request, None).await?
-    } else {
-        let mut renderer = crate::runtime_turn::RuntimeEventRenderer::new(verbose, false);
-        let completion =
-            submit_run_runtime_turn(&runtime, session, request, Some(&mut renderer)).await?;
-        renderer.finish(
-            completion
-                .token_usage
-                .as_ref()
-                .map(|u| u64::from(u.total_tokens)),
-        )?;
-        completion
+
+    let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+
+    let turn_result = match result {
+        Ok(r) => r,
+        Err(lattice_api::ApiError::NotFound(id)) => {
+            eprintln!("{}: session '{}' not found", "error".red(), id);
+            return Ok(std::process::ExitCode::from(2));
+        }
+        Err(lattice_api::ApiError::Internal(msg)) => {
+            eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
     };
-    crate::security::reap_audit(&security).await;
 
-    if json || !stream_output {
-        render_run_completion(&completion, verbose, json)?;
-    }
-    render_profile_warning(&completion, agent, previous_session.is_some(), json)?;
-
-    if save && verbose {
-        let saved_id = completion
-            .saved_session_id
-            .as_deref()
-            .map(display_id)
-            .unwrap_or_else(|| "not saved".into());
-        eprintln!("{}", format!("session saved: {}", saved_id).dimmed());
-    }
-
-    Ok(())
+    render_result(&turn_result, verbose, json)?;
+    Ok(status_to_exit_code(&turn_result.status))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_run_profile_session(
-    runtime: &Runtime,
-    source: ProfileSource,
-    model_override: Option<String>,
-    project_root: PathBuf,
-    global_agents_dir: PathBuf,
-    security: crate::security::RuntimeSecurity,
-    security_config: crate::config::SecurityConfig,
-    provider_override: Option<String>,
-    session_id: Option<String>,
-    task_state_seed: Option<lattice_agent::TaskState>,
-) -> Result<RuntimeAgentSession> {
-    let request = crate::profile_runtime::ProfileRuntimeSessionRequest {
-        source: source.clone(),
-        project_root: project_root.clone(),
-        global_agents_dir: global_agents_dir.clone(),
-        security_config,
-        model_override: model_override.clone(),
-        provider_override: provider_override.clone(),
-        session_id: session_id.clone(),
-        task_state_seed: task_state_seed.clone(),
+// ── Profile helpers ──────────────────────────────────────────────────────
+
+fn default_session_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("lattice")
+        .join("sessions")
+}
+
+fn profile_source_from_profile_arg(profile: Option<&str>) -> ProfileSource {
+    let Some(value) = profile.map(str::trim).filter(|v| !v.is_empty()) else {
+        return ProfileSource::Default;
     };
-    match crate::profile_runtime::prepare_profile_runtime_session(runtime, request) {
-        Ok(session) => Ok(session),
-        Err(error) if matches!(source, ProfileSource::Default) => {
-            let Some(profile_error) = error.downcast_ref::<ProfileError>() else {
-                return Err(error);
-            };
-            let ProfileError::MissingDefault { dir, template } = profile_error else {
-                return Err(error);
-            };
+    let has_path_separator = value.contains('/') || (cfg!(windows) && value.contains('\\'));
+    let is_path = Path::new(value).is_absolute()
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || has_path_separator
+        || value.ends_with(".toml");
+    if is_path {
+        ProfileSource::Path(PathBuf::from(value))
+    } else {
+        ProfileSource::Name(value.to_string())
+    }
+}
+
+fn load_profile(
+    source: &ProfileSource,
+    project_root: &Path,
+) -> std::result::Result<lattice_profile::LoadedAgentProfile, anyhow::Error> {
+    let global_agents_dir = safe_agents_dir(None).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: project_root.to_path_buf(),
+        global_agents_dir,
+    };
+    lattice_profile::resolve_agent_profile(source.clone(), &paths).map_err(Into::into)
+}
+
+fn handle_profile_error(
+    error: anyhow::Error,
+    _source: &ProfileSource,
+    project_root: &PathBuf,
+) -> Result<std::process::ExitCode> {
+    let Some(profile_error) = error.downcast_ref::<ProfileError>() else {
+        return Err(error);
+    };
+
+    match profile_error {
+        ProfileError::MissingDefault { dir, template } => {
             if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-                anyhow::bail!("{}", crate::profile_runtime::missing_default_message(dir));
+                eprintln!("{}: {}", "error".red(), missing_default_message(dir));
+                return Ok(std::process::ExitCode::from(2));
             }
             eprint!(
-                "No default agent profile exists. Create .lattice/agents/default/agent.toml and continue this run? [y/N] "
+                "No default agent profile exists. Create .lattice/agents/default/agent.toml now? [y/N] "
             );
             std::io::stderr().flush()?;
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer)?;
             if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                anyhow::bail!("{}", crate::profile_runtime::missing_default_message(dir));
+                eprintln!("{}: {}", "error".red(), missing_default_message(dir));
+                return Ok(std::process::ExitCode::from(2));
             }
-            let path = crate::profile_runtime::create_default_profile(dir, template)?;
+            let path = create_default_profile(dir, template)?;
             eprintln!(
-                "Created {}. Edit it later to change prompt, tools, model, or security settings.",
-                path.strip_prefix(&project_root).unwrap_or(&path).display()
+                "Created {}. Edit it if needed, then re-run the command.",
+                path.strip_prefix(project_root).unwrap_or(&path).display()
             );
-            crate::profile_runtime::prepare_profile_runtime_session_with_security(
-                runtime,
-                ProfileSource::Default,
-                project_root,
-                global_agents_dir,
-                security,
-                model_override,
-                provider_override,
-                session_id,
-                task_state_seed,
-            )
+            Err(anyhow::anyhow!(
+                "profile created at {}; please re-run the command",
+                path.display()
+            ))
         }
-        Err(error) => Err(error),
+        _ => Err(error),
     }
 }
 
-fn display_id(id: &str) -> String {
-    let mut chars = id.chars();
-    let mut prefix = chars.by_ref().take(8).collect::<String>();
-    if chars.next().is_some() {
-        prefix.push_str("...");
-    }
-    prefix
+fn missing_default_message(default_agent_dir: &Path) -> String {
+    let profile_path = default_agent_dir.join("agent.toml");
+    format!(
+        "No default agent profile found at {}. Create one before running non-interactively.",
+        profile_path.display()
+    )
 }
 
-/// Compile prompt through the engine and print the result without calling LLM.
-async fn dry_run_prompt(
-    prompt: &str,
-    model_name: &str,
-    system_prompt: Option<&str>,
-    previous_session: Option<&crate::session::Session>,
-) -> Result<()> {
-    let history = previous_session
-        .map(crate::session::messages_for_agent)
-        .unwrap_or_default();
-    let runtime = crate::runtime::model_runtime(HashMap::new());
-    let report = runtime
-        .dry_run_prompt(model_name, system_prompt, prompt, history)
-        .await?;
+fn create_default_profile(dir: &Path, template: &str) -> Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join("agent.toml");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(&path)?;
+    use std::io::Write as _;
+    file.write_all(template.as_bytes())?;
+    Ok(path)
+}
 
-    println!("{}", "═══ Compiled Prompt (dry-run) ═══".green());
-    println!("{}", "─ Input Sections ─".dimmed());
-    for (s, b) in report.sections.iter().zip(report.budgets.iter()) {
-        let label = format!("{:?}", s.layer);
-        let budget = match b {
-            prompt::TokenBudget::Fixed(n) => format!("Fixed({})", n),
-            prompt::TokenBudget::Ratio(r) => format!("Ratio({})", r),
-            prompt::TokenBudget::Dynamic => "Dynamic".into(),
-        };
-        println!(
-            "  {}  tokens={:<6} priority={:<3} budget={}",
-            label.cyan(),
-            s.tokens.to_string().yellow(),
-            s.priority.to_string().dimmed(),
-            budget.dimmed(),
-        );
+fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
+    let path = if let Some(p) = override_path {
+        PathBuf::from(p)
+    } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
+        PathBuf::from(dir)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".lattice").join("agents")
+    } else {
+        PathBuf::from(".lattice/agents")
+    };
+
+    validate_agents_dir(&path)?;
+    Ok(path)
+}
+
+fn validate_agents_dir(path: &Path) -> Result<(), String> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let path_str = canonical.to_string_lossy();
+
+    let dangerous_prefixes = [
+        "/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot",
+    ];
+    for prefix in &dangerous_prefixes {
+        if path_str.starts_with(prefix) {
+            return Err(format!(
+                "Agents directory '{}' is inside a system path ({}). \
+                 Set LATTICE_AGENTS_DIR to a safe location (e.g., under $HOME or your project).",
+                path.display(),
+                prefix
+            ));
+        }
     }
-    println!();
-    println!("{}", "─ Rendered Messages ─".dimmed());
-    for msg in &report.messages {
-        let role_label = match msg.role {
-            Role::System => "System".red(),
-            Role::User => "User".cyan(),
-            Role::Assistant => "Assistant".green(),
-            Role::Tool => "Tool".yellow(),
-        };
-        println!("  [{}] {}", role_label, msg.content);
+
+    if path_str.starts_with("/tmp") {
+        return Err(format!(
+            "Agents directory '{}' is inside /tmp which is world-writable and unsafe. \
+             Set LATTICE_AGENTS_DIR to a safe location.",
+            path.display()
+        ));
     }
-    println!();
-    println!("{}", "─ Stats ─".dimmed());
-    println!(
-        "  total_tokens={:<6} context_length={}",
-        report.rendered.total_tokens.to_string().yellow(),
-        report.resolved.context_length.to_string().dimmed(),
-    );
 
     Ok(())
 }
 
-pub(crate) async fn submit_run_runtime_turn(
-    runtime: &Runtime,
-    session: RuntimeAgentSession,
-    request: TurnRequest,
-    mut renderer: Option<&mut crate::runtime_turn::RuntimeEventRenderer>,
-) -> Result<TurnCompletion> {
-    let submitted = runtime.submit_session_turn(session, request).await?;
-    let mut events = submitted.events;
-    while let Some(event) = events.next().await {
-        if let Some(renderer) = renderer.as_deref_mut() {
-            renderer.render(&event)?;
-        }
-    }
+// ── Rendering ────────────────────────────────────────────────────────────
 
-    let completion = submitted.completion.await?;
-    crate::runtime_turn::require_successful_runtime_completion(completion)
-}
-
-pub(crate) fn run_completion_value(completion: &TurnCompletion) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "content": completion.assistant_text,
-        "total_tokens": completion
-            .token_usage
-            .as_ref()
-            .map(|usage| usage.total_tokens)
-            .unwrap_or_default(),
-    });
-    if let Some(warning) = completion.profile_drift_warning.as_ref() {
-        value["profile_warning"] = serde_json::Value::String(warning.clone());
-    }
-    value
-}
-
-fn render_run_completion(completion: &TurnCompletion, verbose: bool, json: bool) -> Result<()> {
+fn render_result(result: &RunTurnResult, verbose: bool, json: bool) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&run_completion_value(completion))?
-        );
+        println!("{}", serde_json::to_string_pretty(result)?);
     } else {
-        print!("{}", completion.assistant_text);
+        print!("{}", result.assistant_output);
         println!();
     }
+
     if verbose && !json {
-        if let Some(usage) = completion.token_usage.as_ref() {
+        eprintln!("{}: {}", "session".dimmed(), result.session_id);
+        eprintln!("{}: {}", "commit".dimmed(), result.commit_id);
+        eprintln!("{}: {:?}", "status".dimmed(), result.status);
+        if let Some(ref usage) = result.usage {
             eprintln!(
-                "\n{}: {} tok (prompt: {}, completion: {})",
+                "{}: {} tok (prompt: {}, completion: {})",
                 "usage".dimmed(),
                 usage.total_tokens,
                 usage.prompt_tokens,
-                usage.completion_tokens,
+                usage.completion_tokens
+            );
+        }
+        if !result.tool_results.is_empty() {
+            eprintln!(
+                "{}: {} executed",
+                "tools".dimmed(),
+                result.tool_results.len()
             );
         }
     }
+
     std::io::stdout().flush()?;
     Ok(())
 }
 
-fn render_profile_warning(
-    completion: &TurnCompletion,
-    agent: Option<&str>,
-    restored_session: bool,
-    json: bool,
-) -> Result<()> {
-    if json {
-        return Ok(());
+fn status_to_exit_code(status: &RunTurnStatus) -> std::process::ExitCode {
+    match status {
+        RunTurnStatus::Completed => std::process::ExitCode::SUCCESS,
+        RunTurnStatus::Failed | RunTurnStatus::Cancelled => std::process::ExitCode::from(1),
     }
-    let Some(warning) = completion.profile_drift_warning.as_ref() else {
-        return Ok(());
-    };
-    if restored_session {
-        if let Some(agent) = agent {
-            let hash = snapshot_hash_from_warning(warning).unwrap_or(warning);
-            eprintln!("Ignoring --agent {agent}; restored session is locked to snapshot {hash}.");
-        } else {
-            eprintln!("{warning}");
-        }
-    } else {
-        eprintln!("{warning}");
-    }
-    Ok(())
 }
 
-fn snapshot_hash_from_warning(warning: &str) -> Option<&str> {
-    warning.split("snapshot ").nth(1).map(str::trim)
-}
+// ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_runtime::{TurnId, TurnStatus};
-
-    fn completion_with_profile_warning() -> TurnCompletion {
-        TurnCompletion {
-            session_id: "session".into(),
-            turn_id: TurnId::new(),
-            status: TurnStatus::Completed,
-            assistant_text: "answer".into(),
-            token_usage: None,
-            task_state_snapshot: lattice_agent::TaskState::new(),
-            final_report: None,
-            turn_manifests: Vec::new(),
-            model: "model".into(),
-            provider: "provider".into(),
-            saved_session_id: None,
-            profile_drift_warning: Some(
-                "profile changed on disk; current session remains locked to snapshot abcdef123456"
-                    .into(),
-            ),
-            error: None,
-        }
-    }
 
     #[test]
-    fn run_completion_json_includes_profile_warning() {
-        let value = run_completion_value(&completion_with_profile_warning());
-
-        assert_eq!(value["content"], "answer");
+    fn run_status_to_exit_code_completed_is_success() {
         assert_eq!(
-            value["profile_warning"],
-            "profile changed on disk; current session remains locked to snapshot abcdef123456"
+            status_to_exit_code(&RunTurnStatus::Completed),
+            std::process::ExitCode::SUCCESS
         );
     }
 
     #[test]
-    fn profile_drift_warning_hash_suffix_is_extracted() {
-        let warning = completion_with_profile_warning()
-            .profile_drift_warning
-            .unwrap();
+    fn run_status_to_exit_code_failed_is_1() {
+        let code = status_to_exit_code(&RunTurnStatus::Failed);
+        assert_ne!(
+            format!("{:?}", code),
+            format!("{:?}", std::process::ExitCode::SUCCESS)
+        );
+    }
 
-        assert_eq!(snapshot_hash_from_warning(&warning), Some("abcdef123456"));
+    #[test]
+    fn run_status_to_exit_code_cancelled_is_1() {
+        let code = status_to_exit_code(&RunTurnStatus::Cancelled);
+        assert_ne!(
+            format!("{:?}", code),
+            format!("{:?}", std::process::ExitCode::SUCCESS)
+        );
+    }
+
+    #[test]
+    fn run_profile_source_none_is_default() {
+        assert!(matches!(
+            profile_source_from_profile_arg(None),
+            ProfileSource::Default
+        ));
+    }
+
+    #[test]
+    fn run_profile_source_name() {
+        match profile_source_from_profile_arg(Some("reader")) {
+            ProfileSource::Name(name) => assert_eq!(name, "reader"),
+            other => panic!("expected Name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_profile_source_path() {
+        assert!(matches!(
+            profile_source_from_profile_arg(Some("./agent.toml")),
+            ProfileSource::Path(_)
+        ));
+    }
+
+    #[test]
+    fn run_missing_default_message_references_profile_path() {
+        let dir = Path::new("/tmp/.lattice/agents/default");
+        let msg = missing_default_message(dir);
+        assert!(msg.contains("agent.toml"));
+        assert!(msg.contains("/tmp/.lattice/agents/default"));
+    }
+
+    #[test]
+    fn run_default_session_dir_under_lattice_sessions() {
+        let dir = default_session_dir();
+        assert!(dir.to_string_lossy().contains("lattice"));
+        assert!(dir.to_string_lossy().contains("sessions"));
+    }
+
+    // ── Integration: run_turn with stub LLM ────────────────────────────────
+
+    struct StubLlmClient;
+
+    #[async_trait::async_trait]
+    impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
+        async fn chat(
+            &self,
+            _request: lattice_llm::ChatRequest,
+        ) -> std::result::Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Ok(lattice_llm::ChatResponse {
+                content: "stub response".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                finish_reason: "stop".to_string(),
+                model: "stub-model".to_string(),
+                usage: Some(lattice_llm::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                }),
+            })
+        }
+    }
+
+    struct NoopToolExecutor;
+
+    #[async_trait::async_trait]
+    impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
+        async fn execute(&self, _call: &lattice_llm::ToolCall) -> String {
+            "no-op".to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_integration_creates_session_and_returns_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_api = lattice_api::SessionApi::sqlite(temp.path());
+        let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
+            lattice_agent::AgentLoopConfig {
+                llm: std::sync::Arc::new(StubLlmClient),
+                tool_executor: std::sync::Arc::new(NoopToolExecutor),
+            },
+        ));
+
+        let request = lattice_api::RunTurnRequest {
+            input: "hello".to_string(),
+            session_id: None,
+            profile: None,
+            model: Some("stub-model".to_string()),
+            loaded_profile: None,
+        };
+
+        let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+
+        match result {
+            Ok(turn_result) => {
+                assert!(!turn_result.session_id.is_empty());
+                assert!(!turn_result.commit_id.is_empty());
+                assert_eq!(turn_result.assistant_output, "stub response");
+                assert_eq!(turn_result.status, RunTurnStatus::Completed);
+            }
+            Err(e) => {
+                panic!("run_turn failed: {e}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_integration_missing_session_returns_not_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_api = lattice_api::SessionApi::sqlite(temp.path());
+        let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
+            lattice_agent::AgentLoopConfig {
+                llm: std::sync::Arc::new(StubLlmClient),
+                tool_executor: std::sync::Arc::new(NoopToolExecutor),
+            },
+        ));
+
+        let request = lattice_api::RunTurnRequest {
+            input: "hello".to_string(),
+            session_id: Some("nonexistent-session-id".to_string()),
+            profile: None,
+            model: Some("stub-model".to_string()),
+            loaded_profile: None,
+        };
+
+        let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            lattice_api::ApiError::NotFound(id) => {
+                assert_eq!(id, "nonexistent-session-id");
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    // ── Boundary: no old crate imports ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
+        // Regression: run_inner used to pass loaded_profile.package_dir
+        // (.lattice/agents/default) as the tool executor's project_root,
+        // which broke read_file/grep/etc for files outside that subdirectory.
+        let workspace = tempfile::tempdir().unwrap();
+        let ws = workspace.path();
+
+        // Create workspace content: src/lib.rs at the workspace root
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
+
+        // Create profile directory that is a *subdirectory* of the workspace
+        let profile_dir = ws.join(".lattice/agents/default");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
+
+        // Build tool executor with the *workspace root* (the fix), not profile_dir
+        let enabled = vec!["read_file".to_string()];
+        let executor =
+            lattice_tools::executor::DefaultToolExecutor::for_project_root(
+                &ws.to_string_lossy(),
+                enabled,
+            )
+            .expect("executor creation must succeed");
+
+        // read_file("src/lib.rs") must resolve against workspace root, not profile_dir
+        let call = lattice_llm::ToolCall::new(
+            "test-call",
+            lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
+        );
+        use lattice_tools::ToolExecutor as _;
+        let result = executor.execute(&call).await;
+
+        assert!(
+            result.contains("fn main()"),
+            "read_file must succeed via workspace root; got: {result}"
+        );
+        assert!(
+            !result.contains("outside the project root"),
+            "must not be rejected as out-of-root"
+        );
+    }
+
+    #[test]
+    fn run_source_has_no_old_crate_imports() {
+        let source = include_str!("run.rs");
+        let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+        let prod = &source[..test_start];
+        let forbidden = [
+            "lattice_core",
+            "lattice_runtime",
+            "lattice_prompt",
+            "lattice_sandbox",
+            "lattice_policy",
+        ];
+        for pattern in forbidden {
+            assert!(
+                !prod.contains(pattern),
+                "run.rs production code must not contain '{pattern}'"
+            );
+        }
     }
 }

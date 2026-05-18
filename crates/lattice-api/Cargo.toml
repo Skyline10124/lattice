@@ -1,0 +1,26 @@
+[package]
+name = "lattice-api"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE v1.1 thin public API facade for session creation, turn execution, and streaming"
+
+[dependencies]
+async-trait = { workspace = true }
+lattice-agent = { workspace = true }
+lattice-llm = { workspace = true }
+lattice-profile = { workspace = true }
+lattice-session = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+lattice-tools = { workspace = true }
+lattice-profile = { workspace = true }
+blake3 = { workspace = true }
