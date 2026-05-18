@@ -35,6 +35,11 @@ async fn execute_turn_inner(
     };
 
     let transcript = deps.head_transcript(&session_id)?;
+    let parent_ids = transcript
+        .parent_commit_id
+        .clone()
+        .into_iter()
+        .collect::<Vec<_>>();
 
     stages.push(RunTurnStage::Agent);
     let agent_request = build_agent_request(
@@ -68,12 +73,6 @@ async fn execute_turn_inner(
     commit_messages.extend(agent_result.messages.iter().cloned());
 
     let commit_message = derive_commit_message(&commit_messages);
-
-    let transcript_for_parent = deps.head_transcript(&session_id)?;
-    let parent_ids = transcript_for_parent
-        .parent_commit_id
-        .into_iter()
-        .collect::<Vec<_>>();
 
     let profile_snapshot_id = request
         .loaded_profile

@@ -251,13 +251,13 @@ fn focused_tests_import_no_removed_crate_names() {
                 let path = entry.path();
                 if path.is_dir() {
                     // Skip target directories
-                    if path.file_name().map_or(false, |n| n == "target") {
+                    if path.file_name().is_some_and(|n| n == "target") {
                         continue;
                     }
                     stack.push(path);
                     continue;
                 }
-                if path.extension().map_or(true, |e| e != "rs") {
+                if path.extension().is_none_or(|e| e != "rs") {
                     continue;
                 }
                 let content = match std::fs::read_to_string(&path) {

@@ -17,7 +17,6 @@ lattice-tools = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
 lattice-llm = { workspace = true }
-lattice-hooks = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

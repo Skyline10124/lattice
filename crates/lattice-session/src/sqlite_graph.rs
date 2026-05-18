@@ -765,6 +765,17 @@ impl SessionGraphStore for SqliteSessionGraphStore {
             source,
         })?;
 
+        // If this branch is the currently checked-out branch, also sync session head_commit_id.
+        // On detached HEAD (head_ref IS NULL) or a non-current branch, this is a no-op.
+        conn.execute(
+            "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3 AND head_ref=?4",
+            params![commit_id, now, session_id, name],
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
+        })?;
+
         Ok(GraphRef {
             session_id: session_id.to_string(),
             name: name.to_string(),
@@ -1668,7 +1679,7 @@ mod sqlite_graph_commit_turn {
 
             let commit = store
                 .commit_turn(input)
-                .expect(&format!("commit_turn should accept status {:?}", status));
+                .unwrap_or_else(|_| panic!("commit_turn should accept status {:?}", status));
             assert_eq!(commit.status, *status);
         }
 
@@ -2726,5 +2737,125 @@ mod session_graph_pointer_ops {
             )
             .expect("count");
         assert_eq!(msg_count, 4, "should have 4 message rows total");
+    }
+
+    /// When `branch()` updates the currently checked-out branch, `graph_sessions.head_commit_id`
+    /// must be kept in sync. Otherwise `status()` returns a stale `current_commit_id`.
+    #[test]
+    fn branch_update_current_branch_syncs_session_head_commit_id() {
+        let dir = temp_dir("branch_syncs_head");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        // 1. Create session and commit A, then commit B on main.
+        let commits = setup_session_with_commits(&store, "sess-1", 2, None);
+        let commit_a = commits[0].commit_id.clone();
+        let commit_b = commits[1].commit_id.clone();
+
+        // Sanity: status shows HEAD on main at commit B.
+        let status = store.status("sess-1").expect("status");
+        assert!(
+            matches!(&status.head, GraphHead::Branch { name } if name == "main"),
+            "HEAD should be on main"
+        );
+        assert_eq!(status.current_commit_id, Some(commit_b.clone()));
+
+        // 2. Call branch() to move main back to commit A.
+        store
+            .branch("sess-1", "main", Some(&commit_a))
+            .expect("branch update");
+
+        // 3. Status must now report commit A as current.
+        let status = store.status("sess-1").expect("status after branch");
+        assert!(
+            matches!(&status.head, GraphHead::Branch { name } if name == "main"),
+            "HEAD should still be on main"
+        );
+        assert_eq!(
+            status.current_commit_id,
+            Some(commit_a.clone()),
+            "status.current_commit_id must be commit A after branch moved main"
+        );
+
+        // 4. Verify main branch ref points to commit A.
+        let conn = store.conn().expect("conn");
+        let main_commit: Option<String> = conn
+            .query_row(
+                "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(main_commit, Some(commit_a.clone()));
+
+        // 5. head_transcript must also reflect the rewind (via branch ref read).
+        let transcript = store.head_transcript("sess-1").expect("head_transcript");
+        assert_eq!(
+            transcript.messages.len(),
+            2,
+            "only commit A's messages visible"
+        );
+        assert_eq!(
+            transcript.parent_commit_id,
+            Some(commit_a),
+            "transcript parent should be commit A"
+        );
+    }
+
+    /// Updating a non-current branch via `branch()` must NOT move the session HEAD.
+    #[test]
+    fn branch_update_non_current_branch_does_not_move_head() {
+        let dir = temp_dir("branch_non_current");
+        let store = SqliteSessionGraphStore::new(dir);
+
+        // 1. Create session, commit A, branch 'side' from A, commit B on main.
+        let commits = setup_session_with_commits(&store, "sess-1", 1, None);
+        let commit_a = commits[0].commit_id.clone();
+
+        store
+            .branch("sess-1", "side", Some(&commit_a))
+            .expect("create side branch");
+
+        // Commit B on main.
+        let messages_b = vec![user_msg("B"), assistant_msg("Response B")];
+        let input_b = commit_input(
+            "sess-1",
+            vec![commit_a.clone()],
+            messages_b,
+            TurnCommitStatus::Completed,
+        );
+        let commit_b = store.commit_turn(input_b).expect("commit B");
+
+        // HEAD is still on main at B.
+        let status = store.status("sess-1").expect("status");
+        assert_eq!(status.current_commit_id, Some(commit_b.commit_id.clone()));
+        let commit_b_id = commit_b.commit_id;
+
+        // 2. Update 'side' branch to point to B.
+        store
+            .branch("sess-1", "side", Some(&commit_b_id))
+            .expect("update side branch");
+
+        // 3. HEAD must still be on main at B — not moved by side branch update.
+        let status = store.status("sess-1").expect("status after side update");
+        assert!(
+            matches!(&status.head, GraphHead::Branch { name } if name == "main"),
+            "HEAD should still be on main"
+        );
+        assert_eq!(
+            status.current_commit_id,
+            Some(commit_b_id.clone()),
+            "HEAD commit should still be B"
+        );
+
+        // 4. 'side' branch ref should point to B.
+        let conn = store.conn().expect("conn");
+        let side_commit: Option<String> = conn
+                        .query_row(
+                            "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='side'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .expect("query");
+        assert_eq!(side_commit, Some(commit_b_id));
     }
 }

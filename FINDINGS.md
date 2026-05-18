@@ -6,12 +6,12 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 
 ## Phase 11 — 2026-05-18
 
-7 findings deferred beyond hot-fix scope. Each requires architectural refactoring.
+7 findings tracked across hardening. Some are now resolved; unresolved architectural items remain deferred.
 
-### WR-02: Inconsistent env var test synchronization — `flaky-ci`
+### WR-02: Inconsistent env var test synchronization — `flaky-ci` [resolved 2026-05-19]
 - **Files:** `crates/lattice-llm/src/router.rs` (tests), `crates/lattice-cli/src/commands/doctor.rs` (tests)
-- **Issue:** `doctor.rs` uses `ENV_MUTEX` for `std::env::set_var`; `router.rs` uses raw calls. Parallel `cargo test` races.
-- **Fix needed:** Apply `ENV_MUTEX` to router tests, or refactor to dependency injection for credential resolution.
+- **Issue:** Env-var tests previously used unsynchronized `std::env::set_var` / `remove_var`, which could race under parallel `cargo test`.
+- **Fix:** Router tests now use a local env mutex helper; CLI doctor tests use shared env helpers for set/remove isolation.
 
 ### WR-03: SQLite per-method connection with no pooling — `consistency`
 - **File:** `crates/lattice-session/src/sqlite_graph.rs`
@@ -23,10 +23,10 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **Issue:** Checks `!output.starts_with("Error:") && !output.starts_with("Tool denied:")`. Different error formats pass silently.
 - **Fix needed:** `ToolCallExecutor::execute` returns `ExecutionResult { output, success }` or `Result<String, ToolError>`.
 
-### WR-06: TOCTOU race in turn parent_commit_id resolution — `race-condition`
-- **File:** `crates/lattice-api/src/turn.rs:476-481`
-- **Issue:** `head_transcript` called again after agent loop for `parent_commit_id`. Concurrent turn could change HEAD between reads.
-- **Fix needed:** Capture `parent_commit_id` from initial transcript read, carry through turn execution.
+### WR-06: TOCTOU race in turn parent_commit_id resolution — `race-condition` [resolved 2026-05-19]
+- **File:** `crates/lattice-api/src/turn/execute.rs`
+- **Issue:** `head_transcript` was called again after agent loop for `parent_commit_id`. Concurrent turn could change HEAD between reads.
+- **Fix:** Parent commit id is now captured from the initial transcript read and carried through turn execution into `TurnCommitInput`.
 
 ### IN-01: Duplicated test helpers across modules — `maintainability`
 - **Files:** `crates/lattice-agent/src/agent_loop.rs`, `crates/lattice-api/src/turn.rs`, `crates/lattice-api/src/session.rs`
@@ -38,7 +38,7 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **Issue:** 405-line hook system never imported. Deferred per CLAUDE.md future work section.
 - **Fix needed:** Remove crate and dependency, or gate with `#[cfg(feature = "hooks")]`.
 
-### IN-03: lattice-cli depends on lattice-hooks but never imports — `unused-dep`
+### IN-03: lattice-cli depends on lattice-hooks but never imports — `unused-dep` [resolved 2026-05-19]
 - **File:** `crates/lattice-cli/Cargo.toml`
-- **Issue:** `lattice-hooks` in deps, no `use lattice_hooks::` in any source file. Now surfaces as warning after WR-01 fix.
-- **Fix needed:** Remove from Cargo.toml until actually needed.
+- **Issue:** `lattice-hooks` was listed in CLI dependencies without any `use lattice_hooks::` in CLI source.
+- **Fix:** Removed the unused `lattice-hooks` dependency from `lattice-cli`.

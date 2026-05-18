@@ -180,29 +180,60 @@ impl ModelRouter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
     use crate::types::ModelTarget;
 
+    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn with_env_vars(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        let previous: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(key, _)| (*key, std::env::var(key).ok()))
+            .collect();
+
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        f();
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
     #[test]
     fn credential_status_present_from_env() {
-        std::env::set_var("LATTICE_TEST_CRED_PRESENT", "sk-test-key");
-        let status = CredentialStatus::from_env("LATTICE_TEST_CRED_PRESENT");
-        assert_eq!(status, CredentialStatus::Present);
-        std::env::remove_var("LATTICE_TEST_CRED_PRESENT");
+        with_env_vars(&[("LATTICE_TEST_CRED_PRESENT", Some("sk-test-key"))], || {
+            let status = CredentialStatus::from_env("LATTICE_TEST_CRED_PRESENT");
+            assert_eq!(status, CredentialStatus::Present);
+        });
     }
 
     #[test]
     fn credential_status_missing_when_unset() {
-        let status = CredentialStatus::from_env("LATTICE_TEST_CRED_MISSING_UNSET");
-        assert_eq!(status, CredentialStatus::Missing);
+        with_env_vars(&[("LATTICE_TEST_CRED_MISSING_UNSET", None)], || {
+            let status = CredentialStatus::from_env("LATTICE_TEST_CRED_MISSING_UNSET");
+            assert_eq!(status, CredentialStatus::Missing);
+        });
     }
 
     #[test]
     fn credential_status_missing_when_empty() {
-        std::env::set_var("LATTICE_TEST_CRED_EMPTY", "");
-        let status = CredentialStatus::from_env("LATTICE_TEST_CRED_EMPTY");
-        assert_eq!(status, CredentialStatus::Missing);
-        std::env::remove_var("LATTICE_TEST_CRED_EMPTY");
+        with_env_vars(&[("LATTICE_TEST_CRED_EMPTY", Some(""))], || {
+            let status = CredentialStatus::from_env("LATTICE_TEST_CRED_EMPTY");
+            assert_eq!(status, CredentialStatus::Missing);
+        });
     }
 
     struct ResolveCase {
@@ -258,7 +289,7 @@ mod tests {
             let target = ModelTarget::new(case.alias);
             let resolved = router
                 .resolve(&target)
-                .expect(&format!("{} should resolve", case.alias));
+                .unwrap_or_else(|_| panic!("{} should resolve", case.alias));
             assert_eq!(
                 resolved.provider, case.provider,
                 "{}: provider mismatch",
@@ -307,33 +338,33 @@ mod tests {
 
     #[test]
     fn resolved_model_debug_does_not_leak_secrets() {
-        std::env::set_var("OPENAI_API_KEY", "sk-secret-value-123");
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-5.5");
-        let resolved = router.resolve(&target).expect("gpt-5.5 should resolve");
-        let debug_str = format!("{:?}", resolved);
-        assert!(
-            !debug_str.contains("sk-secret-value-123"),
-            "debug output must not leak API key value: {}",
-            debug_str
-        );
-        assert!(
-            debug_str.contains("OPENAI_API_KEY"),
-            "debug output should contain the env var name"
-        );
-        std::env::remove_var("OPENAI_API_KEY");
+        with_env_vars(&[("OPENAI_API_KEY", Some("sk-secret-value-123"))], || {
+            let router = ModelRouter::new();
+            let target = ModelTarget::new("gpt-5.5");
+            let resolved = router.resolve(&target).expect("gpt-5.5 should resolve");
+            let debug_str = format!("{:?}", resolved);
+            assert!(
+                !debug_str.contains("sk-secret-value-123"),
+                "debug output must not leak API key value: {}",
+                debug_str
+            );
+            assert!(
+                debug_str.contains("OPENAI_API_KEY"),
+                "debug output should contain the env var name"
+            );
+        });
     }
 
     #[test]
     fn resolved_model_serialization_does_not_leak_secrets() {
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-secret");
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("sonnet");
-        let resolved = router.resolve(&target).expect("sonnet should resolve");
-        assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
-        let fields = format!("{:?}", resolved);
-        assert!(!fields.contains("sk-ant-secret"));
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        with_env_vars(&[("ANTHROPIC_API_KEY", Some("sk-ant-secret"))], || {
+            let router = ModelRouter::new();
+            let target = ModelTarget::new("sonnet");
+            let resolved = router.resolve(&target).expect("sonnet should resolve");
+            assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
+            let fields = format!("{:?}", resolved);
+            assert!(!fields.contains("sk-ant-secret"));
+        });
     }
 
     #[test]
@@ -371,36 +402,37 @@ mod tests {
 
     #[test]
     fn aliases_carry_provider_metadata_and_no_secrets() {
-        std::env::set_var("OPENAI_API_KEY", "sk-router-secret");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-secret");
-        std::env::set_var("GEMINI_API_KEY", "sk-gem-secret");
+        with_env_vars(
+            &[
+                ("OPENAI_API_KEY", Some("sk-router-secret")),
+                ("ANTHROPIC_API_KEY", Some("sk-ant-secret")),
+                ("GEMINI_API_KEY", Some("sk-gem-secret")),
+            ],
+            || {
+                let router = ModelRouter::new();
+                let aliases = router.aliases();
 
-        let router = ModelRouter::new();
-        let aliases = router.aliases();
-
-        for alias in &aliases {
-            assert!(
-                !alias.api_key_env.is_empty(),
-                "{}: should have api_key_env",
-                alias.alias
-            );
-            assert!(
-                !alias.base_url.is_empty() || alias.alias == "openai-compatible",
-                "{}: should have base_url",
-                alias.alias
-            );
-            let debug = format!("{:?}", alias);
-            assert!(
-                !debug.contains("sk-router-secret"),
-                "{}: no leak",
-                alias.alias
-            );
-            assert!(!debug.contains("sk-ant-secret"), "{}: no leak", alias.alias);
-            assert!(!debug.contains("sk-gem-secret"), "{}: no leak", alias.alias);
-        }
-
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("GEMINI_API_KEY");
+                for alias in &aliases {
+                    assert!(
+                        !alias.api_key_env.is_empty(),
+                        "{}: should have api_key_env",
+                        alias.alias
+                    );
+                    assert!(
+                        !alias.base_url.is_empty() || alias.alias == "openai-compatible",
+                        "{}: should have base_url",
+                        alias.alias
+                    );
+                    let debug = format!("{:?}", alias);
+                    assert!(
+                        !debug.contains("sk-router-secret"),
+                        "{}: no leak",
+                        alias.alias
+                    );
+                    assert!(!debug.contains("sk-ant-secret"), "{}: no leak", alias.alias);
+                    assert!(!debug.contains("sk-gem-secret"), "{}: no leak", alias.alias);
+                }
+            },
+        );
     }
 }

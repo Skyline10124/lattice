@@ -23,3 +23,28 @@ pub(crate) fn with_env_var(key: &str, value: &str, f: impl FnOnce()) {
         None => std::env::remove_var(key),
     }
 }
+
+/// Call `f` with the given env vars removed from the environment.
+///
+/// Previous values are restored after `f` returns.
+pub(crate) fn without_env_vars(keys: &[&str], f: impl FnOnce()) {
+    let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let previous: Vec<(&str, Option<String>)> = keys
+        .iter()
+        .map(|key| (*key, std::env::var(key).ok()))
+        .collect();
+
+    for key in keys {
+        std::env::remove_var(key);
+    }
+
+    f();
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}

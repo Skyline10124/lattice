@@ -994,7 +994,6 @@ dependencies = [
  "futures",
  "lattice-agent",
  "lattice-api",
- "lattice-hooks",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",

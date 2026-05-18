@@ -156,6 +156,7 @@ pub fn run(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_env::{with_env_var, without_env_vars};
 
     #[test]
     fn doctor_report_contains_expected_keys() {
@@ -213,57 +214,55 @@ mod tests {
 
     #[test]
     fn doctor_json_does_not_leak_secret_values() {
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-secret-test-key-12345");
-        let report = build_report();
-        let json = render_json(&report).unwrap();
+        with_env_var("ANTHROPIC_API_KEY", "sk-secret-test-key-12345", || {
+            let report = build_report();
+            let json = render_json(&report).unwrap();
 
-        // The secret value should NOT appear in the JSON
-        assert!(!json.contains("sk-secret-test-key-12345"));
-        // But the env var name SHOULD appear
-        assert!(json.contains("ANTHROPIC_API_KEY"));
-        std::env::remove_var("ANTHROPIC_API_KEY");
+            // The secret value should NOT appear in the JSON
+            assert!(!json.contains("sk-secret-test-key-12345"));
+            // But the env var name SHOULD appear
+            assert!(json.contains("ANTHROPIC_API_KEY"));
+        });
     }
 
     #[test]
     fn doctor_text_does_not_leak_secret_values() {
-        std::env::set_var("OPENAI_API_KEY", "sk-another-secret-67890");
-        let report = build_report();
-        let text = render_text(&report);
+        with_env_var("OPENAI_API_KEY", "sk-another-secret-67890", || {
+            let report = build_report();
+            let text = render_text(&report);
 
-        // The secret value should NOT appear in the text
-        assert!(!text.contains("sk-another-secret-67890"));
-        // But the env var name SHOULD appear
-        assert!(text.contains("OPENAI_API_KEY"));
-        std::env::remove_var("OPENAI_API_KEY");
+            // The secret value should NOT appear in the text
+            assert!(!text.contains("sk-another-secret-67890"));
+            // But the env var name SHOULD appear
+            assert!(text.contains("OPENAI_API_KEY"));
+        });
     }
 
     #[test]
     fn doctor_credentials_reflect_present_status() {
-        std::env::set_var("GEMINI_API_KEY", "sk-gemini-test");
-        let report = build_report();
+        with_env_var("GEMINI_API_KEY", "sk-gemini-test", || {
+            let report = build_report();
 
-        let gemini = report
-            .credentials
-            .iter()
-            .find(|c| c.env_var == "GEMINI_API_KEY");
-        assert!(gemini.is_some(), "should have GEMINI_API_KEY entry");
-        assert_eq!(gemini.unwrap().status, "Present");
-        std::env::remove_var("GEMINI_API_KEY");
+            let gemini = report
+                .credentials
+                .iter()
+                .find(|c| c.env_var == "GEMINI_API_KEY");
+            assert!(gemini.is_some(), "should have GEMINI_API_KEY entry");
+            assert_eq!(gemini.unwrap().status, "Present");
+        });
     }
 
     #[test]
     fn doctor_credentials_reflect_missing_status() {
-        // Ensure these env vars are not set
-        std::env::remove_var("ANTHROPIC_API_KEY");
-        std::env::remove_var("OPENAI_API_KEY");
+        without_env_vars(&["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], || {
+            let report = build_report();
 
-        let report = build_report();
-
-        // At least one should have Missing status
-        let has_missing = report.credentials.iter().any(|c| c.status == "Missing");
-        assert!(
-            has_missing,
-            "should have at least one credential with Missing status"
-        );
+            // At least one should have Missing status
+            let has_missing = report.credentials.iter().any(|c| c.status == "Missing");
+            assert!(
+                has_missing,
+                "should have at least one credential with Missing status"
+            );
+        });
     }
 }

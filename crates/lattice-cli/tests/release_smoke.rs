@@ -9,11 +9,11 @@
 //! Threat model: T-11-20 (information disclosure), T-11-21 (tampering).
 
 use lattice_session::SessionGraphStore;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Build a `Command` for the `lattice` binary with isolated environment.
-fn lattice(temp_home: &PathBuf) -> Command {
+fn lattice(temp_home: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lattice"));
     cmd.env("HOME", temp_home)
         .env("XDG_CONFIG_HOME", temp_home.join(".config"))
@@ -36,7 +36,7 @@ fn temp_home(prefix: &str) -> PathBuf {
 
 /// Seed a session with one committed turn in the temp session store.
 /// Returns the session ID used.
-fn seed_session(temp_home: &PathBuf, session_id: &str) {
+fn seed_session(temp_home: &Path, session_id: &str) {
     let session_dir = temp_home.join(".config").join("lattice").join("sessions");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
 
@@ -85,7 +85,7 @@ fn seed_session(temp_home: &PathBuf, session_id: &str) {
 }
 
 /// Create a minimal .lattice/agents/default/agent.toml in the project dir.
-fn seed_default_profile(project_dir: &PathBuf) {
+fn seed_default_profile(project_dir: &Path) {
     let agents_dir = project_dir.join(".lattice").join("agents").join("default");
     std::fs::create_dir_all(&agents_dir).expect("create agents dir");
     let profile = lattice_profile::default_agent_template("default", "sonnet");
