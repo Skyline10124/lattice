@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
+///
+/// Sections removed in v1.1: `[security]`, `[context]`, `[behavior]`.
+/// The `[tools]` section only supports explicit `enabled` — no `bundles`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentProfile {
@@ -9,12 +12,6 @@ pub struct AgentProfile {
     pub prompt: PromptSection,
     #[serde(default)]
     pub tools: ToolsSection,
-    #[serde(default)]
-    pub security: Option<SecuritySection>,
-    #[serde(default)]
-    pub context: Option<ContextSection>,
-    #[serde(default)]
-    pub behavior: Option<BehaviorSection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -35,49 +32,14 @@ pub struct PromptSection {
     pub system_path: Option<String>,
 }
 
+/// v1.1 tool section: only explicit `enabled` tool names are supported.
+///
+/// `bundles` and any other field are rejected by `#[serde(deny_unknown_fields)]`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSection {
     #[serde(default)]
-    pub bundles: Vec<String>,
-    #[serde(default)]
     pub enabled: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxMode {
-    Project,
-    Strict,
-    Permissive,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct SecuritySection {
-    pub sandbox_mode: SandboxMode,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextSection {
-    #[serde(default = "default_true")]
-    pub project_instructions: bool,
-    #[serde(default = "default_true")]
-    pub workspace_context: bool,
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct BehaviorSection {
-    #[serde(default)]
-    pub max_turns: Option<u32>,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
 }
 
 #[cfg(test)]
@@ -126,19 +88,7 @@ description = "A full-featured agent"
 system_path = "prompt.md"
 
 [tools]
-bundles = ["workspace", "filesystem"]
-enabled = ["grep"]
-
-[security]
-sandbox_mode = "strict"
-
-[context]
-project_instructions = true
-workspace_context = false
-
-[behavior]
-max_turns = 42
-reasoning_effort = "high"
+enabled = ["grep", "read_file", "bash"]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(
@@ -147,19 +97,10 @@ reasoning_effort = "high"
         );
         assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
         let tools = &profile.tools;
-        assert_eq!(tools.bundles, vec!["workspace", "filesystem"]);
-        assert_eq!(tools.enabled, vec!["grep"]);
-        let sec = profile.security.unwrap();
-        assert!(matches!(sec.sandbox_mode, SandboxMode::Strict));
-        let ctx = profile.context.unwrap();
-        assert!(ctx.project_instructions);
-        assert!(!ctx.workspace_context);
-        let bhv = profile.behavior.unwrap();
-        assert_eq!(bhv.max_turns, Some(42));
-        assert_eq!(bhv.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(tools.enabled, vec!["grep", "read_file", "bash"]);
     }
 
-    // schema_version rejection is tested in load.rs (loader-level validation)
+    // ── Top-level section rejection ───────────────────────────────────
 
     #[test]
     fn reject_unknown_top_level_section() {
@@ -178,6 +119,63 @@ some_field = "bad"
 "#;
         let err = parse(toml).unwrap_err();
         assert!(err.to_string().contains("orchestrator"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_security_section() {
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[security]
+sandbox_mode = "project"
+"#;
+        let err = parse(toml).unwrap_err();
+        assert!(err.to_string().contains("security"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_context_section() {
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[context]
+project_instructions = true
+"#;
+        let err = parse(toml).unwrap_err();
+        assert!(err.to_string().contains("context"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_behavior_section() {
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[behavior]
+max_turns = 10
+"#;
+        let err = parse(toml).unwrap_err();
+        assert!(err.to_string().contains("behavior"), "got: {err}");
     }
 
     #[test]
@@ -228,6 +226,9 @@ enabled = true
             "subagents",
             "micro_agents",
             "memory",
+            "security",
+            "context",
+            "behavior",
         ];
         for section in forbidden {
             let toml = format!(
@@ -251,6 +252,32 @@ x = "y"
             );
         }
     }
+
+    // ── Tools section rejection ───────────────────────────────────────
+
+    #[test]
+    fn reject_tools_bundles() {
+        let toml = r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[tools]
+bundles = ["workspace"]
+"#;
+        let err = parse(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("bundles") || err.to_string().contains("unknown field"),
+            "bundles must be rejected, got: {err}"
+        );
+    }
+
+    // ── Agent field rejection ─────────────────────────────────────────
 
     #[test]
     fn reject_agent_preset_field() {
@@ -317,8 +344,10 @@ system = "hi"
         assert!(parse(toml).is_err());
     }
 
+    // ── Tools section defaults ────────────────────────────────────────
+
     #[test]
-    fn reject_behavior_behavior_type() {
+    fn tools_section_defaults_to_empty_enabled() {
         let toml = r#"
 schema_version = 1
 
@@ -328,106 +357,9 @@ model = "sonnet"
 
 [prompt]
 system = "hi"
-
-[behavior]
-behavior_type = "code_agent"
 "#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_behavior_confidence_threshold() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[behavior]
-confidence_threshold = 0.9
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_behavior_max_retries() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[behavior]
-max_retries = 3
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_behavior_enforce_sandbox() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[behavior]
-enforce_sandbox = true
-"#;
-        assert!(parse(toml).is_err());
-    }
-
-    #[test]
-    fn reject_invalid_sandbox_mode() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[security]
-sandbox_mode = "unknown"
-"#;
-        let err = parse(toml).unwrap_err();
-        assert!(err.to_string().contains("sandbox_mode"), "got: {err}");
-    }
-
-    #[test]
-    fn accept_all_valid_sandbox_modes() {
-        for mode in &["project", "strict", "permissive"] {
-            let toml = format!(
-                r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[security]
-sandbox_mode = "{mode}"
-"#
-            );
-            parse(&toml).unwrap();
-        }
+        let profile = parse(toml).unwrap();
+        assert!(profile.tools.enabled.is_empty());
     }
 
     /// Guard: no legacy symbols in production source.
@@ -448,64 +380,16 @@ sandbox_mode = "{mode}"
             "code-agent",
             "AgentPreset",
             "ToolPreset",
+            "SandboxMode",
+            "SecuritySection",
+            "ContextSection",
+            "BehaviorSection",
         ];
+        // Note: "bundles" is allowed in doc comments explaining its removal.
         for pattern in forbidden_patterns {
             if prod.contains(pattern) {
                 panic!("schema.rs production code must not contain '{pattern}'");
             }
         }
-    }
-
-    #[test]
-    fn tools_section_defaults_to_empty_arrays() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-"#;
-        let profile = parse(toml).unwrap();
-        assert!(profile.tools.bundles.is_empty());
-        assert!(profile.tools.enabled.is_empty());
-    }
-
-    #[test]
-    fn context_defaults_to_true_when_absent() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-"#;
-        let profile = parse(toml).unwrap();
-        assert!(profile.context.is_none()); // section absent → None
-    }
-
-    #[test]
-    fn context_defaults_to_true_when_section_present_but_fields_missing() {
-        let toml = r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "sonnet"
-
-[prompt]
-system = "hi"
-
-[context]
-"#;
-        let profile = parse(toml).unwrap();
-        let ctx = profile.context.unwrap();
-        assert!(ctx.project_instructions);
-        assert!(ctx.workspace_context);
     }
 }

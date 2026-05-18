@@ -22,6 +22,9 @@ const FORBIDDEN_SECTIONS: &[&str] = &[
     "subagents",
     "micro_agents",
     "memory",
+    "security",
+    "context",
+    "behavior",
 ];
 
 /// Load and validate an `agent.toml` profile at `path`.
@@ -495,6 +498,73 @@ x = 1
             assert!(
                 err.to_string().contains(section),
                 "expected '{section}' in error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_version_must_be_1() {
+        for version in [0, 2, 3, 99] {
+            let (_dir, path) = temp_profile(&format!(
+                r#"
+schema_version = {}
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+"#,
+                version
+            ));
+            let err = load_agent_profile(&path).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("schema_version") && msg.contains(&version.to_string()),
+                "version {}: got: {err}",
+                version
+            );
+        }
+    }
+
+    #[test]
+    fn all_forbidden_sections_rejected() {
+        // Covers: capabilities, handoff, orchestrator, plugins, pipeline,
+        // subagents, micro_agents, memory
+        let forbidden = [
+            "capabilities",
+            "handoff",
+            "orchestrator",
+            "plugins",
+            "pipeline",
+            "subagents",
+            "micro_agents",
+            "memory",
+        ];
+        for section in forbidden {
+            let dir = tempfile::tempdir().unwrap();
+            let toml_path = dir.path().join("agent.toml");
+            let toml = format!(
+                r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[{section}]
+x = 1
+"#
+            );
+            std::fs::write(&toml_path, toml).unwrap();
+            let err = load_agent_profile(&toml_path).unwrap_err();
+            assert!(
+                err.to_string().contains(section),
+                "section '{section}': got: {err}"
             );
         }
     }
