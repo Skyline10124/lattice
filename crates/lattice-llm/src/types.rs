@@ -1,6 +1,4 @@
-//! v1.1 LLM vocabulary types.
-//!
-//! These types define the direct wire contract for LATTICE v1.1 LLM calls
+//! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
 use serde::{Deserialize, Serialize};
@@ -160,35 +158,45 @@ pub struct ChatResponse {
     pub usage: Option<TokenUsage>,
 }
 
-/// A streaming LLM event for the v1.1 API.
+/// A streaming LLM event for the API.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum LlmEvent {
-    /// The stream has started.
     Started,
-    /// A chunk of generated text content.
-    Token { content: String },
-    /// A chunk of reasoning / thinking content.
-    Reasoning { content: String },
-    /// Start of a tool call from the model.
-    ToolCallStart { id: String, name: String },
-    /// An incremental argument delta for an in-progress tool call.
-    ToolCallDelta { id: String, arguments_delta: String },
-    /// A tool call is complete.
-    ToolCallEnd { id: String },
-    /// The stream finished successfully.
+    Token {
+        content: String,
+    },
+    Reasoning {
+        content: String,
+    },
+    ToolCallStart {
+        id: String,
+        name: String,
+    },
+    ToolCallDelta {
+        id: String,
+        arguments_delta: String,
+    },
+    ToolCallEnd {
+        id: String,
+    },
     Done {
         finish_reason: String,
         usage: Option<TokenUsage>,
     },
-    /// An error encountered during streaming.
-    Error { message: String },
-    /// Citation from model (Anthropic extended field).
-    Citation { index: usize, cite_text: String },
-    /// Function signature for verification.
-    Signature { signature: String },
-    /// Grounding metadata (Gemini).
-    GroundingChunk { text: String, url: Option<String> },
-    /// Safety rating from model (Gemini).
+    Error {
+        message: String,
+    },
+    Citation {
+        index: usize,
+        cite_text: String,
+    },
+    Signature {
+        signature: String,
+    },
+    GroundingChunk {
+        text: String,
+        url: Option<String>,
+    },
     SafetyRating {
         category: String,
         probability: String,
@@ -198,9 +206,7 @@ pub enum LlmEvent {
 /// A model target specifying which model alias to route to.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelTarget {
-    /// Canonical model alias (e.g., "sonnet", "gpt-4o").
     pub model: String,
-    /// Optional provider override.
     pub provider: Option<String>,
 }
 
@@ -234,8 +240,6 @@ pub struct TokenUsage {
 mod tests {
     use super::*;
 
-    // ── Role roundtrip ──────────────────────────────────────────────────────
-
     #[test]
     fn role_serde_roundtrip() {
         let cases = vec![Role::System, Role::User, Role::Assistant, Role::Tool];
@@ -257,8 +261,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"Tool\"");
     }
 
-    // ── FunctionCall roundtrip ───────────────────────────────────────────────
-
     #[test]
     fn function_call_roundtrip() {
         let fc = FunctionCall::new("get_weather", r#"{"city": "Tokyo"}"#);
@@ -266,8 +268,6 @@ mod tests {
         let deserialized: FunctionCall = serde_json::from_str(&json).unwrap();
         assert_eq!(fc, deserialized);
     }
-
-    // ── ToolCall roundtrip ──────────────────────────────────────────────────
 
     #[test]
     fn tool_call_roundtrip() {
@@ -279,8 +279,6 @@ mod tests {
         let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
         assert_eq!(tc, deserialized);
     }
-
-    // ── Message roundtrip ───────────────────────────────────────────────────
 
     #[test]
     fn message_simple_roundtrip() {
@@ -323,8 +321,6 @@ mod tests {
         assert_eq!(msg, deserialized);
     }
 
-    // ── ToolDefinition roundtrip ────────────────────────────────────────────
-
     #[test]
     fn tool_definition_roundtrip() {
         let td = ToolDefinition::new(
@@ -342,8 +338,6 @@ mod tests {
         let deserialized: ToolDefinition = serde_json::from_str(&json).unwrap();
         assert_eq!(td, deserialized);
     }
-
-    // ── ChatRequest / ChatResponse ──────────────────────────────────────────
 
     #[test]
     fn chat_request_roundtrip() {
@@ -376,8 +370,6 @@ mod tests {
         let deserialized: ChatResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, deserialized);
     }
-
-    // ── LlmEvent roundtrip ──────────────────────────────────────────────────
 
     #[test]
     fn llm_event_roundtrip() {

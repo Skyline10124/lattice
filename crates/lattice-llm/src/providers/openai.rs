@@ -10,9 +10,6 @@ use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
 
 /// Build the JSON body for an OpenAI Chat Completions request.
-///
-/// Maps internal `Message` and `ToolDefinition` types to the OpenAI wire format.
-/// Always sets `stream: true` for streaming requests.
 pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": resolved.provider_model,
@@ -97,7 +94,6 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         body["max_tokens"] = serde_json::json!(max_tokens);
     }
 
-    // Request usage in streaming responses for accurate token counts
     if request.stream {
         body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
@@ -105,22 +101,16 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
     body
 }
 
-/// Build the `Authorization` header value for an OpenAI request.
 pub fn auth_header_value(api_key: &str) -> String {
     format!("Bearer {}", api_key)
 }
 
-/// Stateful parser for OpenAI SSE chunks.
-///
-/// Tracks tool call IDs per index because OpenAI omits the `id`
-/// field from subsequent delta chunks after the first one.
 #[derive(Default)]
 pub struct OpenAiSseParser {
     tool_call_ids: HashMap<u32, String>,
 }
 
 impl OpenAiSseParser {
-    /// Create a new parser with no tracked state.
     pub fn new() -> Self {
         Self {
             tool_call_ids: HashMap::new(),
@@ -128,9 +118,6 @@ impl OpenAiSseParser {
     }
 
     /// Parse a single SSE data chunk into [`LlmEvent`] values.
-    ///
-    /// The `event_type` parameter is unused by OpenAI SSE (which uses unnamed
-    /// `data:` lines), but is accepted for interface compatibility.
     pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
         let root = match super::parse_json_data("OpenAI", data) {
             Ok(v) => v,
@@ -172,7 +159,6 @@ impl OpenAiSseParser {
                     for tc in tool_calls {
                         let idx = tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
 
-                        // ToolCallStart: first chunk with id
                         if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
                             let name = tc
                                 .get("function")
@@ -186,7 +172,6 @@ impl OpenAiSseParser {
                             });
                         }
 
-                        // ToolCallDelta: subsequent chunks with arguments
                         if let Some(args) = tc
                             .get("function")
                             .and_then(|f| f.get("arguments"))
@@ -207,7 +192,6 @@ impl OpenAiSseParser {
                 // Finish reason — emits ToolCallEnd for all tracked IDs, then Done
                 if let Some(reason) = finish_reason {
                     if !reason.is_empty() {
-                        // Emit ToolCallEnd for all pending tool calls
                         for id in self.tool_call_ids.drain().map(|(_, id)| id) {
                             events.push(LlmEvent::ToolCallEnd { id });
                         }
@@ -251,8 +235,6 @@ mod tests {
             credential_status: CredentialStatus::Present,
         }
     }
-
-    // ── Request JSON building ─────────────────────────────────────────────
 
     #[test]
     fn build_request_includes_model() {
@@ -340,7 +322,6 @@ mod tests {
         let req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
-        // temperature and max_tokens should be absent when not set
         assert!(json.get("temperature").is_none() || json["temperature"].is_null());
         assert!(json.get("max_tokens").is_none() || json["max_tokens"].is_null());
     }
@@ -401,8 +382,6 @@ mod tests {
         assert_eq!(messages[0]["tool_call_id"], "call_1");
     }
 
-    // ── Auth header ───────────────────────────────────────────────────────
-
     #[test]
     fn auth_header_uses_bearer_prefix() {
         let header = auth_header_value("sk-test-key");
@@ -422,11 +401,8 @@ mod tests {
         );
     }
 
-    // ── SSE parsing ───────────────────────────────────────────────────────
-
     #[test]
     fn parse_sse_token_chunk() {
-        // Reset parser state between tests — use a fresh parser instance
         let mut parser = OpenAiSseParser::new();
         let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#;
         let events = parser.parse_chunk(None, data);
@@ -457,10 +433,8 @@ mod tests {
     #[test]
     fn parse_sse_tool_call_delta() {
         let mut parser = OpenAiSseParser::new();
-        // Register a tool call first
         let start_data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}"#;
         parser.parse_chunk(None, start_data);
-        // Now a delta chunk
         let data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\""}}]},"finish_reason":null}]}"#;
         let events = parser.parse_chunk(None, data);
         let has_delta = events.iter().any(|e| matches!(e, LlmEvent::ToolCallDelta { id, arguments_delta } if id == "call_abc" && arguments_delta == r#"{"city""#));
@@ -497,10 +471,8 @@ mod tests {
     #[test]
     fn parse_sse_tool_call_end_on_finish() {
         let mut parser = OpenAiSseParser::new();
-        // Register a tool call first
         let start_data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_xyz","type":"function","function":{"name":"search","arguments":"{}"}}]},"finish_reason":null}]}"#;
         parser.parse_chunk(None, start_data);
-        // Now emit finish
         let done_data = r#"{"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
         let events = parser.parse_chunk(None, done_data);
         let has_end = events
@@ -520,12 +492,8 @@ mod tests {
         assert!(events.is_empty());
     }
 
-    // ── Boundary: no lattice_core imports ──────────────────────────────────
-
     #[test]
     fn openai_provider_has_no_lattice_core_imports() {
-        // This test compiles iff openai.rs does not import lattice_core.
-        // Presence of this test file in lattice-llm proves the boundary.
         let json = build_request_json(
             &ChatRequest::new(vec![Message::user("test")], ModelTarget::new("gpt-4o")),
             &make_resolved(),

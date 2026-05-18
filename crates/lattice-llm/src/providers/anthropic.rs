@@ -28,10 +28,6 @@ fn map_stop_reason(reason: &str) -> String {
 }
 
 /// Build the JSON body for an Anthropic Messages API request.
-///
-/// Extracts system messages into a `system` string (merged with `\n\n`),
-/// converts remaining messages into Anthropic content blocks, and maps
-/// tool definitions to `tools` entries with `input_schema`.
 pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
     let mut system: Option<String> = None;
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -144,25 +140,9 @@ pub fn auth_header_value(api_key: &str) -> String {
     api_key.to_string()
 }
 
-/// The Anthropic API version header value.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Stateful parser for Anthropic message-streaming SSE.
-///
-/// Anthropic uses named SSE events (`message_start`, `content_block_delta`, etc.)
-/// rather than OpenAI-style all-in-one JSON chunks.
-///
-/// ## Event mapping
-///
-/// | SSE event              | Emitted LlmEvents                              |
-/// |------------------------|------------------------------------------------|
-/// | `message_start`        | (none — tracks `input_tokens` for usage)       |
-/// | `content_block_start`  | `ToolCallStart` (if `type = "tool_use"`)       |
-/// | `content_block_delta`  | `Token`, `Reasoning`, or `ToolCallDelta`       |
-/// | `content_block_stop`   | `ToolCallEnd` (if it was a tool_use block)     |
-/// | `message_delta`        | `Done` with finish reason and usage            |
-/// | `message_stop` / `ping`| (ignored)                                      |
-/// | `error`                | `Error` with message                           |
 #[derive(Default)]
 pub struct AnthropicSseParser {
     tool_call_ids: HashMap<u32, String>,
@@ -170,7 +150,6 @@ pub struct AnthropicSseParser {
 }
 
 impl AnthropicSseParser {
-    /// Create a new parser with no tracked state.
     pub fn new() -> Self {
         Self {
             tool_call_ids: HashMap::new(),
@@ -178,7 +157,6 @@ impl AnthropicSseParser {
         }
     }
 
-    /// Parse an Anthropic SSE event into [`LlmEvent`] values.
     pub fn parse_chunk(&mut self, event_type: &str, data: &str) -> Vec<LlmEvent> {
         let root = match super::parse_json_data("Anthropic", data) {
             Ok(v) => v,
@@ -322,8 +300,6 @@ mod tests {
         }
     }
 
-    // ── Request JSON building ─────────────────────────────────────────────
-
     #[test]
     fn build_request_includes_model_and_max_tokens() {
         let req = ChatRequest::new(vec![Message::user("hello")], ModelTarget::new("sonnet"));
@@ -347,7 +323,6 @@ mod tests {
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
         assert_eq!(json["system"], "You are helpful.");
-        // System message should NOT appear in messages array
         let messages = json["messages"].as_array().unwrap();
         assert!(!messages.iter().any(|m| m["role"] == "system"));
     }
@@ -510,8 +485,6 @@ mod tests {
         assert_eq!(json["max_tokens"], 2048);
     }
 
-    // ── Auth header ───────────────────────────────────────────────────────
-
     #[test]
     fn auth_header_is_api_key_value() {
         let header = auth_header_value("sk-ant-test");
@@ -522,8 +495,6 @@ mod tests {
     fn anthropic_version_constant() {
         assert_eq!(ANTHROPIC_VERSION, "2023-06-01");
     }
-
-    // ── SSE parsing ───────────────────────────────────────────────────────
 
     #[test]
     fn parse_sse_content_block_delta_text() {
@@ -546,9 +517,7 @@ mod tests {
     #[test]
     fn parse_sse_content_block_delta_json() {
         let mut parser = AnthropicSseParser::new();
-        // Register tool call first
         parser.parse_chunk("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_001","name":"get_weather"}}"#);
-        // Now delta
         let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\""}}"#;
         let events = parser.parse_chunk("content_block_delta", data);
         let has_delta = events
@@ -560,9 +529,7 @@ mod tests {
     #[test]
     fn parse_sse_content_block_stop_tool_use() {
         let mut parser = AnthropicSseParser::new();
-        // Register tool call first
         parser.parse_chunk("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_001","name":"search"}}"#);
-        // Now stop
         let data = r#"{"type":"content_block_stop","index":0}"#;
         let events = parser.parse_chunk("content_block_stop", data);
         let has_end = events
@@ -592,7 +559,6 @@ mod tests {
         let data = r#"{"type":"message_start","message":{"id":"msg_001","type":"message","role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":42}}}"#;
         let events = parser.parse_chunk("message_start", data);
         assert!(events.is_empty(), "message_start should not emit events");
-        // Later: message_delta should include input_tokens in usage
     }
 
     #[test]
@@ -634,8 +600,6 @@ mod tests {
             events
         );
     }
-
-    // ── Boundary: no lattice_core imports ──────────────────────────────────
 
     #[test]
     fn anthropic_provider_has_no_lattice_core_imports() {

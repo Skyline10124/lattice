@@ -21,9 +21,6 @@ pub struct RawSseEvent {
 }
 
 /// Parse a buffer of SSE text into zero or more [`RawSseEvent`] values.
-///
-/// Enforces `MAX_SSE_EVENTS`, `MAX_SSE_DATA_SIZE`, and `MAX_SSE_BUFFER_SIZE`.
-/// Returns an error when limits are exceeded or the input is malformed.
 pub fn parse_raw_sse(input: &str) -> Result<Vec<RawSseEvent>, String> {
     let mut events: Vec<RawSseEvent> = Vec::new();
     let mut current_event_type: Option<String> = None;
@@ -43,7 +40,6 @@ pub fn parse_raw_sse(input: &str) -> Result<Vec<RawSseEvent>, String> {
         }
 
         if line.is_empty() {
-            // Empty line dispatches the current event
             if !current_data.is_empty() || current_event_type.is_some() {
                 if events.len() >= MAX_SSE_EVENTS {
                     return Err(format!("SSE event count exceeded: {}", MAX_SSE_EVENTS));
@@ -58,7 +54,6 @@ pub fn parse_raw_sse(input: &str) -> Result<Vec<RawSseEvent>, String> {
         }
 
         if line.starts_with(':') {
-            // SSE comment — skip
             continue;
         }
 
@@ -80,10 +75,8 @@ pub fn parse_raw_sse(input: &str) -> Result<Vec<RawSseEvent>, String> {
         } else if let Some(value) = line.strip_prefix("id:") {
             current_id = Some(value.trim().to_string());
         }
-        // Unknown fields are ignored per SSE spec
     }
 
-    // Flush trailing event if any data was accumulated
     if !current_data.is_empty() || current_event_type.is_some() {
         if events.len() >= MAX_SSE_EVENTS {
             return Err(format!("SSE event count exceeded: {}", MAX_SSE_EVENTS));
@@ -158,16 +151,13 @@ mod tests {
 
     #[test]
     fn reject_event_count_exceeded() {
-        // Generate events approaching the limit, then one more
         let mut input = String::new();
         for i in 0..MAX_SSE_EVENTS {
             input.push_str(&format!("data: evt{}\n\n", i));
         }
-        // This should just barely succeed
         let events = parse_raw_sse(&input).unwrap();
         assert_eq!(events.len(), MAX_SSE_EVENTS);
 
-        // One more should fail
         input.push_str("data: one-too-many\n\n");
         assert!(parse_raw_sse(&input).is_err());
     }

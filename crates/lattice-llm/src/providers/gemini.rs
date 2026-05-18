@@ -8,9 +8,6 @@ use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
 
 /// Build the JSON body for a Gemini `streamGenerateContent` request.
-///
-/// Maps system messages to `systemInstruction`, user to `"user"`, assistant to `"model"`,
-/// tool calls to `functionCall`, and tool results to `functionResponse`.
 pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
     let mut contents: Vec<serde_json::Value> = Vec::new();
     let mut system_instruction: Option<String> = None;
@@ -98,15 +95,12 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         }]);
     }
 
-    let _ = resolved; // provider_model used in URL, not body for Gemini
+    let _ = resolved;
 
     body
 }
 
 /// Build the full Gemini streaming endpoint URL.
-///
-/// Returns `{base_url}/models/{model}:streamGenerateContent?alt=sse`
-/// where `{model}` is URL-encoded.
 pub fn build_stream_url(base_url: &str, provider_model: &str) -> String {
     let encoded = urlencoding::encode(provider_model);
     format!(
@@ -122,10 +116,6 @@ pub fn auth_header_value(api_key: &str) -> String {
 }
 
 /// Stateful parser for Gemini `streamGenerateContent` SSE.
-///
-/// Gemini SSE uses unnamed `data:` lines. Each payload is a
-/// `GenerateContentResponse` JSON chunk with candidates containing
-/// content parts (text, functionCall, thought).
 #[derive(Default)]
 pub struct GeminiSseParser {
     tool_call_ids: Vec<String>,
@@ -142,14 +132,6 @@ impl GeminiSseParser {
     }
 
     /// Map Gemini finish reasons to internal finish-reason strings.
-    ///
-    /// | Gemini        | Internal       |
-    /// |---------------|----------------|
-    /// | STOP          | stop           |
-    /// | MAX_TOKENS    | length         |
-    /// | SAFETY        | content_filter |
-    /// | RECITATION    | content_filter |
-    /// | OTHER         | unknown        |
     fn map_finish_reason(reason: &str) -> String {
         match reason.to_uppercase().as_str() {
             "STOP" => "stop".to_string(),
@@ -236,7 +218,6 @@ impl GeminiSseParser {
                 // Finish reason
                 if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
                     let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
-                    // Emit ToolCallEnd for all tracked tool calls
                     for id in self.tool_call_ids.drain(..) {
                         events.push(LlmEvent::ToolCallEnd { id });
                     }
@@ -343,8 +324,6 @@ mod tests {
             credential_status: CredentialStatus::Present,
         }
     }
-
-    // ── Request JSON building ─────────────────────────────────────────────
 
     #[test]
     fn build_request_includes_system_instruction() {
@@ -488,8 +467,6 @@ mod tests {
         assert_eq!(tools[0]["functionDeclarations"][0]["name"], "get_weather");
     }
 
-    // ── URL building ─────────────────────────────────────────────────────
-
     #[test]
     fn build_stream_url_includes_url_encoded_model() {
         let url = build_stream_url(GEMINI_BASE_URL, "gemini-2.5-flash");
@@ -513,7 +490,6 @@ mod tests {
     #[test]
     fn build_stream_url_encodes_special_chars_in_model() {
         let url = build_stream_url("https://api.example.com/v1", "models/my-model@v1");
-        // model name with special chars should be URL-encoded
         assert!(
             url.contains("models%2Fmy-model%40v1") || url.contains("my-model@v1"),
             "URL should contain encoded model name, got: {}",
@@ -521,15 +497,11 @@ mod tests {
         );
     }
 
-    // ── Auth header ──────────────────────────────────────────────────────
-
     #[test]
     fn auth_header_name_is_x_goog_api_key() {
         let val = auth_header_value("gemini-key-123");
         assert_eq!(val, "gemini-key-123");
     }
-
-    // ── SSE parsing ───────────────────────────────────────────────────────
 
     #[test]
     fn parse_sse_token_chunk() {
@@ -590,8 +562,6 @@ mod tests {
         let events = parser.parse_chunk(None, "");
         assert!(events.is_empty());
     }
-
-    // ── Boundary: no lattice_core imports ──────────────────────────────────
 
     #[test]
     fn gemini_provider_has_no_lattice_core_imports() {

@@ -1,4 +1,4 @@
-//! Concrete provider modules for v1.1 LLM execution.
+//! Concrete provider modules for LLM execution.
 //!
 //! Each provider module owns request JSON construction, SSE parsing,
 //! and auth header logic for a specific provider family.
@@ -14,7 +14,7 @@ use crate::types::LlmEvent;
 pub(crate) fn parse_json_data(provider: &str, data: &str) -> Result<serde_json::Value, LlmEvent> {
     let trimmed = data.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" {
-        return Err(LlmEvent::Started); // sentinel: caller should skip empty chunks
+        return Err(LlmEvent::Started);
     }
     serde_json::from_str(trimmed).map_err(|e| LlmEvent::Error {
         message: format!("{} SSE JSON parse error: {}", provider, e),
@@ -33,9 +33,6 @@ pub(crate) fn extract_api_error(root: &serde_json::Value) -> Option<LlmEvent> {
 }
 
 /// Append `text` to an optional system-message accumulator.
-///
-/// Multiple system messages are merged with `"\n\n"`.  If `slot` is
-/// `None`, it is initialised to `text` without a separator.
 pub(crate) fn push_system_text(slot: &mut Option<String>, text: &str) {
     match slot {
         Some(ref mut existing) => {

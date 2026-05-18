@@ -1,4 +1,4 @@
-//! Deterministic stub LLM implementation for Phase 6.
+//! Deterministic stub LLM implementation
 //!
 //! Provides fake `chat` and `stream` implementations that require no provider
 //! credentials, no HTTP clients, and no real model routing. The stub produces
@@ -13,37 +13,26 @@ use thiserror::Error;
 /// Errors that can occur during LLM operations.
 #[derive(Debug, Error)]
 pub enum LlmError {
-    /// A model alias was not found in the router's alias table.
     #[error("unknown model alias: '{0}'")]
     UnknownModel(String),
-    /// A general LLM error.
     #[error("LLM error: {0}")]
     Other(String),
 }
 
-/// A streaming LLM response — a boxed stream of [`LlmEvent`] values.
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmEvent> + Send>>;
 
 /// A deterministic stub LLM that returns fake chat and stream responses.
-///
-/// Never reads provider credentials, environment variables, or makes HTTP calls.
 #[derive(Clone, Debug, Default)]
 pub struct StubLlm {
-    /// Optional model router for target resolution (Phase 6 stub: identity).
     pub router: ModelRouter,
 }
 
 impl StubLlm {
-    /// Create a new StubLlm with default settings.
     pub fn new() -> Self {
         StubLlm::default()
     }
 
     /// Return a deterministic chat response.
-    ///
-    /// The response content includes the phrase "stub response" and incorporates
-    /// the last user message for deterministic observability.
-    /// Never calls provider transports or reads credentials.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let resolved = self.router.resolve(&request.target)?;
         let mut stream = self.stream(request)?;
@@ -112,9 +101,6 @@ impl StubLlm {
     }
 
     /// Return a fake streaming response as a boxed stream of [`LlmEvent`] values.
-    ///
-    /// Yields `Started`, a `Token("stub response")`, then `Done`.
-    /// Never calls provider transports or reads credentials.
     pub fn stream(&self, request: ChatRequest) -> Result<LlmStream, LlmError> {
         let _resolved = self.router.resolve(&request.target)?;
 
@@ -148,9 +134,6 @@ impl StubLlm {
 }
 
 /// Convenience function: run a chat completion through the real client.
-///
-/// Resolves the model alias, validates credentials, dispatches to the
-/// appropriate provider, and collects the stream into a [`ChatResponse`].
 pub async fn chat(request: ChatRequest) -> Result<ChatResponse, LlmError> {
     let resolved = ModelRouter::new().resolve(&request.target)?;
     let model = resolved.alias.clone();
@@ -220,8 +203,6 @@ pub async fn chat(request: ChatRequest) -> Result<ChatResponse, LlmError> {
 }
 
 /// Convenience function: stream a completion through the real client.
-///
-/// Resolves the model alias and dispatches to the appropriate provider.
 pub async fn stream(request: ChatRequest) -> Result<LlmStream, LlmError> {
     let resolved = ModelRouter::new().resolve(&request.target)?;
     crate::client::dispatch_stream(request, resolved).await
@@ -233,12 +214,9 @@ mod tests {
     use crate::types::{Message, ModelTarget};
     use futures::StreamExt;
 
-    /// Build a minimal chat request with the given user text.
     fn make_request(text: &str) -> ChatRequest {
         ChatRequest::new(vec![Message::user(text)], ModelTarget::default())
     }
-
-    // ── RED tests (will fail until GREEN implementations are in place) ─────
 
     #[tokio::test]
     async fn chat_returns_stub_response_content() {
@@ -254,7 +232,6 @@ mod tests {
 
     #[tokio::test]
     async fn chat_default_stub_produces_deterministic_response() {
-        // Tests the StubLlm directly (real client requires credentials)
         let stub = StubLlm::new();
         let req = make_request("hello");
         let resp = stub.chat(req).await.unwrap();
@@ -288,7 +265,6 @@ mod tests {
             events.last()
         );
 
-        // At least one Token event should exist between Started and Done.
         let has_token = events.iter().any(|e| matches!(e, LlmEvent::Token { .. }));
         assert!(has_token, "stream should contain at least one Token event");
     }
@@ -317,8 +293,6 @@ mod tests {
             }
         }
     }
-
-    // ── chat_collects_stream ──────────────────────────────────────────────
 
     #[tokio::test]
     async fn chat_collects_stream() {
@@ -353,15 +327,9 @@ mod tests {
         );
     }
 
-    // ── Boundary tests (must always pass) ──────────────────────────────────
-
     #[test]
     fn stub_llm_no_lattice_core_references() {
-        // Compile-time check: no `lattice_core` or `lattice_runtime` in this file.
-        // If this file compiles without those crates, the test passes.
-        // We verify at the module level that no forbidden imports exist.
         let stub = StubLlm::new();
-        // StubLlm must exist and be constructable.
         assert_eq!(stub.router.default_model, Some("sonnet".to_string()));
     }
 }

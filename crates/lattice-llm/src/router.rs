@@ -16,31 +16,21 @@ use crate::types::ModelTarget;
 /// Supported LLM provider families.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderKind {
-    /// OpenAI API (`https://api.openai.com/v1`)
     OpenAi,
-    /// OpenAI-compatible API endpoint (e.g. Ollama, vLLM, LiteLLM)
     OpenAiCompatible,
-    /// Anthropic Messages API
     Anthropic,
-    /// Google Gemini API
     Gemini,
 }
 
 /// Whether the required API key environment variable is set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialStatus {
-    /// The API key environment variable is present and non-empty.
     Present,
-    /// The API key environment variable is missing or empty.
     Missing,
 }
 
 impl CredentialStatus {
     /// Read the named environment variable and return a credential status.
-    ///
-    /// Returns `Present` when the variable is set and non-empty.
-    /// Returns `Missing` when the variable is absent or empty.
-    /// Never exposes the key value.
     pub fn from_env(env_var: &str) -> Self {
         match env::var(env_var) {
             Ok(val) if !val.is_empty() => CredentialStatus::Present,
@@ -50,33 +40,17 @@ impl CredentialStatus {
 }
 
 /// Resolved metadata for a model alias.
-///
-/// Contains everything a provider module needs to construct an HTTP request:
-/// which provider kind, which model name to send, which base URL to post to,
-/// which env var holds the API key, and whether that key is available.
-///
-/// Never stores credential values. Callers read env vars at request time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedModel {
-    /// The user-supplied alias that was resolved.
     pub alias: String,
-    /// Which provider family this alias maps to.
     pub provider: ProviderKind,
-    /// The provider-specific model name to include in the API request body.
     pub provider_model: String,
-    /// The base URL for the provider API (e.g. `https://api.openai.com/v1`).
     pub base_url: String,
-    /// The environment variable name that holds the API key for this provider.
     pub api_key_env: String,
-    /// Whether the API key is currently available in the environment.
     pub credential_status: CredentialStatus,
 }
 
 /// A fixed alias table that maps model aliases to explicit provider metadata.
-///
-/// The table is deliberately small: enough aliases to exercise the OpenAI,
-/// Anthropic, Gemini, and OpenAI-compatible provider paths without recreating
-/// a catalog, prefix system, or automatic fallback.
 #[derive(Clone, Debug)]
 pub struct ModelRouter {
     /// Optional default model alias when no target is specified.
@@ -97,23 +71,16 @@ impl ModelRouter {
         ModelRouter::default()
     }
 
-    /// Return the fixed v1.1 alias list with full metadata for each entry.
-    ///
-    /// Returns ALL known aliases regardless of credential status, so callers
-    /// can distinguish "6 models available, credentials missing" from "no models".
-    /// The `CredentialStatus` on each `ResolvedModel` carries the credential info.
+    /// Return the fixed alias list with full metadata for each entry.
     pub fn aliases(&self) -> Vec<ResolvedModel> {
         let names = [
-            // OpenAI GPT series
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.3-codex",
             "gpt-4o-mini",
-            // Anthropic Claude series
             "opus",
             "sonnet",
             "haiku",
-            // Other
             "gemini",
             "openai-compatible",
         ];
@@ -121,18 +88,12 @@ impl ModelRouter {
             .iter()
             .filter_map(|name| {
                 let target = ModelTarget::new(*name);
-                // resolve returns Ok even with Missing credentials — the status
-                // is on the ResolvedModel itself. Only filter out truly unknown models.
                 self.resolve(&target).ok()
             })
             .collect()
     }
 
     /// Resolve a model target to explicit provider metadata.
-    ///
-    /// Returns `Ok(ResolvedModel)` for known aliases.
-    /// Returns `Err(LlmError::UnknownModel)` for unknown aliases.
-    /// Never falls back silently and never uses prefix syntax or catalog data.
     pub fn resolve(&self, target: &ModelTarget) -> Result<ResolvedModel, LlmError> {
         let alias = target.model.as_str();
 
@@ -222,11 +183,8 @@ mod tests {
     use super::*;
     use crate::types::ModelTarget;
 
-    // ── CREdentialStatus ──────────────────────────────────────────────────
-
     #[test]
     fn credential_status_present_from_env() {
-        // Set a temporary env var for the test
         std::env::set_var("LATTICE_TEST_CRED_PRESENT", "sk-test-key");
         let status = CredentialStatus::from_env("LATTICE_TEST_CRED_PRESENT");
         assert_eq!(status, CredentialStatus::Present);
@@ -247,79 +205,82 @@ mod tests {
         std::env::remove_var("LATTICE_TEST_CRED_EMPTY");
     }
 
-    // ── ModelRouter::resolve — known aliases ──────────────────────────────
-
-    #[test]
-    fn resolve_gpt55() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-5.5");
-        let resolved = router.resolve(&target).expect("gpt-5.5 should resolve");
-        assert_eq!(resolved.alias, "gpt-5.5");
-        assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        assert_eq!(resolved.provider_model, "gpt-5.5");
-        assert_eq!(resolved.base_url, OPENAI_BASE_URL);
-        assert_eq!(resolved.api_key_env, "OPENAI_API_KEY");
+    struct ResolveCase {
+        alias: &'static str,
+        provider: ProviderKind,
+        provider_model: &'static str,
+        api_key_env: &'static str,
     }
 
     #[test]
-    fn resolve_gpt4o_mini() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("gpt-4o-mini");
-        let resolved = router.resolve(&target).expect("gpt-4o-mini should resolve");
-        assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        assert_eq!(resolved.provider_model, "gpt-4o-mini");
-        assert_eq!(resolved.base_url, OPENAI_BASE_URL);
-        assert_eq!(resolved.api_key_env, "OPENAI_API_KEY");
-    }
+    fn resolve_known_aliases() {
+        let cases = [
+            ResolveCase {
+                alias: "gpt-5.5",
+                provider: ProviderKind::OpenAi,
+                provider_model: "gpt-5.5",
+                api_key_env: "OPENAI_API_KEY",
+            },
+            ResolveCase {
+                alias: "gpt-4o-mini",
+                provider: ProviderKind::OpenAi,
+                provider_model: "gpt-4o-mini",
+                api_key_env: "OPENAI_API_KEY",
+            },
+            ResolveCase {
+                alias: "sonnet",
+                provider: ProviderKind::Anthropic,
+                provider_model: "claude-sonnet-4-6",
+                api_key_env: "ANTHROPIC_API_KEY",
+            },
+            ResolveCase {
+                alias: "haiku",
+                provider: ProviderKind::Anthropic,
+                provider_model: "claude-haiku-4-5",
+                api_key_env: "ANTHROPIC_API_KEY",
+            },
+            ResolveCase {
+                alias: "gemini",
+                provider: ProviderKind::Gemini,
+                provider_model: "gemini-2.5-flash",
+                api_key_env: "GEMINI_API_KEY",
+            },
+            ResolveCase {
+                alias: "openai-compatible",
+                provider: ProviderKind::OpenAiCompatible,
+                provider_model: "openai-compatible",
+                api_key_env: "OPENAI_COMPATIBLE_API_KEY",
+            },
+        ];
 
-    #[test]
-    fn resolve_sonnet() {
         let router = ModelRouter::new();
-        let target = ModelTarget::new("sonnet");
-        let resolved = router.resolve(&target).expect("sonnet should resolve");
-        assert_eq!(resolved.alias, "sonnet");
-        assert_eq!(resolved.provider, ProviderKind::Anthropic);
-        assert_eq!(resolved.provider_model, "claude-sonnet-4-6");
-        assert_eq!(resolved.base_url, ANTHROPIC_BASE_URL);
-        assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
+        for case in cases {
+            let target = ModelTarget::new(case.alias);
+            let resolved = router
+                .resolve(&target)
+                .expect(&format!("{} should resolve", case.alias));
+            assert_eq!(
+                resolved.provider, case.provider,
+                "{}: provider mismatch",
+                case.alias
+            );
+            assert_eq!(
+                resolved.provider_model, case.provider_model,
+                "{}: model mismatch",
+                case.alias
+            );
+            assert_eq!(
+                resolved.api_key_env, case.api_key_env,
+                "{}: env var mismatch",
+                case.alias
+            );
+            assert!(
+                !resolved.base_url.is_empty() || case.alias == "openai-compatible",
+                "{}: should have base_url",
+                case.alias
+            );
+        }
     }
-
-    #[test]
-    fn resolve_haiku() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("haiku");
-        let resolved = router.resolve(&target).expect("haiku should resolve");
-        assert_eq!(resolved.provider, ProviderKind::Anthropic);
-        assert_eq!(resolved.provider_model, "claude-haiku-4-5");
-        assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
-    }
-
-    #[test]
-    fn resolve_gemini() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("gemini");
-        let resolved = router.resolve(&target).expect("gemini should resolve");
-        assert_eq!(resolved.provider, ProviderKind::Gemini);
-        assert_eq!(resolved.provider_model, "gemini-2.5-flash");
-        assert_eq!(resolved.base_url, GEMINI_BASE_URL);
-        assert_eq!(resolved.api_key_env, "GEMINI_API_KEY");
-    }
-
-    #[test]
-    fn resolve_openai_compatible() {
-        let router = ModelRouter::new();
-        let target = ModelTarget::new("openai-compatible");
-        let resolved = router
-            .resolve(&target)
-            .expect("openai-compatible should resolve");
-        assert_eq!(resolved.provider, ProviderKind::OpenAiCompatible);
-        assert_eq!(resolved.provider_model, "openai-compatible");
-        assert_eq!(resolved.api_key_env, "OPENAI_COMPATIBLE_API_KEY");
-        // base_url for openai-compatible comes from env, not hardcoded
-        assert!(!resolved.base_url.is_empty());
-    }
-
-    // ── ModelRouter::resolve — unknown alias ──────────────────────────────
 
     #[test]
     fn resolve_unknown_alias_returns_error() {
@@ -344,11 +305,8 @@ mod tests {
         );
     }
 
-    // ── ResolvedModel never leaks credential values ──────────────────────
-
     #[test]
     fn resolved_model_debug_does_not_leak_secrets() {
-        // Set a credential env var to simulate an available key
         std::env::set_var("OPENAI_API_KEY", "sk-secret-value-123");
         let router = ModelRouter::new();
         let target = ModelTarget::new("gpt-5.5");
@@ -372,15 +330,11 @@ mod tests {
         let router = ModelRouter::new();
         let target = ModelTarget::new("sonnet");
         let resolved = router.resolve(&target).expect("sonnet should resolve");
-        // ResolvedModel should not contain the key value — it only stores the env var name
         assert_eq!(resolved.api_key_env, "ANTHROPIC_API_KEY");
-        // The struct itself should never hold the secret
         let fields = format!("{:?}", resolved);
         assert!(!fields.contains("sk-ant-secret"));
         std::env::remove_var("ANTHROPIC_API_KEY");
     }
-
-    // ── ModelRouter default ──────────────────────────────────────────────
 
     #[test]
     fn model_router_default_has_sonnet_default() {
@@ -388,14 +342,13 @@ mod tests {
         assert_eq!(router.default_model, Some("sonnet".to_string()));
     }
 
-    // ── ModelRouter::aliases — router_cli_diagnostics ─────────────────────
-
     #[test]
-    fn router_cli_diagnostics_aliases_include_expected_names() {
+    fn aliases_returns_all_known_aliases() {
         let router = ModelRouter::new();
         let aliases = router.aliases();
         let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
-        for expected in &[
+
+        let expected = [
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.3-codex",
@@ -405,60 +358,47 @@ mod tests {
             "haiku",
             "gemini",
             "openai-compatible",
-        ] {
+        ];
+        for name in &expected {
             assert!(
-                names.contains(expected),
+                names.contains(name),
                 "aliases() should include '{}', got: {:?}",
-                expected,
+                name,
                 names
             );
         }
     }
 
     #[test]
-    fn router_cli_diagnostics_aliases_carry_provider_metadata() {
+    fn aliases_carry_provider_metadata_and_no_secrets() {
+        std::env::set_var("OPENAI_API_KEY", "sk-router-secret");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-secret");
+        std::env::set_var("GEMINI_API_KEY", "sk-gem-secret");
+
         let router = ModelRouter::new();
         let aliases = router.aliases();
+
         for alias in &aliases {
             assert!(
                 !alias.api_key_env.is_empty(),
-                "alias '{}' should have non-empty api_key_env",
+                "{}: should have api_key_env",
                 alias.alias
             );
             assert!(
                 !alias.base_url.is_empty() || alias.alias == "openai-compatible",
-                "alias '{}' should have non-empty base_url (except openai-compatible which reads from env)",
+                "{}: should have base_url",
                 alias.alias
             );
-        }
-    }
-
-    #[test]
-    fn router_cli_diagnostics_aliases_never_leak_credential_values() {
-        // Seed a fake secret and verify aliases() output never contains it.
-        std::env::set_var("OPENAI_API_KEY", "sk-router-alias-secret");
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-router-ant-secret");
-        std::env::set_var("GEMINI_API_KEY", "sk-router-gem-secret");
-        let router = ModelRouter::new();
-        let aliases = router.aliases();
-        for alias in &aliases {
             let debug = format!("{:?}", alias);
             assert!(
-                !debug.contains("sk-router-alias-secret"),
-                "alias '{}' debug must not leak OPENAI_API_KEY value",
+                !debug.contains("sk-router-secret"),
+                "{}: no leak",
                 alias.alias
             );
-            assert!(
-                !debug.contains("sk-router-ant-secret"),
-                "alias '{}' debug must not leak ANTHROPIC_API_KEY value",
-                alias.alias
-            );
-            assert!(
-                !debug.contains("sk-router-gem-secret"),
-                "alias '{}' debug must not leak GEMINI_API_KEY value",
-                alias.alias
-            );
+            assert!(!debug.contains("sk-ant-secret"), "{}: no leak", alias.alias);
+            assert!(!debug.contains("sk-gem-secret"), "{}: no leak", alias.alias);
         }
+
         std::env::remove_var("OPENAI_API_KEY");
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("GEMINI_API_KEY");

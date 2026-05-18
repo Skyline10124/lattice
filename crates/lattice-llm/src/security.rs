@@ -49,10 +49,6 @@ fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
 }
 
 /// Validate a provider base URL.
-///
-/// Empty URLs are accepted. Non-empty URLs must use HTTP(S), have a host,
-/// contain no userinfo, and must not target private/reserved IP space.
-/// Plain HTTP is allowed only for localhost: `http://localhost:11434/v1`.
 pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
     if url.is_empty() {
         return Ok(());

@@ -1,8 +1,4 @@
-//! Concrete provider dispatch for v1.1 LLM execution.
-//!
-//! Routes `ChatRequest` → `LlmStream` through a simple `match` on
-//! `ProviderKind`. No transport registry, provider plugin trait, catalog,
-//! or `lattice-core` dependency exists here.
+//! Concrete provider dispatch for LLM execution.
 
 use futures::stream::{self};
 
@@ -14,18 +10,9 @@ use crate::stub::{LlmError, LlmStream};
 use crate::types::{ChatRequest, LlmEvent};
 
 /// Validate base URL and read the API key from the environment.
-///
-/// Returns `Ok(key)` if the base URL passes SSRF validation and the
-/// environment variable is set and non-empty.
-/// Returns `Err(LlmError)` on URL validation failure or missing credential.
-///
-/// Never logs or serializes the key value. Errors mention only the
-/// environment variable name.
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
-    // Validate the base URL first (SSRF safety floor)
     security::validate_base_url(&resolved.base_url)?;
 
-    // Read the API key from the environment
     let key = std::env::var(&resolved.api_key_env).map_err(|_| {
         LlmError::Other(format!(
             "missing API key: environment variable '{}' is not set",
@@ -103,9 +90,6 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
 }
 
 /// Stream SSE events from an HTTP response into [`LlmEvent`] values.
-///
-/// Collects the full response body, parses SSE events from it, and returns
-/// a stream of parsed [`LlmEvent`] values.
 async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind) -> LlmStream {
     // Collect the full response body (bounded by safety limits)
     let bytes = match response.bytes().await {
@@ -148,9 +132,6 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
 }
 
 /// Parse a single SSE event text block into [`LlmEvent`] values.
-///
-/// Uses a per-type parser (not stateful across the entire stream for this
-/// implementation; state is scoped to each provider's parser).
 fn parse_provider_sse(event_text: &str, provider: ProviderKind) -> Vec<LlmEvent> {
     let mut event_type: Option<&str> = None;
     let mut data = String::new();
@@ -202,22 +183,16 @@ fn parse_provider_sse(event_text: &str, provider: ProviderKind) -> Vec<LlmEvent>
 }
 
 /// Dispatch a chat request to the appropriate provider and return a stream.
-///
-/// Uses a concrete `match resolved.provider` to select the provider path.
-/// No registry, catalog, or plugin mechanism is involved.
 pub async fn dispatch_stream(
     request: ChatRequest,
     resolved: ResolvedModel,
 ) -> Result<LlmStream, LlmError> {
-    // Validate base URL and read credentials
     let api_key = validate_and_read_key(&resolved)?;
 
-    // Build the request
     let url = build_endpoint_url(&resolved);
     let body = build_request_body(&request, &resolved);
     let headers = build_auth_headers(&resolved, &api_key);
 
-    // Send the HTTP request
     let client = reqwest::Client::new();
     let mut req_builder = client.post(&url).json(&body);
 
@@ -240,7 +215,6 @@ pub async fn dispatch_stream(
         )));
     }
 
-    // Stream SSE events
     let provider = resolved.provider.clone();
     Ok(stream_sse_response(response, provider).await)
 }
@@ -255,8 +229,6 @@ mod tests {
     fn make_router() -> ModelRouter {
         ModelRouter::new()
     }
-
-    // ── Credential validation ─────────────────────────────────────────────
 
     #[test]
     fn missing_credential_returns_named_error() {
@@ -298,8 +270,6 @@ mod tests {
 
     #[test]
     fn missing_credential_error_never_leaks_key_value() {
-        // Even when the env var is set elsewhere, make sure the error
-        // message for a DIFFERENT missing env var doesn't leak values
         std::env::set_var("LATTICE_TEST_OK_KEY", "sk-ok-value");
         let resolved = ResolvedModel {
             alias: "gpt-4o".to_string(),
@@ -340,16 +310,12 @@ mod tests {
         std::env::remove_var("LATTICE_TEST_EMPTY_KEY");
     }
 
-    // ── Provider dispatch by kind ────────────────────────────────────────
-
     #[test]
     fn dispatch_does_not_use_registry_or_plugins() {
         let router = make_router();
         let target = ModelTarget::new("gpt-5.5");
         let resolved = router.resolve(&target).unwrap();
         assert_eq!(resolved.provider, ProviderKind::OpenAi);
-        // If this compiles without lattice_core, the test passes.
-        // Verify build_request_body dispatches by kind
         let req = ChatRequest::new(vec![Message::user("hi")], target);
         let json = build_request_body(&req, &resolved);
         assert_eq!(json["model"], "gpt-5.5");
@@ -366,11 +332,8 @@ mod tests {
             credential_status: CredentialStatus::Missing,
         };
         let result = validate_and_read_key(&resolved);
-        // Private IP URL should be rejected by base URL validation
         assert!(result.is_err(), "private IP base URL should be rejected");
     }
-
-    // ── Auth header construction ──────────────────────────────────────────
 
     #[test]
     fn openai_auth_headers_use_bearer() {
@@ -421,8 +384,6 @@ mod tests {
         assert_eq!(headers[0].0, "x-goog-api-key");
         assert_eq!(headers[0].1, "gemini-test-key");
     }
-
-    // ── Endpoint URL construction ────────────────────────────────────────
 
     #[test]
     fn openai_endpoint_url() {
