@@ -1,28 +1,12 @@
 //! v1.1 session graph contract: types, narrow store trait, and canonical helpers.
-//!
-//! This module defines the durable graph vocabulary for sessions, commits,
-//! messages, branches, HEAD, and refs. It intentionally excludes legacy
-//! operations like merge or rebase.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Maximum characters for a commit message derived from user text.
 pub const COMMIT_MESSAGE_MAX_CHARS: usize = 72;
-
-/// Canonical schema version for the v1.1 turn commit payload.
 pub const COMMIT_PAYLOAD_SCHEMA_VERSION: u32 = 1;
 
-// ---------------------------------------------------------------------------
-// Graph message types
-// ---------------------------------------------------------------------------
-
-/// A single transcript message in the v1.1 graph.
-///
-/// Reuses the existing `SessionMessage` shape from the legacy module but
-/// scoped to the v1.1 contract. Supports `user`, `assistant`, and `tool`
-/// roles. Tool call fields (`tool_calls`, `tool_call_id`, `name`) remain
-/// message fields rather than a separate context schema.
+/// A single transcript message: user, assistant, or tool role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphMessage {
     pub role: String,
@@ -37,7 +21,7 @@ pub struct GraphMessage {
     pub name: Option<String>,
 }
 
-/// A tool call request embedded in an assistant message.
+/// A tool call request in an assistant message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphToolCall {
     pub id: String,
@@ -46,10 +30,6 @@ pub struct GraphToolCall {
 }
 
 /// Complete ordered transcript for the current branch HEAD.
-///
-/// D-11/D-12: the agent loop reads this to build model input. Contains the
-/// session ID, the parent commit ID (None if no commits yet), and the full
-/// ordered message list from root through current HEAD.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadTranscript {
     pub session_id: String,
@@ -58,10 +38,7 @@ pub struct HeadTranscript {
     pub messages: Vec<GraphMessage>,
 }
 
-/// Token usage statistics for a completed turn.
-///
-/// D-28/D-31: persisted as part of turn commit metadata. Token counts are
-/// provider-reported and stored as opaque integers.
+/// Token usage for a completed turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnUsage {
     pub prompt_tokens: u64,
@@ -69,14 +46,7 @@ pub struct TurnUsage {
     pub total_tokens: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Session container
-// ---------------------------------------------------------------------------
-
-/// A v1.1 graph session: a container/namespace for branches, HEAD, and commits.
-///
-/// Sessions do not own commits directly -- commits form a directed graph linked
-/// by parent IDs. Branches and HEAD are commit-pointer concepts.
+/// A session: container for branches, HEAD, and commits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphSession {
     pub session_id: String,
@@ -92,21 +62,14 @@ pub struct GraphSession {
     pub updated_at: String,
 }
 
-// ---------------------------------------------------------------------------
-// Refs and HEAD
-// ---------------------------------------------------------------------------
-
-/// The kind of ref: branch or detached HEAD.
+/// Ref kind: branch or detached HEAD.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphRefKind {
     Branch,
 }
 
-/// A named ref pointing to a commit ID.
-///
-/// In v1.1, branches and HEAD are commit-pointer concepts. A ref always
-/// points to a commit ID, never to a session ID.
+/// A named ref pointing to a commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphRef {
     pub session_id: String,
@@ -117,24 +80,15 @@ pub struct GraphRef {
     pub updated_at: String,
 }
 
-/// HEAD state: either on a named branch or detached at a commit.
+/// HEAD state: on a branch or detached at a commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphHead {
-    /// HEAD is on a named branch.
     Branch { name: String },
-    /// HEAD is detached at a specific commit.
     Detached { commit_id: String },
 }
 
-// ---------------------------------------------------------------------------
-// Turn commit status
-// ---------------------------------------------------------------------------
-
 /// Status of a completed turn commit.
-///
-/// D-01/D-02: durable turn commits are created only for completed, errored,
-/// or cancelled turns. No half-finished user-only pending commit is recorded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnCommitStatus {
@@ -153,85 +107,44 @@ impl TurnCommitStatus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Turn commit input / output
-// ---------------------------------------------------------------------------
-
-/// Input for creating a durable turn commit.
-///
-/// D-04/D-05: the v1.1 commit envelope is minimal and does not include
-/// prompt compiler records, hook records, external blobs, or context summary
-/// layers.
+/// Input for creating a turn commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnCommitInput {
-    /// The session this commit belongs to.
     pub session_id: String,
-    /// Parent commit IDs (empty for the first commit in a session).
     pub parent_ids: Vec<String>,
-    /// Ordered transcript messages for this turn.
     pub messages: Vec<GraphMessage>,
-    /// Profile snapshot identity or summary hash.
     pub profile_snapshot_id: Option<String>,
-    /// Model used for this turn.
     pub model: String,
-    /// Provider used for this turn.
     pub provider: String,
-    /// Turn outcome status.
     pub status: TurnCommitStatus,
-    /// Human-facing commit message (derived from first user message).
     pub commit_message: String,
-    /// Token usage statistics for this turn.
     #[serde(default)]
     pub usage: Option<TurnUsage>,
-    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
     #[serde(default)]
     pub terminal_reason: Option<String>,
 }
 
-/// An immutable turn commit in the v1.1 graph.
-///
-/// D-03/D-21: commit IDs are logical hashes over canonical commit payloads
-/// and exclude storage details such as SQLite row IDs, object paths,
-/// filesystem paths, and write order.
+/// An immutable turn commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnCommit {
-    /// Canonical commit ID (logical hash).
     pub commit_id: String,
-    /// The session this commit belongs to.
     pub session_id: String,
-    /// Parent commit IDs.
     pub parent_ids: Vec<String>,
-    /// Ordered message IDs for the transcript.
     pub message_ids: Vec<String>,
-    /// Profile snapshot identity or summary hash.
     #[serde(default)]
     pub profile_snapshot_id: Option<String>,
-    /// Model used for this turn.
     pub model: String,
-    /// Provider used for this turn.
     pub provider: String,
-    /// Turn outcome status.
     pub status: TurnCommitStatus,
-    /// Human-facing commit message.
     pub commit_message: String,
-    /// Token usage statistics for this turn.
     #[serde(default)]
     pub usage: Option<TurnUsage>,
-    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
     #[serde(default)]
     pub terminal_reason: Option<String>,
-    /// When the commit was created.
     pub created_at: String,
 }
 
-// ---------------------------------------------------------------------------
-// Log, status, summary, diff, reset
-// ---------------------------------------------------------------------------
-
-/// A single entry in the turn log.
-///
-/// D-22: one line per turn commit with commit ID, status, model/provider,
-/// commit_message, and small counts.
+/// A single turn log entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnLogEntry {
     pub commit_id: String,
@@ -242,19 +155,14 @@ pub struct TurnLogEntry {
     pub commit_message: String,
     pub message_count: usize,
     pub tool_message_count: usize,
-    /// Token usage statistics for this turn.
     #[serde(default)]
     pub usage: Option<TurnUsage>,
-    /// Terminal reason string (e.g. "stop", "timeout", "error: ...").
     #[serde(default)]
     pub terminal_reason: Option<String>,
     pub created_at: String,
 }
 
-/// Session status: pointer-focused view of a session.
-///
-/// D-27: shows session ID, HEAD state, current commit, branch summary,
-/// and no pending durable turn.
+/// Session status: HEAD, branches, commit count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
     pub session_id: String,
@@ -265,10 +173,7 @@ pub struct SessionStatus {
     pub commit_count: usize,
 }
 
-/// Summary of a session for list display.
-///
-/// D-27: shows current branch, HEAD commit, updated time, commit count,
-/// and label/title.
+/// Session summary for list display.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionGraphSummary {
     pub session_id: String,
@@ -283,25 +188,17 @@ pub struct SessionGraphSummary {
 }
 
 /// Graph-path diff result.
-///
-/// D-26: compares graph paths by commit IDs. Lists commits unique to each
-/// side with ID, status, and commit_message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphDiff {
     pub from_commit_id: String,
     pub to_commit_id: String,
     #[serde(default)]
     pub common_ancestor_id: Option<String>,
-    /// Commits reachable from `from` but not `to`.
     pub only_in_from: Vec<TurnLogEntry>,
-    /// Commits reachable from `to` but not `from`.
     pub only_in_to: Vec<TurnLogEntry>,
 }
 
 /// Result of a reset operation.
-///
-/// D-25: reset must return the old HEAD commit ID because v1.1 does not
-/// include history side channels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResetResult {
     pub session_id: String,
@@ -311,19 +208,8 @@ pub struct ResetResult {
     pub new_commit_id: String,
 }
 
-// ---------------------------------------------------------------------------
-// Narrow store trait
-// ---------------------------------------------------------------------------
-
-/// Narrow v1.1 session graph store contract.
-///
-/// D-12/D-13/D-14: exposes only create/open, status/list/log, commit_turn,
-/// checkout, branch, diff, and reset style operations. Does NOT include
-/// merge, rebase, or any legacy rich operations.
+/// Narrow session graph store contract.
 pub trait SessionGraphStore: Send + Sync {
-    // -- Session lifecycle --
-
-    /// Create a new session with an initial `main` branch.
     fn create_session(
         &self,
         session_id: &str,
@@ -333,71 +219,28 @@ pub trait SessionGraphStore: Send + Sync {
         provider: Option<&str>,
     ) -> crate::Result<GraphSession>;
 
-    /// Open an existing session by ID or prefix.
     fn open_session(&self, session_id: &str) -> crate::Result<GraphSession>;
 
-    // -- Status / list / log --
-
-    /// Get the current status of a session (HEAD, branches, commit count).
     fn status(&self, session_id: &str) -> crate::Result<SessionStatus>;
 
-    /// List all sessions with summary information.
     fn list(&self) -> crate::Result<Vec<SessionGraphSummary>>;
 
-    /// Get the turn log for a session (one entry per turn commit).
     fn log(&self, session_id: &str) -> crate::Result<Vec<TurnLogEntry>>;
 
-    // -- Transcript read --
-
-    /// Read the complete ordered transcript for the current branch HEAD.
-    ///
-    /// D-11: the agent loop calls this to build model input from the full
-    /// branch history. Returns `parent_commit_id` as None when no commits
-    /// exist yet (empty session).
     fn head_transcript(&self, session_id: &str) -> crate::Result<HeadTranscript>;
 
-    // -- Commit --
-
-    /// Commit a completed turn atomically.
-    ///
-    /// D-17: writes messages, commit object, and branch/HEAD ref update
-    /// in one transaction or writes none of them.
     fn commit_turn(&self, input: TurnCommitInput) -> crate::Result<TurnCommit>;
 
-    // -- Pointer operations --
-
-    /// Change the active branch or detach HEAD at a commit.
-    ///
-    /// D-23: does not run a model and does not create a commit.
     fn checkout(&self, session_id: &str, target: &str) -> crate::Result<GraphHead>;
 
-    /// Create or move a branch ref to an existing commit.
-    ///
-    /// D-24: pointer operation only; does not fork a session, run a model,
-    /// or create a commit.
     fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> crate::Result<GraphRef>;
 
-    /// Compare graph paths between two commits.
-    ///
-    /// D-26: finds common ancestor and lists commits unique to each side.
     fn diff(&self, session_id: &str, from: &str, to: &str) -> crate::Result<GraphDiff>;
 
-    /// Move the current branch pointer to a target commit.
-    ///
-    /// D-25: does not delete commits; returns old HEAD commit ID for recovery.
     fn reset(&self, session_id: &str, target: &str) -> crate::Result<ResetResult>;
 }
 
-// ---------------------------------------------------------------------------
-// Pure helpers: commit message derivation, canonical IDs
-// ---------------------------------------------------------------------------
-
-/// Derive a human-facing commit message from the turn's transcript.
-///
-/// D-18/D-19/D-20: reads the first `user` role message, normalizes
-/// whitespace, truncates to `COMMIT_MESSAGE_MAX_CHARS`, and returns
-/// `"Turn commit"` when no non-empty user message exists. Does NOT call
-/// an LLM.
+/// Derive commit message from first user message.
 pub fn derive_commit_message(messages: &[GraphMessage]) -> String {
     let user_text = messages
         .iter()
@@ -412,12 +255,7 @@ pub fn derive_commit_message(messages: &[GraphMessage]) -> String {
     normalized.chars().take(COMMIT_MESSAGE_MAX_CHARS).collect()
 }
 
-/// Compute a canonical message ID for a single transcript message.
-///
-/// The payload includes role, content, reasoning_content, tool_calls,
-/// tool_call_id, name, and the ordinal position within the turn. The
-/// ordinal prevents hash collisions when two byte-identical messages
-/// appear in the same turn (e.g., duplicate tool results).
+/// Compute canonical message ID.
 pub fn canonical_message_id(message: &GraphMessage, ordinal: usize) -> String {
     let payload = serde_json::json!({
         "role": message.role,
@@ -431,13 +269,7 @@ pub fn canonical_message_id(message: &GraphMessage, ordinal: usize) -> String {
     hash_json("v1_message", &payload)
 }
 
-/// Compute a canonical turn commit ID from logical payload fields.
-///
-/// D-03/D-21: the payload includes schema version, session ID, parent
-/// commit IDs, message IDs, profile snapshot identity, model, provider,
-/// status, commit_message, and a logical timestamp. It explicitly
-/// excludes: SQLite row IDs, object paths, filesystem paths, write order,
-/// side-channel history and auxiliary request IDs.
+/// Compute canonical turn commit ID.
 #[allow(clippy::too_many_arguments)]
 pub fn canonical_turn_commit_id(
     session_id: &str,
@@ -465,7 +297,6 @@ pub fn canonical_turn_commit_id(
     hash_json("v1_turn_commit", &payload)
 }
 
-/// SHA-256 hash of a type-prefixed JSON payload.
 fn hash_json(kind: &str, value: &serde_json::Value) -> String {
     let json = serde_json::to_string(value).expect("JSON serialization must succeed");
     let mut hasher = Sha256::new();
@@ -646,12 +477,8 @@ mod graph_contract {
         // This is a compile-time check: the trait should only have the
         // methods listed below. If legacy methods were added, this test
         // module would need to be updated, drawing reviewer attention.
-        //
-        // The trait is used as a bound in this test to confirm it compiles.
         fn _assert_trait_bound(_store: &dyn SessionGraphStore) {}
     }
-
-    // -- Commit message derivation tests --
 
     fn user_msg(text: &str) -> GraphMessage {
         GraphMessage {
@@ -717,8 +544,6 @@ mod graph_contract {
         ];
         assert_eq!(derive_commit_message(&messages), "First question");
     }
-
-    // -- Canonical ID tests --
 
     #[test]
     fn canonical_turn_commit_id_includes_logical_fields() {
@@ -867,8 +692,6 @@ mod graph_contract {
         );
     }
 
-    // -- HeadTranscript contract tests (Phase 09) --
-
     #[test]
     fn head_transcript_contract_serializes() {
         let transcript = HeadTranscript {
@@ -903,8 +726,6 @@ mod graph_contract {
         assert!(decoded.messages.is_empty());
     }
 
-    // -- TurnUsage contract tests (Phase 09) --
-
     #[test]
     fn turn_usage_serializes_for_commit_metadata() {
         let usage = TurnUsage {
@@ -923,8 +744,6 @@ mod graph_contract {
         assert_eq!(decoded.completion_tokens, 50);
         assert_eq!(decoded.total_tokens, 150);
     }
-
-    // -- TurnCommitInput extended fields tests (Phase 09) --
 
     #[test]
     fn turn_commit_input_accepts_usage_and_terminal_reason() {

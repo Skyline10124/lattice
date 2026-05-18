@@ -1,9 +1,6 @@
-//! Clean v1.1 SQLite graph store for sessions, commits, messages, and refs.
+//! SQLite graph store for sessions, commits, messages, and refs.
 //!
-//! This module implements `SessionGraphStore` over SQLite using the clean
-//! v1.1 table set: `graph_sessions`, `graph_refs`, `graph_commits`, and
-//! `graph_messages`. It intentionally does not use legacy tables like
-//! old object tables or history side-channel tables.
+//! Implements `SessionGraphStore` over SQLite.
 
 use std::path::{Path, PathBuf};
 
@@ -20,39 +17,29 @@ use crate::{
     Result, SessionError,
 };
 
-/// Default branch name for new sessions.
 const DEFAULT_BRANCH: &str = "main";
 
-/// v1.1 SQLite-backed session graph store.
-///
-/// Uses clean tables (`graph_sessions`, `graph_refs`, `graph_commits`,
-/// `graph_messages`) and does not touch legacy CAS tables.
+/// SQLite-backed session graph store.
 pub struct SqliteSessionGraphStore {
     dir: PathBuf,
     db_path: PathBuf,
 }
 
 impl SqliteSessionGraphStore {
-    /// Create a new store rooted at `dir`.
-    ///
-    /// The database file is `session_v11.db` inside `dir`.
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let db_path = dir.join("session_v11.db");
         Self { dir, db_path }
     }
 
-    /// The directory this store was created in.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
-    /// The path to the SQLite database file.
     pub fn db_path(&self) -> &Path {
         &self.db_path
     }
 
-    /// Open (or create) a SQLite connection and ensure v1.1 tables exist.
     fn conn(&self) -> Result<Connection> {
         crate::create_dir_all(&self.dir)?;
         let conn = Connection::open(&self.db_path).map_err(|source| SessionError::Database {
@@ -152,7 +139,6 @@ impl SqliteSessionGraphStore {
 }
 
 impl SqliteSessionGraphStore {
-    /// Read the current branch ref's commit_id for the session's active branch.
     fn current_branch_commit_id(
         &self,
         conn: &Connection,
@@ -920,7 +906,6 @@ impl SessionGraphStore for SqliteSessionGraphStore {
 }
 
 impl SqliteSessionGraphStore {
-    /// Inner commit_turn logic that runs inside a transaction.
     fn commit_turn_inner(&self, conn: &Connection, input: &TurnCommitInput) -> Result<TurnCommit> {
         let now = Utc::now().to_rfc3339();
 
@@ -1075,7 +1060,6 @@ impl SqliteSessionGraphStore {
         })
     }
 
-    /// Read the session's active branch name.
     fn current_branch_name(&self, conn: &Connection, session_id: &str) -> Result<Option<String>> {
         let name: Option<String> = conn
             .query_row(
@@ -1092,8 +1076,6 @@ impl SqliteSessionGraphStore {
         Ok(name)
     }
 
-    /// Resolve a target string to a commit ID. The target can be a branch
-    /// name (looked up in graph_refs) or a commit ID (verified in graph_commits).
     fn resolve_target_to_commit_id(
         &self,
         conn: &Connection,
@@ -1137,7 +1119,6 @@ impl SqliteSessionGraphStore {
         Err(SessionError::MissingCommit(target.to_string()))
     }
 
-    /// Get parent IDs for a commit.
     fn get_parent_ids(&self, conn: &Connection, commit_id: &str) -> Result<Vec<String>> {
         let parents_json: String = conn
             .query_row(
@@ -1150,7 +1131,6 @@ impl SqliteSessionGraphStore {
         Ok(serde_json::from_str(&parents_json).unwrap_or_default())
     }
 
-    /// Collect all ancestor commit IDs reachable from `start` (BFS, including start).
     fn collect_ancestors(
         &self,
         conn: &Connection,
@@ -1173,8 +1153,6 @@ impl SqliteSessionGraphStore {
         Ok(visited)
     }
 
-    /// Collect log entries for commits reachable from `start` that are NOT in
-    /// `other_set` and stop at (but include) `stop_at` if provided.
     fn collect_unique_entries(
         &self,
         conn: &Connection,
@@ -1402,8 +1380,6 @@ mod sqlite_graph_commit_turn {
         );
     }
 
-    // -- create_session tests --
-
     #[test]
     fn create_session_does_not_create_commit() {
         let dir = temp_dir("create_no_commit");
@@ -1462,8 +1438,6 @@ mod sqlite_graph_commit_turn {
             "open_session should fail for missing session"
         );
     }
-
-    // -- commit_turn tests --
 
     #[test]
     fn commit_turn_writes_messages_commit_and_branch_ref_atomically() {
@@ -1719,9 +1693,7 @@ mod sqlite_graph_commit_turn {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Head transcript and usage metadata tests (Plan 09-01)
-// ---------------------------------------------------------------------------
+// Head transcript and usage metadata tests
 
 #[cfg(test)]
 mod sqlite_graph_head_transcript {
@@ -2064,9 +2036,7 @@ mod sqlite_graph_head_transcript {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pointer operations tests (Plan 03)
-// ---------------------------------------------------------------------------
+// Pointer operations tests
 
 #[cfg(test)]
 mod session_graph_pointer_ops {
@@ -2175,10 +2145,6 @@ mod session_graph_pointer_ops {
         }
         commits
     }
-
-    // =======================================================================
-    // Task 1 tests: status, list, log
-    // =======================================================================
 
     #[test]
     fn status_reports_pointer_state() {
@@ -2304,10 +2270,6 @@ mod session_graph_pointer_ops {
         assert_eq!(entry2.message_count, 3);
         assert_eq!(entry2.tool_message_count, 1);
     }
-
-    // =======================================================================
-    // Task 2 tests: checkout, branch, reset, diff
-    // =======================================================================
 
     #[test]
     fn branch_checkout_and_reset_do_not_create_commits() {
