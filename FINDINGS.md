@@ -57,11 +57,8 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 #### H-08: agent loop 无任何迭代上限 — `resource-exhaustion` [resolved 2026-05-19]
 - **修复**: 添加 `MAX_TURN_ROUNDS = 200` hard cap，超限返回 `Failed` + `"exceeded max rounds"` terminal_reason，并 emit Error event。新增测试验证无限 tool_call 场景下精确停在 200 轮。
 
-#### H-09: SQLite 每次操作新建连接 + TOCTOU 竞态 — `race-condition`
-- **位置**: `crates/lattice-session/src/sqlite_graph.rs:43-138`
-- **问题**: 每次方法调用新建连接并执行完整 DDL。trait 要求 `Send + Sync`，两个线程并发 `commit_turn` 时各自读到相同 HEAD、都通过 parent 校验，可能产生图分叉。
-- **影响**: 并发下会话图完整性受损
-- **修复**: 连接池或 Mutex 保护单连接 + parent 校验放入事务内。
+#### H-09: SQLite 每次操作新建连接 + TOCTOU 竞态 — `race-condition` [resolved 2026-05-19]
+- **修复**: `SqliteSessionGraphStore` 改为 `Mutex<Option<Connection>>` 持久化单连接，lazy 初始化（首次 `conn()` 时创建目录、打开 DB、跑 schema DDL、ALTER 迁移、设置 `journal_mode=WAL`）。`conn()` 返回 `ConnHandle`（deref 到 `Connection`），所有调用点保持原签名。`Mutex` 串行化所有方法访问，`commit_turn` 的 BEGIN IMMEDIATE 仍保留以防多进程访问同 DB。
 - **关联**: WR-03
 
 #### H-10: `validate_agents_dir` canonicalize 失败时回退原始路径 — `security` [partial 2026-05-19]
@@ -99,13 +96,11 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 #### M-08: blocking `is_file()`/`is_dir()` 在 async 上下文 — `performance` [resolved 2026-05-19]
 - **修复**: search.rs 中 grep_recursive 和 find_files_recursive 改用 `tokio::fs::metadata`。
 
-#### M-09: SQLite 无 WAL 模式 — `performance`
-- **位置**: `crates/lattice-session/src/sqlite_graph.rs:49-114`
-- **问题**: 默认 rollback journal 模式下读写互斥，并发操作报 SQLITE_BUSY。
+#### M-09: SQLite 无 WAL 模式 — `performance` [resolved 2026-05-19]
+- **修复**: 与 H-09 一并修复。schema 初始化时执行 `PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;`，启用 WAL 后并发读不再被写阻塞，大幅减少 SQLITE_BUSY。
 
-#### M-10: `unwrap_or_default()` 吞掉 corrupt JSON — `data-integrity`
-- **位置**: `crates/lattice-session/src/sqlite_graph.rs:236, 514, 516, 1179, 1245, 1247`
-- **问题**: 损坏 JSON 被静默当空数组，commit 看起来像 root commit，消息丢失。
+#### M-10: `unwrap_or_default()` 吞掉 corrupt JSON — `data-integrity` [resolved 2026-05-19]
+- **修复**: 引入 `parse_json_column` helper，`parents_json` 和 `message_ids_json` 解析失败时返回 `SessionError::Database`（包装为 `FromSqlConversionFailure`），损坏数据不再静默退化为空数组。`query_map` closure 内的两处 inline 处理（rusqlite Error 类型约束）。
 
 #### M-11: `head_transcript` 只走 first-parent — `correctness`
 - **位置**: `crates/lattice-session/src/sqlite_graph.rs:219`

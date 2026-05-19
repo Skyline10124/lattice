@@ -1,8 +1,10 @@
 //! SQLite graph store for sessions, commits, messages, and refs.
 //!
-//! Implements `SessionGraphStore` over SQLite.
+//! Implements `SessionGraphStore` over SQLite with a single shared
+//! connection, WAL journaling, and lazy schema initialization.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -20,16 +22,40 @@ use crate::{
 const DEFAULT_BRANCH: &str = "main";
 
 /// SQLite-backed session graph store.
+///
+/// Uses a single shared connection guarded by a Mutex. The connection is
+/// opened lazily on first access (so `new` remains infallible) and runs
+/// schema DDL plus PRAGMA journal_mode=WAL once on initialization.
 pub struct SqliteSessionGraphStore {
     dir: PathBuf,
     db_path: PathBuf,
+    conn: Mutex<Option<Connection>>,
+}
+
+/// RAII handle around the shared connection. Derefs to `Connection`, so
+/// existing call sites can use `self.conn()?.execute(...)` unchanged.
+pub(crate) struct ConnHandle<'a> {
+    guard: MutexGuard<'a, Option<Connection>>,
+}
+
+impl<'a> std::ops::Deref for ConnHandle<'a> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.guard
+            .as_ref()
+            .expect("connection initialized by SqliteSessionGraphStore::conn()")
+    }
 }
 
 impl SqliteSessionGraphStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let db_path = dir.join("session_v11.db");
-        Self { dir, db_path }
+        Self {
+            dir,
+            db_path,
+            conn: Mutex::new(None),
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -40,12 +66,33 @@ impl SqliteSessionGraphStore {
         &self.db_path
     }
 
-    fn conn(&self) -> Result<Connection> {
-        crate::create_dir_all(&self.dir)?;
-        let conn = Connection::open(&self.db_path).map_err(|source| SessionError::Database {
-            path: self.db_path.clone(),
-            source,
-        })?;
+    /// Acquire a locked handle to the shared connection, initializing on
+    /// first call (creates the directory, opens the DB, runs schema DDL,
+    /// enables WAL journaling).
+    fn conn(&self) -> Result<ConnHandle<'_>> {
+        let mut guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            crate::create_dir_all(&self.dir)?;
+            let conn =
+                Connection::open(&self.db_path).map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+            self.init_schema(&conn)?;
+            *guard = Some(conn);
+        }
+        Ok(ConnHandle { guard })
+    }
+
+    /// Initialize schema, PRAGMAs, and idempotent ALTER TABLE migrations.
+    fn init_schema(&self, conn: &Connection) -> Result<()> {
+        // Enable WAL for concurrent readers and reduce SQLITE_BUSY under load.
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
@@ -102,10 +149,6 @@ impl SqliteSessionGraphStore {
                 ordinal        INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES graph_sessions(session_id)
             );
-
-            -- Idempotent migration for existing databases: add usage_json and
-            -- terminal_reason columns to graph_commits if missing.
-            PRAGMA table_info(graph_commits);
             ",
         )
         .map_err(|source| SessionError::Database {
@@ -134,7 +177,7 @@ impl SqliteSessionGraphStore {
             }
         }
 
-        Ok(conn)
+        Ok(())
     }
 }
 
@@ -188,6 +231,29 @@ impl SqliteSessionGraphStore {
             }
         }
     }
+
+    /// Parse a JSON column from the SQLite row into a typed value.
+    ///
+    /// Returns `SessionError::Database` if the stored JSON is malformed,
+    /// preventing silent data loss. Used for `parents_json` and
+    /// `message_ids_json` columns where corruption would otherwise yield
+    /// an empty Vec and produce subtle wrong-graph behavior.
+    fn parse_json_column<T>(&self, column: &str, raw: &str) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        serde_json::from_str(raw).map_err(|err| SessionError::Database {
+            path: self.db_path.clone(),
+            source: rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("malformed JSON in column '{column}': {err}"),
+                )),
+            ),
+        })
+    }
 }
 
 impl SessionGraphStore for SqliteSessionGraphStore {
@@ -233,7 +299,7 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                 .map_err(|_| SessionError::MissingCommit(cid.clone()))?;
 
             let message_ids: Vec<String> =
-                serde_json::from_str(&message_ids_json).unwrap_or_default();
+                self.parse_json_column("message_ids_json", &message_ids_json)?;
 
             for mid in &message_ids {
                 let (role, content, reasoning_content, tool_call_id, name, tool_calls_json): (
@@ -511,9 +577,27 @@ impl SessionGraphStore for SqliteSessionGraphStore {
                 let terminal_reason: Option<String> = row.get(9)?;
 
                 let parent_ids: Vec<String> =
-                    serde_json::from_str(&parents_json).unwrap_or_default();
+                    serde_json::from_str(&parents_json).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("malformed JSON in parents_json: {err}"),
+                            )),
+                        )
+                    })?;
                 let message_ids: Vec<String> =
-                    serde_json::from_str(&message_ids_json).unwrap_or_default();
+                    serde_json::from_str(&message_ids_json).map_err(|err| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            7,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("malformed JSON in message_ids_json: {err}"),
+                            )),
+                        )
+                    })?;
                 let status = match status_str.as_str() {
                     "completed" => TurnCommitStatus::Completed,
                     "error" => TurnCommitStatus::Error,
@@ -1176,7 +1260,7 @@ impl SqliteSessionGraphStore {
             )
             .map_err(|_| SessionError::MissingCommit(commit_id.to_string()))?;
 
-        Ok(serde_json::from_str(&parents_json).unwrap_or_default())
+        self.parse_json_column("parents_json", &parents_json)
     }
 
     fn collect_ancestors(
@@ -1242,9 +1326,9 @@ impl SqliteSessionGraphStore {
                     _ => TurnCommitStatus::Completed,
                 };
                 let parent_ids: Vec<String> =
-                    serde_json::from_str(&parents_json).unwrap_or_default();
+                    self.parse_json_column("parents_json", &parents_json)?;
                 let message_ids: Vec<String> =
-                    serde_json::from_str(&message_ids_json).unwrap_or_default();
+                    self.parse_json_column("message_ids_json", &message_ids_json)?;
 
                 entries.push(TurnLogEntry {
                     commit_id: cid,
@@ -1313,10 +1397,11 @@ mod sqlite_graph_commit_turn {
         let dir = temp_dir("creates_tables");
         let store = SqliteSessionGraphStore::new(dir.clone());
 
-        // Opening a connection triggers table creation.
-        let conn = store.conn().expect("conn should succeed");
+        // Trigger lazy connection init (creates tables).
+        drop(store.conn().expect("init"));
 
-        // Verify the four v1.1 tables exist.
+        // Verify the four v1.1 tables exist via a raw connection.
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         for table in &[
             "graph_sessions",
             "graph_refs",
@@ -1350,7 +1435,8 @@ mod sqlite_graph_commit_turn {
     fn graph_refs_has_commit_id_column() {
         let dir = temp_dir("refs_has_commit_id");
         let store = SqliteSessionGraphStore::new(dir);
-        let conn = store.conn().expect("conn should succeed");
+        drop(store.conn().expect("init"));
+        let conn = Connection::open(store.db_path()).expect("raw conn");
 
         // PRAGMA table_info returns columns for graph_refs.
         let columns: Vec<String> = {
@@ -1404,7 +1490,8 @@ mod sqlite_graph_commit_turn {
     fn graph_refs_does_not_have_session_id_as_branch_pointer_value() {
         let dir = temp_dir("refs_no_session_id_pointer");
         let store = SqliteSessionGraphStore::new(dir);
-        let conn = store.conn().expect("conn should succeed");
+        drop(store.conn().expect("init"));
+        let conn = Connection::open(store.db_path()).expect("raw conn");
 
         // The commit_id column exists (tested above). There should be no
         // separate "target_session_id" or similar column used as the branch
@@ -1448,7 +1535,7 @@ mod sqlite_graph_commit_turn {
         assert_eq!(session.model, Some("sonnet".to_string()));
 
         // graph_commits count must be 0 immediately after create.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let commit_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM graph_commits", [], |row| row.get(0))
             .expect("count query");
@@ -1508,7 +1595,7 @@ mod sqlite_graph_commit_turn {
         // Message IDs are populated.
         assert_eq!(commit.message_ids.len(), 2);
 
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
 
         // Verify message rows exist.
         let msg_count: i64 = conn
@@ -1588,7 +1675,7 @@ mod sqlite_graph_commit_turn {
         assert!(result.is_err(), "stale parent should be rejected");
 
         // Verify commit count is still 1 (the failed write didn't persist).
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let commit_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM graph_commits WHERE session_id='sess-1'",
@@ -1618,7 +1705,7 @@ mod sqlite_graph_commit_turn {
         let commit = store.commit_turn(input).expect("commit_turn");
         assert_eq!(commit.message_ids.len(), 3);
 
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
 
         // Verify tool message persisted with tool_call_id and name.
         let (role, tool_call_id, name): (String, Option<String>, Option<String>) = conn
@@ -1683,7 +1770,7 @@ mod sqlite_graph_commit_turn {
             assert_eq!(commit.status, *status);
         }
 
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let commit_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM graph_commits WHERE session_id='sess-1'",
@@ -2373,7 +2460,7 @@ mod session_graph_pointer_ops {
         let first_commit_id = commits[0].commit_id.clone();
 
         // Record commit count before pointer operations.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let count_before: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM graph_commits WHERE session_id='sess-1'",
@@ -2432,7 +2519,7 @@ mod session_graph_pointer_ops {
         );
 
         // Verify in the database directly.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let stored_commit_id: Option<String> = conn
             .query_row(
                 "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='feature'",
@@ -2585,7 +2672,7 @@ mod session_graph_pointer_ops {
         }
 
         // Verify main branch was NOT moved — still points to second_id.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let main_commit: Option<String> = conn
             .query_row(
                 "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
@@ -2638,7 +2725,7 @@ mod session_graph_pointer_ops {
         );
 
         // main branch should still point to A.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let main_commit: Option<String> = conn
             .query_row(
                 "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
@@ -2728,7 +2815,7 @@ mod session_graph_pointer_ops {
         );
 
         // Verify all messages exist in the database.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let msg_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM graph_messages WHERE session_id='sess-1'",
@@ -2777,7 +2864,7 @@ mod session_graph_pointer_ops {
         );
 
         // 4. Verify main branch ref points to commit A.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let main_commit: Option<String> = conn
             .query_row(
                 "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='main'",
@@ -2848,7 +2935,7 @@ mod session_graph_pointer_ops {
         );
 
         // 4. 'side' branch ref should point to B.
-        let conn = store.conn().expect("conn");
+        let conn = Connection::open(store.db_path()).expect("raw conn");
         let side_commit: Option<String> = conn
                         .query_row(
                             "SELECT commit_id FROM graph_refs WHERE session_id='sess-1' AND kind='branch' AND name='side'",
