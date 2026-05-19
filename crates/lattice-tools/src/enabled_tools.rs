@@ -104,8 +104,7 @@ mod tests {
         assert!(!result.tool_names.contains("web_fetch"));
 
         // Explicit inclusion: bash and web_fetch are available when named
-        let with_special: Vec<String> =
-            vec!["read_file".into(), "bash".into(), "web_fetch".into()];
+        let with_special: Vec<String> = vec!["read_file".into(), "bash".into(), "web_fetch".into()];
         let result = resolve_enabled_tools(&with_special).expect("should resolve with bash+web");
         assert!(result.tool_names.contains("bash"));
         assert!(result.tool_names.contains("web_fetch"));
