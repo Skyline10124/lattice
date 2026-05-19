@@ -4,56 +4,49 @@ pub(super) async fn web_search(
     http_client: &reqwest::Client,
     limits: &crate::ToolLimits,
     args: &serde_json::Value,
-) -> String {
+) -> Result<String, String> {
     use crate::tool_error::ToolError;
     use futures::StreamExt;
 
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    if let Err(e) = check_url(url) {
-        return e;
-    }
-    match http_client.get(url).send().await {
-        Ok(response) => {
-            let limit = limits.max_http_response_size;
-            if let Some(content_length) = response.content_length() {
-                if content_length > limit as u64 {
-                    return ToolError::HttpError(format!(
-                        "Response too large: {} bytes (max {})",
-                        content_length, limit
-                    ))
-                    .to_string();
-                }
-            }
-            let mut buf = Vec::new();
-            let mut exceeded = false;
-            let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                let chunk = match chunk {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return ToolError::HttpError(e.to_string()).to_string();
-                    }
-                };
-                if buf.len() + chunk.len() > limit {
-                    let remaining = limit - buf.len();
-                    buf.extend_from_slice(&chunk[..remaining]);
-                    exceeded = true;
-                    break;
-                }
-                buf.extend_from_slice(&chunk);
-            }
-            if exceeded {
-                let truncated = String::from_utf8_lossy(&buf);
-                format!(
-                    "{}[TRUNCATED: response exceeded {} bytes]",
-                    truncated.trim_end(),
-                    limit
-                )
-            } else {
-                String::from_utf8_lossy(&buf).to_string()
-            }
+    check_url(url)?;
+    let response = http_client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| ToolError::HttpError(e.to_string()).to_string())?;
+    let limit = limits.max_http_response_size;
+    if let Some(content_length) = response.content_length() {
+        if content_length > limit as u64 {
+            return Err(ToolError::HttpError(format!(
+                "Response too large: {} bytes (max {})",
+                content_length, limit
+            ))
+            .to_string());
         }
-        Err(e) => ToolError::HttpError(e.to_string()).to_string(),
+    }
+    let mut buf = Vec::new();
+    let mut exceeded = false;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ToolError::HttpError(e.to_string()).to_string())?;
+        if buf.len() + chunk.len() > limit {
+            let remaining = limit - buf.len();
+            buf.extend_from_slice(&chunk[..remaining]);
+            exceeded = true;
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    if exceeded {
+        let truncated = String::from_utf8_lossy(&buf);
+        Ok(format!(
+            "{}[TRUNCATED: response exceeded {} bytes]",
+            truncated.trim_end(),
+            limit
+        ))
+    } else {
+        Ok(String::from_utf8_lossy(&buf).to_string())
     }
 }
 

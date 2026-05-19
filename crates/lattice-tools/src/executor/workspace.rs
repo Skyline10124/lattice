@@ -100,73 +100,65 @@ fn workspace_project_type_context(workdir: &Path) -> Vec<String> {
 }
 
 impl DefaultToolExecutor {
-    pub(super) async fn workspace_context_inner(&self, path: &str, limit: usize) -> String {
-        if let Err(e) = Self::reject_parent_traversal(path) {
-            return e;
-        }
+    pub(super) async fn workspace_context_inner(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<String, String> {
+        Self::reject_parent_traversal(path)?;
         let requested = self.resolve_user_path(path);
-        let canonical = match tokio::fs::canonicalize(&requested).await {
-            Ok(p) => p,
-            Err(e) => {
-                return ToolError::IoError {
-                    path: path.to_string(),
-                    error: e,
-                }
-                .to_string()
+        let canonical = tokio::fs::canonicalize(&requested).await.map_err(|e| {
+            ToolError::IoError {
+                path: path.to_string(),
+                error: e,
             }
-        };
-        if let Err(e) = self.ensure_under_project_root(&canonical) {
-            return e;
-        }
+            .to_string()
+        })?;
+        self.ensure_under_project_root(&canonical)?;
         let mut lines = vec![format!("Workspace: {}", canonical.display())];
         lines.push("Top-level entries:".into());
-        match tokio::fs::read_dir(&canonical).await {
-            Ok(mut entries) => {
-                let mut rendered = Vec::new();
-                loop {
-                    match entries.next_entry().await {
-                        Ok(Some(entry)) => {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if matches!(name.as_str(), ".git" | "target" | "node_modules") {
-                                continue;
-                            }
-                            let ty = if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false)
-                            {
-                                "DIR"
-                            } else {
-                                "FILE"
-                            };
-                            rendered.push(format!("- {ty} {name}"));
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            rendered.push(format!("- Error reading entry: {e}"));
-                            break;
-                        }
+        let mut entries = tokio::fs::read_dir(&canonical).await.map_err(|e| {
+            ToolError::IoError {
+                path: path.to_string(),
+                error: e,
+            }
+            .to_string()
+        })?;
+        let mut rendered = Vec::new();
+        loop {
+            match entries.next_entry().await {
+                Ok(Some(entry)) => {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if matches!(name.as_str(), ".git" | "target" | "node_modules") {
+                        continue;
                     }
+                    let ty = if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                        "DIR"
+                    } else {
+                        "FILE"
+                    };
+                    rendered.push(format!("- {ty} {name}"));
                 }
-                rendered.sort();
-                let total = rendered.len();
-                let visible: Vec<String> = rendered.into_iter().take(limit).collect();
-                if visible.is_empty() {
-                    lines.push("- no readable top-level entries".into());
-                } else {
-                    lines.extend(visible.iter().cloned());
-                    if total > visible.len() {
-                        lines.push(format!(
-                            "[TRUNCATED: showing {} of {} entries]",
-                            visible.len(),
-                            total
-                        ));
-                    }
+                Ok(None) => break,
+                Err(e) => {
+                    rendered.push(format!("- Error reading entry: {e}"));
+                    break;
                 }
             }
-            Err(e) => {
-                return ToolError::IoError {
-                    path: path.to_string(),
-                    error: e,
-                }
-                .to_string()
+        }
+        rendered.sort();
+        let total = rendered.len();
+        let visible: Vec<String> = rendered.into_iter().take(limit).collect();
+        if visible.is_empty() {
+            lines.push("- no readable top-level entries".into());
+        } else {
+            lines.extend(visible.iter().cloned());
+            if total > visible.len() {
+                lines.push(format!(
+                    "[TRUNCATED: showing {} of {} entries]",
+                    visible.len(),
+                    total
+                ));
             }
         }
 
@@ -190,14 +182,14 @@ impl DefaultToolExecutor {
             lines.extend(project);
         }
 
-        lines.join("\n")
+        Ok(lines.join("\n"))
     }
 }
 
 pub(super) async fn workspace_context(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
-) -> String {
+) -> Result<String, String> {
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
     let limit = args
         .get("limit")

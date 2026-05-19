@@ -48,7 +48,7 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **关联**: P2-04
 
 #### H-07: `tool_output_is_ok` 用字符串前缀判断成功/失败 — `correctness` [resolved 2026-05-19]
-- **修复**: `ToolCallExecutor::execute` 改为返回 `Result<String, String>`，agent 层直接通过 `Ok`/`Err` 判定 ok。前缀判定从 agent 移到单一 adapter（`classify_tool_output`），并扩展前缀集（包括 traversal denied、write denied 等）。`tool_output_is_ok` helper 删除。
+- **修复**: 统一 `lattice_tools::ToolExecutor` 和 `lattice_agent::ToolCallExecutor` 为单一 trait，签名 `Result<String, String>`。`DefaultToolExecutor` 内部 12 个工具函数全部改为返回 `Err(...)` 而非 `format!("Error: ...")`。`tool_output_is_ok` helper 和 CLI 的 `classify_tool_output`/`ToolExecutorAdapter` 全部删除。`DefaultToolExecutor` 直接传给 `AgentLoopConfig.tool_executor`，agent loop 通过 `Ok`/`Err` 模式匹配判定 ok。
 - **关联**: WR-04
 
 #### H-08: agent loop 无任何迭代上限 — `resource-exhaustion` [resolved 2026-05-19]

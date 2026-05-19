@@ -10,7 +10,6 @@ use anyhow::Result;
 use colored::Colorize;
 use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_profile::{ProfileError, ProfileSource};
-use lattice_tools::ToolExecutor as _;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,40 +29,6 @@ impl lattice_agent::agent_loop::LlmClient for RealLlmClient {
         lattice_llm::chat(request)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-    }
-}
-
-/// Adapter wrapping `DefaultToolExecutor` for the agent loop's `ToolCallExecutor` trait.
-struct ToolExecutorAdapter {
-    inner: lattice_tools::executor::DefaultToolExecutor,
-}
-
-#[async_trait::async_trait]
-impl lattice_agent::agent_loop::ToolCallExecutor for ToolExecutorAdapter {
-    async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String> {
-        let output = self.inner.execute(call).await;
-        classify_tool_output(output)
-    }
-}
-
-/// Convert `DefaultToolExecutor` legacy String output into a structured Result.
-///
-/// `DefaultToolExecutor` encodes failure as a String prefix. This single
-/// helper isolates the legacy convention so the agent layer never depends
-/// on string sniffing.
-fn classify_tool_output(output: String) -> Result<String, String> {
-    const FAILURE_PREFIXES: &[&str] = &[
-        "Error:",
-        "Tool denied:",
-        "Unknown tool:",
-        "traversal denied",
-        "write denied:",
-        "cannot write to",
-    ];
-    if FAILURE_PREFIXES.iter().any(|p| output.starts_with(p)) {
-        Err(output)
-    } else {
-        Ok(output)
     }
 }
 
@@ -125,9 +90,7 @@ async fn run_inner(
 
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm: Arc::new(RealLlmClient),
-        tool_executor: Arc::new(ToolExecutorAdapter {
-            inner: tool_executor,
-        }),
+        tool_executor: Arc::new(tool_executor),
     }));
 
     let request = RunTurnRequest {
@@ -530,7 +493,10 @@ mod tests {
             lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
         );
         use lattice_tools::ToolExecutor as _;
-        let result = executor.execute(&call).await;
+        let result = executor
+            .execute(&call)
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
 
         assert!(
             result.contains("fn main()"),

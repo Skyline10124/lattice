@@ -11,19 +11,13 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>;
 }
 
-/// Injectable tool executor for the agent loop.
+/// Re-export of the unified tool executor trait.
 ///
-/// `Ok(content)` carries successful tool output to be appended to the
-/// transcript. `Err(message)` signals a tool-level failure (denied, invalid
-/// args, IO error, etc.) — the agent loop records the message as the tool
-/// message content and marks the result as `ok: false`. Implementations
-/// must encode success/failure structurally rather than via string prefixes
-/// in the output.
-#[async_trait::async_trait]
-pub trait ToolCallExecutor: Send + Sync {
-    /// Execute a tool call.
-    ///
-    /// Return `Ok(output)` on success or `Err(error)` when the tool
-    /// could not produce a valid result.
-    async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String>;
-}
+/// The agent loop drives any implementation of `lattice_tools::ToolExecutor`
+/// to handle tool calls. This re-export lets agent-layer callers depend on
+/// a single trait without importing `lattice-tools` directly.
+///
+/// Implementations return `Ok(content)` on success or `Err(message)` when
+/// the tool could not produce a valid result. The agent loop derives the
+/// `ok` flag and error summary from the Result variant.
+pub use lattice_tools::ToolExecutor as ToolCallExecutor;

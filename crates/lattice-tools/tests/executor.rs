@@ -5,6 +5,24 @@ fn tool_call(name: &str, args: serde_json::Value) -> ToolCall {
     ToolCall::new("call_test", FunctionCall::new(name, args.to_string()))
 }
 
+/// Trait extension for tests: flatten Result<String, String> into a single
+/// String so legacy assertions on `.contains()` keep working. Failure values
+/// are prefixed with "Error: " to preserve the assertion contract.
+#[async_trait::async_trait]
+trait ExecuteFlat {
+    async fn execute_flat(&self, call: &ToolCall) -> String;
+}
+
+#[async_trait::async_trait]
+impl ExecuteFlat for DefaultToolExecutor {
+    async fn execute_flat(&self, call: &ToolCall) -> String {
+        match self.execute(call).await {
+            Ok(output) => output,
+            Err(error) => format!("Error: {error}"),
+        }
+    }
+}
+
 fn executor_with_all_tools(root: &str) -> DefaultToolExecutor {
     DefaultToolExecutor::for_project_root(
         root,
@@ -32,7 +50,7 @@ async fn read_file_supports_relative_paths_line_ranges_and_line_numbers() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({
                 "path": "sample.txt",
@@ -56,7 +74,7 @@ async fn read_files_batches_targeted_file_reads() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_files",
             serde_json::json!({
                 "files": [
@@ -82,7 +100,7 @@ async fn read_file_and_read_files_show_content_hash() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let single = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({
                 "path": "a.txt"
@@ -91,7 +109,7 @@ async fn read_file_and_read_files_show_content_hash() {
         .await;
 
     let batch = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_files",
             serde_json::json!({
                 "files": [
@@ -115,7 +133,7 @@ async fn workspace_context_reports_entries_instructions_and_project_type() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "workspace_context",
             serde_json::json!({
                 "path": "."
@@ -138,7 +156,7 @@ async fn todo_write_validates_single_in_progress_item() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "todo_write",
             serde_json::json!({
                 "todos": [
@@ -154,7 +172,7 @@ async fn todo_write_validates_single_in_progress_item() {
     assert!(result.contains("2. [in_progress] Apply patch"));
 
     let invalid = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "todo_write",
             serde_json::json!({
                 "todos": [
@@ -175,7 +193,7 @@ async fn grep_caps_results_and_reports_truncation() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "grep",
             serde_json::json!({
                 "pattern": "hit",
@@ -200,7 +218,7 @@ async fn list_directory_caps_entries_and_reports_total() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "list_directory",
             serde_json::json!({
                 "path": ".",
@@ -225,7 +243,7 @@ async fn find_files_matches_names_and_relative_paths_with_limits() {
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "find_files",
             serde_json::json!({
                 "pattern": "*.rs",
@@ -250,7 +268,7 @@ async fn patch_applies_structured_patch_and_returns_json_manifest() {
     let old_hash = lattice_tools::edit::content_hash(before.as_bytes());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "patch",
             serde_json::json!({ "patch": format!(
                 "\
@@ -289,7 +307,7 @@ async fn patch_failure_json_keeps_changed_files_empty_and_attempts_populated() {
     let old_hash = lattice_tools::edit::content_hash(before.as_bytes());
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "patch",
             serde_json::json!({ "patch": format!(
                 "\
@@ -319,7 +337,7 @@ async fn authorized_executor_denies_unlisted_builtin_before_execution() {
         DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "write_file",
             serde_json::json!({
                 "path": "denied.txt",
@@ -344,7 +362,7 @@ async fn denied_tool_is_not_unknown_tool() {
         DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "bash",
             serde_json::json!({"command": "echo no"}),
         ))
@@ -375,7 +393,7 @@ async fn bash_timeout_returns_promptly() {
     let started = std::time::Instant::now();
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "bash",
             serde_json::json!({"command": "exec sleep 5"}),
         ))
@@ -396,7 +414,7 @@ async fn bash_rejects_empty_command() {
         DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["bash"]).unwrap();
 
     let result = executor
-        .execute(&tool_call("bash", serde_json::json!({"command": "   "})))
+        .execute_flat(&tool_call("bash", serde_json::json!({"command": "   "})))
         .await;
 
     assert!(result.contains("empty command"), "got: {result}");
@@ -410,7 +428,7 @@ async fn bash_allows_normal_shell_operators() {
         DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["bash"]).unwrap();
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "bash",
             serde_json::json!({"command": "echo hello > /dev/null && echo ok"}),
         ))
@@ -446,7 +464,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // read_file with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({"path": "../secret.txt"}),
         ))
@@ -459,7 +477,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // read_files with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_files",
             serde_json::json!({"files": [{"path": "../secret.txt"}]}),
         ))
@@ -472,7 +490,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // write_file with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "write_file",
             serde_json::json!({"path": "../evil.txt", "content": "bad"}),
         ))
@@ -485,7 +503,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // grep with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "grep",
             serde_json::json!({"pattern": "secret", "path": ".."}),
         ))
@@ -494,7 +512,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // list_directory with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "list_directory",
             serde_json::json!({"path": ".."}),
         ))
@@ -507,7 +525,7 @@ async fn project_root_executor_rejects_parent_traversal() {
 
     // find_files with .. traversal
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "find_files",
             serde_json::json!({"pattern": "*.txt", "path": ".."}),
         ))
@@ -539,7 +557,7 @@ async fn project_root_executor_rejects_symlink_escape() {
 
     // read_file through symlink escape
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({"path": "escape_link/secret.txt"}),
         ))
@@ -552,7 +570,7 @@ async fn project_root_executor_rejects_symlink_escape() {
 
     // list_directory through symlink escape
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "list_directory",
             serde_json::json!({"path": "escape_link"}),
         ))
@@ -565,7 +583,7 @@ async fn project_root_executor_rejects_symlink_escape() {
 
     // grep through symlink escape
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "grep",
             serde_json::json!({"pattern": "secret", "path": "escape_link"}),
         ))
@@ -578,7 +596,7 @@ async fn project_root_executor_rejects_symlink_escape() {
 
     // find_files through symlink escape
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "find_files",
             serde_json::json!({"pattern": "*.txt", "path": "escape_link"}),
         ))
@@ -612,7 +630,7 @@ async fn project_root_executor_allows_inside_project_root() {
 
     // read_file inside root
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({"path": "hello.txt"}),
         ))
@@ -621,7 +639,7 @@ async fn project_root_executor_allows_inside_project_root() {
 
     // grep inside root
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "grep",
             serde_json::json!({"pattern": "hello", "path": "."}),
         ))
@@ -630,7 +648,7 @@ async fn project_root_executor_allows_inside_project_root() {
 
     // list_directory inside root
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "list_directory",
             serde_json::json!({"path": "."}),
         ))
@@ -644,7 +662,7 @@ async fn project_root_executor_allows_inside_project_root() {
 
     // find_files inside root
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "find_files",
             serde_json::json!({"pattern": "*.rs"}),
         ))
@@ -653,7 +671,7 @@ async fn project_root_executor_allows_inside_project_root() {
 
     // write_file inside root
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "write_file",
             serde_json::json!({"path": "output.txt", "content": "written"}),
         ))
@@ -679,7 +697,7 @@ async fn project_root_executor_keeps_output_limits() {
 
     // read_file respects DEFAULT_READ_LINE_LIMIT (2000)
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "read_file",
             serde_json::json!({"path": "big.txt"}),
         ))
@@ -691,7 +709,7 @@ async fn project_root_executor_keeps_output_limits() {
 
     // grep respects DEFAULT_GREP_LIMIT (200)
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "grep",
             serde_json::json!({"pattern": "line", "path": "."}),
         ))
@@ -709,7 +727,7 @@ async fn project_root_executor_has_no_dynamic_approval() {
         DefaultToolExecutor::for_project_root(dir.path().to_str().unwrap(), ["read_file"]).unwrap();
 
     let result = executor
-        .execute(&tool_call(
+        .execute_flat(&tool_call(
             "bash",
             serde_json::json!({"command": "echo test"}),
         ))

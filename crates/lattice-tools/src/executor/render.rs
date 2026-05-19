@@ -40,13 +40,13 @@ pub(super) fn render_file_slice(
     rendered.join("\n")
 }
 
-pub(super) fn render_todos(args: &serde_json::Value) -> String {
-    let todos = match args.get("todos").and_then(|v| v.as_array()) {
-        Some(todos) => todos,
-        None => return "Error: todo_write requires a todos array".to_string(),
-    };
+pub(super) fn render_todos(args: &serde_json::Value) -> Result<String, String> {
+    let todos = args
+        .get("todos")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "todo_write requires a todos array".to_string())?;
     if todos.len() > 100 {
-        return "Error: todo_write accepts at most 100 todos".to_string();
+        return Err("todo_write accepts at most 100 todos".to_string());
     }
 
     let mut pending = 0usize;
@@ -61,7 +61,7 @@ pub(super) fn render_todos(args: &serde_json::Value) -> String {
             .unwrap_or("")
             .trim();
         if content.is_empty() {
-            return format!("Error: todo {} has empty content", index + 1);
+            return Err(format!("todo {} has empty content", index + 1));
         }
         let status = todo.get("status").and_then(|v| v.as_str()).unwrap_or("");
         match status {
@@ -69,18 +69,18 @@ pub(super) fn render_todos(args: &serde_json::Value) -> String {
             "in_progress" => in_progress += 1,
             "completed" => completed += 1,
             _ => {
-                return format!(
-                    "Error: todo {} has invalid status '{}'; expected pending, in_progress, or completed",
+                return Err(format!(
+                    "todo {} has invalid status '{}'; expected pending, in_progress, or completed",
                     index + 1,
                     status
-                );
+                ));
             }
         }
         rendered.push(format!("{}. [{}] {}", index + 1, status, content));
     }
 
     if in_progress > 1 {
-        return "Error: todo_write allows at most one in_progress todo".to_string();
+        return Err("todo_write allows at most one in_progress todo".to_string());
     }
 
     let mut lines = vec![format!(
@@ -91,7 +91,7 @@ pub(super) fn render_todos(args: &serde_json::Value) -> String {
         completed
     )];
     lines.extend(rendered);
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 pub(super) fn truncate_output(mut output: String, limit: usize, label: &str) -> String {

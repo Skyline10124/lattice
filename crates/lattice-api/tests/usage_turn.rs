@@ -6,9 +6,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient, ToolCallExecutor};
+use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_api::{RunTurnRequest, RunTurnStatus};
-use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, ToolCall, TokenUsage};
+use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, TokenUsage, ToolCall};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_tools::executor::DefaultToolExecutor;
 
@@ -49,29 +49,10 @@ impl LlmClient for FakeLlm {
 }
 
 // ── Tool executor adapter ───────────────────────────────────────────────────
-
-struct ToolExecutorAdapter(DefaultToolExecutor);
-
-#[async_trait::async_trait]
-impl ToolCallExecutor for ToolExecutorAdapter {
-    async fn execute(&self, call: &ToolCall) -> Result<String, String> {
-        use lattice_tools::ToolExecutor as _;
-        let output = self.0.execute(call).await;
-        const FAILURE_PREFIXES: &[&str] = &[
-            "Error:",
-            "Tool denied:",
-            "Unknown tool:",
-            "traversal denied",
-            "write denied:",
-            "cannot write to",
-        ];
-        if FAILURE_PREFIXES.iter().any(|p| output.starts_with(p)) {
-            Err(output)
-        } else {
-            Ok(output)
-        }
-    }
-}
+//
+// `DefaultToolExecutor` directly implements the unified `ToolExecutor` trait
+// (re-exported as `ToolCallExecutor`), so it can be wrapped in an Arc and
+// passed to `AgentLoopConfig.tool_executor` without an adapter layer.
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -170,7 +151,7 @@ fn build_agent_loop(
 
     Arc::new(AgentLoop::new(AgentLoopConfig {
         llm: fake_llm,
-        tool_executor: Arc::new(ToolExecutorAdapter(executor)),
+        tool_executor: Arc::new(executor),
     }))
 }
 
@@ -208,7 +189,9 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     // Turn completed
     assert_eq!(result.status, RunTurnStatus::Completed);
     assert!(
-        result.assistant_output.contains("Read workspace file successfully"),
+        result
+            .assistant_output
+            .contains("Read workspace file successfully"),
         "assistant output: {}",
         result.assistant_output
     );
@@ -225,7 +208,10 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     // contain "pub fn answer" — this proves the tool read from workspace root,
     // not from .lattice/agents/default
     let requests = fake_llm.take_requests();
-    assert!(requests.len() >= 2, "LLM should have been called at least twice");
+    assert!(
+        requests.len() >= 2,
+        "LLM should have been called at least twice"
+    );
     let second_req = &requests[1];
     let has_file_content = second_req
         .messages
@@ -269,7 +255,10 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         tool_call_response(
             "call_1",
             "patch",
-            &format!(r#"{{"patch":{}}}"#, serde_json::to_string(&patch_doc).unwrap()),
+            &format!(
+                r#"{{"patch":{}}}"#,
+                serde_json::to_string(&patch_doc).unwrap()
+            ),
         ),
         final_response("Patched successfully."),
     ]);
@@ -296,7 +285,10 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 
     // File on disk changed to 42
     let patched = std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
-    assert!(patched.contains("42"), "file should contain 42, got: {patched}");
+    assert!(
+        patched.contains("42"),
+        "file should contain 42, got: {patched}"
+    );
     assert!(!patched.contains("{ 1 }"), "old value should be gone");
 
     assert_eq!(result.status, RunTurnStatus::Completed);

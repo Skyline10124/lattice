@@ -9,14 +9,15 @@ const MAX_GREP_LIMIT: usize = 1000;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const MAX_LIST_LIMIT: usize = 1000;
 
-pub(super) async fn grep(executor: &DefaultToolExecutor, args: &serde_json::Value) -> String {
+pub(super) async fn grep(
+    executor: &DefaultToolExecutor,
+    args: &serde_json::Value,
+) -> Result<String, String> {
     use crate::tool_error::ToolError;
 
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    if let Err(e) = DefaultToolExecutor::reject_parent_traversal(path) {
-        return e;
-    }
+    DefaultToolExecutor::reject_parent_traversal(path)?;
     let max_results = args
         .get("max_results")
         .and_then(|v| v.as_u64())
@@ -24,10 +25,18 @@ pub(super) async fn grep(executor: &DefaultToolExecutor, args: &serde_json::Valu
         .unwrap_or(DEFAULT_GREP_LIMIT)
         .clamp(1, MAX_GREP_LIMIT);
 
-    let re = match regex::Regex::new(pattern) {
-        Ok(r) => r,
-        Err(e) => return ToolError::RegexError(e.to_string()).to_string(),
-    };
+    let re =
+        regex::Regex::new(pattern).map_err(|e| ToolError::RegexError(e.to_string()).to_string())?;
+
+    let requested = executor.resolve_user_path(path);
+    let canonical = tokio::fs::canonicalize(&requested).await.map_err(|e| {
+        ToolError::IoError {
+            path: path.to_string(),
+            error: e,
+        }
+        .to_string()
+    })?;
+    executor.ensure_under_project_root(&canonical)?;
 
     let mut results = Vec::new();
     let mut visited = HashSet::new();
@@ -42,29 +51,30 @@ pub(super) async fn grep(executor: &DefaultToolExecutor, args: &serde_json::Valu
         max_results,
         truncated: &mut truncated,
     };
-    grep_recursive(&mut context, &executor.resolve_user_path(path), 0).await;
+    grep_recursive(&mut context, &canonical, 0).await;
 
     if results.is_empty() {
-        "(no matches)".to_string()
+        Ok("(no matches)".to_string())
     } else if truncated {
-        format!(
+        Ok(format!(
             "{}\n[TRUNCATED: grep returned first {} matches; narrow path or pattern]",
             results.join("\n"),
             results.len()
-        )
+        ))
     } else {
-        results.join("\n")
+        Ok(results.join("\n"))
     }
 }
 
-pub(super) async fn find_files(executor: &DefaultToolExecutor, args: &serde_json::Value) -> String {
+pub(super) async fn find_files(
+    executor: &DefaultToolExecutor,
+    args: &serde_json::Value,
+) -> Result<String, String> {
     use crate::tool_error::ToolError;
 
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    if let Err(e) = DefaultToolExecutor::reject_parent_traversal(path) {
-        return e;
-    }
+    DefaultToolExecutor::reject_parent_traversal(path)?;
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -72,19 +82,14 @@ pub(super) async fn find_files(executor: &DefaultToolExecutor, args: &serde_json
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
     let requested = executor.resolve_user_path(path);
-    let canonical = match tokio::fs::canonicalize(&requested).await {
-        Ok(p) => p,
-        Err(e) => {
-            return ToolError::IoError {
-                path: path.to_string(),
-                error: e,
-            }
-            .to_string()
+    let canonical = tokio::fs::canonicalize(&requested).await.map_err(|e| {
+        ToolError::IoError {
+            path: path.to_string(),
+            error: e,
         }
-    };
-    if let Err(e) = executor.ensure_under_project_root(&canonical) {
-        return e;
-    }
+        .to_string()
+    })?;
+    executor.ensure_under_project_root(&canonical)?;
     let mut matches = Vec::new();
     let mut visited = HashSet::new();
     let mut truncated = false;
@@ -100,15 +105,15 @@ pub(super) async fn find_files(executor: &DefaultToolExecutor, args: &serde_json
     };
     find_files_recursive(&mut context, &canonical, 0).await;
     if matches.is_empty() {
-        "(no matches)".to_string()
+        Ok("(no matches)".to_string())
     } else if truncated {
-        format!(
+        Ok(format!(
             "{}\n[TRUNCATED: find_files returned first {} matches; narrow path or pattern]",
             matches.join("\n"),
             matches.len()
-        )
+        ))
     } else {
-        matches.join("\n")
+        Ok(matches.join("\n"))
     }
 }
 

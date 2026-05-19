@@ -87,10 +87,7 @@ impl FakeTurnDeps {
 
 #[async_trait::async_trait]
 impl TurnDeps for FakeTurnDeps {
-    fn create_session(
-        &self,
-        _request: &RunTurnRequest,
-    ) -> std::result::Result<String, ApiError> {
+    fn create_session(&self, _request: &RunTurnRequest) -> std::result::Result<String, ApiError> {
         self.create_called.store(true, Ordering::SeqCst);
         Ok(self.created_session_id.clone())
     }
@@ -100,10 +97,7 @@ impl TurnDeps for FakeTurnDeps {
         Ok(session_id.to_string())
     }
 
-    fn head_transcript(
-        &self,
-        session_id: &str,
-    ) -> std::result::Result<HeadTranscript, ApiError> {
+    fn head_transcript(&self, session_id: &str) -> std::result::Result<HeadTranscript, ApiError> {
         let mut transcripts = self.transcripts.lock().unwrap();
         if transcripts.len() > 1 {
             Ok(transcripts.remove(0))
@@ -229,10 +223,7 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
     }
 }
 
-fn make_loaded_profile(
-    model: &str,
-    system_prompt: &str,
-) -> lattice_profile::LoadedAgentProfile {
+fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::LoadedAgentProfile {
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),
         package_dir: std::path::PathBuf::from("/tmp/test"),
@@ -635,10 +626,8 @@ async fn run_turn_commits_parent_from_initial_transcript() {
         messages: vec![],
     };
 
-    let deps = FakeTurnDeps::new(success_result()).with_transcripts(vec![
-        initial_transcript,
-        raced_transcript,
-    ]);
+    let deps = FakeTurnDeps::new(success_result())
+        .with_transcripts(vec![initial_transcript, raced_transcript]);
 
     let request = make_request_with_session("hello", "existing-session");
     let result = run_turn_with_deps(&deps, request).await.unwrap();
