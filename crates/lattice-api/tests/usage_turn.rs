@@ -54,9 +54,22 @@ struct ToolExecutorAdapter(DefaultToolExecutor);
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for ToolExecutorAdapter {
-    async fn execute(&self, call: &ToolCall) -> String {
+    async fn execute(&self, call: &ToolCall) -> Result<String, String> {
         use lattice_tools::ToolExecutor as _;
-        self.0.execute(call).await
+        let output = self.0.execute(call).await;
+        const FAILURE_PREFIXES: &[&str] = &[
+            "Error:",
+            "Tool denied:",
+            "Unknown tool:",
+            "traversal denied",
+            "write denied:",
+            "cannot write to",
+        ];
+        if FAILURE_PREFIXES.iter().any(|p| output.starts_with(p)) {
+            Err(output)
+        } else {
+            Ok(output)
+        }
     }
 }
 
