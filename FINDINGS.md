@@ -93,17 +93,14 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **位置**: `crates/lattice-tools/src/executor/web.rs:12-15, 60-88`
 - **问题**: 同 M-04。rebinding 域名黑名单只有 `nip.io`/`xip.io`，缺少多个已知域名。
 
-#### M-06: `grep` 不做前置 project-root 校验 — `security`
-- **位置**: `crates/lattice-tools/src/executor/search.rs:12-45`
-- **问题**: 绝对路径如 `/tmp/sensitive` 通过 `reject_parent_traversal`，在递归函数内静默过滤返回 "(no matches)" 而非报错。
+#### M-06: `grep` 不做前置 project-root 校验 — `security` [resolved 2026-05-19]
+- **修复**: 入口处canonicalize + `ensure_under_project_root`，绝对路径越界直接返回明确错误。
 
-#### M-07: `read_text_file` TOCTOU — `race-condition`
-- **位置**: `crates/lattice-tools/src/executor/fs.rs:38-55`
-- **问题**: 先检查 metadata size 再读文件，期间文件可能增长超限。
+#### M-07: `read_text_file` TOCTOU — `race-condition` [resolved 2026-05-19]
+- **修复**: 读取后检查实际 content 长度，超限报错（保留 metadata 早期拒绝大文件的快路径）。
 
-#### M-08: blocking `is_file()`/`is_dir()` 在 async 上下文 — `performance`
-- **位置**: `crates/lattice-tools/src/executor/search.rs:158, 219, 245`
-- **问题**: 同步 `stat` 调用在 async 函数中，网络文件系统下阻塞 tokio worker thread。
+#### M-08: blocking `is_file()`/`is_dir()` 在 async 上下文 — `performance` [resolved 2026-05-19]
+- **修复**: search.rs 中 grep_recursive 和 find_files_recursive 改用 `tokio::fs::metadata`。
 
 #### M-09: SQLite 无 WAL 模式 — `performance`
 - **位置**: `crates/lattice-session/src/sqlite_graph.rs:49-114`

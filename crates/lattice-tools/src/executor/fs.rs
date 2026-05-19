@@ -51,6 +51,14 @@ impl DefaultToolExecutor {
             }
             .to_string()
         })?;
+        // M-07: re-check actual content length to defeat metadata→read TOCTOU
+        if content.len() > self.limits.max_read_size {
+            return Err(format!(
+                "file content {} exceeds max_read_size {} (file may have grown during read)",
+                content.len(),
+                self.limits.max_read_size
+            ));
+        }
         let rendered = render::render_file_slice(&content, offset, limit, line_numbers);
         let hash = content_hash(content.as_bytes());
         if rendered.is_empty() {
