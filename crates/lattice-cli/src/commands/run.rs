@@ -229,7 +229,30 @@ fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
 }
 
 fn validate_agents_dir(path: &Path) -> Result<(), String> {
-    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Try canonicalize; if path doesn't exist yet, normalize manually to
+    // prevent traversal attacks while still allowing non-existent directories.
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            use std::path::Component;
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    Component::ParentDir => {
+                        if !normalized.pop() {
+                            return Err(format!(
+                                "Agents directory '{}' contains path traversal that escapes root.",
+                                path.display()
+                            ));
+                        }
+                    }
+                    Component::CurDir => {}
+                    other => normalized.push(other),
+                }
+            }
+            normalized
+        }
+    };
     let path_str = canonical.to_string_lossy();
 
     let dangerous_prefixes = ["/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot"];

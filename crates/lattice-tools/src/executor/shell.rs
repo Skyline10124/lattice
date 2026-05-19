@@ -52,11 +52,12 @@ async fn wait_with_timeout(
 async fn execute_bash_command(
     command: &str,
     limits: &ToolLimits,
-    _project_root: &str,
+    project_root: &str,
 ) -> Result<std::process::Output, String> {
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
         .arg(command)
+        .current_dir(project_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -97,11 +98,13 @@ async fn execute_bash_command(
 async fn execute_bash_command(
     command: &str,
     limits: &ToolLimits,
-    _project_root: &str,
+    project_root: &str,
 ) -> Result<std::process::Output, String> {
     let timeout_secs = std::cmp::max(limits.max_command_timeout, 1) as u64;
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-c", command]).kill_on_drop(true);
+    cmd.args(["-c", command])
+        .current_dir(project_root)
+        .kill_on_drop(true);
     let child = cmd.spawn().map_err(|e| e.to_string())?;
     wait_with_timeout(child, timeout_secs, limits.max_command_timeout).await
 }

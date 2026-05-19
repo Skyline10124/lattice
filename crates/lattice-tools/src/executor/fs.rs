@@ -152,9 +152,20 @@ pub(super) async fn write_file(
         })?;
         let canonical = canonical_parent.join(abs.file_name().unwrap());
         executor.ensure_under_project_root(&canonical)?;
+        // Reject symlinks to prevent writes escaping project root (H-03)
+        if tokio::fs::symlink_metadata(&canonical)
+            .await
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "write denied: '{}' is a symlink (potential path escape)",
+                path
+            ));
+        }
         canonical
     } else {
-        abs.clone()
+        return Err(format!("cannot write to '{}': invalid path", path));
     };
     if content.len() > executor.limits.max_write_size {
         return Err(ToolError::SizeLimit {
