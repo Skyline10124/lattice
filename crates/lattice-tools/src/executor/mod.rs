@@ -113,6 +113,14 @@ impl DefaultToolExecutor {
     }
 }
 
+fn preview_utf8(value: &str, max: usize) -> &str {
+    let mut end = value.len().min(max);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 #[async_trait]
 impl ToolExecutor for DefaultToolExecutor {
     async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String> {
@@ -122,7 +130,7 @@ impl ToolExecutor for DefaultToolExecutor {
                     "invalid JSON arguments for tool '{}': {} — raw args: {:?}",
                     call.function.name,
                     e,
-                    &call.function.arguments[..call.function.arguments.len().min(200)]
+                    preview_utf8(&call.function.arguments, 200)
                 )
             })?;
 
@@ -177,9 +185,11 @@ impl ToolExecutor for DefaultToolExecutor {
                     })
                     .to_string()
                 });
-                // Tool-layer success: patch executor ran. Per-file outcomes
-                // (success/failure) live inside the JSON envelope itself.
-                Ok(body)
+                if envelope.ok {
+                    Ok(body)
+                } else {
+                    Err(body)
+                }
             }
             "web_fetch" => web::web_fetch(&self.http_client, &self.limits, &args).await,
             other => Err(format!("Unknown tool: {other}")),

@@ -280,7 +280,8 @@ async fn patch_failure_json_keeps_changed_files_empty_and_attempts_populated() {
             )}),
         ))
         .await;
-    let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let json_str = result.strip_prefix("Error: ").unwrap_or(&result);
+    let value: serde_json::Value = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(value["ok"], false);
     assert_eq!(value["errors"][0]["code"], "hunk_missing");
