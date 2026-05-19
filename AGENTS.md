@@ -65,10 +65,34 @@ The main agent turn path is:
 
 v1.1 tool safety is intentionally simple: project-root containment, no `..` traversal, file-size limits, and profile-gated optional shell/web tools. The removed sandbox and approval modules are not part of the current release.
 
-## Environment
+## Where to make changes
 
-Copy `.env.example` to `.env`. Supports 20+ providers (Anthropic, OpenAI, Gemini, DeepSeek,
-Mistral, Groq, xAI, OpenRouter, Ollama, etc.). Only set keys are used.
+Use this table to skip the "which crate owns this?" exploration step.
+
+| If you're changing… | Go to | Key files |
+|---|---|---|
+| Tool implementations (fs, shell, web, search) | `lattice-tools/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs` |
+| Path containment / project-root checks | `lattice-tools/src/executor/` | `path_guard.rs`, `workspace.rs` |
+| Edit/diff application logic | `lattice-tools/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs` |
+| Tool schemas / definitions exposed to LLM | `lattice-tools/src/` | `tool_definitions.rs`, `enabled_tools.rs` |
+| Provider protocol adapters | `lattice-llm/src/providers/` | `anthropic.rs`, `openai.rs`, `gemini.rs` |
+| SSE streaming parser | `lattice-llm/src/` | `sse.rs`, `client.rs` |
+| Model resolution / aliases | `lattice-llm/src/` | `router.rs`, `endpoints.rs` |
+| URL / DNS / SSRF validation | `lattice-llm/src/` | `security.rs` |
+| Agent loop, turn state machine | `lattice-agent/src/agent_loop/` | `mod.rs`, `messages.rs`, `traits.rs` |
+| Public turn API (`run_turn` / `stream_turn`) | `lattice-api/src/turn/` | `execute.rs`, `mapping.rs`, `deps.rs` |
+| Session graph / SQLite persistence | `lattice-session/src/` | `sqlite_graph.rs`, `graph.rs` |
+| Profile schema, defaults, discovery | `lattice-profile/src/` | `schema.rs`, `defaults.rs`, `discovery.rs` |
+| CLI subcommands | `lattice-cli/src/commands/` | `run.rs`, `models.rs`, `resolve.rs`, `session.rs`, `doctor.rs` |
+
+## Repo meta files
+
+These are not part of the source tree but show up at the root — know what they are so you don't waste time guessing.
+
+- **`FIX.md`** — append-only changelog of applied code-review fixes (HIGH / MEDIUM / LOW per phase). Authoritative record of what's been fixed.
+- **`FINDINGS.md`** — open issues deferred past the current release. Every entry has a location, problem, and plan. If you're picking up follow-up work, start here.
+- **`.planning/`** — GSD workflow artifacts (`PROJECT.md`, `ROADMAP.md`, `REQUIREMENTS.md`, `STATE.md`, `phases/`). Drives planning skills; treat as scoping context, not source.
+- **`.agents/`, `.codex/`, `.sisyphus/`, `.worktrees/`** — agent/tooling scratch dirs. Don't edit unless that's the task.
 
 ## Future Work
 
