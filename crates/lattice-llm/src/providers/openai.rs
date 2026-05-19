@@ -4,7 +4,7 @@
 //! Supports OpenAI and OpenAI-compatible endpoints (Ollama, vLLM, LiteLLM, etc.).
 //! Uses bounded SSE framing from `crate::sse` and never imports `lattice-core`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
@@ -107,13 +107,13 @@ pub fn auth_header_value(api_key: &str) -> String {
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
-    tool_call_ids: HashMap<u32, String>,
+    tool_call_ids: BTreeMap<u32, String>,
 }
 
 impl OpenAiSseParser {
     pub fn new() -> Self {
         Self {
-            tool_call_ids: HashMap::new(),
+            tool_call_ids: BTreeMap::new(),
         }
     }
 
@@ -192,7 +192,11 @@ impl OpenAiSseParser {
                 // Finish reason — emits ToolCallEnd for all tracked IDs, then Done
                 if let Some(reason) = finish_reason {
                     if !reason.is_empty() {
-                        for id in self.tool_call_ids.drain().map(|(_, id)| id) {
+                        // BTreeMap iterates in key order, so ToolCallEnd is
+                        // emitted in tool-call-index order rather than the
+                        // arbitrary HashMap iteration order (L-03).
+                        let drained = std::mem::take(&mut self.tool_call_ids);
+                        for (_, id) in drained {
                             events.push(LlmEvent::ToolCallEnd { id });
                         }
 

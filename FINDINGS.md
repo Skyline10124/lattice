@@ -76,13 +76,11 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 #### M-01: OpenAI provider 硬编码 `"stream": true` — `correctness` [resolved 2026-05-19]
 - **修复**: `build_request_json` 改为 `"stream": request.stream`，`stream_options` 仅在流式时附加。测试覆盖两个分支。
 
-#### M-02: Gemini provider 忽略 `temperature` / `max_tokens` — `correctness`
-- **位置**: `crates/lattice-llm/src/providers/gemini.rs:11-101`
-- **问题**: `build_request_json` 从不读取这两个字段。OpenAI/Anthropic 都正确处理。
+#### M-02: Gemini provider 忽略 `temperature` / `max_tokens` — `correctness` [resolved 2026-05-19]
+- **修复**: `build_request_json` 添加 `generationConfig` 块，按 Gemini API 字段名 `temperature` / `maxOutputTokens` 转发用户参数。
 
-#### M-03: `validate_base_url` 接受空字符串 — `security`
-- **位置**: `crates/lattice-llm/src/security.rs:52-55`
-- **问题**: 空 URL 直接 `return Ok(())`，绕过全部 SSRF 检查。
+#### M-03: `validate_base_url` 接受空字符串 — `security` [resolved 2026-05-19]
+- **修复**: 空 URL 改返回 `Err("base_url must not be empty")`，统一所有 SSRF 检查的入口契约。
 
 #### M-04: DNS rebinding TOCTOU（lattice-llm） — `security`
 - **位置**: `crates/lattice-llm/src/security.rs:100-117`
@@ -143,14 +141,14 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 
 ### LOW — 可选清理
 
-#### L-01: `u32_field` 静默截断大值 — `correctness`
-- **位置**: `crates/lattice-llm/src/providers/mod.rs:47-49`
+#### L-01: `u32_field` 静默截断大值 — `correctness` [resolved 2026-05-19]
+- **修复**: 改用 `u32::try_from(...).unwrap_or(u32::MAX)` saturating cast。
 
 #### L-02: `parse_json_data` 用 `Err(LlmEvent::Started)` 做 sentinel — `api-design`
 - **位置**: `crates/lattice-llm/src/providers/mod.rs:14-22`
 
-#### L-03: `ToolCallEnd` 事件顺序不确定 — `correctness`
-- **位置**: `crates/lattice-llm/src/providers/openai.rs:195`
+#### L-03: `ToolCallEnd` 事件顺序不确定 — `correctness` [resolved 2026-05-19]
+- **修复**: `OpenAiSseParser` 的 `tool_call_ids` 改用 `BTreeMap<u32, String>`，按 tool call index 顺序 emit `ToolCallEnd`。
 
 #### L-04: `display_id` byte 切片可能 panic — `correctness`
 - **位置**: `crates/lattice-cli/src/commands/session.rs:387-393`

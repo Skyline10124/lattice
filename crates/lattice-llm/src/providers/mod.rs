@@ -44,8 +44,15 @@ pub(crate) fn push_system_text(slot: &mut Option<String>, text: &str) {
 }
 
 /// Read a `u32` field from a JSON object, defaulting to 0.
+///
+/// Saturates at `u32::MAX` instead of silently truncating to avoid
+/// surprising usage values when a provider returns an unexpectedly large
+/// number.
 pub(crate) fn u32_field(obj: &serde_json::Value, key: &str) -> u32 {
-    obj.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as u32
+    obj.get(key)
+        .and_then(|v| v.as_u64())
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0)
 }
 
 use crate::types::TokenUsage;
