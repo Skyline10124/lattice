@@ -160,7 +160,11 @@ async fn find_files_recursive(context: &mut FindFilesContext<'_>, path: &Path, d
         }
     }
 
-    if !resolved.is_dir() {
+    let meta = match tokio::fs::metadata(&resolved).await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if !meta.is_dir() {
         return;
     }
 
@@ -221,11 +225,14 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
         return;
     }
 
-    if resolved.is_file() {
-        if let Ok(meta) = tokio::fs::metadata(&resolved).await {
-            if meta.len() > context.limits.max_read_size as u64 {
-                return;
-            }
+    let meta = match tokio::fs::metadata(&resolved).await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    if meta.is_file() {
+        if meta.len() > context.limits.max_read_size as u64 {
+            return;
         }
 
         if let Ok(content) = tokio::fs::read_to_string(&resolved).await {
@@ -247,7 +254,7 @@ async fn grep_recursive(context: &mut GrepContext<'_>, path: &Path, depth: u32) 
                 }
             }
         }
-    } else if resolved.is_dir() {
+    } else if meta.is_dir() {
         let mut entries = match tokio::fs::read_dir(&resolved).await {
             Ok(d) => d,
             Err(_) => return,

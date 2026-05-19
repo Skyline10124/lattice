@@ -134,7 +134,6 @@ impl ToolExecutor for DefaultToolExecutor {
             "workspace_context" => workspace::workspace_context(self, &args).await,
             "todo_write" => render::render_todos(&args),
             "read_file" => fs::read_file(self, &args).await,
-            "read_files" => fs::read_files(self, &args).await,
             "grep" => search::grep(self, &args).await,
             "write_file" => fs::write_file(self, &args).await,
             "list_directory" => fs::list_directory(self, &args).await,
@@ -182,7 +181,7 @@ impl ToolExecutor for DefaultToolExecutor {
                 // (success/failure) live inside the JSON envelope itself.
                 Ok(body)
             }
-            "web_search" => web::web_search(&self.http_client, &self.limits, &args).await,
+            "web_fetch" => web::web_fetch(&self.http_client, &self.limits, &args).await,
             other => Err(format!("Unknown tool: {other}")),
         }
     }

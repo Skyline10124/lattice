@@ -6,7 +6,6 @@ use crate::DefaultToolExecutor;
 
 use super::render;
 
-const MAX_BATCH_READ_FILES: usize = 20;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const MAX_LIST_LIMIT: usize = 1000;
 
@@ -52,6 +51,14 @@ impl DefaultToolExecutor {
             }
             .to_string()
         })?;
+        // M-07: re-check actual content length to defeat metadata→read TOCTOU
+        if content.len() > self.limits.max_read_size {
+            return Err(format!(
+                "file content {} exceeds max_read_size {} (file may have grown during read)",
+                content.len(),
+                self.limits.max_read_size
+            ));
+        }
         let rendered = render::render_file_slice(&content, offset, limit, line_numbers);
         let hash = content_hash(content.as_bytes());
         if rendered.is_empty() {
@@ -89,52 +96,6 @@ pub(super) async fn read_file(
         .await
 }
 
-pub(super) async fn read_files(
-    executor: &DefaultToolExecutor,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let files = match args.get("files").and_then(|v| v.as_array()) {
-        Some(files) if !files.is_empty() => files,
-        _ => return Err("read_files requires a non-empty files array".to_string()),
-    };
-    if files.len() > MAX_BATCH_READ_FILES {
-        return Err(format!(
-            "read_files accepts at most {} files per call",
-            MAX_BATCH_READ_FILES
-        ));
-    }
-
-    let mut sections = Vec::new();
-    for file in files {
-        let path = file.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let offset = file
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(1)
-            .max(1);
-        let limit = file
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(2000)
-            .max(1);
-        let line_numbers = file
-            .get("line_numbers")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let content = match executor
-            .read_text_file(path, offset, limit, line_numbers)
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => format!("Error: {e}"),
-        };
-        sections.push(format!("--- {path} ---\n{content}"));
-    }
-    Ok(sections.join("\n\n"))
-}
-
 pub(super) async fn write_file(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
@@ -152,9 +113,20 @@ pub(super) async fn write_file(
         })?;
         let canonical = canonical_parent.join(abs.file_name().unwrap());
         executor.ensure_under_project_root(&canonical)?;
+        // Reject symlinks to prevent writes escaping project root (H-03)
+        if tokio::fs::symlink_metadata(&canonical)
+            .await
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(format!(
+                "write denied: '{}' is a symlink (potential path escape)",
+                path
+            ));
+        }
         canonical
     } else {
-        abs.clone()
+        return Err(format!("cannot write to '{}': invalid path", path));
     };
     if content.len() > executor.limits.max_write_size {
         return Err(ToolError::SizeLimit {

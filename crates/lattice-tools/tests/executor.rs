@@ -30,14 +30,13 @@ fn executor_with_all_tools(root: &str) -> DefaultToolExecutor {
             "workspace_context",
             "todo_write",
             "read_file",
-            "read_files",
             "write_file",
             "patch",
             "grep",
             "find_files",
             "list_directory",
             "bash",
-            "web_search",
+            "web_fetch",
         ],
     )
     .unwrap()
@@ -67,36 +66,9 @@ async fn read_file_supports_relative_paths_line_ranges_and_line_numbers() {
 }
 
 #[tokio::test]
-async fn read_files_batches_targeted_file_reads() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), "a1\na2\na3\n").unwrap();
-    std::fs::write(dir.path().join("b.txt"), "b1\nb2\n").unwrap();
-    let executor = executor_with_all_tools(dir.path().to_str().unwrap());
-
-    let result = executor
-        .execute_flat(&tool_call(
-            "read_files",
-            serde_json::json!({
-                "files": [
-                    {"path": "a.txt", "offset": 2, "limit": 1},
-                    {"path": "b.txt", "line_numbers": false}
-                ]
-            }),
-        ))
-        .await;
-
-    assert!(result.contains("--- a.txt ---"));
-    assert!(result.contains("     2\ta2"));
-    assert!(!result.contains("     1\ta1"));
-    assert!(result.contains("--- b.txt ---"));
-    assert!(result.contains("b1\nb2"));
-}
-
-#[tokio::test]
-async fn read_file_and_read_files_show_content_hash() {
+async fn read_file_shows_content_hash() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "a1\na2\n").unwrap();
-    std::fs::write(dir.path().join("b.txt"), "b1\n").unwrap();
     let executor = executor_with_all_tools(dir.path().to_str().unwrap());
 
     let single = executor
@@ -108,20 +80,7 @@ async fn read_file_and_read_files_show_content_hash() {
         ))
         .await;
 
-    let batch = executor
-        .execute_flat(&tool_call(
-            "read_files",
-            serde_json::json!({
-                "files": [
-                    {"path": "a.txt"},
-                    {"path": "b.txt"}
-                ]
-            }),
-        ))
-        .await;
-
     assert!(single.contains("Content hash: blake3:"));
-    assert_eq!(batch.matches("Content hash: blake3:").count(), 2);
 }
 
 #[tokio::test]
@@ -453,7 +412,6 @@ async fn project_root_executor_rejects_parent_traversal() {
         sub.to_str().unwrap(),
         [
             "read_file",
-            "read_files",
             "write_file",
             "grep",
             "list_directory",
@@ -472,19 +430,6 @@ async fn project_root_executor_rejects_parent_traversal() {
     assert!(
         result.contains("traversal denied"),
         "should reject .. traversal, got: {}",
-        result
-    );
-
-    // read_files with .. traversal
-    let result = executor
-        .execute_flat(&tool_call(
-            "read_files",
-            serde_json::json!({"files": [{"path": "../secret.txt"}]}),
-        ))
-        .await;
-    assert!(
-        result.contains("traversal denied"),
-        "read_files: {}",
         result
     );
 

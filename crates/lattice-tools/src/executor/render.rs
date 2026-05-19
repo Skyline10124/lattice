@@ -98,7 +98,11 @@ pub(super) fn truncate_output(mut output: String, limit: usize, label: &str) -> 
     if output.len() <= limit {
         return output;
     }
-    output.truncate(limit);
+    let mut end = limit;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.truncate(end);
     output.push_str(&format!(
         "\n[TRUNCATED: {} exceeded {} bytes]",
         label, limit

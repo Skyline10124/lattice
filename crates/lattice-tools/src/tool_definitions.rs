@@ -59,7 +59,7 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
         ),
         ToolDefinition::new(
             "read_file",
-            "Read a text file. Supports optional 1-based line offset/limit and line-number output for targeted inspection.",
+            "Read a text file. Supports optional 1-based line offset/limit and line-number output for targeted inspection. To read multiple files, issue parallel read_file tool calls.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -83,45 +83,6 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
                     }
                 },
                 "required": ["path"]
-            }),
-        ),
-        ToolDefinition::new(
-            "read_files",
-            "Read multiple text files in one call. Each file supports optional 1-based line offset/limit and line-number output.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "files": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 20,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": {
-                                    "type": "string",
-                                    "description": "Absolute path, or a path relative to the project root"
-                                },
-                                "offset": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "Optional 1-based starting line"
-                                },
-                                "limit": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "Optional maximum number of lines to return"
-                                },
-                                "line_numbers": {
-                                    "type": "boolean",
-                                    "description": "Whether to prefix returned lines with line numbers (default: true)"
-                                }
-                            },
-                            "required": ["path"]
-                        }
-                    }
-                },
-                "required": ["files"]
             }),
         ),
         ToolDefinition::new(
@@ -236,7 +197,7 @@ pub fn default_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         ToolDefinition::new(
-            "web_search",
+            "web_fetch",
             "Fetch a URL and return its text content.",
             serde_json::json!({
                 "type": "object",

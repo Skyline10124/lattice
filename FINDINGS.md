@@ -22,19 +22,22 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **影响**: 内存耗尽 / DoS
 - **修复**: 使用 `response.bytes_stream()` 逐 chunk 解析，边读边检查累计大小。
 
-#### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security`
+#### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security` [partial 2026-05-19]
+- **修复**: 写入前 `symlink_metadata` 检测 symlink 并拒绝。剩余 TOCTOU 窗口：检测后到 `tokio::fs::write` 之间文件可被替换为 symlink。完整修复需 Unix `O_NOFOLLOW`，跨平台代价较高，威胁模型有限，留 v1.2。
 - **位置**: `crates/lattice-tools/src/executor/fs.rs:143-171`
 - **问题**: 只 canonicalize 父目录后 join 文件名，若目标文件是已存在的 symlink（如 `project/link.txt -> /etc/cron.d/job`），`ensure_under_project_root` 检查通过，但 `tokio::fs::write` 跟随 symlink 写到外部路径。对比 `read_text_file` 正确 canonicalize 了完整路径。
 - **影响**: 任意文件写入
 - **修复**: 写入前检查目标是否为 symlink；或 canonicalize 完整路径后再做边界校验。
 
-#### H-04: `truncate_output` 在非 UTF-8 字符边界 panic — `correctness`
+#### H-04: `truncate_output` 在非 UTF-8 字符边界 panic — `correctness` [resolved 2026-05-19]
+- **修复**: 截断前用 `is_char_boundary` 循环回退到最近合法边界。
 - **位置**: `crates/lattice-tools/src/executor/render.rs:101`
 - **问题**: `String::truncate(limit)` 若 limit 落在多字节 UTF-8 字符中间则 panic。`from_utf8_lossy` 产生的 U+FFFD 是 3 字节，`MAX_COMMAND_OUTPUT_SIZE` 可能恰好落在其中间。
 - **影响**: bash 工具输出含非 ASCII 时进程崩溃
 - **修复**: 回退到最近的 char boundary。
 
-#### H-05: bash 命令不设 `current_dir` — `correctness`
+#### H-05: bash 命令不设 `current_dir` — `correctness` [resolved 2026-05-19]
+- **修复**: Unix 和非 Unix 分支均添加 `.current_dir(project_root)`，参数去下划线。
 - **位置**: `crates/lattice-tools/src/executor/shell.rs:52-92`
 - **问题**: `_project_root` 参数带下划线被显式忽略，`Command` 未调用 `.current_dir()`。所有 bash 工具调用在 lattice 进程的启动目录执行，而非项目根目录。
 - **影响**: 工具契约违反，命令操作错误目录
@@ -61,7 +64,8 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **修复**: 连接池或 Mutex 保护单连接 + parent 校验放入事务内。
 - **关联**: WR-03
 
-#### H-10: `validate_agents_dir` canonicalize 失败时回退原始路径 — `security`
+#### H-10: `validate_agents_dir` canonicalize 失败时回退原始路径 — `security` [partial 2026-05-19]
+- **修复**: canonicalize 失败时手动按 `Component` 规范化，`..` 越过根直接报错。剩余攻击面：手动规范化不解析路径中已存在的 symlink，需攻击者已能写入用户目录才可利用，威胁模型有限。完整修复需锚点回溯算法，留 v1.2。
 - **位置**: `crates/lattice-cli/src/commands/run.rs:252-278`
 - **问题**: 路径不存在时 `canonicalize()` 失败，回退到未规范化的原始路径。`LATTICE_AGENTS_DIR=/home/../etc/cron.d` 原始字符串以 `/home` 开头通过验证，实际解析到 `/etc/cron.d`。
 - **影响**: agents 目录验证可绕过
@@ -89,17 +93,14 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **位置**: `crates/lattice-tools/src/executor/web.rs:12-15, 60-88`
 - **问题**: 同 M-04。rebinding 域名黑名单只有 `nip.io`/`xip.io`，缺少多个已知域名。
 
-#### M-06: `grep` 不做前置 project-root 校验 — `security`
-- **位置**: `crates/lattice-tools/src/executor/search.rs:12-45`
-- **问题**: 绝对路径如 `/tmp/sensitive` 通过 `reject_parent_traversal`，在递归函数内静默过滤返回 "(no matches)" 而非报错。
+#### M-06: `grep` 不做前置 project-root 校验 — `security` [resolved 2026-05-19]
+- **修复**: 入口处canonicalize + `ensure_under_project_root`，绝对路径越界直接返回明确错误。
 
-#### M-07: `read_text_file` TOCTOU — `race-condition`
-- **位置**: `crates/lattice-tools/src/executor/fs.rs:38-55`
-- **问题**: 先检查 metadata size 再读文件，期间文件可能增长超限。
+#### M-07: `read_text_file` TOCTOU — `race-condition` [resolved 2026-05-19]
+- **修复**: 读取后检查实际 content 长度，超限报错（保留 metadata 早期拒绝大文件的快路径）。
 
-#### M-08: blocking `is_file()`/`is_dir()` 在 async 上下文 — `performance`
-- **位置**: `crates/lattice-tools/src/executor/search.rs:158, 219, 245`
-- **问题**: 同步 `stat` 调用在 async 函数中，网络文件系统下阻塞 tokio worker thread。
+#### M-08: blocking `is_file()`/`is_dir()` 在 async 上下文 — `performance` [resolved 2026-05-19]
+- **修复**: search.rs 中 grep_recursive 和 find_files_recursive 改用 `tokio::fs::metadata`。
 
 #### M-09: SQLite 无 WAL 模式 — `performance`
 - **位置**: `crates/lattice-session/src/sqlite_graph.rs:49-114`
