@@ -4,7 +4,7 @@
 //! Supports OpenAI and OpenAI-compatible endpoints (Ollama, vLLM, LiteLLM, etc.).
 //! Uses bounded SSE framing from `crate::sse` and never imports `lattice-core`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
@@ -14,7 +14,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
     let mut body = serde_json::json!({
         "model": resolved.provider_model,
         "messages": [],
-        "stream": true,
+        "stream": request.stream,
     });
 
     let messages = body
@@ -107,13 +107,13 @@ pub fn auth_header_value(api_key: &str) -> String {
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
-    tool_call_ids: HashMap<u32, String>,
+    tool_call_ids: BTreeMap<u32, String>,
 }
 
 impl OpenAiSseParser {
     pub fn new() -> Self {
         Self {
-            tool_call_ids: HashMap::new(),
+            tool_call_ids: BTreeMap::new(),
         }
     }
 
@@ -192,7 +192,11 @@ impl OpenAiSseParser {
                 // Finish reason — emits ToolCallEnd for all tracked IDs, then Done
                 if let Some(reason) = finish_reason {
                     if !reason.is_empty() {
-                        for id in self.tool_call_ids.drain().map(|(_, id)| id) {
+                        // BTreeMap iterates in key order, so ToolCallEnd is
+                        // emitted in tool-call-index order rather than the
+                        // arbitrary HashMap iteration order (L-03).
+                        let drained = std::mem::take(&mut self.tool_call_ids);
+                        for (_, id) in drained {
                             events.push(LlmEvent::ToolCallEnd { id });
                         }
 
@@ -266,11 +270,26 @@ mod tests {
     }
 
     #[test]
-    fn build_request_includes_stream_true() {
-        let req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
+    fn build_request_propagates_stream_flag() {
         let resolved = make_resolved();
+
+        // Default ChatRequest has stream=false
+        let mut req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
+        let json = build_request_json(&req, &resolved);
+        assert_eq!(json["stream"], false);
+        assert!(
+            json.get("stream_options").is_none(),
+            "stream_options should be absent when stream=false"
+        );
+
+        // Streaming mode: stream=true and stream_options is present
+        req.stream = true;
         let json = build_request_json(&req, &resolved);
         assert_eq!(json["stream"], true);
+        assert_eq!(
+            json["stream_options"]["include_usage"], true,
+            "stream_options must include usage when streaming"
+        );
     }
 
     #[test]

@@ -1029,6 +1029,7 @@ dependencies = [
 name = "lattice-llm"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "reqwest",
  "serde",

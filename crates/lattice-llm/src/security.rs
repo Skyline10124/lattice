@@ -51,7 +51,7 @@ fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
 /// Validate a provider base URL.
 pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
     if url.is_empty() {
-        return Ok(());
+        return Err(LlmError::Other("base_url must not be empty".to_string()));
     }
 
     let parsed =
@@ -173,8 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn allow_empty_url() {
-        assert!(validate_base_url("").is_ok());
+    fn reject_empty_url() {
+        let err = validate_base_url("").expect_err("empty base_url must be rejected");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "error should explain empty url, got: {err}"
+        );
     }
 
     #[test]
