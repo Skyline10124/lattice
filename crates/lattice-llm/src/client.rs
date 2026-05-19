@@ -1,6 +1,8 @@
 //! Concrete provider dispatch for LLM execution.
 
-use futures::stream::{self};
+use std::pin::Pin;
+
+use futures::stream::{self, StreamExt};
 
 use crate::providers;
 use crate::router::{ProviderKind, ResolvedModel};
@@ -89,50 +91,45 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
     }
 }
 
-/// Stream SSE events from an HTTP response into [`LlmEvent`] values.
-async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind) -> LlmStream {
-    // Collect the full response body (bounded by safety limits)
-    let bytes = match response.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            return Box::pin(stream::iter(vec![LlmEvent::Error {
-                message: format!("HTTP response read error: {}", e),
-            }]));
-        }
-    };
-
-    if bytes.len() > sse::MAX_SSE_BUFFER_SIZE {
-        return Box::pin(stream::iter(vec![LlmEvent::Error {
-            message: format!("SSE buffer size exceeded: {} bytes", bytes.len()),
-        }]));
-    }
-
-    let body_text = String::from_utf8_lossy(&bytes);
-    let mut events: Vec<LlmEvent> = Vec::new();
-    let mut event_count: usize = 0;
-
-    // Split on double-newline for SSE event boundaries
-    for event_text in body_text.split("\n\n") {
-        if event_text.trim().is_empty() {
-            continue;
-        }
-        if event_count >= sse::MAX_SSE_EVENTS {
-            events.push(LlmEvent::Error {
-                message: format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
-            });
-            break;
-        }
-        event_count += 1;
-
-        let parsed = parse_provider_sse(event_text, provider.clone());
-        events.extend(parsed);
-    }
-
-    Box::pin(stream::iter(events))
+/// Per-request provider parser state. Each `stream_sse_response` call
+/// owns its own parser, preventing state leakage across concurrent or
+/// sequential requests on the same tokio worker thread (H-01).
+enum ProviderParser {
+    OpenAi(providers::openai::OpenAiSseParser),
+    Anthropic(providers::anthropic::AnthropicSseParser),
+    Gemini(providers::gemini::GeminiSseParser),
 }
 
-/// Parse a single SSE event text block into [`LlmEvent`] values.
-fn parse_provider_sse(event_text: &str, provider: ProviderKind) -> Vec<LlmEvent> {
+impl ProviderParser {
+    fn new(provider: ProviderKind) -> Self {
+        match provider {
+            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+                ProviderParser::OpenAi(providers::openai::OpenAiSseParser::new())
+            }
+            ProviderKind::Anthropic => {
+                ProviderParser::Anthropic(providers::anthropic::AnthropicSseParser::new())
+            }
+            ProviderKind::Gemini => {
+                ProviderParser::Gemini(providers::gemini::GeminiSseParser::new())
+            }
+        }
+    }
+
+    fn parse_event(&mut self, event_text: &str) -> Vec<LlmEvent> {
+        let (event_type, data) = parse_sse_event_block(event_text);
+        if data.is_empty() {
+            return Vec::new();
+        }
+        match self {
+            ProviderParser::OpenAi(p) => p.parse_chunk(event_type, &data),
+            ProviderParser::Anthropic(p) => p.parse_chunk(event_type.unwrap_or(""), &data),
+            ProviderParser::Gemini(p) => p.parse_chunk(event_type, &data),
+        }
+    }
+}
+
+/// Parse a single SSE event text block into (event_type, data) pair.
+fn parse_sse_event_block(event_text: &str) -> (Option<&str>, String) {
     let mut event_type: Option<&str> = None;
     let mut data = String::new();
 
@@ -152,32 +149,122 @@ fn parse_provider_sse(event_text: &str, provider: ProviderKind) -> Vec<LlmEvent>
         }
     }
 
-    if data.is_empty() {
-        return vec![];
-    }
+    (event_type, data)
+}
 
-    match provider {
-        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-            // Use thread-local parser for state tracking
-            thread_local! {
-                static OPENAI_PARSER: std::cell::RefCell<providers::openai::OpenAiSseParser> =
-                    std::cell::RefCell::new(providers::openai::OpenAiSseParser::new());
-            }
-            OPENAI_PARSER.with(|p| p.borrow_mut().parse_chunk(event_type, &data))
+/// State carried by the streaming SSE unfold loop.
+struct SseStreamState {
+    body_stream: Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+    parser: ProviderParser,
+    buffer: String,
+    total_bytes: usize,
+    event_count: usize,
+    finished: bool,
+    pending: std::collections::VecDeque<LlmEvent>,
+}
+
+/// Stream SSE events incrementally from an HTTP response into [`LlmEvent`] values.
+///
+/// Each call creates its own parser instance — no thread-local state leaks
+/// across requests. Body chunks are read incrementally; if the cumulative
+/// SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
+/// `MAX_SSE_EVENTS`, an error event is emitted and the stream terminates.
+async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind) -> LlmStream {
+    let body_stream = Box::pin(response.bytes_stream());
+    let state = SseStreamState {
+        body_stream,
+        parser: ProviderParser::new(provider),
+        buffer: String::new(),
+        total_bytes: 0,
+        event_count: 0,
+        finished: false,
+        pending: std::collections::VecDeque::new(),
+    };
+
+    let event_stream = stream::unfold(state, |mut state| async move {
+        if state.finished && state.pending.is_empty() {
+            return None;
         }
-        ProviderKind::Anthropic => {
-            thread_local! {
-                static ANTHROPIC_PARSER: std::cell::RefCell<providers::anthropic::AnthropicSseParser> =
-                    std::cell::RefCell::new(providers::anthropic::AnthropicSseParser::new());
-            }
-            ANTHROPIC_PARSER.with(|p| p.borrow_mut().parse_chunk(event_type.unwrap_or(""), &data))
+
+        // Drain any pending events from the previous chunk first.
+        if let Some(event) = state.pending.pop_front() {
+            return Some((event, state));
         }
-        ProviderKind::Gemini => {
-            thread_local! {
-                static GEMINI_PARSER: std::cell::RefCell<providers::gemini::GeminiSseParser> =
-                    std::cell::RefCell::new(providers::gemini::GeminiSseParser::new());
+
+        // Pull more chunks until we produce at least one event or exhaust
+        // the body.
+        loop {
+            match state.body_stream.next().await {
+                Some(Ok(chunk)) => {
+                    state.total_bytes = state.total_bytes.saturating_add(chunk.len());
+                    if state.total_bytes > sse::MAX_SSE_BUFFER_SIZE {
+                        state.finished = true;
+                        return Some((
+                            LlmEvent::Error {
+                                message: format!(
+                                    "SSE buffer size exceeded: {} bytes",
+                                    state.total_bytes
+                                ),
+                            },
+                            state,
+                        ));
+                    }
+                    state.buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    drain_complete_events(&mut state);
+                    if let Some(event) = state.pending.pop_front() {
+                        return Some((event, state));
+                    }
+                }
+                Some(Err(e)) => {
+                    state.finished = true;
+                    return Some((
+                        LlmEvent::Error {
+                            message: format!("HTTP response read error: {}", e),
+                        },
+                        state,
+                    ));
+                }
+                None => {
+                    // Body exhausted: flush any trailing event.
+                    if !state.buffer.trim().is_empty() {
+                        let trailing = std::mem::take(&mut state.buffer);
+                        if state.event_count < sse::MAX_SSE_EVENTS {
+                            state.event_count += 1;
+                            for event in state.parser.parse_event(&trailing) {
+                                state.pending.push_back(event);
+                            }
+                        }
+                    }
+                    state.finished = true;
+                    return state.pending.pop_front().map(|event| (event, state));
+                }
             }
-            GEMINI_PARSER.with(|p| p.borrow_mut().parse_chunk(event_type, &data))
+        }
+    });
+
+    Box::pin(event_stream)
+}
+
+/// Drain complete SSE events (terminated by "\n\n") from the buffer.
+/// Caps event count and pushes parsed events into `state.pending`.
+fn drain_complete_events(state: &mut SseStreamState) {
+    while let Some(idx) = state.buffer.find("\n\n") {
+        let event_text: String = state.buffer.drain(..idx).collect();
+        // Drop the "\n\n" separator.
+        state.buffer.drain(..2);
+        if event_text.trim().is_empty() {
+            continue;
+        }
+        if state.event_count >= sse::MAX_SSE_EVENTS {
+            state.pending.push_back(LlmEvent::Error {
+                message: format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
+            });
+            state.finished = true;
+            return;
+        }
+        state.event_count += 1;
+        for event in state.parser.parse_event(&event_text) {
+            state.pending.push_back(event);
         }
     }
 }

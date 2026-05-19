@@ -73,9 +73,8 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 
 ### MEDIUM — 建议修复
 
-#### M-01: OpenAI provider 硬编码 `"stream": true` — `correctness`
-- **位置**: `crates/lattice-llm/src/providers/openai.rs:14-18`
-- **问题**: JSON body 中 `"stream"` 硬编码为 `true`，忽略 `request.stream`。非流式模式不可用。
+#### M-01: OpenAI provider 硬编码 `"stream": true` — `correctness` [resolved 2026-05-19]
+- **修复**: `build_request_json` 改为 `"stream": request.stream`，`stream_options` 仅在流式时附加。测试覆盖两个分支。
 
 #### M-02: Gemini provider 忽略 `temperature` / `max_tokens` — `correctness`
 - **位置**: `crates/lattice-llm/src/providers/gemini.rs:11-101`

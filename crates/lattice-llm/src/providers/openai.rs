@@ -14,7 +14,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
     let mut body = serde_json::json!({
         "model": resolved.provider_model,
         "messages": [],
-        "stream": true,
+        "stream": request.stream,
     });
 
     let messages = body
@@ -266,11 +266,26 @@ mod tests {
     }
 
     #[test]
-    fn build_request_includes_stream_true() {
-        let req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
+    fn build_request_propagates_stream_flag() {
         let resolved = make_resolved();
+
+        // Default ChatRequest has stream=false
+        let mut req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
+        let json = build_request_json(&req, &resolved);
+        assert_eq!(json["stream"], false);
+        assert!(
+            json.get("stream_options").is_none(),
+            "stream_options should be absent when stream=false"
+        );
+
+        // Streaming mode: stream=true and stream_options is present
+        req.stream = true;
         let json = build_request_json(&req, &resolved);
         assert_eq!(json["stream"], true);
+        assert_eq!(
+            json["stream_options"]["include_usage"], true,
+            "stream_options must include usage when streaming"
+        );
     }
 
     #[test]

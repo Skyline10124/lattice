@@ -15,6 +15,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "time"
 url = "2"
 urlencoding = { workspace = true }
 reqwest = { workspace = true }
+bytes = "1"
 
 [dev-dependencies]
 tokio = { workspace = true }
