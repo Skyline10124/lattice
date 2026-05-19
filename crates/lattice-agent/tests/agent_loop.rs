@@ -52,12 +52,12 @@ impl FakeToolExecutor {
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for FakeToolExecutor {
-    async fn execute(&self, _call: &lattice_llm::ToolCall) -> String {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
         let mut results = self.results.lock().unwrap();
         if results.is_empty() {
-            return "no more fake results".to_string();
+            return Err("no more fake results".to_string());
         }
-        results.remove(0)
+        Ok(results.remove(0))
     }
 }
 
@@ -371,9 +371,9 @@ async fn agent_loop_executes_tool_calls_sequentially() {
 
     #[async_trait::async_trait]
     impl ToolCallExecutor for OrderTrackingExecutor {
-        async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
+        async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String> {
             self.order.lock().unwrap().push(call.id.clone());
-            format!("content of {}", call.function.name)
+            Ok(format!("content of {}", call.function.name))
         }
     }
 
@@ -729,4 +729,73 @@ async fn agent_loop_llm_error_returns_failed_status() {
         .iter()
         .any(|e| matches!(e, AgentTurnEvent::Error { message } if message.contains("provider unavailable")));
     assert!(has_error, "should have Error event");
+}
+
+/// Fake LLM that emits a tool call response on every call, forever.
+/// Used to verify the agent loop's safety cap (MAX_TURN_ROUNDS).
+struct InfiniteToolCallLlm {
+    call_count: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl LlmClient for InfiniteToolCallLlm {
+    async fn chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+        Ok(lattice_llm::ChatResponse {
+            content: String::new(),
+            reasoning_content: None,
+            tool_calls: Some(vec![lattice_llm::ToolCall {
+                id: format!("call_{n}"),
+                function: lattice_llm::FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path": "x.txt"}"#.to_string(),
+                },
+            }]),
+            finish_reason: "tool_calls".to_string(),
+            model: "test-model".to_string(),
+            usage: None,
+        })
+    }
+}
+
+struct InfiniteToolExecutor;
+
+#[async_trait::async_trait]
+impl ToolCallExecutor for InfiniteToolExecutor {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+        Ok("ok".to_string())
+    }
+}
+
+#[tokio::test]
+async fn agent_loop_terminates_at_hard_cap_when_llm_loops_forever() {
+    let llm = Arc::new(InfiniteToolCallLlm {
+        call_count: AtomicUsize::new(0),
+    });
+    let executor = Arc::new(InfiniteToolExecutor);
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm: llm.clone(),
+        tool_executor: executor,
+    });
+
+    let request = make_request("loop forever", vec!["read_file".to_string()]);
+    let result = loop_inst.run_turn(request).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Failed);
+    let reason = result.terminal_reason.expect("should have terminal reason");
+    assert!(
+        reason.contains("max rounds"),
+        "expected max-rounds reason, got: {reason}"
+    );
+    // LLM call count should equal MAX_TURN_ROUNDS (each round makes exactly one LLM call).
+    assert_eq!(llm.call_count.load(Ordering::SeqCst), 200);
+
+    let has_error = result
+        .events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::Error { message } if message.contains("max rounds")));
+    assert!(has_error, "should emit Error event for max rounds");
 }

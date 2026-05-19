@@ -214,10 +214,13 @@ mod tests {
 
     #[test]
     fn credential_status_present_from_env() {
-        with_env_vars(&[("LATTICE_TEST_CRED_PRESENT", Some("sk-test-key"))], || {
-            let status = CredentialStatus::from_env("LATTICE_TEST_CRED_PRESENT");
-            assert_eq!(status, CredentialStatus::Present);
-        });
+        with_env_vars(
+            &[("LATTICE_TEST_CRED_PRESENT", Some("sk-test-key"))],
+            || {
+                let status = CredentialStatus::from_env("LATTICE_TEST_CRED_PRESENT");
+                assert_eq!(status, CredentialStatus::Present);
+            },
+        );
     }
 
     #[test]

@@ -1,29 +1,10 @@
-//! v1.1 agent loop: sequences LLM calls and tool execution for a single turn.
+//! agent loop: sequences LLM calls and tool execution for a single turn.
 //!
 //! This module implements the stable public main-path `AgentLoop`. It uses
 //! `lattice-llm` types at the model boundary and `lattice-tools::enabled_tools`
 //! for tool authorization.
-//!
-//! # Design decisions
-//!
-//! - D-01: Ownership belongs in `lattice-agent`.
-//! - D-02: Independent v1.1 minimal path, not a reuse of old `Agent`.
-//! - D-03/D-04: Final public names: `AgentLoop`, `AgentLoopConfig`,
-//!   `AgentTurnRequest`, `AgentTurnResult`, `AgentTurnEvent`, `AgentTurnStatus`.
-//! - D-05/D-06/D-07: Old `Agent` architecture is deleted from active source.
-//! - D-08: No fixed tool counter; loop until final assistant response.
-//! - D-09/D-10: External timeout/cancel as run protection.
-//! - D-11: Build model input from complete session transcript + user input.
-//! - D-12: No transcript compression, summaries, or prompt-budget logic.
-//! - D-13..D-18: Only explicit enabled tool names; no bundle expansion.
-//! - D-19..D-22: Project-root path containment via executor.
-//! - D-23..D-26: Full tool results in transcript; no summarization/clipping.
-//! - T-09-02: `resolve_enabled_tools` called before LLM call.
-//! - T-09-03: Result carries status, terminal reason, messages, usage, summaries.
-//! - T-09-04: External timeout/cancel; no heuristic round limits.
 
 mod messages;
-mod tools;
 mod traits;
 mod types;
 
@@ -35,7 +16,15 @@ use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
 use lattice_tools::enabled_tools::{resolve_enabled_tools, EnabledTools};
 
 use messages::convert_to_llm_message;
-use tools::tool_output_is_ok;
+
+/// Hard upper bound on LLM rounds within a single turn.
+///
+/// Acts as a safety net when caller-supplied timeout/cancel are missing or
+/// when an LLM repeatedly emits tool calls without a final response. Set
+/// well above expected agent task length (well-behaved agents finish in
+/// well under 50 rounds; we cap at 200 to prevent runaway loops without
+/// constraining legitimate long tasks).
+const MAX_TURN_ROUNDS: u32 = 200;
 
 pub use traits::{LlmClient, ToolCallExecutor};
 pub use types::{
@@ -144,8 +133,31 @@ impl AgentLoop {
 
         all_events.push(AgentTurnEvent::Started);
 
-        // Repeat-until-final loop (D-08: no fixed round counter)
+        // Repeat-until-final loop with safety cap (MAX_TURN_ROUNDS).
+        // External timeout/cancel remain primary stops; this guards against
+        // missing-timeout cases where a model emits tool calls indefinitely.
+        let mut round: u32 = 0;
         loop {
+            if round >= MAX_TURN_ROUNDS {
+                let reason = format!(
+                    "exceeded max rounds ({}); set a shorter timeout or fix prompt",
+                    MAX_TURN_ROUNDS
+                );
+                all_events.push(AgentTurnEvent::Error {
+                    message: reason.clone(),
+                });
+                return AgentTurnResult {
+                    messages: all_messages,
+                    assistant_output: String::new(),
+                    usage: accumulated_usage,
+                    tool_results: tool_summaries,
+                    status: AgentTurnStatus::Failed,
+                    terminal_reason: Some(reason),
+                    events: all_events,
+                };
+            }
+            round += 1;
+
             // Check cancel (D-09)
             if let Some(flag) = &request.cancel_flag {
                 if flag.load(Ordering::Relaxed) {
@@ -286,33 +298,35 @@ impl AgentLoop {
                     },
                 };
 
-                let tool_output = self.config.tool_executor.execute(&executor_call).await;
+                let tool_result = self.config.tool_executor.execute(&executor_call).await;
+                let (ok, tool_content) = match tool_result {
+                    Ok(output) => (true, output),
+                    Err(error) => (false, error),
+                };
 
                 all_events.push(AgentTurnEvent::ToolCallResult {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
-                    ok: tool_output_is_ok(&tool_output),
-                    output_len: tool_output.len(),
+                    ok,
+                    output_len: tool_content.len(),
                 });
 
-                // Build tool summary
-                let ok = tool_output_is_ok(&tool_output);
                 tool_summaries.push(AgentToolResultSummary {
                     tool_call_id: call.id.clone(),
                     name: call.function.name.clone(),
                     ok,
-                    output_len: tool_output.len(),
+                    output_len: tool_content.len(),
                     error_summary: if ok {
                         None
                     } else {
-                        Some(tool_output.chars().take(200).collect())
+                        Some(tool_content.chars().take(200).collect())
                     },
                 });
 
                 // Full tool result as GraphMessage (D-23..D-26: no summarization)
                 let tool_msg = GraphMessage {
                     role: "tool".to_string(),
-                    content: tool_output,
+                    content: tool_content,
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),

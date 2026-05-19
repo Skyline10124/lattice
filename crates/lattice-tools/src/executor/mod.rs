@@ -115,21 +115,19 @@ impl DefaultToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for DefaultToolExecutor {
-    async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
-        let args: serde_json::Value = match serde_json::from_str(&call.function.arguments) {
-            Ok(v) => v,
-            Err(e) => {
-                return format!(
-                    "Error: invalid JSON arguments for tool '{}': {} — raw args: {:?}",
+    async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String> {
+        let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).map_err(|e| {
+                format!(
+                    "invalid JSON arguments for tool '{}': {} — raw args: {:?}",
                     call.function.name,
                     e,
                     &call.function.arguments[..call.function.arguments.len().min(200)]
-                );
-            }
-        };
+                )
+            })?;
 
         if let Some(denial) = self.authorization_denial(&call.function.name) {
-            return denial;
+            return Err(denial);
         }
 
         match call.function.name.as_str() {
@@ -143,29 +141,28 @@ impl ToolExecutor for DefaultToolExecutor {
             "find_files" => search::find_files(self, &args).await,
             "bash" => {
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                let result = Self::execute_bash(&self.project_root, &self.limits, cmd).await;
-                match result {
-                    Ok(o) => {
-                        let mut cmd_result = String::from_utf8_lossy(&o.stdout).to_string();
-                        if !o.stderr.is_empty() {
-                            cmd_result
-                                .push_str(&format!("\nERR:{}", String::from_utf8_lossy(&o.stderr)));
-                        }
-                        render::truncate_output(
-                            cmd_result,
-                            MAX_COMMAND_OUTPUT_SIZE,
-                            "command output",
-                        )
-                    }
-                    Err(e) => ToolError::CommandError(e).to_string(),
+                let output = Self::execute_bash(&self.project_root, &self.limits, cmd)
+                    .await
+                    .map_err(|e| ToolError::CommandError(e).to_string())?;
+                let mut cmd_result = String::from_utf8_lossy(&output.stdout).to_string();
+                if !output.stderr.is_empty() {
+                    cmd_result.push_str(&format!(
+                        "\nERR:{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
                 }
+                Ok(render::truncate_output(
+                    cmd_result,
+                    MAX_COMMAND_OUTPUT_SIZE,
+                    "command output",
+                ))
             }
             "patch" => {
                 let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
                 let envelope: PatchResultEnvelope =
                     apply_structured_patch(Path::new(&self.project_root), &self.limits, patch)
                         .await;
-                serde_json::to_string(&envelope).unwrap_or_else(|error| {
+                let body = serde_json::to_string(&envelope).unwrap_or_else(|error| {
                     serde_json::json!({
                         "ok": false,
                         "summary": "failed to serialize patch result envelope",
@@ -180,10 +177,13 @@ impl ToolExecutor for DefaultToolExecutor {
                         "attempted_operations": []
                     })
                     .to_string()
-                })
+                });
+                // Tool-layer success: patch executor ran. Per-file outcomes
+                // (success/failure) live inside the JSON envelope itself.
+                Ok(body)
             }
             "web_search" => web::web_search(&self.http_client, &self.limits, &args).await,
-            _ => format!("Unknown tool: {}", call.function.name),
+            other => Err(format!("Unknown tool: {other}")),
         }
     }
 }

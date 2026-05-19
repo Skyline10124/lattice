@@ -47,18 +47,12 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **修复**: 需将 AgentLoop 改为 channel-based 事件推送架构（建议 v1.2）。
 - **关联**: P2-04
 
-#### H-07: `tool_output_is_ok` 用字符串前缀判断成功/失败 — `correctness`
-- **位置**: `crates/lattice-agent/src/agent_loop/tools.rs:1-3`
-- **问题**: 检查输出是否以 `"Error:"` 或 `"Tool denied:"` 开头来判定失败。合法输出含 "Error:" 被误判为失败；异常输出不以此开头被误判为成功。
-- **影响**: 核心逻辑错误，agent 对工具结果的判断不可靠
-- **修复**: `ToolCallExecutor` trait 返回 `Result<String, String>` 或带显式 `ok` 字段的结构体。
+#### H-07: `tool_output_is_ok` 用字符串前缀判断成功/失败 — `correctness` [resolved 2026-05-19]
+- **修复**: 统一 `lattice_tools::ToolExecutor` 和 `lattice_agent::ToolCallExecutor` 为单一 trait，签名 `Result<String, String>`。`DefaultToolExecutor` 内部 12 个工具函数全部改为返回 `Err(...)` 而非 `format!("Error: ...")`。`tool_output_is_ok` helper 和 CLI 的 `classify_tool_output`/`ToolExecutorAdapter` 全部删除。`DefaultToolExecutor` 直接传给 `AgentLoopConfig.tool_executor`，agent loop 通过 `Ok`/`Err` 模式匹配判定 ok。
 - **关联**: WR-04
 
-#### H-08: agent loop 无任何迭代上限 — `resource-exhaustion`
-- **位置**: `crates/lattice-agent/src/agent_loop/mod.rs:148`
-- **问题**: 若 LLM 持续返回 tool_calls 且调用方未设置 timeout/cancel_flag，循环永不终止，无限消耗 API tokens。
-- **影响**: denial-of-wallet
-- **修复**: 添加 hard cap（如 50 轮），超限返回 `Failed`。
+#### H-08: agent loop 无任何迭代上限 — `resource-exhaustion` [resolved 2026-05-19]
+- **修复**: 添加 `MAX_TURN_ROUNDS = 200` hard cap，超限返回 `Failed` + `"exceeded max rounds"` terminal_reason，并 emit Error event。新增测试验证无限 tool_call 场景下精确停在 200 轮。
 
 #### H-09: SQLite 每次操作新建连接 + TOCTOU 竞态 — `race-condition`
 - **位置**: `crates/lattice-session/src/sqlite_graph.rs:43-138`

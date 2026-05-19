@@ -10,14 +10,11 @@ use anyhow::Result;
 use colored::Colorize;
 use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_profile::{ProfileError, ProfileSource};
-use lattice_tools::ToolExecutor as _;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lattice_api::{RunTurnRequest, RunTurnResult, RunTurnStatus};
-
-// ── Real dependency adapters ─────────────────────────────────────────────
 
 /// Production LlmClient that delegates to `lattice_llm::chat`.
 struct RealLlmClient;
@@ -34,20 +31,6 @@ impl lattice_agent::agent_loop::LlmClient for RealLlmClient {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
     }
 }
-
-/// Adapter wrapping `DefaultToolExecutor` for the agent loop's `ToolCallExecutor` trait.
-struct ToolExecutorAdapter {
-    inner: lattice_tools::executor::DefaultToolExecutor,
-}
-
-#[async_trait::async_trait]
-impl lattice_agent::agent_loop::ToolCallExecutor for ToolExecutorAdapter {
-    async fn execute(&self, call: &lattice_llm::ToolCall) -> String {
-        self.inner.execute(call).await
-    }
-}
-
-// ── Public entry point ───────────────────────────────────────────────────
 
 /// Execute the v1.1 `run` command.
 pub async fn run(
@@ -107,9 +90,7 @@ async fn run_inner(
 
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm: Arc::new(RealLlmClient),
-        tool_executor: Arc::new(ToolExecutorAdapter {
-            inner: tool_executor,
-        }),
+        tool_executor: Arc::new(tool_executor),
     }));
 
     let request = RunTurnRequest {
@@ -137,8 +118,6 @@ async fn run_inner(
     render_result(&turn_result, verbose, json)?;
     Ok(status_to_exit_code(&turn_result.status))
 }
-
-// ── Profile helpers ──────────────────────────────────────────────────────
 
 fn default_session_dir() -> PathBuf {
     dirs::config_dir()
@@ -253,9 +232,7 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let path_str = canonical.to_string_lossy();
 
-    let dangerous_prefixes = [
-        "/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot",
-    ];
+    let dangerous_prefixes = ["/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot"];
     for prefix in &dangerous_prefixes {
         if path_str.starts_with(prefix) {
             return Err(format!(
@@ -277,8 +254,6 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
 
     Ok(())
 }
-
-// ── Rendering ────────────────────────────────────────────────────────────
 
 fn render_result(result: &RunTurnResult, verbose: bool, json: bool) -> Result<()> {
     if json {
@@ -320,8 +295,6 @@ fn status_to_exit_code(status: &RunTurnStatus) -> std::process::ExitCode {
         RunTurnStatus::Failed | RunTurnStatus::Cancelled => std::process::ExitCode::from(1),
     }
 }
-
-// ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -392,8 +365,6 @@ mod tests {
         assert!(dir.to_string_lossy().contains("sessions"));
     }
 
-    // ── Integration: run_turn with stub LLM ────────────────────────────────
-
     struct StubLlmClient;
 
     #[async_trait::async_trait]
@@ -422,8 +393,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
-        async fn execute(&self, _call: &lattice_llm::ToolCall) -> String {
-            "no-op".to_string()
+        async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+            Ok("no-op".to_string())
         }
     }
 
@@ -491,8 +462,6 @@ mod tests {
         }
     }
 
-    // ── Boundary: no old crate imports ──────────────────────────────────────
-
     #[tokio::test]
     async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         // Regression: run_inner used to pass loaded_profile.package_dir
@@ -512,12 +481,11 @@ mod tests {
 
         // Build tool executor with the *workspace root* (the fix), not profile_dir
         let enabled = vec!["read_file".to_string()];
-        let executor =
-            lattice_tools::executor::DefaultToolExecutor::for_project_root(
-                &ws.to_string_lossy(),
-                enabled,
-            )
-            .expect("executor creation must succeed");
+        let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+            &ws.to_string_lossy(),
+            enabled,
+        )
+        .expect("executor creation must succeed");
 
         // read_file("src/lib.rs") must resolve against workspace root, not profile_dir
         let call = lattice_llm::ToolCall::new(
@@ -525,7 +493,10 @@ mod tests {
             lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
         );
         use lattice_tools::ToolExecutor as _;
-        let result = executor.execute(&call).await;
+        let result = executor
+            .execute(&call)
+            .await
+            .unwrap_or_else(|e| format!("Error: {e}"));
 
         assert!(
             result.contains("fn main()"),
