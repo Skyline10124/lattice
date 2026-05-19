@@ -6,7 +6,6 @@ use crate::DefaultToolExecutor;
 
 use super::render;
 
-const MAX_BATCH_READ_FILES: usize = 20;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const MAX_LIST_LIMIT: usize = 1000;
 
@@ -87,52 +86,6 @@ pub(super) async fn read_file(
     executor
         .read_text_file(path, offset, limit, line_numbers)
         .await
-}
-
-pub(super) async fn read_files(
-    executor: &DefaultToolExecutor,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let files = match args.get("files").and_then(|v| v.as_array()) {
-        Some(files) if !files.is_empty() => files,
-        _ => return Err("read_files requires a non-empty files array".to_string()),
-    };
-    if files.len() > MAX_BATCH_READ_FILES {
-        return Err(format!(
-            "read_files accepts at most {} files per call",
-            MAX_BATCH_READ_FILES
-        ));
-    }
-
-    let mut sections = Vec::new();
-    for file in files {
-        let path = file.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        let offset = file
-            .get("offset")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(1)
-            .max(1);
-        let limit = file
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .and_then(|v| usize::try_from(v).ok())
-            .unwrap_or(2000)
-            .max(1);
-        let line_numbers = file
-            .get("line_numbers")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let content = match executor
-            .read_text_file(path, offset, limit, line_numbers)
-            .await
-        {
-            Ok(c) => c,
-            Err(e) => format!("Error: {e}"),
-        };
-        sections.push(format!("--- {path} ---\n{content}"));
-    }
-    Ok(sections.join("\n\n"))
 }
 
 pub(super) async fn write_file(

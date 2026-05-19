@@ -28,7 +28,7 @@ model = {model}
 system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
-enabled = ["read_file", "read_files", "grep", "find_files", "list_directory", "workspace_context"]
+enabled = ["read_file", "grep", "find_files", "list_directory", "workspace_context"]
 "#
     )
 }
@@ -57,7 +57,7 @@ description = "Read-only agent for code understanding and review"
 system = "You are a code reader and reviewer. Read and analyze code carefully. Do not suggest edits or run commands. Explain your reasoning clearly."
 
 [tools]
-enabled = ["read_file", "read_files", "grep", "find_files", "list_directory", "workspace_context"]
+enabled = ["read_file", "grep", "find_files", "list_directory", "workspace_context"]
 "#
     )
 }
@@ -86,14 +86,14 @@ description = "Editing agent for refactoring, fixing, and applying patches"
 system = "You are a code editor. Read, edit, and refactor code within the project. Use read, write, and patch tools for changes. Be precise and explain your edits."
 
 [tools]
-enabled = ["read_file", "read_files", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context"]
+enabled = ["read_file", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context"]
 "#
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for a development agent.
 ///
-/// Full tool set: all reader/editor tools plus bash and web_search.
+/// Full tool set: all reader/editor tools plus bash and web_fetch.
 pub fn default_dev_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
@@ -110,10 +110,10 @@ model = {model}
 description = "Full development agent for coding, planning, and troubleshooting"
 
 [prompt]
-system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Search the web when documentation is needed. Be methodical and explain your reasoning."
+system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Fetch web docs when needed. Be methodical and explain your reasoning."
 
 [tools]
-enabled = ["read_file", "read_files", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context", "bash", "web_search"]
+enabled = ["read_file", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context", "bash", "web_fetch"]
 "#
     )
 }
@@ -269,7 +269,7 @@ mod tests {
         // No shell, web, or editing tools
         let enabled = &profile.tools.enabled;
         assert!(!enabled.contains(&"bash".to_string()));
-        assert!(!enabled.contains(&"web_search".to_string()));
+        assert!(!enabled.contains(&"web_fetch".to_string()));
         assert!(!enabled.contains(&"write_file".to_string()));
         assert!(!enabled.contains(&"patch".to_string()));
     }
@@ -290,7 +290,6 @@ mod tests {
             toml::from_str(&toml_str).expect("reader template must parse");
         let expected: Vec<&str> = vec![
             "read_file",
-            "read_files",
             "grep",
             "find_files",
             "list_directory",
@@ -319,15 +318,15 @@ mod tests {
         assert!(enabled.contains(&"todo_write".to_string()));
         // No shell or web
         assert!(!enabled.contains(&"bash".to_string()));
-        assert!(!enabled.contains(&"web_search".to_string()));
+        assert!(!enabled.contains(&"web_fetch".to_string()));
     }
 
     #[test]
-    fn editor_template_has_no_web_search_tool() {
+    fn editor_template_has_no_web_fetch_tool() {
         let toml_str = default_editor_template("e", "sonnet");
         // The word "web" may appear in comments, but the tool name
-        // "web_search" must not appear as an enabled tool.
-        assert!(!toml_str.contains("web_search"));
+        // "web_fetch" must not appear as an enabled tool.
+        assert!(!toml_str.contains("web_fetch"));
     }
 
     #[test]
@@ -337,7 +336,6 @@ mod tests {
             toml::from_str(&toml_str).expect("editor template must parse");
         let expected: Vec<&str> = vec![
             "read_file",
-            "read_files",
             "write_file",
             "patch",
             "grep",
@@ -365,7 +363,7 @@ mod tests {
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
         assert!(enabled.contains(&"bash".to_string()));
-        assert!(enabled.contains(&"web_search".to_string()));
+        assert!(enabled.contains(&"web_fetch".to_string()));
         assert!(enabled.contains(&"write_file".to_string()));
         assert!(enabled.contains(&"patch".to_string()));
         assert!(enabled.contains(&"todo_write".to_string()));
@@ -378,7 +376,6 @@ mod tests {
             toml::from_str(&toml_str).expect("dev template must parse");
         let expected: Vec<&str> = vec![
             "read_file",
-            "read_files",
             "write_file",
             "patch",
             "grep",
@@ -387,7 +384,7 @@ mod tests {
             "todo_write",
             "workspace_context",
             "bash",
-            "web_search",
+            "web_fetch",
         ];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();

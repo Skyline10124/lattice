@@ -1,6 +1,6 @@
 use std::net::{IpAddr, ToSocketAddrs};
 
-pub(super) async fn web_search(
+pub(super) async fn web_fetch(
     http_client: &reqwest::Client,
     limits: &crate::ToolLimits,
     args: &serde_json::Value,

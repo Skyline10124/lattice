@@ -84,31 +84,31 @@ mod tests {
         // Tools NOT in the enabled list are absent
         assert!(!result.tool_names.contains("write_file"));
         assert!(!result.tool_names.contains("bash"));
-        assert!(!result.tool_names.contains("web_search"));
+        assert!(!result.tool_names.contains("web_fetch"));
         assert!(!result.tool_names.contains("todo_write"));
     }
 
     #[test]
-    fn bash_and_web_search_require_explicit_names() {
+    fn bash_and_web_fetch_require_explicit_names() {
         // Empty list: no tools at all
         let empty: Vec<String> = vec![];
         let result = resolve_enabled_tools(&empty).expect("empty is valid");
         assert!(result.tool_names.is_empty());
         assert!(!result.tool_names.contains("bash"));
-        assert!(!result.tool_names.contains("web_search"));
+        assert!(!result.tool_names.contains("web_fetch"));
 
-        // Non-shell/non-web list: bash and web_search still absent
+        // Non-shell/non-web list: bash and web_fetch still absent
         let non_special: Vec<String> = vec!["read_file".into(), "grep".into()];
         let result = resolve_enabled_tools(&non_special).expect("should resolve");
         assert!(!result.tool_names.contains("bash"));
-        assert!(!result.tool_names.contains("web_search"));
+        assert!(!result.tool_names.contains("web_fetch"));
 
-        // Explicit inclusion: bash and web_search are available when named
+        // Explicit inclusion: bash and web_fetch are available when named
         let with_special: Vec<String> =
-            vec!["read_file".into(), "bash".into(), "web_search".into()];
+            vec!["read_file".into(), "bash".into(), "web_fetch".into()];
         let result = resolve_enabled_tools(&with_special).expect("should resolve with bash+web");
         assert!(result.tool_names.contains("bash"));
-        assert!(result.tool_names.contains("web_search"));
+        assert!(result.tool_names.contains("web_fetch"));
         assert_eq!(result.tool_names.len(), 3);
         assert_eq!(result.definitions.len(), 3);
     }
@@ -155,7 +155,6 @@ mod tests {
     fn all_required_builtins_can_be_resolved_by_exact_name() {
         let required = [
             "read_file",
-            "read_files",
             "write_file",
             "patch",
             "grep",
