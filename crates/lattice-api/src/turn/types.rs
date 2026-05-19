@@ -118,19 +118,9 @@ pub enum TurnEvent {
     Token {
         content: String,
     },
-    Reasoning {
-        content: String,
-    },
     ToolCallStart {
         id: String,
         name: String,
-    },
-    ToolCallDelta {
-        id: String,
-        arguments_delta: String,
-    },
-    ToolCallEnd {
-        id: String,
     },
     ToolResult {
         id: String,

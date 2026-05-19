@@ -19,7 +19,7 @@ pub enum ProfileError {
     #[error("invalid schema_version {found} at {path}: only schema_version = 1 is supported")]
     UnsupportedSchemaVersion { path: PathBuf, found: u64 },
 
-    #[error("forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools], [security], [context], [behavior]")]
+    #[error("forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools]")]
     ForbiddenSection {
         path: PathBuf,
         section: String,

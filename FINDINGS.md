@@ -114,25 +114,21 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 - **位置**: `crates/lattice-profile/src/load.rs:148-149`
 - **问题**: 失败后 `starts_with` 比较 canonical vs non-canonical 路径，可能绕过限制。
 
-#### M-14: `ForbiddenSection` 错误信息把 forbidden section 列为 "allowed" — `ux`
-- **位置**: `crates/lattice-profile/src/error.rs:22`
-- **问题**: 错误消息误导用户添加实际被禁止的 section。
+#### M-14: `ForbiddenSection` 错误信息把 forbidden section 列为 "allowed" — `ux` [resolved 2026-05-19]
+- **修复**: 错误模板中只列出真正允许的 section：`schema_version, [agent], [prompt], [tools]`。
 
 #### M-15: `map_session_error` 丢弃结构化错误信息 — `observability`
 - **位置**: `crates/lattice-api/src/session.rs:131-136`
 - **问题**: 所有非 NotFound 的 SessionError 扁平化为 `ApiError::Internal(string)`。
 
-#### M-16: `TurnEvent` 有永远不会被构造的 variants — `dead-code`
-- **位置**: `crates/lattice-api/src/turn/types.rs:119-131`
-- **问题**: `Reasoning`、`ToolCallDelta`、`ToolCallEnd` 永远不被产生，误导 API 消费者。
+#### M-16: `TurnEvent` 有永远不会被构造的 variants — `dead-code` [resolved 2026-05-19]
+- **修复**: 删除 `Reasoning`、`ToolCallDelta`、`ToolCallEnd` 三个从未被 mapping 层构造的 variant。
 
-#### M-17: `topology.rs` 孤立死代码 — `dead-code`
-- **位置**: `crates/lattice-api/src/topology.rs`（113行）
-- **问题**: 未在 `lib.rs` 声明为 mod，从不编译。
+#### M-17: `topology.rs` 孤立死代码 — `dead-code` [resolved 2026-05-19]
+- **修复**: 删除 `crates/lattice-api/src/topology.rs`（113 行，从未被 `lib.rs` 声明为 mod）。
 
-#### M-18: `project_root` 静默回退空字符串 — `security`
-- **位置**: `crates/lattice-api/src/turn/mapping.rs:56-64`
-- **问题**: 无 profile 且 `current_dir()` 失败时 project_root 为 ""，可能禁用工具路径限制。
+#### M-18: `project_root` 静默回退空字符串 — `security` [resolved 2026-05-19]
+- **修复**: 回退到 `"/"` 而非 `""`，确保工具路径限制始终有非空 root。
 
 ### LOW — 可选清理
 
@@ -145,11 +141,11 @@ Open findings across code review phases. Entries are append-only; mark resolved 
 #### L-03: `ToolCallEnd` 事件顺序不确定 — `correctness` [resolved 2026-05-19]
 - **修复**: `OpenAiSseParser` 的 `tool_call_ids` 改用 `BTreeMap<u32, String>`，按 tool call index 顺序 emit `ToolCallEnd`。
 
-#### L-04: `display_id` byte 切片可能 panic — `correctness`
-- **位置**: `crates/lattice-cli/src/commands/session.rs:387-393`
+#### L-04: `display_id` byte 切片可能 panic — `correctness` [resolved 2026-05-19]
+- **修复**: 使用 `char_indices().nth(12)` 安全截断。
 
-#### L-05: `config_dir()` 失败时 session 存到相对路径 — `ux`
-- **位置**: `crates/lattice-cli/src/commands/run.rs:143-148`
+#### L-05: `config_dir()` 失败时 session 存到相对路径 — `ux` [resolved 2026-05-19]
+- **修复**: 回退到 `HOME/.config`，两者都不可用时 panic 并附明确信息。
 
 ### 优先级建议
 
