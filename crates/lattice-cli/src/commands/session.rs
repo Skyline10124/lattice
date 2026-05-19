@@ -386,7 +386,12 @@ fn not_found(kind: &str, id: &str) -> anyhow::Error {
 
 fn display_id(id: &str) -> String {
     if id.len() > 12 {
-        format!("{}..", &id[..12])
+        let end = id
+            .char_indices()
+            .nth(12)
+            .map(|(i, _)| i)
+            .unwrap_or(id.len());
+        format!("{}..", &id[..end])
     } else {
         id.to_string()
     }

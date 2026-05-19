@@ -121,7 +121,8 @@ async fn run_inner(
 
 fn default_session_dir() -> PathBuf {
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
+        .expect("cannot determine config directory: neither XDG_CONFIG_HOME, config_dir, nor HOME is set")
         .join("lattice")
         .join("sessions")
 }

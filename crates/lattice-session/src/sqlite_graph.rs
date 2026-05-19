@@ -1359,6 +1359,7 @@ impl SqliteSessionGraphStore {
 mod sqlite_graph_commit_turn {
     use super::*;
     use crate::graph::{derive_commit_message, GraphMessage};
+    use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
     use std::env;
     use std::fs;
 
@@ -1368,28 +1369,6 @@ mod sqlite_graph_commit_turn {
             .join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
-    }
-
-    fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
     }
 
     #[test]
@@ -1453,17 +1432,6 @@ mod sqlite_graph_commit_turn {
             columns.contains(&"commit_id".to_string()),
             "graph_refs must have commit_id column, found: {columns:?}"
         );
-    }
-
-    fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
-        GraphMessage {
-            role: "tool".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            name: Some(name.to_string()),
-        }
     }
 
     fn commit_input(
@@ -1834,6 +1802,7 @@ mod sqlite_graph_commit_turn {
 mod sqlite_graph_head_transcript {
     use super::*;
     use crate::graph::{derive_commit_message, GraphMessage, TurnUsage};
+    use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
     use std::env;
     use std::fs;
 
@@ -1843,39 +1812,6 @@ mod sqlite_graph_head_transcript {
             .join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
-    }
-
-    fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
-        GraphMessage {
-            role: "tool".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            name: Some(name.to_string()),
-        }
     }
 
     fn commit_input_with_usage(
@@ -2222,6 +2158,7 @@ mod sqlite_graph_head_transcript {
 mod session_graph_pointer_ops {
     use super::*;
     use crate::graph::{derive_commit_message, GraphMessage};
+    use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
     use std::env;
     use std::fs;
 
@@ -2231,39 +2168,6 @@ mod session_graph_pointer_ops {
             .join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
-    }
-
-    fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
-        GraphMessage {
-            role: "tool".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: Some(tool_call_id.to_string()),
-            name: Some(name.to_string()),
-        }
     }
 
     fn commit_input(

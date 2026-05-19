@@ -60,7 +60,7 @@ pub(crate) fn build_agent_request(
         .unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
+                .unwrap_or_else(|_| "/".to_string())
         });
 
     AgentTurnRequest {

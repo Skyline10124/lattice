@@ -220,7 +220,6 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-tools",
         "lattice-api",
         "lattice-cli",
-        "lattice-hooks",
     ];
     let forbidden = [
         "lattice_core",

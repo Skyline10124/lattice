@@ -74,3 +74,59 @@ pub(crate) fn create_dir_all(path: impl AsRef<Path>) -> Result<()> {
         source,
     })
 }
+
+/// Shared test helpers for constructing `GraphMessage` values.
+///
+/// These are used by internal tests and downstream crate test suites.
+/// Not intended for production use.
+#[doc(hidden)]
+pub mod test_helpers {
+    use crate::graph::{GraphMessage, GraphToolCall};
+
+    pub fn user_msg(text: &str) -> GraphMessage {
+        GraphMessage {
+            role: "user".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    pub fn assistant_msg(text: &str) -> GraphMessage {
+        GraphMessage {
+            role: "assistant".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    pub fn assistant_msg_with_tool_calls(
+        text: &str,
+        tool_calls: Vec<GraphToolCall>,
+    ) -> GraphMessage {
+        GraphMessage {
+            role: "assistant".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    pub fn tool_msg(text: &str, tool_call_id: &str, name: &str) -> GraphMessage {
+        GraphMessage {
+            role: "tool".to_string(),
+            content: text.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            name: Some(name.to_string()),
+        }
+    }
+}

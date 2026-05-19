@@ -509,27 +509,7 @@ mod graph_contract {
         fn _assert_trait_bound(_store: &dyn SessionGraphStore) {}
     }
 
-    fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
+    use crate::test_helpers::{assistant_msg, user_msg};
 
     #[test]
     fn derive_commit_message_normalizes_whitespace() {

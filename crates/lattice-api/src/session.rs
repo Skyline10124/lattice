@@ -140,7 +140,7 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
 #[cfg(test)]
 mod session_graph {
     use super::*;
-    use lattice_session::{GraphMessage, TurnCommitInput, TurnCommitStatus};
+    use lattice_session::{TurnCommitInput, TurnCommitStatus};
     use std::env;
     use std::fs;
 
@@ -156,27 +156,7 @@ mod session_graph {
         SessionApi::sqlite(temp_dir(dir_name))
     }
 
-    fn user_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "user".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
-
-    fn assistant_msg(text: &str) -> GraphMessage {
-        GraphMessage {
-            role: "assistant".to_string(),
-            content: text.to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }
-    }
+    use lattice_session::test_helpers::{assistant_msg, user_msg};
 
     fn setup_with_commits(
         api: &SessionApi,
