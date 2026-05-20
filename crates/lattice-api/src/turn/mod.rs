@@ -2,8 +2,10 @@
 //!
 //! [`run_turn`] orchestrates durable turn execution through the `TurnDeps`
 //! dependency seam: create/open session, read transcript, invoke agent loop,
-//! commit exactly one turn, and return typed results. [`stream_turn`] forwards
-//! live agent events and appends a final `Committed` event after persistence.
+//! commit exactly one turn, and return typed results. [`stream_turn`] takes
+//! the same [`RunTurnRequest`] and returns a stream of [`TurnEvent`] values;
+//! the v1.1 implementation buffers events until the turn commits and then
+//! replays them, so it is not a live feed.
 //!
 //! # Dependency seam
 //!
@@ -22,6 +24,6 @@ mod tests;
 
 pub use execute::{run_turn, stream_turn};
 pub use types::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, StreamTurnRequest,
-    ToolResultSummary, TurnEvent, TurnEventStream, TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
+    TurnEventStream, TurnUsageSummary,
 };

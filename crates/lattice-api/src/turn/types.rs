@@ -4,20 +4,17 @@ use std::pin::Pin;
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
 
-/// Request to run a turn.
+/// Request to run a turn through either [`run_turn`] or [`stream_turn`].
+///
+/// Both facades accept the same input shape, so they share this single
+/// request type. `stream_turn` does not currently expose intermediate
+/// progress live — it executes the turn to completion and then replays
+/// buffered events — so callers do not need a distinct request type.
+///
+/// [`run_turn`]: crate::turn::run_turn
+/// [`stream_turn`]: crate::turn::stream_turn
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RunTurnRequest {
-    pub input: String,
-    pub session_id: Option<String>,
-    pub profile: Option<String>,
-    pub model: Option<String>,
-    #[serde(skip)]
-    pub loaded_profile: Option<LoadedAgentProfile>,
-}
-
-/// Request to stream a turn.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct StreamTurnRequest {
     pub input: String,
     pub session_id: Option<String>,
     pub profile: Option<String>,

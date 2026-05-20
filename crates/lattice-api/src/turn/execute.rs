@@ -7,8 +7,7 @@ use lattice_session::{derive_commit_message, TurnCommitInput};
 use super::deps::{RealTurnDeps, TurnDeps};
 use super::mapping::{build_agent_request, map_status, map_tool_results, resolve_model_and_prompt};
 use super::types::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, StreamTurnRequest, TurnEvent, TurnEventStream,
-    TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStage, TurnEvent, TurnEventStream, TurnUsageSummary,
 };
 use crate::session::{ApiError, Result, SessionApi};
 
@@ -119,7 +118,10 @@ pub async fn run_turn_with_deps(
     })
 }
 
-/// Execute a synchronous turn.
+/// Execute a turn and return its final result once it has been committed.
+///
+/// This is the synchronous facade: callers get a single
+/// [`RunTurnResult`] after the turn completes.
 pub async fn run_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
@@ -129,7 +131,9 @@ pub async fn run_turn(
     run_turn_with_deps(&deps, request).await
 }
 
-/// Execute a streaming turn with injected dependencies.
+/// Execute a turn and replay its buffered events through injected deps.
+///
+/// See [`stream_turn`] for the live-vs-buffered note.
 pub async fn stream_turn_with_deps(
     deps: &dyn TurnDeps,
     request: RunTurnRequest,
@@ -172,19 +176,18 @@ pub async fn stream_turn_with_deps(
     Ok(Box::pin(stream::iter(turn_events)))
 }
 
-/// Execute a streaming turn.
+/// Execute a turn and return its events as a stream.
+///
+/// **Current behavior (v1.1):** the turn is executed to completion and
+/// committed first, then the buffered events — including the terminal
+/// [`TurnEvent::Committed`] — are replayed as a stream. This is *not* a
+/// live event feed: callers will not observe tokens or tool results until
+/// the turn finishes. The live event stream lands in alpha-v1.2.
 pub async fn stream_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
-    request: StreamTurnRequest,
+    request: RunTurnRequest,
 ) -> Result<TurnEventStream> {
-    let run_request = RunTurnRequest {
-        input: request.input,
-        session_id: request.session_id,
-        profile: request.profile,
-        model: request.model,
-        loaded_profile: request.loaded_profile,
-    };
     let deps = RealTurnDeps::new(session, agent_loop);
-    stream_turn_with_deps(&deps, run_request).await
+    stream_turn_with_deps(&deps, request).await
 }
