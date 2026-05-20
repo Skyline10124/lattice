@@ -127,7 +127,6 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// OpenAI-specific: max completion tokens (replaces max_tokens for o-series)
     pub max_completion_tokens: Option<u32>,
-    pub stream: bool,
 }
 
 impl ChatRequest {
@@ -139,7 +138,6 @@ impl ChatRequest {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: false,
         }
     }
 }
@@ -348,7 +346,6 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: None,
             max_completion_tokens: None,
-            stream: false,
         };
         let json = serde_json::to_string(&req).unwrap();
         let deserialized: ChatRequest = serde_json::from_str(&json).unwrap();

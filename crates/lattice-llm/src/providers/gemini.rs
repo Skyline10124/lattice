@@ -346,7 +346,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -365,7 +364,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -382,7 +380,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -409,7 +406,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -441,7 +437,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -470,7 +465,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);

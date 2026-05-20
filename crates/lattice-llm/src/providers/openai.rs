@@ -10,12 +10,18 @@ use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
 
 /// Build the JSON body for an OpenAI Chat Completions request.
+///
+/// LATTICE's provider response path is SSE-only — `dispatch_stream` parses
+/// Server-Sent Events and never decodes a non-stream JSON body. The request
+/// is therefore always built as a streaming request, with `stream_options`
+/// asking the provider to include the final usage chunk.
 pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": resolved.provider_model,
         "messages": [],
-        "stream": request.stream,
+        "stream": true,
     });
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
 
     let messages = body
         .get_mut("messages")
@@ -92,10 +98,6 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         body["max_completion_tokens"] = serde_json::json!(max_comp_tokens);
     } else if let Some(max_tokens) = request.max_tokens {
         body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-
-    if request.stream {
-        body["stream_options"] = serde_json::json!({ "include_usage": true });
     }
 
     body
@@ -257,7 +259,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -270,25 +271,18 @@ mod tests {
     }
 
     #[test]
-    fn build_request_propagates_stream_flag() {
+    fn build_request_always_streams() {
         let resolved = make_resolved();
-
-        // Default ChatRequest has stream=false
-        let mut req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
+        let req = ChatRequest::new(vec![Message::user("hi")], ModelTarget::new("gpt-4o"));
         let json = build_request_json(&req, &resolved);
-        assert_eq!(json["stream"], false);
-        assert!(
-            json.get("stream_options").is_none(),
-            "stream_options should be absent when stream=false"
+        assert_eq!(
+            json["stream"], true,
+            "OpenAI request body must always set stream=true"
         );
-
-        // Streaming mode: stream=true and stream_options is present
-        req.stream = true;
-        let json = build_request_json(&req, &resolved);
-        assert_eq!(json["stream"], true);
         assert_eq!(
             json["stream_options"]["include_usage"], true,
-            "stream_options must include usage when streaming"
+            "stream_options.include_usage must always be set so the final \
+             SSE chunk carries usage data"
         );
     }
 
@@ -305,7 +299,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -328,7 +321,6 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(1024),
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -364,7 +356,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -392,7 +383,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);

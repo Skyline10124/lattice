@@ -106,7 +106,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         "model": resolved.provider_model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "stream": request.stream,
+        "stream": true,
     });
 
     if let Some(sys) = system {
@@ -318,7 +318,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -340,7 +339,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -356,7 +354,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -387,7 +384,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -417,7 +413,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -442,7 +437,6 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
@@ -454,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn build_request_includes_stream_flag() {
+    fn build_request_always_streams() {
         let req = ChatRequest {
             messages: vec![Message::user("hi")],
             tools: vec![],
@@ -462,11 +456,13 @@ mod tests {
             temperature: None,
             max_tokens: None,
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);
-        assert_eq!(json["stream"], true);
+        assert_eq!(
+            json["stream"], true,
+            "Anthropic request body must always set stream=true"
+        );
     }
 
     #[test]
@@ -478,7 +474,6 @@ mod tests {
             temperature: None,
             max_tokens: Some(2048),
             max_completion_tokens: None,
-            stream: true,
         };
         let resolved = make_resolved();
         let json = build_request_json(&req, &resolved);

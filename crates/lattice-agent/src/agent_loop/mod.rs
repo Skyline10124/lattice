@@ -205,7 +205,6 @@ impl AgentLoop {
                 temperature: None,
                 max_tokens: None,
                 max_completion_tokens: None,
-                stream: false,
             };
 
             let response = match self.config.llm.chat(chat_request).await {
