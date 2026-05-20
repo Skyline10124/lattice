@@ -65,6 +65,19 @@ impl Default for ModelRouter {
     }
 }
 
+fn build_openai_compatible(alias: &str, provider_model: &str) -> ResolvedModel {
+    let base_url = std::env::var("OPENAI_COMPATIBLE_BASE_URL")
+        .unwrap_or_else(|_| OPENAI_COMPATIBLE_DEFAULT_BASE_URL.to_string());
+    ResolvedModel {
+        alias: alias.to_string(),
+        provider: ProviderKind::OpenAiCompatible,
+        provider_model: provider_model.to_string(),
+        base_url,
+        api_key_env: "OPENAI_COMPATIBLE_API_KEY".to_string(),
+        credential_status: CredentialStatus::from_env("OPENAI_COMPATIBLE_API_KEY"),
+    }
+}
+
 impl ModelRouter {
     /// Create a new router with the default alias table.
     pub fn new() -> Self {
@@ -97,17 +110,26 @@ impl ModelRouter {
     pub fn resolve(&self, target: &ModelTarget) -> Result<ResolvedModel, LlmError> {
         let alias = target.model.as_str();
 
+        for prefix in ["compat:", "compatible:", "openai-compatible:"] {
+            if let Some(model) = alias.strip_prefix(prefix) {
+                if model.is_empty() {
+                    return Err(LlmError::Other(format!(
+                        "compatible model name is empty in '{}'; use {}<model>",
+                        alias, prefix
+                    )));
+                }
+                return Ok(build_openai_compatible(alias, model));
+            }
+        }
+
         if alias == "openai-compatible" {
-            let base_url = std::env::var("OPENAI_COMPATIBLE_BASE_URL")
-                .unwrap_or_else(|_| OPENAI_COMPATIBLE_DEFAULT_BASE_URL.to_string());
-            return Ok(ResolvedModel {
-                alias: alias.to_string(),
-                provider: ProviderKind::OpenAiCompatible,
-                provider_model: alias.to_string(),
-                base_url,
-                api_key_env: "OPENAI_COMPATIBLE_API_KEY".to_string(),
-                credential_status: CredentialStatus::from_env("OPENAI_COMPATIBLE_API_KEY"),
-            });
+            return match std::env::var("OPENAI_COMPATIBLE_MODEL") {
+                Ok(model) if !model.is_empty() => Ok(build_openai_compatible(alias, &model)),
+                _ => Err(LlmError::Other(
+                    "openai-compatible requires OPENAI_COMPATIBLE_MODEL or use compat:<model>"
+                        .to_string(),
+                )),
+            };
         }
 
         let (provider, provider_model, base_url, api_key_env) = match alias {
@@ -279,12 +301,6 @@ mod tests {
                 provider_model: "gemini-2.5-flash",
                 api_key_env: "GEMINI_API_KEY",
             },
-            ResolveCase {
-                alias: "openai-compatible",
-                provider: ProviderKind::OpenAiCompatible,
-                provider_model: "openai-compatible",
-                api_key_env: "OPENAI_COMPATIBLE_API_KEY",
-            },
         ];
 
         let router = ModelRouter::new();
@@ -309,7 +325,7 @@ mod tests {
                 case.alias
             );
             assert!(
-                !resolved.base_url.is_empty() || case.alias == "openai-compatible",
+                !resolved.base_url.is_empty(),
                 "{}: should have base_url",
                 case.alias
             );
@@ -378,29 +394,34 @@ mod tests {
 
     #[test]
     fn aliases_returns_all_known_aliases() {
-        let router = ModelRouter::new();
-        let aliases = router.aliases();
-        let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
+        with_env_vars(
+            &[("OPENAI_COMPATIBLE_MODEL", Some("deepseek-chat"))],
+            || {
+                let router = ModelRouter::new();
+                let aliases = router.aliases();
+                let names: Vec<&str> = aliases.iter().map(|a| a.alias.as_str()).collect();
 
-        let expected = [
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.3-codex",
-            "gpt-4o-mini",
-            "opus",
-            "sonnet",
-            "haiku",
-            "gemini",
-            "openai-compatible",
-        ];
-        for name in &expected {
-            assert!(
-                names.contains(name),
-                "aliases() should include '{}', got: {:?}",
-                name,
-                names
-            );
-        }
+                let expected = [
+                    "gpt-5.5",
+                    "gpt-5.4",
+                    "gpt-5.3-codex",
+                    "gpt-4o-mini",
+                    "opus",
+                    "sonnet",
+                    "haiku",
+                    "gemini",
+                    "openai-compatible",
+                ];
+                for name in &expected {
+                    assert!(
+                        names.contains(name),
+                        "aliases() should include '{}', got: {:?}",
+                        name,
+                        names
+                    );
+                }
+            },
+        );
     }
 
     #[test]
@@ -410,6 +431,7 @@ mod tests {
                 ("OPENAI_API_KEY", Some("sk-router-secret")),
                 ("ANTHROPIC_API_KEY", Some("sk-ant-secret")),
                 ("GEMINI_API_KEY", Some("sk-gem-secret")),
+                ("OPENAI_COMPATIBLE_MODEL", Some("deepseek-chat")),
             ],
             || {
                 let router = ModelRouter::new();
@@ -422,7 +444,7 @@ mod tests {
                         alias.alias
                     );
                     assert!(
-                        !alias.base_url.is_empty() || alias.alias == "openai-compatible",
+                        !alias.base_url.is_empty(),
                         "{}: should have base_url",
                         alias.alias
                     );
@@ -437,5 +459,91 @@ mod tests {
                 }
             },
         );
+    }
+
+    #[test]
+    fn resolve_compat_prefix_model() {
+        let router = ModelRouter::new();
+        let target = ModelTarget::new("compat:deepseek-chat");
+        let resolved = router.resolve(&target).expect("should resolve");
+        assert_eq!(resolved.provider, ProviderKind::OpenAiCompatible);
+        assert_eq!(resolved.provider_model, "deepseek-chat");
+        assert_eq!(resolved.api_key_env, "OPENAI_COMPATIBLE_API_KEY");
+        assert_eq!(resolved.alias, "compat:deepseek-chat");
+    }
+
+    #[test]
+    fn resolve_openai_compatible_prefix_model() {
+        let router = ModelRouter::new();
+        let target = ModelTarget::new("openai-compatible:deepseek-chat");
+        let resolved = router.resolve(&target).expect("should resolve");
+        assert_eq!(resolved.provider, ProviderKind::OpenAiCompatible);
+        assert_eq!(resolved.provider_model, "deepseek-chat");
+        assert_eq!(resolved.api_key_env, "OPENAI_COMPATIBLE_API_KEY");
+    }
+
+    #[test]
+    fn resolve_compatible_prefix_model() {
+        let router = ModelRouter::new();
+        let target = ModelTarget::new("compatible:qwen-plus");
+        let resolved = router.resolve(&target).expect("should resolve");
+        assert_eq!(resolved.provider, ProviderKind::OpenAiCompatible);
+        assert_eq!(resolved.provider_model, "qwen-plus");
+    }
+
+    #[test]
+    fn resolve_bare_openai_compatible_uses_env_model() {
+        with_env_vars(
+            &[("OPENAI_COMPATIBLE_MODEL", Some("deepseek-chat"))],
+            || {
+                let router = ModelRouter::new();
+                let target = ModelTarget::new("openai-compatible");
+                let resolved = router.resolve(&target).expect("should resolve");
+                assert_eq!(resolved.provider, ProviderKind::OpenAiCompatible);
+                assert_eq!(resolved.provider_model, "deepseek-chat");
+                assert_eq!(resolved.alias, "openai-compatible");
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_bare_openai_compatible_errors_without_env_model() {
+        with_env_vars(&[("OPENAI_COMPATIBLE_MODEL", None)], || {
+            let router = ModelRouter::new();
+            let target = ModelTarget::new("openai-compatible");
+            let err = router
+                .resolve(&target)
+                .expect_err("bare openai-compatible without env model should error");
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("OPENAI_COMPATIBLE_MODEL"),
+                "error should mention OPENAI_COMPATIBLE_MODEL: {}",
+                msg
+            );
+            assert!(
+                msg.contains("compat:<model>"),
+                "error should mention compat:<model>: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_empty_compat_model_errors() {
+        let router = ModelRouter::new();
+        for alias in ["compat:", "compatible:", "openai-compatible:"] {
+            let target = ModelTarget::new(alias);
+            let err = router
+                .resolve(&target)
+                .err()
+                .unwrap_or_else(|| panic!("expected error for '{}'", alias));
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("compatible model name is empty"),
+                "error for '{}' should mention empty model: {}",
+                alias,
+                msg
+            );
+        }
     }
 }
