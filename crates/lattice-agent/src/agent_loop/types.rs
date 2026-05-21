@@ -28,7 +28,7 @@ pub struct AgentTurnRequest {
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// Optional timeout for the entire turn (D-09/D-10).
     /// If the turn does not complete within this duration, it returns
-    /// `Failed` status with a timeout terminal reason.
+    /// `Error` status with a timeout terminal reason.
     pub timeout: Option<Duration>,
 }
 
@@ -37,8 +37,8 @@ pub struct AgentTurnRequest {
 pub enum AgentTurnStatus {
     /// The turn completed successfully with a final assistant response.
     Completed,
-    /// The turn failed due to an error (LLM error, unknown tools, etc.).
-    Failed,
+    /// The turn ended in error (LLM failure, max-rounds, unknown tools, timeout, etc.).
+    Error,
     /// The turn was cancelled by the caller.
     Cancelled,
 }
@@ -79,27 +79,46 @@ pub struct AgentTurnResult {
 
 /// Events emitted during agent turn execution.
 ///
-/// These events are the internal vocabulary for the agent loop. The API facade
-/// maps them to public `TurnEvent` values for streaming consumers.
+/// Process-only events describing what happens inside the agent loop. The agent
+/// loop does **not** emit terminal events. Terminal state for a turn lives
+/// solely on [`AgentTurnResult::status`] and [`AgentTurnResult::terminal_reason`];
+/// the API facade derives public terminal events from the result.
+///
+/// `AgentTurnEvent` is internal to the runtime and intentionally not
+/// `Serialize`/`Deserialize`. Only [`crate::TurnEvent`]-style public types
+/// carry serde derives.
 #[derive(Debug, Clone)]
 pub enum AgentTurnEvent {
-    /// The turn has started.
-    Started,
-    /// A chunk of generated text content from the LLM.
-    Token { content: String },
+    /// A model request is about to start.
+    ///
+    /// `provider` is the routed provider name when known (useful for
+    /// debugging model routing and OpenAI-compatible dispatch); `model`
+    /// is the canonical model identifier passed to the LLM client.
+    ModelStarted {
+        provider: Option<String>,
+        model: String,
+    },
+    /// A chunk of reasoning/thinking text from the LLM.
+    ReasoningDelta { content: String },
+    /// A chunk of visible assistant text from the LLM.
+    TokenDelta { content: String },
     /// A tool call is about to be executed.
-    ToolCallStart { id: String, name: String },
-    /// A tool call has completed.
-    ToolCallResult {
+    ToolCallStarted { id: String, name: String },
+    /// A tool call has completed execution.
+    ToolCallFinished {
         id: String,
         name: String,
         ok: bool,
         output_len: usize,
+        error_summary: Option<String>,
     },
-    /// The turn completed successfully.
-    Done { finish_reason: String },
-    /// The turn encountered an error.
-    Error { message: String },
-    /// The turn was cancelled.
-    Cancelled,
+    /// A model request completed successfully.
+    ///
+    /// Emitted only on successful LLM completion. Error and cancel paths
+    /// do **not** emit `ModelFinished`; their outcome is observable on
+    /// `AgentTurnResult.status` instead.
+    ModelFinished {
+        finish_reason: String,
+        usage: Option<TurnUsage>,
+    },
 }

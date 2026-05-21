@@ -54,7 +54,7 @@ impl std::fmt::Display for RunTurnStage {
 #[serde(rename_all = "snake_case")]
 pub enum RunTurnStatus {
     Completed,
-    Failed,
+    Error,
     Cancelled,
 }
 
@@ -62,7 +62,7 @@ impl RunTurnStatus {
     pub fn to_commit_status(&self) -> lattice_session::TurnCommitStatus {
         match self {
             Self::Completed => lattice_session::TurnCommitStatus::Completed,
-            Self::Failed => lattice_session::TurnCommitStatus::Error,
+            Self::Error => lattice_session::TurnCommitStatus::Error,
             Self::Cancelled => lattice_session::TurnCommitStatus::Cancelled,
         }
     }
@@ -108,35 +108,63 @@ pub struct RunTurnResult {
     pub stages: Vec<RunTurnStage>,
 }
 
-/// Turn stream event.
+/// Public turn stream event with stable JSON discriminator.
+///
+/// Serializes with `#[serde(tag = "type", rename_all = "snake_case")]`, so
+/// each variant produces JSON of the form `{"type": "snake_case_name", ...}`.
+/// Unit variants serialize as `{"type": "snake_case_name"}`.
+///
+/// The vocabulary covers turn lifecycle (`TurnStarted`, terminal events,
+/// commit events), per-request model activity (`ModelStarted`,
+/// `ModelFinished`), incremental deltas (`TokenDelta`, `ReasoningDelta`),
+/// and tool execution (`ToolCallStarted`, `ToolCallFinished`).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
-    Started,
-    Token {
-        content: String,
+    /// The turn has started execution.
+    TurnStarted {
+        session_id: String,
+        parent_commit_id: Option<String>,
+        branch: Option<String>,
     },
-    ToolCallStart {
-        id: String,
-        name: String,
+    /// A model request is starting.
+    ModelStarted {
+        provider: Option<String>,
+        model: String,
     },
-    ToolResult {
+    /// A chunk of reasoning/thinking text from the LLM.
+    ReasoningDelta { content: String },
+    /// A chunk of visible assistant text from the LLM.
+    TokenDelta { content: String },
+    /// A tool call is about to execute.
+    ToolCallStarted { id: String, name: String },
+    /// A tool call has completed.
+    ToolCallFinished {
         id: String,
         name: String,
         ok: bool,
         output_len: usize,
+        error_summary: Option<String>,
     },
-    Done {
+    /// A model request completed successfully.
+    ModelFinished {
         finish_reason: String,
+        usage: Option<TurnUsageSummary>,
     },
-    Error {
-        message: String,
-    },
-    Cancelled,
-    Committed {
+    /// The turn failed due to an error.
+    TurnFailed { reason: String },
+    /// The turn was cancelled.
+    TurnCancelled { reason: Option<String> },
+    /// Commit persistence is in progress.
+    TurnCommitting,
+    /// The turn was committed successfully.
+    TurnCommitted {
         session_id: String,
         commit_id: String,
         status: RunTurnStatus,
     },
+    /// Commit persistence failed.
+    CommitFailed { reason: String },
 }
 
 /// Boxed stream of TurnEvent values.

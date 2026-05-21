@@ -249,7 +249,7 @@ async fn agent_loop_unknown_enabled_tools_fails_before_llm_call() {
     );
 
     let result = loop_inst.run_turn(request).await;
-    assert_eq!(result.status, AgentTurnStatus::Failed);
+    assert_eq!(result.status, AgentTurnStatus::Error);
     assert!(result
         .terminal_reason
         .as_ref()
@@ -554,13 +554,17 @@ async fn agent_loop_timeout_returns_failed_status() {
     let started = std::time::Instant::now();
     let result = loop_inst.run_turn(request).await;
 
-    assert_eq!(result.status, AgentTurnStatus::Failed);
+    assert_eq!(result.status, AgentTurnStatus::Error);
     assert!(result.terminal_reason.as_ref().unwrap().contains("timeout"));
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "timeout should return promptly"
     );
     assert!(result.messages.is_empty());
+    assert!(
+        result.events.is_empty(),
+        "timeout path should not emit any process events"
+    );
 }
 
 #[tokio::test]
@@ -666,20 +670,24 @@ async fn agent_loop_emits_tool_activity_events() {
     assert_eq!(result.status, AgentTurnStatus::Completed);
 
     let events = &result.events;
+
+    let has_model_started = events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::ModelStarted { model, .. } if model == "test-model"));
     assert!(
-        matches!(events[0], AgentTurnEvent::Started),
-        "first event should be Started"
+        has_model_started,
+        "should emit ModelStarted before each chat() call"
     );
 
     let has_tool_start = events
         .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ToolCallStart { id, .. } if id == "call_1"));
-    assert!(has_tool_start, "should have ToolCallStart event");
+        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { id, .. } if id == "call_1"));
+    assert!(has_tool_start, "should have ToolCallStarted event");
 
-    let has_tool_result = events.iter().any(|e| {
+    let has_tool_finished = events.iter().any(|e| {
         matches!(
             e,
-            AgentTurnEvent::ToolCallResult {
+            AgentTurnEvent::ToolCallFinished {
                 id,
                 name,
                 ok: true,
@@ -687,17 +695,23 @@ async fn agent_loop_emits_tool_activity_events() {
             } if id == "call_1" && name == "read_file"
         )
     });
-    assert!(has_tool_result, "should have ToolCallResult event");
+    assert!(has_tool_finished, "should have ToolCallFinished event");
 
-    let has_done = events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::Done { finish_reason } if finish_reason == "stop"));
-    assert!(has_done, "should have Done event");
+    let has_model_finished = events.iter().any(|e| {
+        matches!(
+            e,
+            AgentTurnEvent::ModelFinished { finish_reason, .. } if finish_reason == "stop"
+        )
+    });
+    assert!(
+        has_model_finished,
+        "should have ModelFinished event on successful completion"
+    );
 
     let has_token = events
         .iter()
-        .any(|e| matches!(e, AgentTurnEvent::Token { content } if content == "final answer"));
-    assert!(has_token, "should have Token event with final answer");
+        .any(|e| matches!(e, AgentTurnEvent::TokenDelta { content } if content == "final answer"));
+    assert!(has_token, "should have TokenDelta event with final answer");
 }
 
 #[tokio::test]
@@ -712,7 +726,7 @@ async fn agent_loop_llm_error_returns_failed_status() {
     let request = make_request("hello", vec!["read_file".to_string()]);
     let result = loop_inst.run_turn(request).await;
 
-    assert_eq!(result.status, AgentTurnStatus::Failed);
+    assert_eq!(result.status, AgentTurnStatus::Error);
     assert!(result
         .terminal_reason
         .as_ref()
@@ -723,12 +737,6 @@ async fn agent_loop_llm_error_returns_failed_status() {
         .as_ref()
         .unwrap()
         .contains("provider unavailable"));
-
-    let has_error = result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::Error { message } if message.contains("provider unavailable")));
-    assert!(has_error, "should have Error event");
 }
 
 /// Fake LLM that emits a tool call response on every call, forever.
@@ -784,7 +792,7 @@ async fn agent_loop_terminates_at_hard_cap_when_llm_loops_forever() {
     let request = make_request("loop forever", vec!["read_file".to_string()]);
     let result = loop_inst.run_turn(request).await;
 
-    assert_eq!(result.status, AgentTurnStatus::Failed);
+    assert_eq!(result.status, AgentTurnStatus::Error);
     let reason = result.terminal_reason.expect("should have terminal reason");
     assert!(
         reason.contains("max rounds"),
@@ -792,10 +800,4 @@ async fn agent_loop_terminates_at_hard_cap_when_llm_loops_forever() {
     );
     // LLM call count should equal MAX_TURN_ROUNDS (each round makes exactly one LLM call).
     assert_eq!(llm.call_count.load(Ordering::SeqCst), 200);
-
-    let has_error = result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::Error { message } if message.contains("max rounds")));
-    assert!(has_error, "should emit Error event for max rounds");
 }

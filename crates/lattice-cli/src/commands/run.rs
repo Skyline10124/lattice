@@ -3,7 +3,7 @@
 //! # Exit codes
 //!
 //! - 0: Turn completed successfully (`RunTurnStatus::Completed`)
-//! - 1: Provider/API/tool execution failure (`RunTurnStatus::Failed` or `Cancelled`)
+//! - 1: Provider/API/tool execution failure (`RunTurnStatus::Error` or `Cancelled`)
 //! - 2: Input/configuration error (missing profile, missing credentials, missing session)
 
 use anyhow::Result;
@@ -316,7 +316,7 @@ fn render_result(result: &RunTurnResult, verbose: bool, json: bool) -> Result<()
 fn status_to_exit_code(status: &RunTurnStatus) -> std::process::ExitCode {
     match status {
         RunTurnStatus::Completed => std::process::ExitCode::SUCCESS,
-        RunTurnStatus::Failed | RunTurnStatus::Cancelled => std::process::ExitCode::from(1),
+        RunTurnStatus::Error | RunTurnStatus::Cancelled => std::process::ExitCode::from(1),
     }
 }
 
@@ -333,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn run_status_to_exit_code_failed_is_1() {
-        let code = status_to_exit_code(&RunTurnStatus::Failed);
+    fn run_status_to_exit_code_error_is_1() {
+        let code = status_to_exit_code(&RunTurnStatus::Error);
         assert_ne!(
             format!("{:?}", code),
             format!("{:?}", std::process::ExitCode::SUCCESS)

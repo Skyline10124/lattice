@@ -83,7 +83,7 @@ impl AgentLoop {
                         total_tokens: 0,
                     },
                     tool_results: Vec::new(),
-                    status: AgentTurnStatus::Failed,
+                    status: AgentTurnStatus::Error,
                     terminal_reason: Some(format!("unknown enabled tools: {err}")),
                     events: Vec::new(),
                 };
@@ -103,9 +103,9 @@ impl AgentLoop {
                         total_tokens: 0,
                     },
                     tool_results: Vec::new(),
-                    status: AgentTurnStatus::Failed,
+                    status: AgentTurnStatus::Error,
                     terminal_reason: Some("timeout".to_string()),
-                    events: vec![AgentTurnEvent::Started, AgentTurnEvent::Cancelled],
+                    events: Vec::new(),
                 },
             }
         } else {
@@ -131,8 +131,6 @@ impl AgentLoop {
         };
         let mut tool_summaries: Vec<AgentToolResultSummary> = Vec::new();
 
-        all_events.push(AgentTurnEvent::Started);
-
         // Repeat-until-final loop with safety cap (MAX_TURN_ROUNDS).
         // External timeout/cancel remain primary stops; this guards against
         // missing-timeout cases where a model emits tool calls indefinitely.
@@ -143,15 +141,12 @@ impl AgentLoop {
                     "exceeded max rounds ({}); set a shorter timeout or fix prompt",
                     MAX_TURN_ROUNDS
                 );
-                all_events.push(AgentTurnEvent::Error {
-                    message: reason.clone(),
-                });
                 return AgentTurnResult {
                     messages: all_messages,
                     assistant_output: String::new(),
                     usage: accumulated_usage,
                     tool_results: tool_summaries,
-                    status: AgentTurnStatus::Failed,
+                    status: AgentTurnStatus::Error,
                     terminal_reason: Some(reason),
                     events: all_events,
                 };
@@ -161,7 +156,6 @@ impl AgentLoop {
             // Check cancel (D-09)
             if let Some(flag) = &request.cancel_flag {
                 if flag.load(Ordering::Relaxed) {
-                    all_events.push(AgentTurnEvent::Cancelled);
                     return AgentTurnResult {
                         messages: all_messages,
                         assistant_output: String::new(),
@@ -182,13 +176,12 @@ impl AgentLoop {
             {
                 Ok(msgs) => msgs,
                 Err(e) => {
-                    all_events.push(AgentTurnEvent::Error { message: e.clone() });
                     return AgentTurnResult {
                         messages: all_messages,
                         assistant_output: String::new(),
                         usage: accumulated_usage,
                         tool_results: tool_summaries,
-                        status: AgentTurnStatus::Failed,
+                        status: AgentTurnStatus::Error,
                         terminal_reason: Some(e),
                         events: all_events,
                     };
@@ -207,18 +200,20 @@ impl AgentLoop {
                 max_completion_tokens: None,
             };
 
+            all_events.push(AgentTurnEvent::ModelStarted {
+                provider: request.provider.clone(),
+                model: request.model.clone(),
+            });
+
             let response = match self.config.llm.chat(chat_request).await {
                 Ok(resp) => resp,
                 Err(err) => {
-                    all_events.push(AgentTurnEvent::Error {
-                        message: err.to_string(),
-                    });
                     return AgentTurnResult {
                         messages: all_messages,
                         assistant_output: String::new(),
                         usage: accumulated_usage,
                         tool_results: tool_summaries,
-                        status: AgentTurnStatus::Failed,
+                        status: AgentTurnStatus::Error,
                         terminal_reason: Some(format!("LLM error: {err}")),
                         events: all_events,
                     };
@@ -232,12 +227,34 @@ impl AgentLoop {
                 accumulated_usage.total_tokens += usage.total_tokens as u64;
             }
 
-            // Emit token/assistant event
+            // Map per-request usage for ModelFinished payload
+            let request_usage: Option<TurnUsage> = response.usage.as_ref().map(|u| TurnUsage {
+                prompt_tokens: u.prompt_tokens as u64,
+                completion_tokens: u.completion_tokens as u64,
+                total_tokens: u.total_tokens as u64,
+            });
+
+            // Emit reasoning delta first (if any), then token delta (visible text).
+            if let Some(ref reasoning) = response.reasoning_content {
+                if !reasoning.is_empty() {
+                    all_events.push(AgentTurnEvent::ReasoningDelta {
+                        content: reasoning.clone(),
+                    });
+                }
+            }
             if !response.content.is_empty() {
-                all_events.push(AgentTurnEvent::Token {
+                all_events.push(AgentTurnEvent::TokenDelta {
                     content: response.content.clone(),
                 });
             }
+
+            // ModelFinished marks successful completion of this LLM request
+            // (D-04: only emitted on success). It carries finish_reason and
+            // per-request usage so the public mapping does not lose info.
+            all_events.push(AgentTurnEvent::ModelFinished {
+                finish_reason: response.finish_reason.clone(),
+                usage: request_usage,
+            });
 
             // Build assistant GraphMessage
             let assistant_tool_calls: Option<Vec<GraphToolCall>> =
@@ -267,9 +284,6 @@ impl AgentLoop {
             let tool_calls = match response.tool_calls {
                 Some(calls) if !calls.is_empty() => calls,
                 _ => {
-                    all_events.push(AgentTurnEvent::Done {
-                        finish_reason: response.finish_reason.clone(),
-                    });
                     return AgentTurnResult {
                         messages: all_messages,
                         assistant_output: response.content,
@@ -284,7 +298,7 @@ impl AgentLoop {
 
             // Execute tool calls sequentially (D-19..D-22)
             for call in &tool_calls {
-                all_events.push(AgentTurnEvent::ToolCallStart {
+                all_events.push(AgentTurnEvent::ToolCallStarted {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
                 });
@@ -303,11 +317,18 @@ impl AgentLoop {
                     Err(error) => (false, error),
                 };
 
-                all_events.push(AgentTurnEvent::ToolCallResult {
+                let error_summary = if ok {
+                    None
+                } else {
+                    Some(tool_content.chars().take(200).collect::<String>())
+                };
+
+                all_events.push(AgentTurnEvent::ToolCallFinished {
                     id: call.id.clone(),
                     name: call.function.name.clone(),
                     ok,
                     output_len: tool_content.len(),
+                    error_summary: error_summary.clone(),
                 });
 
                 tool_summaries.push(AgentToolResultSummary {
@@ -315,11 +336,7 @@ impl AgentLoop {
                     name: call.function.name.clone(),
                     ok,
                     output_len: tool_content.len(),
-                    error_summary: if ok {
-                        None
-                    } else {
-                        Some(tool_content.chars().take(200).collect())
-                    },
+                    error_summary,
                 });
 
                 // Full tool result as GraphMessage (D-23..D-26: no summarization)

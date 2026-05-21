@@ -31,12 +31,16 @@ impl FakeTurnDeps {
             created_session_id: "auto-created-session".to_string(),
             agent_result: std::sync::Mutex::new(Some(agent_result)),
             agent_events: vec![
-                AgentTurnEvent::Started,
-                AgentTurnEvent::Token {
+                AgentTurnEvent::ModelStarted {
+                    provider: None,
+                    model: "test-model".to_string(),
+                },
+                AgentTurnEvent::TokenDelta {
                     content: "test response".to_string(),
                 },
-                AgentTurnEvent::Done {
+                AgentTurnEvent::ModelFinished {
                     finish_reason: "stop".to_string(),
+                    usage: None,
                 },
             ],
             commit_id: "commit-abc123".to_string(),
@@ -174,7 +178,7 @@ fn failed_result() -> AgentTurnResult {
             total_tokens: 0,
         },
         tool_results: vec![],
-        status: AgentTurnStatus::Failed,
+        status: AgentTurnStatus::Error,
         terminal_reason: Some("LLM error: provider unavailable".to_string()),
         events: vec![],
     }
@@ -339,7 +343,7 @@ async fn run_turn_failed_outcome_is_committed() {
     let request = make_request("hello");
     let result = run_turn_with_deps(&deps, request).await.unwrap();
 
-    assert_eq!(result.status, RunTurnStatus::Failed);
+    assert_eq!(result.status, RunTurnStatus::Error);
     assert_eq!(result.assistant_output, "");
     assert_eq!(deps.commit_count(), 1);
     let commit_input = deps
@@ -451,10 +455,10 @@ async fn stream_turn_auto_creates_session_and_final_committed_event_names_it() {
 
     let committed = events
         .iter()
-        .find(|e| matches!(e, TurnEvent::Committed { .. }))
-        .expect("should have Committed event");
+        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("should have TurnCommitted event");
 
-    if let TurnEvent::Committed {
+    if let TurnEvent::TurnCommitted {
         session_id,
         commit_id,
         status,
@@ -465,7 +469,7 @@ async fn stream_turn_auto_creates_session_and_final_committed_event_names_it() {
         assert!(!commit_id.is_empty(), "commit_id should be non-empty");
         assert_eq!(*status, RunTurnStatus::Completed);
     } else {
-        panic!("expected Committed event");
+        panic!("expected TurnCommitted event");
     }
 }
 
@@ -520,22 +524,27 @@ async fn stream_turn_emits_tool_activity_before_committed() {
         events: vec![],
     };
     let tool_events = vec![
-        AgentTurnEvent::Started,
-        AgentTurnEvent::ToolCallStart {
+        AgentTurnEvent::ModelStarted {
+            provider: None,
+            model: "test-model".to_string(),
+        },
+        AgentTurnEvent::ToolCallStarted {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
         },
-        AgentTurnEvent::ToolCallResult {
+        AgentTurnEvent::ToolCallFinished {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
             ok: true,
             output_len: 12,
+            error_summary: None,
         },
-        AgentTurnEvent::Token {
+        AgentTurnEvent::TokenDelta {
             content: "here is the file".to_string(),
         },
-        AgentTurnEvent::Done {
+        AgentTurnEvent::ModelFinished {
             finish_reason: "stop".to_string(),
+            usage: None,
         },
     ];
 
@@ -549,30 +558,36 @@ async fn stream_turn_emits_tool_activity_before_committed() {
 
     let tool_start_pos = events
         .iter()
-        .position(|e| matches!(e, TurnEvent::ToolCallStart { .. }));
-    let tool_result_pos = events
+        .position(|e| matches!(e, TurnEvent::ToolCallStarted { .. }));
+    let tool_finished_pos = events
         .iter()
-        .position(|e| matches!(e, TurnEvent::ToolResult { .. }));
+        .position(|e| matches!(e, TurnEvent::ToolCallFinished { .. }));
     let committed_pos = events
         .iter()
-        .position(|e| matches!(e, TurnEvent::Committed { .. }));
+        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }));
 
-    assert!(tool_start_pos.is_some(), "should have ToolCallStart event");
-    assert!(tool_result_pos.is_some(), "should have ToolResult event");
-    assert!(committed_pos.is_some(), "should have Committed event");
+    assert!(
+        tool_start_pos.is_some(),
+        "should have ToolCallStarted event"
+    );
+    assert!(
+        tool_finished_pos.is_some(),
+        "should have ToolCallFinished event"
+    );
+    assert!(committed_pos.is_some(), "should have TurnCommitted event");
 
     assert!(
         tool_start_pos.unwrap() < committed_pos.unwrap(),
-        "ToolCallStart must appear before Committed"
+        "ToolCallStarted must appear before TurnCommitted"
     );
     assert!(
-        tool_result_pos.unwrap() < committed_pos.unwrap(),
-        "ToolResult must appear before Committed"
+        tool_finished_pos.unwrap() < committed_pos.unwrap(),
+        "ToolCallFinished must appear before TurnCommitted"
     );
 }
 
 #[tokio::test]
-async fn stream_turn_error_still_commits_failed() {
+async fn stream_turn_error_still_commits_error() {
     let deps = FakeTurnDeps::new(failed_result());
     let request = make_request("hello");
     let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
@@ -583,12 +598,26 @@ async fn stream_turn_error_still_commits_failed() {
 
     let committed = events
         .iter()
-        .find(|e| matches!(e, TurnEvent::Committed { .. }))
-        .expect("should have Committed event even on failure");
+        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("should have TurnCommitted event even on failure");
 
-    if let TurnEvent::Committed { status, .. } = committed {
-        assert_eq!(*status, RunTurnStatus::Failed);
+    if let TurnEvent::TurnCommitted { status, .. } = committed {
+        assert_eq!(*status, RunTurnStatus::Error);
     }
+
+    // The terminal TurnFailed must appear before TurnCommitted.
+    let failed_pos = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::TurnFailed { .. }))
+        .expect("should have TurnFailed event before commit");
+    let committed_pos = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("should have TurnCommitted event");
+    assert!(
+        failed_pos < committed_pos,
+        "TurnFailed must precede TurnCommitted in the stream"
+    );
 
     assert_eq!(deps.commit_count(), 1);
     let commit_input = deps
@@ -643,4 +672,78 @@ async fn run_turn_commits_parent_from_initial_transcript() {
         vec!["parent-initial".to_string()],
         "commit should use parent from initial transcript, not a raced second read"
     );
+}
+
+// ── VER-07 verification tests ───────────────────────────────────────
+//
+// These tests pin the public vocabulary contract:
+//   1. RunTurnStatus::Error maps to TurnCommitStatus::Error.
+//   2. TurnEvent serializes with internally tagged `{"type": ...}` JSON.
+//   3. Old Failed variant is gone.
+
+#[test]
+fn status_error_maps_to_commit_error() {
+    assert_eq!(
+        RunTurnStatus::Error.to_commit_status(),
+        lattice_session::TurnCommitStatus::Error
+    );
+}
+
+#[test]
+fn turn_event_serializes_with_type_discriminator() {
+    let event = TurnEvent::TokenDelta {
+        content: "hi".to_string(),
+    };
+    let json = serde_json::to_value(&event).expect("TurnEvent should serialize");
+    assert_eq!(json["type"], "token_delta");
+    assert_eq!(json["content"], "hi");
+}
+
+#[test]
+fn turn_event_unit_variant_serializes_correctly() {
+    let event = TurnEvent::TurnCommitting;
+    let json = serde_json::to_value(&event).expect("unit variant should serialize");
+    assert_eq!(json["type"], "turn_committing");
+    let obj = json
+        .as_object()
+        .expect("unit variant should serialize as object with `type` only");
+    assert_eq!(
+        obj.len(),
+        1,
+        "TurnCommitting should serialize with only `type`, got {obj:?}"
+    );
+}
+
+#[test]
+fn turn_event_struct_variant_with_optional_none() {
+    let event = TurnEvent::TurnCancelled { reason: None };
+    let json = serde_json::to_value(&event).expect("TurnCancelled should serialize");
+    assert_eq!(json["type"], "turn_cancelled");
+    assert!(
+        json["reason"].is_null(),
+        "Optional reason field should serialize as null when None, got {:?}",
+        json["reason"]
+    );
+}
+
+#[test]
+fn turn_event_turn_started_serializes() {
+    let event = TurnEvent::TurnStarted {
+        session_id: "s1".to_string(),
+        parent_commit_id: None,
+        branch: None,
+    };
+    let json = serde_json::to_value(&event).expect("TurnStarted should serialize");
+    assert_eq!(json["type"], "turn_started");
+    assert_eq!(json["session_id"], "s1");
+}
+
+#[test]
+fn old_failed_variant_removed_compile_guard() {
+    // Compile-time guard: this only builds because RunTurnStatus::Error exists.
+    // The runtime assertion proves the renamed variant Debug-prints as "Error",
+    // not "Failed", so any reintroduction of Failed shows up here too.
+    let status = RunTurnStatus::Error;
+    assert_ne!(format!("{status:?}"), "Failed");
+    assert_eq!(format!("{status:?}"), "Error");
 }

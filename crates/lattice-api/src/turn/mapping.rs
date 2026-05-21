@@ -95,7 +95,7 @@ pub(crate) fn map_tool_results(summaries: &[AgentToolSummary]) -> Vec<ToolResult
 pub(crate) fn map_status(status: &AgentTurnStatus) -> RunTurnStatus {
     match status {
         AgentTurnStatus::Completed => RunTurnStatus::Completed,
-        AgentTurnStatus::Failed => RunTurnStatus::Failed,
+        AgentTurnStatus::Error => RunTurnStatus::Error,
         AgentTurnStatus::Cancelled => RunTurnStatus::Cancelled,
     }
 }
