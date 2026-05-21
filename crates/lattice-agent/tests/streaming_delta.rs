@@ -385,6 +385,123 @@ async fn streaming_invalid_tool_call_json_no_execution() {
         .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
 }
 
+#[tokio::test]
+async fn streaming_tool_call_delta_after_end_is_error_no_execution() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                LlmEvent::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                },
+                LlmEvent::ToolCallDelta {
+                    id: "c1".to_string(),
+                    arguments_delta: r#"{"path":"a.txt"}"#.to_string(),
+                },
+                LlmEvent::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+                LlmEvent::ToolCallDelta {
+                    id: "c1".to_string(),
+                    arguments_delta: r#"{"path":"b.txt"}"#.to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let result = loop_inst
+        .run_turn(make_request("read", vec!["read_file".to_string()]))
+        .await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert!(result
+        .terminal_reason
+        .as_ref()
+        .unwrap()
+        .contains("delta after end"));
+    assert!(result.tool_results.is_empty());
+    assert!(result
+        .messages
+        .iter()
+        .all(|message| message.tool_calls.is_none()));
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })));
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+}
+
+#[tokio::test]
+async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                LlmEvent::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                },
+                LlmEvent::ToolCallDelta {
+                    id: "c1".to_string(),
+                    arguments_delta: r#"{"path":"a.txt"}"#.to_string(),
+                },
+                LlmEvent::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+                LlmEvent::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let result = loop_inst
+        .run_turn(make_request("read", vec!["read_file".to_string()]))
+        .await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert!(result
+        .terminal_reason
+        .as_ref()
+        .unwrap()
+        .contains("duplicate end"));
+    assert!(result.tool_results.is_empty());
+    assert!(result
+        .messages
+        .iter()
+        .all(|message| message.tool_calls.is_none()));
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })));
+    assert!(!result
+        .events
+        .iter()
+        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+}
+
 // ---------------------------------------------------------------------------
 // Scenario 6 (AGENT-06): multiple valid tool calls, sequential execution
 // ---------------------------------------------------------------------------

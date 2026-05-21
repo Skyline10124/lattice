@@ -561,8 +561,20 @@ impl AgentLoop {
                     id,
                     arguments_delta,
                 } => {
-                    if let Some(call) = pending_calls.iter_mut().find(|c| c.id == id) {
-                        call.arguments.push_str(&arguments_delta);
+                    if let Some(index) = pending_calls.iter().position(|c| c.id == id) {
+                        if pending_calls[index].ended {
+                            return StreamResult {
+                                assistant_content,
+                                reasoning_content,
+                                tool_calls: pending_calls,
+                                usage,
+                                finish_reason,
+                                outcome: StreamOutcome::Error(format!(
+                                    "invalid/incomplete tool call: delta after end (id={id})"
+                                )),
+                            };
+                        }
+                        pending_calls[index].arguments.push_str(&arguments_delta);
                     } else {
                         return StreamResult {
                             assistant_content,
@@ -577,8 +589,20 @@ impl AgentLoop {
                     }
                 }
                 lattice_llm::LlmEvent::ToolCallEnd { id } => {
-                    if let Some(call) = pending_calls.iter_mut().find(|c| c.id == id) {
-                        call.ended = true;
+                    if let Some(index) = pending_calls.iter().position(|c| c.id == id) {
+                        if pending_calls[index].ended {
+                            return StreamResult {
+                                assistant_content,
+                                reasoning_content,
+                                tool_calls: pending_calls,
+                                usage,
+                                finish_reason,
+                                outcome: StreamOutcome::Error(format!(
+                                    "invalid/incomplete tool call: duplicate end (id={id})"
+                                )),
+                            };
+                        }
+                        pending_calls[index].ended = true;
                     } else {
                         return StreamResult {
                             assistant_content,

@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.2-alpha
 milestone_name: Evented Runtime
 status: milestone_complete
-last_updated: 2026-05-21T13:23:07.245Z
+last_updated: 2026-05-21T14:20:05Z
 last_activity: 2026-05-21 -- Phase 14 execution started
 progress:
   total_phases: 3
@@ -56,6 +56,7 @@ Last activity: 2026-05-21
 ### Todos
 
 - Phase 14: AgentLoop Streaming Delta Engine.
+- Phase 15: Implement cooperative cancellation checkpoints deferred from Phase 14: before `stream_chat`, after each `LlmEvent` chunk, after model `Done` before tool execution, before each tool starts, and after each tool finishes before the next model round.
 - Phase 14/17: Preserve partial progress on timeout via cooperative deadline or streaming loop state.
 - Phase 17: Reconcile `RunTurnStage` semantics with observed events/tool results or weaken/remove the field.
 - Run `cargo fmt --all` during Phase 14 to clean up pre-existing drift in `crates/lattice-llm/src/client.rs:289` (logged in `.planning/phases/12-event-and-status-vocabulary-contract/deferred-items.md`).
