@@ -361,20 +361,24 @@ impl AgentLoop {
 
                     if !all_valid {
                         // Invalid tool calls: no ModelFinished, content-only message
-                        let assistant_msg = GraphMessage {
-                            role: "assistant".to_string(),
-                            content: stream_result.assistant_content.clone(),
-                            reasoning_content: if stream_result.reasoning_content.is_empty() {
-                                None
-                            } else {
-                                Some(stream_result.reasoning_content.clone())
-                            },
-                            tool_calls: None,
-                            tool_call_id: None,
-                            name: None,
-                        };
-                        messages.push(assistant_msg.clone());
-                        all_messages.push(assistant_msg);
+                        if !stream_result.assistant_content.is_empty()
+                            || !stream_result.reasoning_content.is_empty()
+                        {
+                            let assistant_msg = GraphMessage {
+                                role: "assistant".to_string(),
+                                content: stream_result.assistant_content.clone(),
+                                reasoning_content: if stream_result.reasoning_content.is_empty() {
+                                    None
+                                } else {
+                                    Some(stream_result.reasoning_content.clone())
+                                },
+                                tool_calls: None,
+                                tool_call_id: None,
+                                name: None,
+                            };
+                            messages.push(assistant_msg.clone());
+                            all_messages.push(assistant_msg);
+                        }
 
                         return AgentTurnResult {
                             messages: all_messages,

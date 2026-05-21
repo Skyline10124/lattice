@@ -371,6 +371,10 @@ async fn streaming_invalid_tool_call_json_no_execution() {
         .as_ref()
         .unwrap()
         .contains("invalid/incomplete tool call"));
+    assert!(
+        result.messages.is_empty(),
+        "malformed tool-only response should not commit an empty assistant message"
+    );
     assert!(result.tool_results.is_empty());
 
     // No ToolCallStarted event (invalid calls are not executed)
