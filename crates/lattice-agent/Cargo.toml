@@ -12,3 +12,7 @@ lattice-session = { workspace = true }
 lattice-tools = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+futures = "0.3"
+
+[features]
+test-utils = []

@@ -21,7 +21,7 @@ A user can run one session-centered generic agent through a small, understandabl
 
 ## Current State
 
-**Shipped:** v1.1 Cut Off Cleverness (2026-05-20)
+**Shipped:** v1.1 Cut Off Cleverness (2026-05-20); Phase 13 LLM streaming seam (2026-05-21)
 **Codebase:** 8 crates, 18.1k LOC Rust, 504 tests passing
 **Stack:** Rust, tokio, reqwest, rusqlite, clap, serde
 
@@ -43,12 +43,12 @@ The v1.2-alpha milestone starts from that small substrate. The design source is 
 - ✓ CLI surface narrowed to run, models, resolve, session, doctor — v1.1
 - ✓ Active source reduced to 18.1k LOC (under 20k budget) — v1.1
 - ✓ All removed abstractions absent from active source — v1.1
+- ✓ `LlmClient::stream_chat` seam with default buffered fallback and feature-gated fake streaming client — Phase 13
 
 ### Active
 
 Active items are milestone requirements, not completed implementation.
 
-- Expose `LlmClient::stream_chat`, with a narrow fallback over `chat()` and a fake streaming test client.
 - Use `Completed`, `Error`, and `Cancelled` across `AgentTurnStatus`, `RunTurnStatus`, and commit status vocabulary.
 - Make `AgentTurnEvent` carry process events only; derive terminal public events in `lattice-api` from `AgentTurnResult`.
 - Expose `TurnEvent` variants for turn start, model activity, deltas, tools, terminal outcomes, committing, committed, and commit failure.
@@ -116,4 +116,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-21 after v1.2-alpha milestone initialization*
+*Last updated: 2026-05-21 after Phase 13 completion*

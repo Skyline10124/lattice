@@ -16,10 +16,10 @@
 
 ### LLM Streaming
 
-- [ ] **LLM-06**: `LlmClient` exposes `stream_chat(request)` returning an `LlmStream` while keeping `chat(request)` available for temporary compatibility and tests.
-- [ ] **LLM-07**: Existing `LlmClient` implementations continue to compile through a default `stream_chat` fallback that faithfully converts `ChatResponse` content, reasoning_content, tool_calls, finish_reason, and usage into a single-blob stream.
-- [ ] **LLM-08**: Tests can use a configurable `FakeStreamingLlmClient` that emits token, reasoning, tool-call, done, and error event sequences without provider credentials.
-- [ ] **LLM-09**: Production LLM execution can consume the existing provider `LlmEvent` stream without adding a model catalog, router policy, or new runtime layer.
+- [x] **LLM-06**: `LlmClient` exposes `stream_chat(request)` returning an `LlmStream` while keeping `chat(request)` available for temporary compatibility and tests.
+- [x] **LLM-07**: Existing `LlmClient` implementations continue to compile through a default `stream_chat` fallback that faithfully converts `ChatResponse` content, reasoning_content, tool_calls, finish_reason, and usage into a single-blob stream.
+- [x] **LLM-08**: Tests can use a configurable `FakeStreamingLlmClient` that emits token, reasoning, tool-call, done, and error event sequences without provider credentials.
+- [x] **LLM-09**: Production LLM execution can consume the existing provider `LlmEvent` stream without adding a model catalog, router policy, or new runtime layer.
 
 ### Agent Loop
 
@@ -99,10 +99,10 @@
 | EVT-03 | Phase 12 | Complete |
 | EVT-04 | Phase 12 | Complete |
 | EVT-05 | Phase 12 | Complete |
-| LLM-06 | Phase 13 | Pending |
-| LLM-07 | Phase 13 | Pending |
-| LLM-08 | Phase 13 | Pending |
-| LLM-09 | Phase 13 | Pending |
+| LLM-06 | Phase 13 | Complete |
+| LLM-07 | Phase 13 | Complete |
+| LLM-08 | Phase 13 | Complete |
+| LLM-09 | Phase 13 | Complete |
 | AGENT-03 | Phase 14 | Pending |
 | AGENT-04 | Phase 14 | Pending |
 | AGENT-05 | Phase 14 | Pending |

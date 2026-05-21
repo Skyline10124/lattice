@@ -6,3 +6,6 @@ pub use agent_loop::{
     AgentLoop, AgentLoopConfig, AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest,
     AgentTurnResult, AgentTurnStatus, LlmClient, ToolCallExecutor,
 };
+
+#[cfg(feature = "test-utils")]
+pub mod testing;

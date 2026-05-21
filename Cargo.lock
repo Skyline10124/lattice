@@ -956,6 +956,7 @@ name = "lattice-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "lattice-llm",
  "lattice-session",
  "lattice-tools",

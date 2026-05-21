@@ -26,7 +26,9 @@
   Plans:
   - [x] 12-01-PLAN.md — Rewrite event/status type definitions, agent loop emissions, and mapping layer
   - [x] 12-02-PLAN.md — Update tests and CLI, add VER-07 verification tests
-- [ ] Phase 13: LLM Streaming Trait and Fake Streaming Client — planned
+- [x] Phase 13: LLM Streaming Trait and Fake Streaming Client — 1/1 plans — completed 2026-05-21
+  Plans:
+  - [x] 13-01-PLAN.md — Add stream_chat to LlmClient with default fallback, ship lattice_agent::testing::FakeStreamingLlmClient, cover D-13.2..D-13.11b in tests/streaming_seam.rs
 - [ ] Phase 14: AgentLoop Streaming Delta Engine — planned
 - [ ] Phase 15: AgentLoop Live Sink and Cooperative Cancellation — planned
 - [ ] Phase 16: Live API Stream and Commit Transaction — planned
@@ -40,7 +42,7 @@
 | Phase | Goal | Requirements | Success Criteria |
 |-------|------|--------------|------------------|
 | 12. Event and Status Vocabulary Contract | Rename and stabilize the public/internal event vocabulary before changing execution behavior. | EVT-01, EVT-02, EVT-03, EVT-04, EVT-05, VER-07 | 4 |
-| 13. LLM Streaming Trait and Fake Streaming Client | Add the streaming LLM seam and deterministic fake client without moving AgentLoop yet. | LLM-06, LLM-07, LLM-08, LLM-09 | 4 |
+| 13. LLM Streaming Trait and Fake Streaming Client | Introduce the LLM streaming seam needed by live turns while keeping existing call sites compiling. | LLM-06, LLM-07, LLM-08, LLM-09 | 4 |
 | 14. AgentLoop Streaming Delta Engine | Make AgentLoop consume model streams and finalize deltas into transcript messages. | AGENT-03, AGENT-04, AGENT-05, AGENT-06, AGENT-07, VER-08, VER-09 | 5 |
 | 15. AgentLoop Live Sink and Cooperative Cancellation | Add live agent event forwarding and lock explicit cancellation semantics. | AGENT-08, AGENT-09, VER-11 | 4 |
 | 16. Live API Stream and Commit Transaction | Implement real `stream_turn` with ordered public events and durable commit behavior. | COMM-01, COMM-02, COMM-03, COMM-04, COMM-05, API-04, API-05, API-06, API-07, API-08, API-09, API-10 | 5 |
@@ -145,7 +147,7 @@
 | 10. CLI Cutover | v1.1 | 6/6 | Complete | 2026-05-17 |
 | 11. Deletion/Verify | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 12. Event Vocabulary | v1.2-alpha | 2/2 | Complete | 2026-05-21 |
-| 13. LLM Streaming | v1.2-alpha | 0/0 | Planned | — |
+| 13. LLM Streaming | v1.2-alpha | 1/1 | Complete | 2026-05-21 |
 | 14. Agent Streaming | v1.2-alpha | 0/0 | Planned | — |
 | 15. Agent Live Sink | v1.2-alpha | 0/0 | Planned | — |
 | 16. API Live Stream | v1.2-alpha | 0/0 | Planned | — |
