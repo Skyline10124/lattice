@@ -349,3 +349,144 @@ async fn fake_chat_ignores_provider_metadata_events() {
     assert_eq!(response.tool_calls, None);
     assert_eq!(response.finish_reason, "stop");
 }
+
+#[tokio::test]
+async fn default_stream_chat_with_multiple_tool_calls_emits_all_sequentially() {
+    let tool_calls = vec![
+        ToolCall {
+            id: "c1".to_string(),
+            function: FunctionCall {
+                name: "search".to_string(),
+                arguments: r#"{"q":"a"}"#.to_string(),
+            },
+        },
+        ToolCall {
+            id: "c2".to_string(),
+            function: FunctionCall {
+                name: "calc".to_string(),
+                arguments: r#"{"expr":"1+1"}"#.to_string(),
+            },
+        },
+    ];
+    let client = BufferedClient {
+        response: Ok(response_with(
+            "",
+            None,
+            Some(tool_calls),
+            "tool_calls",
+            None,
+        )),
+    };
+
+    let stream = client.stream_chat(make_chat_request()).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+
+    assert_eq!(
+        events,
+        vec![
+            LlmEvent::ToolCallStart {
+                id: "c1".to_string(),
+                name: "search".to_string(),
+            },
+            LlmEvent::ToolCallDelta {
+                id: "c1".to_string(),
+                arguments_delta: r#"{"q":"a"}"#.to_string(),
+            },
+            LlmEvent::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+            LlmEvent::ToolCallStart {
+                id: "c2".to_string(),
+                name: "calc".to_string(),
+            },
+            LlmEvent::ToolCallDelta {
+                id: "c2".to_string(),
+                arguments_delta: r#"{"expr":"1+1"}"#.to_string(),
+            },
+            LlmEvent::ToolCallEnd {
+                id: "c2".to_string(),
+            },
+            done("tool_calls", None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn default_stream_chat_with_content_and_tool_calls_emits_token_before_tools() {
+    let tool_call = ToolCall {
+        id: "c1".to_string(),
+        function: FunctionCall {
+            name: "run".to_string(),
+            arguments: "{}".to_string(),
+        },
+    };
+    let client = BufferedClient {
+        response: Ok(response_with(
+            "ok",
+            None,
+            Some(vec![tool_call]),
+            "tool_calls",
+            None,
+        )),
+    };
+
+    let stream = client.stream_chat(make_chat_request()).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+
+    assert_eq!(
+        events,
+        vec![
+            token("ok"),
+            LlmEvent::ToolCallStart {
+                id: "c1".to_string(),
+                name: "run".to_string(),
+            },
+            LlmEvent::ToolCallDelta {
+                id: "c1".to_string(),
+                arguments_delta: "{}".to_string(),
+            },
+            LlmEvent::ToolCallEnd {
+                id: "c1".to_string(),
+            },
+            done("tool_calls", None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn default_stream_chat_with_empty_response_emits_only_done() {
+    let client = BufferedClient {
+        response: Ok(response_with("", None, None, "stop", None)),
+    };
+
+    let stream = client.stream_chat(make_chat_request()).await.unwrap();
+    let events = stream.collect::<Vec<_>>().await;
+
+    assert_eq!(events, vec![done("stop", None)]);
+}
+
+#[tokio::test]
+async fn fake_chat_returns_err_when_queue_exhausted() {
+    let client = FakeStreamingLlmClient::builder().build();
+
+    let result = client.chat(make_chat_request()).await;
+
+    match result {
+        Ok(_) => panic!("chat unexpectedly returned a response"),
+        Err(error) => assert!(error.to_string().contains("no more fake responses")),
+    }
+    assert_eq!(client.call_count(), 1);
+}
+
+#[tokio::test]
+async fn fake_stream_chat_returns_err_when_queue_exhausted() {
+    let client = FakeStreamingLlmClient::builder().build();
+
+    let result = client.stream_chat(make_chat_request()).await;
+
+    match result {
+        Ok(_) => panic!("stream_chat unexpectedly returned a stream"),
+        Err(error) => assert!(error.to_string().contains("no more fake responses")),
+    }
+    assert_eq!(client.call_count(), 1);
+}

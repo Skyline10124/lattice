@@ -38,7 +38,7 @@ impl FakeStreamingLlmClient {
     }
 
     pub fn call_count(&self) -> usize {
-        self.call_count.load(Ordering::SeqCst)
+        self.call_count.load(Ordering::Relaxed)
     }
 }
 
@@ -68,7 +68,7 @@ impl LlmClient for FakeStreamingLlmClient {
         &self,
         request: ChatRequest,
     ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.call_count.fetch_add(1, Ordering::Relaxed);
         let response = self.queue.lock().unwrap().pop_front();
 
         match response {
@@ -84,7 +84,7 @@ impl LlmClient for FakeStreamingLlmClient {
         &self,
         _request: ChatRequest,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.call_count.fetch_add(1, Ordering::Relaxed);
         let response = self.queue.lock().unwrap().pop_front();
 
         match response {
@@ -163,6 +163,9 @@ fn aggregate_events_to_chat_response(
             Some(reasoning_content)
         },
         tool_calls,
+        // Intentional StubLlm/chat parity: missing Done defaults to "stop".
+        // Phase 14 streaming consumers must treat this as Error instead —
+        // do not emit ModelFinished on incomplete streams.
         finish_reason: if finish_reason.is_empty() {
             "stop".to_string()
         } else {
