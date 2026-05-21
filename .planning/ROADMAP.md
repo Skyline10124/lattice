@@ -29,7 +29,10 @@
 - [x] Phase 13: LLM Streaming Trait and Fake Streaming Client — 1/1 plans — completed 2026-05-21
   Plans:
   - [x] 13-01-PLAN.md — Add stream_chat to LlmClient with default fallback, ship lattice_agent::testing::FakeStreamingLlmClient, cover D-13.2..D-13.11b in tests/streaming_seam.rs
-- [ ] Phase 14: AgentLoop Streaming Delta Engine — planned
+- [x] Phase 14: AgentLoop Streaming Delta Engine — 2/2 plans — completed 2026-05-21
+  Plans:
+  - [x] 14-01-PLAN.md — Stream consumption engine, tool call assembly, RealLlmClient stream_chat override
+  - [x] 14-02-PLAN.md — 13 behavioral tests proving streaming delta engine (D-16 scenarios + D-17 regression)
 - [ ] Phase 15: AgentLoop Live Sink and Cooperative Cancellation — planned
 - [ ] Phase 16: Live API Stream and Commit Transaction — planned
 - [ ] Phase 17: Failure Matrix and Run/Stream Consistency — planned
@@ -148,7 +151,7 @@
 | 11. Deletion/Verify | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 12. Event Vocabulary | v1.2-alpha | 2/2 | Complete | 2026-05-21 |
 | 13. LLM Streaming | v1.2-alpha | 1/1 | Complete | 2026-05-21 |
-| 14. Agent Streaming | v1.2-alpha | 0/0 | Planned | — |
+| 14. Agent Streaming | v1.2-alpha | 0/2 | Planned | — |
 | 15. Agent Live Sink | v1.2-alpha | 0/0 | Planned | — |
 | 16. API Live Stream | v1.2-alpha | 0/0 | Planned | — |
 | 17. Failure Matrix | v1.2-alpha | 0/0 | Planned | — |

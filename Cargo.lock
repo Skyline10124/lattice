@@ -960,6 +960,7 @@ dependencies = [
  "lattice-llm",
  "lattice-session",
  "lattice-tools",
+ "serde_json",
  "tokio",
 ]
 

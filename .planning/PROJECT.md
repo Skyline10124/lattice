@@ -21,8 +21,8 @@ A user can run one session-centered generic agent through a small, understandabl
 
 ## Current State
 
-**Shipped:** v1.1 Cut Off Cleverness (2026-05-20); Phase 13 LLM streaming seam (2026-05-21)
-**Codebase:** 8 crates, 18.1k LOC Rust, 504 tests passing
+**Shipped:** v1.1 Cut Off Cleverness (2026-05-20); Phase 14 AgentLoop streaming delta engine (2026-05-21)
+**Codebase:** 8 crates, 18.5k LOC Rust, 340+ tests passing
 **Stack:** Rust, tokio, reqwest, rusqlite, clap, serde
 
 The v1.1 rewrite established the minimal session-driven chain and removed all abstractions that did not directly serve it. The runtime went from ~58.5k LOC across 14+ crates to 18.1k LOC across 8 focused crates.
@@ -43,16 +43,17 @@ The v1.2-alpha milestone starts from that small substrate. The design source is 
 - ✓ CLI surface narrowed to run, models, resolve, session, doctor — v1.1
 - ✓ Active source reduced to 18.1k LOC (under 20k budget) — v1.1
 - ✓ All removed abstractions absent from active source — v1.1
-- ✓ `LlmClient::stream_chat` seam with default buffered fallback and feature-gated fake streaming client — Phase 13
+- ✓ Use `Completed`, `Error`, and `Cancelled` across `AgentTurnStatus`, `RunTurnStatus`, and commit status vocabulary — Phase 13
+- ✓ Make AgentLoop consume streaming LLM events, finalize transcript deltas, and preserve partial assistant output on error/cancellation — Phase 14
+- ✓ AgentLoop consumes `stream_chat` with per-chunk delta accumulation, all-or-nothing tool call validation, and partial content preservation on error — Phase 14
+- ✓ 13 behavioral streaming delta tests proving token/reasoning/tool_call assembly, error handling, and backward compatibility — Phase 14
 
 ### Active
 
 Active items are milestone requirements, not completed implementation.
 
-- Use `Completed`, `Error`, and `Cancelled` across `AgentTurnStatus`, `RunTurnStatus`, and commit status vocabulary.
 - Make `AgentTurnEvent` carry process events only; derive terminal public events in `lattice-api` from `AgentTurnResult`.
 - Expose `TurnEvent` variants for turn start, model activity, deltas, tools, terminal outcomes, committing, committed, and commit failure.
-- Make AgentLoop consume streaming LLM events, finalize transcript deltas, and preserve partial assistant output on error/cancellation.
 - Make `stream_turn` return a live event stream before commit, use a bounded channel, and keep receiver drop separate from cancellation.
 - Render live public events through CLI `run` after the API stream shape is stable.
 
@@ -116,4 +117,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-21 after Phase 13 completion*
+*Last updated: 2026-05-21 after Phase 14 completion*

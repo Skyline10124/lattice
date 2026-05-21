@@ -30,6 +30,15 @@ impl lattice_agent::agent_loop::LlmClient for RealLlmClient {
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
     }
+
+    async fn stream_chat(
+        &self,
+        request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        lattice_llm::stream(request)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+    }
 }
 
 /// Execute the v1.1 `run` command.
