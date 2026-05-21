@@ -6,8 +6,9 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use futures::StreamExt;
 use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
-use lattice_api::{RunTurnRequest, RunTurnStatus};
+use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, TokenUsage, ToolCall};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_tools::executor::DefaultToolExecutor;
@@ -228,6 +229,46 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         .log(&result.session_id)
         .expect("log must succeed");
     assert_eq!(log.len(), 1, "session log should have exactly one commit");
+}
+
+#[tokio::test]
+async fn usage_stream_turn_model_started_includes_routed_provider() {
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &[]);
+
+    let fake_llm = FakeLlm::new(vec![final_response("Done.")]);
+    let agent_loop = build_agent_loop(fake_llm, &ws.root, &[]);
+
+    let session_dir = tempfile::tempdir().unwrap();
+    let sessions_path = session_dir.path().join("sessions");
+
+    let request = RunTurnRequest {
+        input: "Hello".to_string(),
+        session_id: None,
+        profile: None,
+        model: None,
+        loaded_profile: Some(ws.loaded),
+    };
+
+    let events: Vec<TurnEvent> = lattice_api::stream_turn(
+        lattice_api::SessionApi::sqlite(&sessions_path),
+        agent_loop,
+        request,
+    )
+    .await
+    .expect("stream_turn must start")
+    .collect()
+    .await;
+
+    let model_started = events
+        .iter()
+        .find_map(|event| match event {
+            TurnEvent::ModelStarted { provider, model } => Some((provider, model)),
+            _ => None,
+        })
+        .expect("stream should include ModelStarted");
+
+    assert_eq!(model_started.0.as_deref(), Some("anthropic"));
+    assert_eq!(model_started.1, "sonnet");
 }
 
 // ── Test 2: patch workspace file and commit ─────────────────────────────────

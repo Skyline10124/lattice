@@ -22,6 +22,18 @@ pub enum ProviderKind {
     Gemini,
 }
 
+impl ProviderKind {
+    /// Stable provider identifier for commit metadata and public events.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderKind::OpenAi => "openai",
+            ProviderKind::OpenAiCompatible => "openai_compatible",
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Gemini => "gemini",
+        }
+    }
+}
+
 /// Whether the required API key environment variable is set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CredentialStatus {
@@ -330,6 +342,14 @@ mod tests {
                 case.alias
             );
         }
+    }
+
+    #[test]
+    fn provider_kind_as_str_is_stable_snake_case() {
+        assert_eq!(ProviderKind::OpenAi.as_str(), "openai");
+        assert_eq!(ProviderKind::OpenAiCompatible.as_str(), "openai_compatible");
+        assert_eq!(ProviderKind::Anthropic.as_str(), "anthropic");
+        assert_eq!(ProviderKind::Gemini.as_str(), "gemini");
     }
 
     #[test]

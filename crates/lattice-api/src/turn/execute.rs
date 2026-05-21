@@ -45,6 +45,7 @@ async fn execute_turn_inner(deps: &dyn TurnDeps, request: &RunTurnRequest) -> Re
         transcript,
         model.clone(),
         system_prompt,
+        Some(provider.clone()).filter(|p| p != "unknown"),
     );
 
     let (agent_events, agent_result) = deps

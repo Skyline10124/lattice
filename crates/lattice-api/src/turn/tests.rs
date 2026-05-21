@@ -444,6 +444,31 @@ async fn run_cutover_profile_model_used_when_no_override() {
 }
 
 #[tokio::test]
+async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() {
+    let deps = FakeTurnDeps::new(success_result());
+    let request = RunTurnRequest {
+        input: "test".to_string(),
+        session_id: None,
+        profile: None,
+        model: Some("compat:deepseek-chat".to_string()),
+        loaded_profile: None,
+    };
+
+    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    assert_eq!(result.status, RunTurnStatus::Completed);
+
+    let agent_req = deps
+        .last_agent_request()
+        .expect("agent should have been called");
+    assert_eq!(agent_req.provider, Some("openai_compatible".to_string()));
+
+    let commit_input = deps
+        .last_commit_input()
+        .expect("commit should have been called");
+    assert_eq!(commit_input.provider, "openai_compatible");
+}
+
+#[tokio::test]
 async fn stream_turn_auto_creates_session_and_final_committed_event_names_it() {
     let deps = FakeTurnDeps::new(success_result());
     let request = make_request("hello");

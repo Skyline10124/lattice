@@ -1,9 +1,10 @@
-use lattice_agent::{AgentToolResultSummary as AgentToolSummary, AgentTurnStatus};
+use lattice_agent::{
+    AgentToolResultSummary as AgentToolSummary, AgentTurnRequest, AgentTurnStatus,
+};
 use lattice_llm::{ModelRouter, ModelTarget};
 use lattice_session::HeadTranscript;
 
 use super::types::{RunTurnRequest, RunTurnStatus, ToolResultSummary};
-use lattice_agent::AgentTurnRequest;
 
 /// Resolve model alias and system prompt from the request.
 pub(crate) fn resolve_model_and_prompt(
@@ -33,7 +34,7 @@ pub(crate) fn resolve_model_and_prompt(
 
     let provider = ModelRouter::new()
         .resolve(&ModelTarget::new(&model))
-        .map(|rm| format!("{:?}", rm.provider).to_lowercase())
+        .map(|rm| rm.provider.as_str().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
     (model, system_prompt, provider)
@@ -46,6 +47,7 @@ pub(crate) fn build_agent_request(
     transcript: HeadTranscript,
     model: String,
     system_prompt: Option<String>,
+    provider: Option<String>,
 ) -> AgentTurnRequest {
     let enabled_tools = request
         .loaded_profile
@@ -69,7 +71,7 @@ pub(crate) fn build_agent_request(
         user_input: request.input.clone(),
         system_prompt,
         model,
-        provider: None,
+        provider,
         enabled_tools,
         project_root,
         cancel_flag: None,

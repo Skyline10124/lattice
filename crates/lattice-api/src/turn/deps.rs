@@ -68,8 +68,9 @@ impl TurnDeps for RealTurnDeps {
         &self,
         request: AgentTurnRequest,
     ) -> std::result::Result<(Vec<AgentTurnEvent>, AgentTurnResult), ApiError> {
-        let result = self.agent_loop.run_turn(request).await;
-        Ok((result.events.clone(), result))
+        let mut result = self.agent_loop.run_turn(request).await;
+        let events = std::mem::take(&mut result.events);
+        Ok((events, result))
     }
 
     fn commit_turn(&self, input: TurnCommitInput) -> Result<String> {
