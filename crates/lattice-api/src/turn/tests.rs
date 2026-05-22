@@ -772,3 +772,193 @@ fn old_failed_variant_removed_compile_guard() {
     assert_ne!(format!("{status:?}"), "Failed");
     assert_eq!(format!("{status:?}"), "Error");
 }
+
+// ── Phase 17 Plan 02: Cancelled buffered seam + error after partial ───
+
+#[tokio::test]
+async fn stream_turn_cancelled_commits_cancelled() {
+    // VER-10 / D-05: Cancelled path through stream_turn_with_deps proves
+    // TurnCancelled emitted, commit stores Cancelled status, terminal_reason
+    // preserved.
+    let deps = FakeTurnDeps::new(cancelled_result()).with_events(vec![
+        AgentTurnEvent::ModelStarted {
+            provider: None,
+            model: "test-model".to_string(),
+        },
+        AgentTurnEvent::TokenDelta {
+            content: "partial".to_string(),
+        },
+        AgentTurnEvent::ModelFinished {
+            finish_reason: "stop".to_string(),
+            usage: None,
+        },
+    ]);
+    let request = make_request("hello");
+    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // TurnCancelled event present with reason "cancelled by caller"
+    let cancelled = events
+        .iter()
+        .find(|e| matches!(e, TurnEvent::TurnCancelled { .. }))
+        .expect("should have TurnCancelled event");
+    if let TurnEvent::TurnCancelled { reason } = cancelled {
+        assert_eq!(
+            *reason,
+            Some("cancelled by caller".to_string()),
+            "TurnCancelled reason should be 'cancelled by caller'"
+        );
+    }
+
+    // TurnCommitting event present
+    let committing_pos = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::TurnCommitting))
+        .expect("should have TurnCommitting event");
+
+    // TurnCommitted event present with status Cancelled
+    let committed_pos = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("should have TurnCommitted event");
+    if let TurnEvent::TurnCommitted { status, .. } = &events[committed_pos] {
+        assert_eq!(
+            *status,
+            RunTurnStatus::Cancelled,
+            "TurnCommitted.status should be Cancelled"
+        );
+    }
+
+    // Event ordering: TurnCancelled < TurnCommitting < TurnCommitted
+    let cancelled_pos = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::TurnCancelled { .. }))
+        .unwrap();
+    assert!(
+        cancelled_pos < committing_pos,
+        "TurnCancelled must precede TurnCommitting"
+    );
+    assert!(
+        committing_pos < committed_pos,
+        "TurnCommitting must precede TurnCommitted"
+    );
+
+    // Exactly one commit
+    assert_eq!(deps.commit_count(), 1);
+
+    // Commit input status is Cancelled
+    let commit_input = deps
+        .last_commit_input()
+        .expect("commit should have been called");
+    assert_eq!(
+        commit_input.status,
+        lattice_session::TurnCommitStatus::Cancelled,
+        "commit input status should be Cancelled"
+    );
+
+    // Commit input terminal_reason preserved
+    assert_eq!(
+        commit_input.terminal_reason,
+        Some("cancelled by caller".to_string()),
+        "commit input terminal_reason should be 'cancelled by caller'"
+    );
+}
+
+#[tokio::test]
+async fn stream_turn_error_after_partial_commits_error() {
+    // VER-12: Error after partial tokens commits with Error status and
+    // preserves partial content in commit messages.
+    let partial_error_result = AgentTurnResult {
+        messages: vec![GraphMessage {
+            role: "assistant".to_string(),
+            content: "partial output before error".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }],
+        assistant_output: "partial output before error".to_string(),
+        usage: TurnUsage {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            total_tokens: 14,
+        },
+        tool_results: vec![],
+        status: AgentTurnStatus::Error,
+        terminal_reason: Some("LLM error: connection reset".to_string()),
+        events: vec![],
+    };
+
+    let deps = FakeTurnDeps::new(partial_error_result).with_events(vec![
+        AgentTurnEvent::ModelStarted {
+            provider: None,
+            model: "test-model".to_string(),
+        },
+        AgentTurnEvent::TokenDelta {
+            content: "partial output".to_string(),
+        },
+        AgentTurnEvent::TokenDelta {
+            content: " before error".to_string(),
+        },
+    ]);
+    let request = make_request("hello");
+    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    // TurnFailed event present
+    let failed = events
+        .iter()
+        .find(|e| matches!(e, TurnEvent::TurnFailed { .. }))
+        .expect("should have TurnFailed event");
+    if let TurnEvent::TurnFailed { reason } = failed {
+        assert!(
+            reason.contains("connection reset"),
+            "TurnFailed reason should contain error message, got: {reason}"
+        );
+    }
+
+    // TurnCommitted with status Error
+    let committed = events
+        .iter()
+        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("should have TurnCommitted event");
+    if let TurnEvent::TurnCommitted { status, .. } = committed {
+        assert_eq!(*status, RunTurnStatus::Error);
+    }
+
+    // Commit input has Error status
+    assert_eq!(deps.commit_count(), 1);
+    let commit_input = deps
+        .last_commit_input()
+        .expect("commit should have been called");
+    assert_eq!(
+        commit_input.status,
+        lattice_session::TurnCommitStatus::Error
+    );
+
+    // Commit messages contain user message + partial assistant message
+    assert!(
+        commit_input.messages.len() >= 2,
+        "commit should have at least user + assistant messages, got {}",
+        commit_input.messages.len()
+    );
+    assert_eq!(commit_input.messages[0].role, "user");
+    assert_eq!(commit_input.messages[0].content, "hello");
+    assert_eq!(commit_input.messages[1].role, "assistant");
+    assert_eq!(
+        commit_input.messages[1].content, "partial output before error",
+        "partial assistant content should be preserved in commit"
+    );
+
+    // Terminal reason preserved in commit
+    assert_eq!(
+        commit_input.terminal_reason,
+        Some("LLM error: connection reset".to_string())
+    );
+}

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
+use tokio::time::Instant;
 use lattice_tools::enabled_tools::{resolve_enabled_tools, EnabledTools};
 
 use messages::convert_to_llm_message;
@@ -91,8 +92,9 @@ impl AgentLoop {
             }
         };
 
-        // Apply timeout if configured (D-09/D-10)
-        apply_optional_timeout(&request, self.run_turn_inner(&request, &enabled, None)).await
+        // Compute cooperative deadline from request.timeout (D-13, Phase 17)
+        let deadline = request.timeout.map(|d| Instant::now() + d);
+        self.run_turn_inner(&request, &enabled, None, deadline).await
     }
 
     /// Execute a single turn with a live `AgentTurnEvent` mirror channel.
@@ -114,15 +116,14 @@ impl AgentLoop {
     /// (1b, 2, 3, 4, 5) honor it identically across `run_turn` and
     /// `run_turn_live`; the live mirror does not change cancel semantics.
     ///
-    /// Timeout — when `request.timeout` is `Some`, the same
-    /// `apply_optional_timeout` wrapper used by `run_turn` (extracted in Plan
-    /// 15-01 D-10) governs the live path. On elapse the returned
-    /// `AgentTurnResult` is byte-identical to the buffered timeout shape
-    /// (`status: Error`, `terminal_reason: Some("timeout")`, empty
-    /// messages/events, zeroed usage); live-path timeout partial-content
-    /// preservation is deferred to Phase 17.
+    /// Timeout — when `request.timeout` is `Some`, a cooperative deadline is
+    /// computed before entering `run_turn_inner` and threaded into both the
+    /// `stream_chat().await` call and the `stream.next()` loop via
+    /// `tokio::select!`. On elapse, the returned `AgentTurnResult` preserves
+    /// all partial state accumulated before the deadline fired (Phase 17 D-13).
     ///
-    /// Added in Plan 15-02 (D-09 / D-10).
+    /// Added in Plan 15-02 (D-09 / D-10). Timeout cooperative deadline added
+    /// in Phase 17 Plan 01.
     pub async fn run_turn_live(
         &self,
         request: AgentTurnRequest,
@@ -149,29 +150,28 @@ impl AgentLoop {
             }
         };
 
-        // Share the timeout wrapper with `run_turn` (D-10). The live sender
-        // is a runtime-only side-channel borrowed via `Some(&events)` and is
-        // moved into this function (no clone — RAII close on return
-        // terminates `rx.recv()` loops in tests / consumers).
-        apply_optional_timeout(
-            &request,
-            self.run_turn_inner(&request, &enabled, Some(&events)),
-        )
-        .await
+        // Compute cooperative deadline from request.timeout (D-13, Phase 17)
+        let deadline = request.timeout.map(|d| Instant::now() + d);
+        self.run_turn_inner(&request, &enabled, Some(&events), deadline)
+            .await
     }
 
-    /// Inner turn execution (called by `run_turn` and `run_turn_live`,
-    /// possibly wrapped in timeout).
+    /// Inner turn execution (called by `run_turn` and `run_turn_live`).
     ///
     /// `live_events` (Plan 15-02 D-10): when `Some`, every event emission site
     /// in this function and inside `consume_model_stream` mirrors the event
     /// onto the live channel via `emit_agent_event`; when `None`, emissions
     /// are buffered only — preserving the pre-Phase-15 `run_turn` shape.
+    ///
+    /// `deadline` (Phase 17 D-13): when `Some`, a cooperative deadline is
+    /// applied to both `stream_chat().await` and `stream.next()` calls. On
+    /// elapse, the function returns with all accumulated partial state preserved.
     async fn run_turn_inner(
         &self,
         request: &AgentTurnRequest,
         enabled: &EnabledTools,
         live_events: Option<&tokio::sync::mpsc::Sender<AgentTurnEvent>>,
+        deadline: Option<Instant>,
     ) -> AgentTurnResult {
         // Build initial messages from transcript + user input
         let mut messages = self.build_messages(request, enabled);
@@ -283,18 +283,55 @@ impl AgentLoop {
                 }
             }
 
-            let stream = match self.config.llm.stream_chat(chat_request).await {
-                Ok(s) => s,
-                Err(err) => {
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Error,
-                        terminal_reason: Some(format!("LLM error: {err}")),
-                        events: all_events,
-                    };
+            let stream = match deadline {
+                Some(dl) => {
+                    let remaining = dl.saturating_duration_since(Instant::now());
+                    tokio::select! {
+                        result = self.config.llm.stream_chat(chat_request) => {
+                            match result {
+                                Ok(s) => s,
+                                Err(err) => {
+                                    return AgentTurnResult {
+                                        messages: all_messages,
+                                        assistant_output: String::new(),
+                                        usage: accumulated_usage,
+                                        tool_results: tool_summaries,
+                                        status: AgentTurnStatus::Error,
+                                        terminal_reason: Some(format!("LLM error: {err}")),
+                                        events: all_events,
+                                    };
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(remaining) => {
+                            // Timeout before stream creation — preserve accumulated state
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: String::new(),
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Error,
+                                terminal_reason: Some("timeout".to_string()),
+                                events: all_events,
+                            };
+                        }
+                    }
+                }
+                None => {
+                    match self.config.llm.stream_chat(chat_request).await {
+                        Ok(s) => s,
+                        Err(err) => {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: String::new(),
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Error,
+                                terminal_reason: Some(format!("LLM error: {err}")),
+                                events: all_events,
+                            };
+                        }
+                    }
                 }
             };
 
@@ -304,6 +341,7 @@ impl AgentLoop {
                     &mut all_events,
                     live_events,
                     request.cancel_flag.as_ref(),
+                    deadline,
                 )
                 .await;
 
@@ -370,6 +408,25 @@ impl AgentLoop {
                         tool_results: tool_summaries,
                         status: AgentTurnStatus::Cancelled,
                         terminal_reason: Some("cancelled by caller".to_string()),
+                        events: all_events,
+                    };
+                }
+                StreamOutcome::Timeout => {
+                    // Cooperative deadline fired during stream.next() (Phase 17
+                    // D-13). Flush partial content and return with preserved state.
+                    flush_partial_assistant_message(
+                        &mut messages,
+                        &mut all_messages,
+                        &stream_result.assistant_content,
+                        &stream_result.reasoning_content,
+                    );
+                    return AgentTurnResult {
+                        messages: all_messages,
+                        assistant_output: stream_result.assistant_content,
+                        usage: accumulated_usage,
+                        tool_results: tool_summaries,
+                        status: AgentTurnStatus::Error,
+                        terminal_reason: Some("timeout".to_string()),
                         events: all_events,
                     };
                 }
@@ -674,6 +731,9 @@ enum StreamOutcome {
     Cancelled,
     /// Stream ended without receiving a `Done` event.
     Exhausted,
+    /// Cooperative deadline fired during `stream.next()` (Phase 17 D-13).
+    /// Accumulated partial state is preserved in the surrounding `StreamResult`.
+    Timeout,
 }
 
 /// Result of consuming a model stream.
@@ -705,12 +765,19 @@ impl AgentLoop {
     ///   `outcome: StreamOutcome::Cancelled` and accumulated state preserved
     ///   (D-02). `Done` is intentionally never a cancel point — the upstream
     ///   loop finalizes the model response before any cancel branch (D-03).
+    ///
+    /// Phase 17 adds:
+    /// - `deadline` — when `Some`, each `stream.next()` is raced against the
+    ///   remaining time via `tokio::select!`. On timeout, returns with
+    ///   `outcome: StreamOutcome::Error("timeout")` and all accumulated state
+    ///   preserved (D-13).
     async fn consume_model_stream(
         &self,
         mut stream: lattice_llm::LlmStream,
         events: &mut Vec<AgentTurnEvent>,
         live: Option<&tokio::sync::mpsc::Sender<AgentTurnEvent>>,
         cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<Instant>,
     ) -> StreamResult {
         let mut assistant_content = String::new();
         let mut reasoning_content = String::new();
@@ -718,7 +785,44 @@ impl AgentLoop {
         let mut usage: Option<TurnUsage> = None;
         let mut finish_reason: Option<String> = None;
 
-        while let Some(event) = stream.next().await {
+        loop {
+            // Fetch next event, racing against deadline when configured (D-13).
+            let next_event = match deadline {
+                Some(dl) => {
+                    let remaining = dl.saturating_duration_since(Instant::now());
+                    tokio::select! {
+                        event = stream.next() => event,
+                        _ = tokio::time::sleep(remaining) => {
+                            // Deadline fired — return with accumulated partial state
+                            return StreamResult {
+                                assistant_content,
+                                reasoning_content,
+                                tool_calls: pending_calls,
+                                usage,
+                                finish_reason,
+                                outcome: StreamOutcome::Timeout,
+                            };
+                        }
+                    }
+                }
+                None => stream.next().await,
+            };
+
+            let event = match next_event {
+                Some(ev) => ev,
+                None => {
+                    // Stream exhausted without Done (D-12)
+                    return StreamResult {
+                        assistant_content,
+                        reasoning_content,
+                        tool_calls: pending_calls,
+                        usage,
+                        finish_reason,
+                        outcome: StreamOutcome::Exhausted,
+                    };
+                }
+            };
+
             match event {
                 lattice_llm::LlmEvent::Token { content } => {
                     assistant_content.push_str(&content);
@@ -863,16 +967,6 @@ impl AgentLoop {
                 }
             }
         }
-
-        // Stream exhausted without Done (D-12)
-        StreamResult {
-            assistant_content,
-            reasoning_content,
-            tool_calls: pending_calls,
-            usage,
-            finish_reason,
-            outcome: StreamOutcome::Exhausted,
-        }
     }
 
     /// Build the initial message list from the transcript, system prompt,
@@ -974,41 +1068,4 @@ fn flush_partial_assistant_message(
     };
     messages.push(msg.clone());
     all_messages.push(msg);
-}
-
-/// Wrap an inner-turn future with an optional `tokio::time::timeout` based on
-/// `request.timeout`.
-///
-/// When `request.timeout` is `None`, awaits and returns the inner result
-/// unchanged. When `Some(duration)` and the future completes in time, returns
-/// the inner result unchanged. On elapse, returns an `AgentTurnResult` with
-/// `status: Error`, `terminal_reason: Some("timeout")`, empty `messages`,
-/// empty `assistant_output`, zeroed `usage`, empty `tool_results`, and empty
-/// `events` — byte-identical to the prior inline behavior in `run_turn`.
-///
-/// Extracted in Plan 15-01 (D-10) so the upcoming `run_turn_live` (Plan 15-02)
-/// can share the same wrapper without duplicating the timeout-shape struct.
-async fn apply_optional_timeout<F>(request: &AgentTurnRequest, fut: F) -> AgentTurnResult
-where
-    F: std::future::Future<Output = AgentTurnResult>,
-{
-    match request.timeout {
-        Some(duration) => match tokio::time::timeout(duration, fut).await {
-            Ok(result) => result,
-            Err(_elapsed) => AgentTurnResult {
-                messages: Vec::new(),
-                assistant_output: String::new(),
-                usage: TurnUsage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    total_tokens: 0,
-                },
-                tool_results: Vec::new(),
-                status: AgentTurnStatus::Error,
-                terminal_reason: Some("timeout".to_string()),
-                events: Vec::new(),
-            },
-        },
-        None => fut.await,
-    }
 }

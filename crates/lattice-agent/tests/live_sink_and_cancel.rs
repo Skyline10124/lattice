@@ -917,15 +917,16 @@ async fn scenario_07_run_turn_buffered_matches_run_turn_live() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8 (optional D-21) — run_turn_live honors AgentTurnRequest.timeout
+// Scenario 8 — cooperative deadline timeout preserves partial state (Phase 17)
 // ---------------------------------------------------------------------------
 
-/// LlmClient whose `stream_chat` returns a stream that never yields. Used to
-/// drive the timeout helper without racing against any wallclock fixture.
-struct PendingStreamLlm;
+/// LlmClient whose `stream_chat` yields a few Token events with small delays,
+/// then hangs forever (never yields Done). Used to prove the cooperative
+/// deadline preserves partial content accumulated before the timeout fires.
+struct SlowStreamLlm;
 
 #[async_trait::async_trait]
-impl LlmClient for PendingStreamLlm {
+impl LlmClient for SlowStreamLlm {
     async fn chat(
         &self,
         _request: lattice_llm::ChatRequest,
@@ -937,13 +938,127 @@ impl LlmClient for PendingStreamLlm {
         &self,
         _request: lattice_llm::ChatRequest,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(Box::pin(futures::stream::pending::<LlmEvent>()))
+        // State machine: yield Token("partial "), Token("content"), then hang.
+        enum Phase {
+            Token1,
+            Token2,
+            Hanging,
+        }
+
+        let stream = futures::stream::unfold(Phase::Token1, |state| async move {
+            match state {
+                Phase::Token1 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    Some((
+                        LlmEvent::Token {
+                            content: "partial ".to_string(),
+                        },
+                        Phase::Token2,
+                    ))
+                }
+                Phase::Token2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    Some((
+                        LlmEvent::Token {
+                            content: "content".to_string(),
+                        },
+                        Phase::Hanging,
+                    ))
+                }
+                Phase::Hanging => {
+                    // Never resolve — cooperative deadline will fire
+                    futures::future::pending::<()>().await;
+                    unreachable!()
+                }
+            }
+        });
+
+        Ok(Box::pin(stream))
     }
 }
 
 #[tokio::test]
-async fn scenario_08_run_turn_live_honors_timeout() {
-    let llm = Arc::new(PendingStreamLlm);
+async fn scenario_08_timeout_cooperative_preserves_partial() {
+    let llm = Arc::new(SlowStreamLlm);
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let mut request = make_request("hello");
+    request.timeout = Some(std::time::Duration::from_millis(100));
+
+    let (result, received) = drive_run_turn_live(&loop_inst, request, 32).await;
+
+    // D-15 assertions:
+    // (1) status == Error
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    // (2) terminal_reason contains "timeout"
+    assert_eq!(result.terminal_reason, Some("timeout".to_string()));
+    // (3) result.events is NOT empty (contains at least ModelStarted, TokenDelta events)
+    assert!(
+        !result.events.is_empty(),
+        "cooperative deadline must preserve events emitted before timeout"
+    );
+    assert!(
+        result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        "ModelStarted must be present in events"
+    );
+    assert!(
+        result.events.iter().any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        "TokenDelta events must be present (partial tokens yielded before timeout)"
+    );
+    // (4) partial content preserved in assistant_output
+    assert_eq!(result.assistant_output, "partial content");
+    // (5) messages is NOT empty (flush_partial preserves the partial assistant message)
+    assert!(
+        !result.messages.is_empty(),
+        "partial assistant message must be flushed on timeout"
+    );
+    let assistant_msg = result
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("partial assistant message should exist");
+    assert_eq!(assistant_msg.content, "partial content");
+    // (6) received (live events) == result.events (same events, same order)
+    assert_eq!(
+        received, result.events,
+        "live events must match result.events on timeout (run/stream consistency)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8b — timeout on stream_chat creation (Phase 17)
+// ---------------------------------------------------------------------------
+
+/// LlmClient whose `stream_chat` hangs forever (never returns a stream).
+/// Used to prove the cooperative deadline fires on stream creation timeout.
+struct HangingStreamChatLlm;
+
+#[async_trait::async_trait]
+impl LlmClient for HangingStreamChatLlm {
+    async fn chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        unreachable!("stream-only fake")
+    }
+
+    async fn stream_chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        // Hang forever — never return a stream
+        futures::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn scenario_08b_timeout_on_stream_creation() {
+    let llm = Arc::new(HangingStreamChatLlm);
     let executor = Arc::new(FakeToolExecutor::new(vec![]));
     let loop_inst = AgentLoop::new(AgentLoopConfig {
         llm,
@@ -953,12 +1068,24 @@ async fn scenario_08_run_turn_live_honors_timeout() {
     let mut request = make_request("hello");
     request.timeout = Some(std::time::Duration::from_millis(50));
 
-    let (result, _received) = drive_run_turn_live(&loop_inst, request, 32).await;
+    let (result, received) = drive_run_turn_live(&loop_inst, request, 32).await;
 
-    // apply_optional_timeout returns the buffered timeout shape (D-10).
+    // Status is Error with timeout reason
     assert_eq!(result.status, AgentTurnStatus::Error);
     assert_eq!(result.terminal_reason, Some("timeout".to_string()));
-    assert!(result.messages.is_empty());
-    assert!(result.assistant_output.is_empty());
-    assert!(result.events.is_empty());
+    // ModelStarted was emitted before stream_chat was called
+    assert!(
+        result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        "ModelStarted must be emitted before stream_chat call"
+    );
+    // No TokenDelta events (stream was never created)
+    assert!(
+        !result.events.iter().any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        "no TokenDelta should exist when stream_chat itself timed out"
+    );
+    // Live events match result.events
+    assert_eq!(
+        received, result.events,
+        "live events must match result.events on stream-creation timeout"
+    );
 }

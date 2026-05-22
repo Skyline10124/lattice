@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2-alpha
 milestone_name: Evented Runtime
-status: in_progress
-last_updated: "2026-05-22T06:04:00.000Z"
-last_activity: 2026-05-22 -- Phase 16 execution complete
+status: executing
+last_updated: "2026-05-22T08:12:47.584Z"
+last_activity: 2026-05-22 -- Phase 17 execution complete
 progress:
-  total_phases: 7
-  completed_phases: 5
-  total_plans: 12
-  completed_plans: 12
-  percent: 71
+  total_phases: 6
+  completed_phases: 6
+  total_plans: 15
+  completed_plans: 15
+  percent: 100
 ---
 
 # Planning State
@@ -20,14 +20,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-21)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Phase 17 — Failure Matrix and Run/Stream Consistency
+**Current focus:** Phase 18 — CLI Live Rendering and Alpha Release Gate
 
 ## Current Position
 
-Phase: 17
+Phase: 18
 Plan: Not started
-Status: Phase 16 complete, ready for Phase 17
-Last activity: 2026-05-22 -- Phase 16 execution complete (3/3 plans, all tests pass)
+Status: Ready to discuss
+Last activity: 2026-05-22 -- Phase 17 execution complete
 
 ## Accumulated Context
 
