@@ -114,9 +114,18 @@ pub enum AgentTurnEvent {
     },
     /// A model request completed successfully.
     ///
-    /// Emitted only on successful LLM completion. Error and cancel paths
-    /// do **not** emit `ModelFinished`; their outcome is observable on
-    /// `AgentTurnResult.status` instead.
+    /// Emitted on successful LLM completion (`finish_reason: "stop"` /
+    /// `"tool_calls"` / `"length"`). Error paths and `consume_model_stream`
+    /// returning `Cancelled` mid-stream do **not** emit `ModelFinished`;
+    /// their outcome is observable on `AgentTurnResult.status`.
+    ///
+    /// Note: cancellation observed *after* the model's `Done` chunk —
+    /// specifically Plan 15-02 checkpoint #3 (post-`ModelFinished`,
+    /// pre-tool-execution) and checkpoint #4 (pre-each-tool) — runs after
+    /// this event has already been buffered/forwarded. A `Cancelled` turn
+    /// can therefore include a trailing `ModelFinished` in
+    /// `AgentTurnResult.events`. Phase 16 event mapping must not assume
+    /// "no `ModelFinished` ⇒ Completed".
     ModelFinished {
         finish_reason: String,
         usage: Option<TurnUsage>,
