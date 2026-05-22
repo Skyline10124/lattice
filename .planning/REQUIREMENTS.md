@@ -28,8 +28,8 @@
 - [ ] **AGENT-05**: AgentLoop preserves complete partial assistant content/reasoning on LLM stream error or explicit cancellation and omits incomplete tool calls from the transcript.
 - [ ] **AGENT-06**: Tool execution remains sequential, with `ToolCallStarted` emitted only immediately before real execution and `ToolCallFinished` carrying only summary fields.
 - [ ] **AGENT-07**: A failed tool call is represented as a tool result and does not automatically make the turn status `Error`.
-- [ ] **AGENT-08**: AgentLoop exposes `run_turn_live(request, sender)` while preserving `run_turn(request)` and the complete buffered `AgentTurnResult.events` vector.
-- [ ] **AGENT-09**: Cancellation is cooperative and explicit: cancellation before a tool skips the tool, cancellation during a tool waits for the real result, and timeout/max-round/provider failures are `Error`, not `Cancelled`.
+- [x] **AGENT-08**: AgentLoop exposes `run_turn_live(request, sender)` while preserving `run_turn(request)` and the complete buffered `AgentTurnResult.events` vector.
+- [x] **AGENT-09**: Cancellation is cooperative and explicit: cancellation before a tool skips the tool, cancellation during a tool waits for the real result, and timeout/max-round/provider failures are `Error`, not `Cancelled`.
 
 ### Commit Semantics
 
@@ -61,7 +61,7 @@
 - [ ] **VER-08**: Tests prove token deltas commit as one assistant message and reasoning deltas do not pollute visible assistant output.
 - [ ] **VER-09**: Tests prove tool-call event timing, failed-tool recovery, and sequential tool execution.
 - [ ] **VER-10**: Tests prove partial assistant output is committed on LLM error and cancelled turns commit with `Cancelled` status.
-- [ ] **VER-11**: Tests prove cancellation before tool execution skips the tool and cancellation during tool execution waits for the tool result.
+- [x] **VER-11**: Tests prove cancellation before tool execution skips the tool and cancellation during tool execution waits for the tool result.
 - [ ] **VER-12**: Tests prove receiver drop does not cancel a live turn and commit failure does not move HEAD.
 - [ ] **VER-13**: Tests prove `stream_turn` emits token/model/tool activity before commit and remains semantically consistent with `run_turn`.
 - [ ] **VER-14**: The release gate passes targeted crate tests for `lattice-llm`, `lattice-agent`, `lattice-api`, and `lattice-cli`, plus formatting and workspace compile checks.
@@ -108,8 +108,8 @@
 | AGENT-05 | Phase 14 | Pending |
 | AGENT-06 | Phase 14 | Pending |
 | AGENT-07 | Phase 14 | Pending |
-| AGENT-08 | Phase 15 | Pending |
-| AGENT-09 | Phase 15 | Pending |
+| AGENT-08 | Phase 15 | Complete |
+| AGENT-09 | Phase 15 | Complete |
 | COMM-01 | Phase 16 | Pending |
 | COMM-02 | Phase 16 | Pending |
 | COMM-03 | Phase 16 | Pending |
@@ -129,7 +129,7 @@
 | VER-08 | Phase 14 | Pending |
 | VER-09 | Phase 14 | Pending |
 | VER-10 | Phase 17 | Pending |
-| VER-11 | Phase 15 | Pending |
+| VER-11 | Phase 15 | Complete |
 | VER-12 | Phase 17 | Pending |
 | VER-13 | Phase 17 | Pending |
 | VER-14 | Phase 18 | Pending |

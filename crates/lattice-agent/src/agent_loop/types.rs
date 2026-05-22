@@ -87,7 +87,7 @@ pub struct AgentTurnResult {
 /// `AgentTurnEvent` is internal to the runtime and intentionally not
 /// `Serialize`/`Deserialize`. Only [`crate::TurnEvent`]-style public types
 /// carry serde derives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentTurnEvent {
     /// A model request is about to start.
     ///

@@ -33,7 +33,12 @@
   Plans:
   - [x] 14-01-PLAN.md — Stream consumption engine, tool call assembly, RealLlmClient stream_chat override
   - [x] 14-02-PLAN.md — 13 behavioral tests proving streaming delta engine (D-16 scenarios + D-17 regression)
-- [ ] Phase 15: AgentLoop Live Sink and Cooperative Cancellation — planned
+- [x] Phase 15: AgentLoop Live Sink and Cooperative Cancellation — 4/4 plans — completed 2026-05-21
+  Plans:
+  - [x] 15-01-PLAN.md — Pure refactor: extract flush_partial_assistant_message + apply_optional_timeout helpers, derive PartialEq/Eq on AgentTurnEvent
+  - [x] 15-02-PLAN.md — Atomic streaming + cancel + live-sink: emit_agent_event, cancel-aware consume_model_stream, StreamOutcome::Cancelled, 5 cancel checkpoints, run_turn_live entrypoint
+  - [x] 15-03-PLAN.md — Behavioral suite: tests/live_sink_and_cancel.rs covering all 7 D-18 scenarios + D-21 timeout regression with concurrent-drain helper
+  - [x] 15-04-PLAN.md — Workspace gate: cargo fmt + clippy + workspace test, close STATE/ROADMAP/REQUIREMENTS for AGENT-08, AGENT-09, VER-11
 - [ ] Phase 16: Live API Stream and Commit Transaction — planned
 - [ ] Phase 17: Failure Matrix and Run/Stream Consistency — planned
 - [ ] Phase 18: CLI Live Rendering and Alpha Release Gate — planned
@@ -47,7 +52,7 @@
 | 12. Event and Status Vocabulary Contract | Rename and stabilize the public/internal event vocabulary before changing execution behavior. | EVT-01, EVT-02, EVT-03, EVT-04, EVT-05, VER-07 | 4 |
 | 13. LLM Streaming Trait and Fake Streaming Client | Introduce the LLM streaming seam needed by live turns while keeping existing call sites compiling. | LLM-06, LLM-07, LLM-08, LLM-09 | 4 |
 | 14. AgentLoop Streaming Delta Engine | Make AgentLoop consume model streams and finalize deltas into transcript messages. | AGENT-03, AGENT-04, AGENT-05, AGENT-06, AGENT-07, VER-08, VER-09 | 5 |
-| 15. AgentLoop Live Sink and Cooperative Cancellation | Add live agent event forwarding and lock explicit cancellation semantics. | AGENT-08, AGENT-09, VER-11 | 4 |
+| 15. AgentLoop Live Sink and Cooperative Cancellation | 4/4 | Complete    | 2026-05-21 |
 | 16. Live API Stream and Commit Transaction | Implement real `stream_turn` with ordered public events and durable commit behavior. | COMM-01, COMM-02, COMM-03, COMM-04, COMM-05, API-04, API-05, API-06, API-07, API-08, API-09, API-10 | 5 |
 | 17. Failure Matrix and Run/Stream Consistency | Prove terminal behavior, receiver drop, commit failure, and final `run_turn` semantics. | VER-10, VER-12, VER-13 | 4 |
 | 18. CLI Live Rendering and Alpha Release Gate | Render public stream events in the CLI and run the milestone release gate. | CLI-05, CLI-06, CLI-07, VER-14 | 5 |
@@ -151,11 +156,12 @@
 | 11. Deletion/Verify | v1.1 | 8/8 | Complete | 2026-05-17 |
 | 12. Event Vocabulary | v1.2-alpha | 2/2 | Complete | 2026-05-21 |
 | 13. LLM Streaming | v1.2-alpha | 1/1 | Complete | 2026-05-21 |
-| 14. Agent Streaming | v1.2-alpha | 0/2 | Planned | — |
-| 15. Agent Live Sink | v1.2-alpha | 0/0 | Planned | — |
+| 14. Agent Streaming | v1.2-alpha | 2/2 | Complete | 2026-05-21 |
+| 15. Agent Live Sink | v1.2-alpha | 4/4 | Complete | 2026-05-21 |
 | 16. API Live Stream | v1.2-alpha | 0/0 | Planned | — |
 | 17. Failure Matrix | v1.2-alpha | 0/0 | Planned | — |
 | 18. CLI Live Rendering | v1.2-alpha | 0/0 | Planned | — |
 
 ---
 *Roadmap updated for v1.2-alpha milestone initialization: 2026-05-21*
+*Phase 15 plans drafted: 2026-05-22*
