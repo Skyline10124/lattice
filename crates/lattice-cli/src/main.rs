@@ -17,7 +17,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Status lines, reasoning, and verbose epilogue are suppressed. Alpha behavior change from v1.1 pretty JSON."
+        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Human status lines and verbose epilogue are suppressed. JSONL emits public TurnEvent values as received, including ReasoningDelta when present. Alpha behavior change from v1.1 pretty JSON."
     )]
     json: bool,
 
@@ -78,7 +78,7 @@ async fn main() -> std::process::ExitCode {
         let _ = lattice_llm::init_logging(false);
     }
 
-    // Run command uses the v1.1 path with ExitCode semantics.
+    // Run command uses the live stream path with ExitCode semantics.
     if let Some(Commands::Run {
         prompt,
         model,

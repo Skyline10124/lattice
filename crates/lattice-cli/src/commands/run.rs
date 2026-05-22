@@ -9,8 +9,9 @@
 //!
 //! `--json` emits one `TurnEvent` JSON object per line on stdout,
 //! terminated by `\n`. This is an alpha behavior change from the v1.1
-//! pretty-printed `RunTurnResult`. Status lines, reasoning, and verbose
-//! epilogue are suppressed in JSON mode (D-D3 / D-D4).
+//! pretty-printed `RunTurnResult`. Human status lines and verbose epilogue
+//! are suppressed in JSON mode. JSONL emits public `TurnEvent` values as
+//! received, including `ReasoningDelta` when present (D-D3 / D-D4).
 //!
 //! # Exit codes
 //!
