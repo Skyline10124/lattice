@@ -1,0 +1,1183 @@
+use super::*;
+
+#[test]
+fn run_status_to_exit_code_completed_is_success() {
+    assert_eq!(
+        status_to_exit_code(&RunTurnStatus::Completed),
+        std::process::ExitCode::SUCCESS
+    );
+}
+
+#[test]
+fn run_status_to_exit_code_error_is_1() {
+    let code = status_to_exit_code(&RunTurnStatus::Error);
+    assert_ne!(
+        format!("{:?}", code),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn run_status_to_exit_code_cancelled_is_1() {
+    let code = status_to_exit_code(&RunTurnStatus::Cancelled);
+    assert_ne!(
+        format!("{:?}", code),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn run_profile_source_none_is_default() {
+    assert!(matches!(
+        profile_source_from_profile_arg(None),
+        ProfileSource::Default
+    ));
+}
+
+#[test]
+fn run_profile_source_name() {
+    match profile_source_from_profile_arg(Some("reader")) {
+        ProfileSource::Name(name) => assert_eq!(name, "reader"),
+        other => panic!("expected Name, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_profile_source_path() {
+    assert!(matches!(
+        profile_source_from_profile_arg(Some("./agent.toml")),
+        ProfileSource::Path(_)
+    ));
+}
+
+#[test]
+fn run_missing_default_message_references_profile_path() {
+    let dir = Path::new("/tmp/.lattice/agents/default");
+    let msg = missing_default_message(dir);
+    assert!(msg.contains("agent.toml"));
+    assert!(msg.contains("/tmp/.lattice/agents/default"));
+}
+
+#[test]
+fn run_default_session_dir_under_lattice_sessions() {
+    let dir = default_session_dir();
+    assert!(dir.to_string_lossy().contains("lattice"));
+    assert!(dir.to_string_lossy().contains("sessions"));
+}
+
+struct StubLlmClient;
+
+#[async_trait::async_trait]
+impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
+    async fn chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
+    {
+        Ok(lattice_llm::ChatResponse {
+            content: "stub response".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            finish_reason: "stop".to_string(),
+            model: "stub-model".to_string(),
+            usage: Some(lattice_llm::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        })
+    }
+}
+
+struct NoopToolExecutor;
+
+#[async_trait::async_trait]
+impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+        Ok("no-op".to_string())
+    }
+}
+
+#[tokio::test]
+async fn run_integration_creates_session_and_returns_commit() {
+    let temp = tempfile::tempdir().unwrap();
+    let session_api = lattice_api::SessionApi::sqlite(temp.path());
+    let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
+        lattice_agent::AgentLoopConfig {
+            llm: std::sync::Arc::new(StubLlmClient),
+            tool_executor: std::sync::Arc::new(NoopToolExecutor),
+        },
+    ));
+
+    let request = lattice_api::RunTurnRequest {
+        input: "hello".to_string(),
+        session_id: None,
+        profile: None,
+        model: Some("stub-model".to_string()),
+        loaded_profile: None,
+    };
+
+    let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+
+    match result {
+        Ok(turn_result) => {
+            assert!(!turn_result.session_id.is_empty());
+            assert!(!turn_result.commit_id.is_empty());
+            assert_eq!(turn_result.assistant_output, "stub response");
+            assert_eq!(turn_result.status, RunTurnStatus::Completed);
+        }
+        Err(e) => {
+            panic!("run_turn failed: {e}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_integration_missing_session_returns_not_found() {
+    let temp = tempfile::tempdir().unwrap();
+    let session_api = lattice_api::SessionApi::sqlite(temp.path());
+    let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
+        lattice_agent::AgentLoopConfig {
+            llm: std::sync::Arc::new(StubLlmClient),
+            tool_executor: std::sync::Arc::new(NoopToolExecutor),
+        },
+    ));
+
+    let request = lattice_api::RunTurnRequest {
+        input: "hello".to_string(),
+        session_id: Some("nonexistent-session-id".to_string()),
+        profile: None,
+        model: Some("stub-model".to_string()),
+        loaded_profile: None,
+    };
+
+    let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        lattice_api::ApiError::NotFound(id) => {
+            assert_eq!(id, "nonexistent-session-id");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
+    // Regression: run_inner used to pass loaded_profile.package_dir
+    // (.lattice/agents/default) as the tool executor's project_root,
+    // which broke read_file/grep/etc for files outside that subdirectory.
+    let workspace = tempfile::tempdir().unwrap();
+    let ws = workspace.path();
+
+    // Create workspace content: src/lib.rs at the workspace root
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
+
+    // Create profile directory that is a *subdirectory* of the workspace
+    let profile_dir = ws.join(".lattice/agents/default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
+
+    // Build tool executor with the *workspace root* (the fix), not profile_dir
+    let enabled = vec!["read_file".to_string()];
+    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+        &ws.to_string_lossy(),
+        enabled,
+    )
+    .expect("executor creation must succeed");
+
+    // read_file("src/lib.rs") must resolve against workspace root, not profile_dir
+    let call = lattice_llm::ToolCall::new(
+        "test-call",
+        lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
+    );
+    use lattice_tools::ToolExecutor as _;
+    let result = executor
+        .execute(&call)
+        .await
+        .unwrap_or_else(|e| format!("Error: {e}"));
+
+    assert!(
+        result.contains("fn main()"),
+        "read_file must succeed via workspace root; got: {result}"
+    );
+    assert!(
+        !result.contains("outside the project root"),
+        "must not be rejected as out-of-root"
+    );
+}
+
+#[test]
+fn run_source_has_no_old_crate_imports() {
+    let source = include_str!("run.rs");
+    let test_start = source.find("#[cfg(test)]").unwrap_or(source.len());
+    let prod = &source[..test_start];
+    let forbidden = [
+        "lattice_core",
+        "lattice_runtime",
+        "lattice_prompt",
+        "lattice_sandbox",
+        "lattice_policy",
+    ];
+    for pattern in forbidden {
+        assert!(
+            !prod.contains(pattern),
+            "run.rs production code must not contain '{pattern}'"
+        );
+    }
+}
+
+// ─── JSON renderer tests (Task 2) ──────────────────────────────
+
+#[test]
+fn render_json_event_emits_single_line_with_trailing_newline() {
+    let event = TurnEvent::TokenDelta {
+        content: "hi".into(),
+    };
+    let mut buf = Vec::new();
+    render_json_event(&event, &mut buf).unwrap();
+    let output = String::from_utf8(buf).unwrap();
+    assert_eq!(output, "{\"type\":\"token_delta\",\"content\":\"hi\"}\n");
+}
+
+#[test]
+fn render_json_event_roundtrips_every_variant() {
+    let events: Vec<TurnEvent> = vec![
+        TurnEvent::TurnStarted {
+            session_id: "s1".into(),
+            parent_commit_id: None,
+            branch: Some("main".into()),
+        },
+        TurnEvent::ModelStarted {
+            provider: Some("anthropic".into()),
+            model: "claude".into(),
+        },
+        TurnEvent::ReasoningDelta {
+            content: "thinking".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "hello".into(),
+        },
+        TurnEvent::ToolCallStarted {
+            id: "tc1".into(),
+            name: "read_file".into(),
+        },
+        TurnEvent::ToolCallFinished {
+            id: "tc1".into(),
+            name: "read_file".into(),
+            ok: true,
+            output_len: 412,
+            error_summary: None,
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+        TurnEvent::TurnFailed {
+            reason: "boom".into(),
+        },
+        TurnEvent::TurnCancelled {
+            reason: Some("caller".into()),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "s1".into(),
+            commit_id: "c1".into(),
+            status: RunTurnStatus::Completed,
+        },
+        TurnEvent::CommitFailed {
+            reason: "parent mismatch".into(),
+        },
+    ];
+
+    for event in &events {
+        let mut buf = Vec::new();
+        render_json_event(event, &mut buf).unwrap();
+        let line = String::from_utf8(buf).unwrap();
+        let trimmed = line.trim_end();
+        let parsed: TurnEvent = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(&parsed, event, "roundtrip failed for {:?}", event);
+    }
+}
+
+#[test]
+fn render_json_event_emits_no_ansi_escapes() {
+    let event = TurnEvent::TurnFailed {
+        reason: "boom".into(),
+    };
+    let mut buf = Vec::new();
+    render_json_event(&event, &mut buf).unwrap();
+    assert!(
+        !buf.contains(&0x1B),
+        "JSON output must not contain ANSI ESC bytes (D-B6 / D-D3)"
+    );
+}
+
+// ─── Human renderer tests (Task 3) ─────────────────────────────
+
+#[test]
+fn render_human_token_delta_writes_only_to_stdout() {
+    let event = TurnEvent::TokenDelta {
+        content: "hi".into(),
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    assert_eq!(out, b"hi");
+    assert!(err.is_empty());
+}
+
+#[test]
+fn render_human_status_line_after_partial_token_inserts_stderr_newline() {
+    // First: emit a partial token (no trailing newline)
+    let mut state = RunRenderState {
+        tokens_emitted_without_newline: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(
+        &TurnEvent::TokenDelta {
+            content: "foo".into(),
+        },
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+    )
+    .unwrap();
+    apply_event_to_state(
+        &TurnEvent::TokenDelta {
+            content: "foo".into(),
+        },
+        &mut state,
+    );
+
+    // Then: a status line event (ToolCallStarted)
+    let event = TurnEvent::ToolCallStarted {
+        id: "t1".into(),
+        name: "read_file".into(),
+    };
+    let mut err2 = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err2, false).unwrap();
+
+    // D-B3: err must start with \n (the mid-token newline trick)
+    assert!(
+        err2.starts_with(b"\n"),
+        "stderr should begin with newline after mid-token status line (D-B3); got: {:?}",
+        String::from_utf8_lossy(&err2)
+    );
+}
+
+#[test]
+fn flush_before_status_resets_mid_token_flag_after_first_status() {
+    // WR-01 regression: after the mid-token newline trick fires for the
+    // first status event, subsequent status events must NOT produce
+    // duplicate blank lines on stderr.
+    let events = vec![
+        TurnEvent::TokenDelta {
+            content: "foo".into(),
+        },
+        TurnEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "read_file".into(),
+        },
+        TurnEvent::ToolCallFinished {
+            id: "t1".into(),
+            name: "read_file".into(),
+            ok: true,
+            output_len: 412,
+            error_summary: None,
+        },
+        TurnEvent::TurnCommitting,
+    ];
+    let (out, err, _state) = fake_event_loop(events, false);
+    // stdout: "foo\n" (token + D-B4 final newline)
+    assert!(out.starts_with(b"foo\n"));
+    // stderr: only ONE leading \n (from the first status event's D-B3 trick),
+    // not three (from each of the three status events).
+    let err_str = String::from_utf8(err).unwrap();
+    let leading_newlines = err_str.chars().take_while(|c| *c == '\n').count();
+    assert_eq!(
+        leading_newlines, 1,
+        "only one D-B3 newline trick, not duplicates; got: {:?}",
+        err_str
+    );
+}
+
+#[test]
+fn render_human_tool_finished_ok_renders_byte_size() {
+    let event = TurnEvent::ToolCallFinished {
+        id: "t1".into(),
+        name: "read_file".into(),
+        ok: true,
+        output_len: 412,
+        error_summary: None,
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(err_str.contains("412B"));
+    assert!(err_str.contains("read_file"));
+}
+
+#[test]
+fn render_human_tool_finished_err_renders_summary() {
+    let event = TurnEvent::ToolCallFinished {
+        id: "t1".into(),
+        name: "read_file".into(),
+        ok: false,
+        output_len: 120,
+        error_summary: Some("permission denied".into()),
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(err_str.contains("120B"));
+    assert!(err_str.contains("permission denied"));
+}
+
+#[test]
+fn render_human_reasoning_hidden_default() {
+    let event = TurnEvent::ReasoningDelta {
+        content: "thinking".into(),
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    assert!(
+        err.is_empty(),
+        "reasoning should be hidden in non-verbose mode"
+    );
+}
+
+#[test]
+fn render_human_reasoning_visible_verbose() {
+    let event = TurnEvent::ReasoningDelta {
+        content: "thinking".into(),
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, true).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(err_str.contains("reasoning"));
+    assert!(err_str.contains("thinking"));
+}
+
+#[test]
+fn render_human_turn_started_silent_default() {
+    let event = TurnEvent::TurnStarted {
+        session_id: "s1".into(),
+        parent_commit_id: None,
+        branch: None,
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    assert!(
+        err.is_empty(),
+        "TurnStarted should be silent in non-verbose human mode (D-C2)"
+    );
+}
+
+#[test]
+fn render_human_committed_lowercases_status() {
+    let event = TurnEvent::TurnCommitted {
+        session_id: "s1".into(),
+        commit_id: "c1".into(),
+        status: RunTurnStatus::Completed,
+    };
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(
+        err_str.contains("completed"),
+        "status must be lowercase in human mode; got: {err_str}"
+    );
+    assert!(
+        !err_str.contains("Completed"),
+        "status must NOT contain uppercase Completed"
+    );
+}
+
+// ─── Verbose epilogue tests (Task 4) ────────────────────────────
+
+#[test]
+fn verbose_epilogue_emits_all_fields_when_populated() {
+    let state = RunRenderState {
+        session_id: Some("s1".into()),
+        commit_id: Some("c1".into()),
+        last_status: Some(RunTurnStatus::Completed),
+        usage_total: Some(TurnUsageSummary {
+            prompt_tokens: 20,
+            completion_tokens: 10,
+            total_tokens: 30,
+        }),
+        tool_finished_count: 3,
+        ..Default::default()
+    };
+    let mut err = Vec::new();
+    render_verbose_epilogue(&state, &mut err).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(err_str.contains("session"));
+    assert!(err_str.contains("s1"));
+    assert!(err_str.contains("commit"));
+    assert!(err_str.contains("c1"));
+    assert!(err_str.contains("status"));
+    assert!(err_str.contains("usage"));
+    assert!(err_str.contains("30 tok"));
+    assert!(err_str.contains("tools"));
+    assert!(err_str.contains("3 executed"));
+}
+
+#[test]
+fn verbose_epilogue_skips_unset_fields() {
+    let state = RunRenderState::default();
+    let mut err = Vec::new();
+    render_verbose_epilogue(&state, &mut err).unwrap();
+    assert!(
+        err.is_empty(),
+        "empty state should produce no epilogue output"
+    );
+}
+
+#[test]
+fn verbose_epilogue_usage_from_state_not_committed() {
+    // Simulate two ModelFinished events summed into usage_total
+    let state = RunRenderState {
+        usage_total: Some(TurnUsageSummary {
+            prompt_tokens: 20,
+            completion_tokens: 10,
+            total_tokens: 30,
+        }),
+        ..Default::default()
+    };
+    let mut err = Vec::new();
+    render_verbose_epilogue(&state, &mut err).unwrap();
+    let err_str = String::from_utf8(err).unwrap();
+    assert!(err_str.contains("30 tok (prompt: 20, completion: 10)"));
+}
+
+// ─── D-A4 exit-code matrix (Task 6) ────────────────────────────
+
+#[test]
+fn exit_code_from_state_covers_all_da4_rows() {
+    use std::process::ExitCode;
+    fn ec_to_dbg(c: ExitCode) -> String {
+        format!("{:?}", c)
+    }
+
+    // Row 1: TurnCommitted{Completed} -> 0
+    let mut s = RunRenderState {
+        last_status: Some(RunTurnStatus::Completed),
+        last_commit: Some(CommitSignal::Committed),
+        ..Default::default()
+    };
+    assert_eq!(
+        ec_to_dbg(exit_code_from_state(&s)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 2: TurnCommitted{Error} -> 1
+    s.last_status = Some(RunTurnStatus::Error);
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 3: TurnCommitted{Cancelled} -> 1
+    s.last_status = Some(RunTurnStatus::Cancelled);
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 4: CommitFailed -> 1 (regardless of last_status)
+    s.last_commit = Some(CommitSignal::Failed {
+        reason: "parent mismatch".into(),
+    });
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 5: TurnFailed without TurnCommitted -> 1
+    let s5 = RunRenderState {
+        last_terminal: Some(TerminalSignal::Failed {
+            reason: "boom".into(),
+        }),
+        ..Default::default()
+    };
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s5)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 6: TurnCancelled without TurnCommitted -> 1
+    let s6 = RunRenderState {
+        last_terminal: Some(TerminalSignal::Cancelled { reason: None }),
+        ..Default::default()
+    };
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s6)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+
+    // Row 7: stream ended without any terminal/commit -> 1 (protocol violation)
+    let s7 = RunRenderState::default();
+    assert_ne!(
+        ec_to_dbg(exit_code_from_state(&s7)),
+        ec_to_dbg(ExitCode::SUCCESS)
+    );
+}
+
+// ─── Sequence test helpers (Plan 02, Task 1) ──────────────────
+
+/// Drive a Vec<TurnEvent> through the human renderer with Vec<u8>
+/// writers, applying D-B4 final-newline policy, and return the
+/// captured stdout bytes, stderr bytes, and accumulated state.
+fn fake_event_loop(
+    events: Vec<TurnEvent>,
+    verbose: bool,
+) -> (Vec<u8>, Vec<u8>, RunRenderState) {
+    let mut state = RunRenderState::default();
+    let mut out: Vec<u8> = Vec::new();
+    let mut err: Vec<u8> = Vec::new();
+    for event in &events {
+        render_human_event(event, &mut state, &mut out, &mut err, verbose)
+            .expect("render_human_event must succeed against Vec<u8> writers");
+        apply_event_to_state(event, &mut state);
+    }
+    // Mirror run_inner D-B4 final-stdout-newline policy.
+    if state.tokens_emitted_without_newline {
+        use std::io::Write;
+        writeln!(&mut out).expect("final newline must succeed against Vec<u8>");
+    }
+    (out, err, state)
+}
+
+/// Drive a Vec<TurnEvent> through the JSONL renderer with a
+/// Vec<u8> writer and return the captured stdout bytes and
+/// accumulated state.
+fn fake_jsonl_loop(events: Vec<TurnEvent>) -> (Vec<u8>, RunRenderState) {
+    let mut state = RunRenderState::default();
+    let mut out: Vec<u8> = Vec::new();
+    for event in &events {
+        render_json_event(event, &mut out)
+            .expect("render_json_event must succeed against Vec<u8>");
+        apply_event_to_state(event, &mut state);
+    }
+    (out, state)
+}
+
+/// Convert raw test buffer bytes to a String (asserts valid UTF-8).
+fn s(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec()).expect("test buffers must be valid UTF-8")
+}
+
+// ─── Happy-path + interleave sequence tests (Plan 02, Task 2) ──
+
+#[test]
+fn seq_happy_path_human() {
+    let events = vec![
+        TurnEvent::TurnStarted {
+            session_id: "S1".into(),
+            parent_commit_id: None,
+            branch: Some("main".into()),
+        },
+        TurnEvent::ModelStarted {
+            provider: Some("anthropic".into()),
+            model: "claude-3".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "Hello".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: " world\n".into(),
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "S1".into(),
+            commit_id: "C1".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (out, err, state) = fake_event_loop(events, false);
+    // stdout = TokenDelta concatenation; " world\n" ends with \n,
+    // so D-B4 final-newline logic does NOT append an extra \n.
+    assert_eq!(s(&out), "Hello world\n");
+    // stderr contains committing, commit id, completed status
+    let err_str = s(&err);
+    assert!(err_str.contains("committing"));
+    assert!(err_str.contains("C1"));
+    assert!(err_str.contains("completed"));
+    // D-C2: non-verbose hides reasoning and model-finished
+    assert!(!err_str.contains("reasoning"));
+    assert!(!err_str.contains("model finished"));
+    // Exit code = SUCCESS
+    assert_eq!(
+        format!("{:?}", exit_code_from_state(&state)),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn seq_happy_path_verbose_with_epilogue() {
+    let events = vec![
+        TurnEvent::TurnStarted {
+            session_id: "S1".into(),
+            parent_commit_id: None,
+            branch: Some("main".into()),
+        },
+        TurnEvent::ModelStarted {
+            provider: Some("anthropic".into()),
+            model: "claude-3".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "Hello".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: " world\n".into(),
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "S1".into(),
+            commit_id: "C1".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (out, mut err, state) = fake_event_loop(events, true);
+    // stdout unchanged
+    assert_eq!(s(&out), "Hello world\n");
+    // Append verbose epilogue to the same err buffer
+    render_verbose_epilogue(&state, &mut err).unwrap();
+    let err_str = s(&err);
+    // Verbose stderr contains session, commit, status, usage labels
+    assert!(err_str.contains("session"));
+    assert!(err_str.contains("commit"));
+    assert!(err_str.contains("status"));
+    assert!(err_str.contains("usage"));
+    assert!(err_str.contains("15 tok"));
+    assert!(err_str.contains("prompt: 10"));
+    assert!(err_str.contains("completion: 5"));
+}
+
+#[test]
+fn seq_trailing_token_newline_emitted() {
+    let events = vec![
+        TurnEvent::TokenDelta {
+            content: "foo".into(),
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: None,
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "S".into(),
+            commit_id: "C".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (out, _err, _state) = fake_event_loop(events, false);
+    // D-B4: "foo" does not end with \n, so fake_event_loop appends one
+    assert_eq!(s(&out), "foo\n");
+}
+
+#[test]
+fn seq_token_then_status_inserts_stderr_newline() {
+    let events = vec![
+        TurnEvent::TokenDelta {
+            content: "foo".into(),
+        },
+        TurnEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "read_file".into(),
+        },
+    ];
+    let (out, err, _state) = fake_event_loop(events, false);
+    // D-B4: "foo" has no trailing newline, so helper appends one to stdout
+    assert_eq!(&out[..], b"foo\n");
+    // D-B3: stderr starts with \n (mid-token newline trick)
+    let err_str = s(&err);
+    assert!(
+        err_str.starts_with('\n'),
+        "stderr should begin with newline after mid-token status line (D-B3); got: {err_str:?}"
+    );
+    // After the leading \n, stderr contains tool name
+    assert!(err_str.contains("tool"));
+    assert!(err_str.contains("read_file"));
+}
+
+#[test]
+fn seq_multiround_usage_sums_into_state() {
+    let events = vec![
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+    ];
+    let (_out, err, state) = fake_event_loop(events, true);
+    // D-A3: usage_total is summed across two ModelFinished events
+    assert_eq!(
+        state.usage_total,
+        Some(TurnUsageSummary {
+            prompt_tokens: 20,
+            completion_tokens: 10,
+            total_tokens: 30,
+        })
+    );
+    // D-C3: verbose epilogue uses state.usage_total, NOT TurnCommitted
+    let mut epilogue_err = err;
+    render_verbose_epilogue(&state, &mut epilogue_err).unwrap();
+    let epilogue_str = s(&epilogue_err);
+    assert!(epilogue_str.contains("30 tok"));
+    assert!(epilogue_str.contains("prompt: 20"));
+    assert!(epilogue_str.contains("completion: 10"));
+}
+
+// ─── Failure / cancellation / protocol-violation sequence tests (Plan 02, Task 3) ──
+
+#[test]
+fn seq_tool_failure_renders_summary() {
+    let events = vec![
+        TurnEvent::TurnStarted {
+            session_id: "S".into(),
+            parent_commit_id: None,
+            branch: None,
+        },
+        TurnEvent::ToolCallStarted {
+            id: "t".into(),
+            name: "read_file".into(),
+        },
+        TurnEvent::ToolCallFinished {
+            id: "t".into(),
+            name: "read_file".into(),
+            ok: false,
+            output_len: 120,
+            error_summary: Some("permission denied".into()),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "S".into(),
+            commit_id: "C".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (_out, err, state) = fake_event_loop(events, false);
+    let err_str = s(&err);
+    // Tool failure renders byte count and error summary with failure glyph
+    assert!(err_str.contains("120B"));
+    assert!(err_str.contains("permission denied"));
+    assert!(err_str.contains("✗"));
+    // D-A4: tool failure inside a successful turn does NOT change exit code
+    // — terminal status comes from TurnCommitted per WR-01
+    assert_eq!(
+        format!("{:?}", exit_code_from_state(&state)),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn seq_turn_failed_then_commit_drains_stream() {
+    let events = vec![
+        TurnEvent::TurnStarted {
+            session_id: "S".into(),
+            parent_commit_id: None,
+            branch: None,
+        },
+        TurnEvent::ModelStarted {
+            provider: None,
+            model: "x".into(),
+        },
+        TurnEvent::TurnFailed {
+            reason: "provider error".into(),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "S".into(),
+            commit_id: "C".into(),
+            status: RunTurnStatus::Error,
+        },
+    ];
+    let (_out, err, state) = fake_event_loop(events, false);
+    let err_str = s(&err);
+    // D-A6 stream-drain proof: stderr contains the TurnFailed message
+    assert!(err_str.contains("failed"));
+    assert!(err_str.contains("provider error"));
+    // And ALSO the post-terminal commit events (D-A6: must drain past terminal)
+    assert!(err_str.contains("committing"));
+    assert!(err_str.contains("C"));
+    assert!(err_str.contains("error")); // D-B2: lowercase status
+                                        // State accumulated correctly
+    assert!(state.last_terminal.is_some());
+    assert_eq!(state.last_status, Some(RunTurnStatus::Error));
+    assert!(state.last_commit.is_some());
+    // D-A4 row 2: TurnCommitted{Error} -> exit 1
+    assert_ne!(
+        format!("{:?}", exit_code_from_state(&state)),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn seq_commit_failed_renders_reason() {
+    let events = vec![
+        TurnEvent::TurnFailed {
+            reason: "boom".into(),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::CommitFailed {
+            reason: "parent mismatch".into(),
+        },
+    ];
+    let (_out, err, state) = fake_event_loop(events, false);
+    let err_str = s(&err);
+    // CommitFailed renders the failure glyph and reason
+    assert!(err_str.contains("commit failed"));
+    assert!(err_str.contains("parent mismatch"));
+    // D-A4 row 4: CommitFailed -> exit 1
+    assert_ne!(
+        format!("{:?}", exit_code_from_state(&state)),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn seq_stream_ends_without_terminal_is_protocol_violation() {
+    let events = vec![
+        TurnEvent::TurnStarted {
+            session_id: "S".into(),
+            parent_commit_id: None,
+            branch: None,
+        },
+        TurnEvent::ModelStarted {
+            provider: None,
+            model: "x".into(),
+        },
+    ];
+    let (_out, _err, state) = fake_event_loop(events, false);
+    // No terminal event arrived
+    assert!(state.last_terminal.is_none());
+    assert!(state.last_commit.is_none());
+    // D-A4 row 7: stream ended without terminal or commit -> exit 1
+    assert_ne!(
+        format!("{:?}", exit_code_from_state(&state)),
+        format!("{:?}", std::process::ExitCode::SUCCESS)
+    );
+}
+
+#[test]
+fn seq_jsonl_round_trips_every_variant() {
+    // Build a Vec<TurnEvent> covering all 12 variants with representative field values
+    let events: Vec<TurnEvent> = vec![
+        TurnEvent::TurnStarted {
+            session_id: "s1".into(),
+            parent_commit_id: None,
+            branch: Some("main".into()),
+        },
+        TurnEvent::ModelStarted {
+            provider: Some("anthropic".into()),
+            model: "claude-3".into(),
+        },
+        TurnEvent::ReasoningDelta {
+            content: "thinking deeply".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "hello world".into(),
+        },
+        TurnEvent::ToolCallStarted {
+            id: "tc1".into(),
+            name: "read_file".into(),
+        },
+        TurnEvent::ToolCallFinished {
+            id: "tc1".into(),
+            name: "read_file".into(),
+            ok: true,
+            output_len: 412,
+            error_summary: None,
+        },
+        TurnEvent::ModelFinished {
+            finish_reason: "stop".into(),
+            usage: Some(TurnUsageSummary {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+        TurnEvent::TurnFailed {
+            reason: "provider error".into(),
+        },
+        TurnEvent::TurnCancelled {
+            reason: Some("caller cancelled".into()),
+        },
+        TurnEvent::TurnCommitting,
+        TurnEvent::TurnCommitted {
+            session_id: "s1".into(),
+            commit_id: "c1".into(),
+            status: RunTurnStatus::Completed,
+        },
+        TurnEvent::CommitFailed {
+            reason: "parent mismatch".into(),
+        },
+    ];
+    assert_eq!(events.len(), 12, "must cover all 12 TurnEvent variants");
+
+    let (out, _state) = fake_jsonl_loop(events.clone());
+
+    // Split stdout buffer by \n; exclude trailing empty element after final newline
+    let out_str = s(&out);
+    let lines: Vec<&str> = out_str.split('\n').filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 12, "JSONL must produce exactly 12 lines");
+
+    // Each line round-trips through serde_json::from_str back to the original event
+    for (i, line) in lines.iter().enumerate() {
+        let parsed: TurnEvent = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            parsed, events[i],
+            "JSONL roundtrip failed for variant at index {i}: parsed={:?}, expected={:?}",
+            parsed, events[i]
+        );
+    }
+
+    // D-D3 / D-B6: stdout contains zero ESC (0x1B) bytes
+    assert!(
+        !out.contains(&0x1B),
+        "JSONL output must not contain ANSI ESC bytes (D-D3 / D-B6)"
+    );
+
+    // No human chrome substrings in JSONL output
+    assert!(
+        !out_str.contains("·") && !out_str.contains("✓") && !out_str.contains("✗"),
+        "JSONL must not contain human chrome glyphs (D-D3)"
+    );
+    assert!(
+        !out_str.contains("reasoning:"),
+        "JSONL must not contain human-format 'reasoning:' prefix"
+    );
+
+    // D-D3 (clarification): JSONL IS the raw public TurnEvent stream,
+    // so ReasoningDelta IS emitted as a normal JSONL line even though
+    // it's hidden from human stderr
+    assert!(
+        out_str.contains("\"type\":\"reasoning_delta\""),
+        "JSONL must contain reasoning_delta as a normal JSONL line (D-D3 raw-stream contract)"
+    );
+}
+
+#[test]
+fn seq_reasoning_hidden_default_in_human() {
+    let events = vec![
+        TurnEvent::TokenDelta {
+            content: "a".into(),
+        },
+        TurnEvent::ReasoningDelta {
+            content: "thinking".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "b".into(),
+        },
+        TurnEvent::TurnCommitted {
+            session_id: "S".into(),
+            commit_id: "C".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (out, err, _state) = fake_event_loop(events, false);
+    // stdout contains TokenDelta bytes only
+    let out_str = s(&out);
+    assert!(
+        out_str.starts_with("ab"),
+        "stdout should start with 'ab' (TokenDelta concatenation); got: {out_str:?}"
+    );
+    // D-C2: stderr does not contain reasoning or thinking text
+    let err_str = s(&err);
+    assert!(
+        !err_str.contains("reasoning"),
+        "stderr must not contain 'reasoning' in non-verbose mode (D-C2)"
+    );
+    assert!(
+        !err_str.contains("thinking"),
+        "stderr must not contain 'thinking' in non-verbose mode (D-C2)"
+    );
+}
+
+#[test]
+fn seq_reasoning_visible_in_verbose() {
+    let events = vec![
+        TurnEvent::TokenDelta {
+            content: "a".into(),
+        },
+        TurnEvent::ReasoningDelta {
+            content: "thinking".into(),
+        },
+        TurnEvent::TokenDelta {
+            content: "b".into(),
+        },
+        TurnEvent::TurnCommitted {
+            session_id: "S".into(),
+            commit_id: "C".into(),
+            status: RunTurnStatus::Completed,
+        },
+    ];
+    let (out, err, _state) = fake_event_loop(events, true);
+    // stdout contains TokenDelta bytes only (unchanged from non-verbose)
+    let out_str = s(&out);
+    assert!(
+        out_str.starts_with("ab"),
+        "stdout should start with 'ab'; got: {out_str:?}"
+    );
+    // D-C3: verbose stderr contains reasoning text
+    let err_str = s(&err);
+    assert!(
+        err_str.contains("thinking"),
+        "verbose stderr must contain 'thinking' (D-C3)"
+    );
+    assert!(
+        err_str.contains("reasoning"),
+        "verbose stderr must contain 'reasoning' (D-C3)"
+    );
+}
