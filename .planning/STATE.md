@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2-alpha
 milestone_name: Evented Runtime
-status: milestone_complete
-last_updated: 2026-05-21T19:06:12.553Z
-last_activity: 2026-05-21 -- Phase 15 execution started
+status: in_progress
+last_updated: 2026-05-22T02:30:00.000Z
+last_activity: 2026-05-22 -- Phase 15 complete; ready for Phase 16
 progress:
-  total_phases: 4
-  completed_phases: 3
+  total_phases: 7
+  completed_phases: 4
   total_plans: 9
   completed_plans: 9
-  percent: 75
-stopped_at: Milestone complete (Phase 15 was final phase)
+  percent: 57
+stopped_at: Phase 15 complete; ready for Phase 16
 ---
 
 # Planning State
@@ -21,14 +21,14 @@ stopped_at: Milestone complete (Phase 15 was final phase)
 See: .planning/PROJECT.md (updated 2026-05-21)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Milestone complete
+**Current focus:** Phase 16 — Live API Stream and Commit Transaction
 
 ## Current Position
 
-Phase: 15
+Phase: 16
 Plan: Not started
-Status: Milestone complete
-Last activity: 2026-05-21
+Status: Ready for planning
+Last activity: 2026-05-22 -- Phase 15 complete
 
 ## Accumulated Context
 
@@ -48,6 +48,9 @@ Last activity: 2026-05-21
 - [Phase 13-01] `LlmClient` now exposes `stream_chat` with a default buffered fallback that emits reasoning, token, tool-call, and done events without synthesizing provider stream-open events.
 - [Phase 13-01] `lattice_agent::testing::FakeStreamingLlmClient` is available only under `feature = "test-utils"` and preserves the two-channel error model: startup failures as `Result::Err`, mid-stream failures as `LlmEvent::Error`.
 - [Phase 13-01] AgentLoop, RealLlmClient, `lattice-llm` source, public `TurnEvent`, and `stream_turn` remained unchanged; those consumer changes start in Phase 14+.
+- [Phase 15-01] Extracted `flush_partial_assistant_message` and `apply_optional_timeout` helpers in `agent_loop/mod.rs`; derived `PartialEq` (not `Eq`) on `AgentTurnEvent` because `TurnUsage` in `lattice-session` is `PartialEq`-only.
+- [Phase 15-02] `emit_agent_event` is the single emission seam; `live_events: Option<&Sender<AgentTurnEvent>>` threaded through `run_turn_inner`; sender drop is fire-and-forget via `let _ = sender.send(event).await`. Five cancel checkpoints (round-top + 1b + 2 + 3 + 4 + 5) all use `flag.load(Ordering::Relaxed)` and return `terminal_reason: Some("cancelled by caller")`. `StreamOutcome::Cancelled` is the cancel-aware return from `consume_model_stream`.
+- [Phase 15-02] `run_turn_live` mirrors `run_turn` buffered output onto a bounded `mpsc::Sender<AgentTurnEvent>` while still returning the full `AgentTurnResult.events` vector. Receiver drop does not fail the turn; cancel-during-tool waits for the real tool result before observing the flag.
 
 ### Blockers
 
@@ -55,8 +58,7 @@ Last activity: 2026-05-21
 
 ### Todos
 
-- Phase 14: AgentLoop Streaming Delta Engine.
-- Phase 15: Implement cooperative cancellation checkpoints deferred from Phase 14: before `stream_chat`, after each `LlmEvent` chunk, after model `Done` before tool execution, before each tool starts, and after each tool finishes before the next model round.
+- Phase 16: Live API Stream and Commit Transaction.
 - Phase 14/17: Preserve partial progress on timeout via cooperative deadline or streaming loop state.
+- Phase 17: Timeout may drop in-flight `run_turn_live` after live events have already been sent, while returned `AgentTurnResult` uses the legacy empty timeout shape (zero usage, empty messages, empty events). Phase 17 must reconcile timeout partial preservation **and** live/result event consistency — fixing only transcript partial without locking `live_received == result.events` would leave a silent observability gap. Scenario 08 in `crates/lattice-agent/tests/live_sink_and_cancel.rs` currently asserts only the result shape; extend it (or add a sibling) to assert received-event consistency once the reconciliation lands.
 - Phase 17: Reconcile `RunTurnStage` semantics with observed events/tool results or weaken/remove the field.
-- Run `cargo fmt --all` during Phase 14 to clean up pre-existing drift in `crates/lattice-llm/src/client.rs:289` (logged in `.planning/phases/12-event-and-status-vocabulary-contract/deferred-items.md`).
