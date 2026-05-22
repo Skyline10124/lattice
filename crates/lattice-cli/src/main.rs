@@ -13,7 +13,12 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long, global = true, help = "JSON output")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Status lines, reasoning, and verbose epilogue are suppressed. Alpha behavior change from v1.1 pretty JSON."
+    )]
     json: bool,
 
     #[arg(

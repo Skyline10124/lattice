@@ -51,9 +51,9 @@
 
 ### CLI
 
-- [ ] **CLI-05**: CLI `run` consumes public `TurnEvent` values and renders `TokenDelta` as assistant output as the stream arrives.
-- [ ] **CLI-06**: CLI rendering keeps reasoning hidden by default, reports tool start/finish as compact status lines, and sends `TurnFailed` / `CommitFailed` to stderr.
-- [ ] **CLI-07**: CLI final output surfaces committed session id, commit id, and terminal status without depending on internal `AgentTurnEvent` names.
+- [x] **CLI-05**: CLI `run` consumes public `TurnEvent` values and renders `TokenDelta` as assistant output as the stream arrives.
+- [x] **CLI-06**: CLI rendering keeps reasoning hidden by default, reports tool start/finish as compact status lines, and sends `TurnFailed` / `CommitFailed` to stderr.
+- [x] **CLI-07**: CLI final output surfaces committed session id, commit id, and terminal status without depending on internal `AgentTurnEvent` names.
 
 ### Verification
 
@@ -64,7 +64,7 @@
 - [x] **VER-11**: Tests prove cancellation before tool execution skips the tool and cancellation during tool execution waits for the tool result.
 - [x] **VER-12**: Tests prove receiver drop does not cancel a live turn and commit failure does not move HEAD.
 - [x] **VER-13**: Tests prove `stream_turn` emits token/model/tool activity before commit and remains semantically consistent with `run_turn`.
-- [ ] **VER-14**: The release gate passes targeted crate tests for `lattice-llm`, `lattice-agent`, `lattice-api`, and `lattice-cli`, plus formatting and workspace compile checks.
+- [x] **VER-14**: The release gate passes targeted crate tests for `lattice-llm`, `lattice-agent`, `lattice-api`, and `lattice-cli`, plus formatting and workspace compile checks.
 
 ## Future Requirements
 
@@ -122,9 +122,9 @@
 | API-08 | Phase 16 | Complete |
 | API-09 | Phase 16 | Complete |
 | API-10 | Phase 16 | Complete |
-| CLI-05 | Phase 18 | Pending |
-| CLI-06 | Phase 18 | Pending |
-| CLI-07 | Phase 18 | Pending |
+| CLI-05 | Phase 18 | Complete |
+| CLI-06 | Phase 18 | Complete |
+| CLI-07 | Phase 18 | Complete |
 | VER-07 | Phase 12 | Complete |
 | VER-08 | Phase 14 | Complete |
 | VER-09 | Phase 14 | Complete |
@@ -132,7 +132,7 @@
 | VER-11 | Phase 15 | Complete |
 | VER-12 | Phase 17 | Complete |
 | VER-13 | Phase 17 | Complete |
-| VER-14 | Phase 18 | Pending |
+| VER-14 | Phase 18 | Complete |
 
 **Coverage:**
 - v1.2-alpha requirements: 39 total

@@ -37,11 +37,34 @@
 - **位置**: `crates/lattice-api/src/session.rs:131-136`
 - **问题**: 所有非 NotFound 的 SessionError 扁平化为 `ApiError::Internal(string)`。
 
+### M-18-01: release-gate.sh 缺三个 workspace crate — `quality`
+- **位置**: `scripts/release-gate.sh:13-23`
+- **问题**: 只测试 lattice-llm/agent/api/cli，缺 lattice-session/tools/profile。任一有 bug 会漏过 release gate。
+- **计划**: post-alpha 改为 `cargo test --workspace`。
+
+### M-18-02: `status_to_exit_code` 死代码 — `quality`
+- **位置**: `crates/lattice-cli/src/commands/run.rs:612-619`
+- **问题**: `#[allow(dead_code)]` 仅为三个遗留测试保留，新 `exit_code_from_state` 已完整覆盖 D-A4 矩阵。
+- **计划**: 移除 `status_to_exit_code` 及其三个测试。
+
 ## LOW
 
 ### L-02: `parse_json_data` 用 `Err(LlmEvent::Started)` 做 sentinel — `api-design`
 - **位置**: `crates/lattice-llm/src/providers/mod.rs:14-22`
 - **问题**: 空数据/`[DONE]` 返回 `Err(LlmEvent::Started)` 表示"跳过"，语义混乱。
+
+### L-18-01: `handle_profile_error` 未用 `_source` 参数 — `quality`
+- **位置**: `crates/lattice-cli/src/commands/run.rs:489-493`
+- **问题**: `_source: &ProfileSource` 从未使用，下划线前缀确认此问题。
+
+### L-18-02: TurnEvent 序列化 `.expect()` 不可恢复 panic — `robustness`
+- **位置**: `crates/lattice-cli/src/commands/run.rs:180`
+- **问题**: `serde_json::to_string(event).expect(...)` — 类型系统保证所有字段可序列化，但 panic 无优雅降级。
+
+### L-18-03: 无 stream 超时/deadline 机制 — `robustness`
+- **位置**: `crates/lattice-cli/src/commands/run.rs:439`
+- **问题**: `while let Some(event) = stream.next().await` 无超时。channel 容量 256 提供背压，但 hung provider 会阻塞 CLI。
+- **计划**: post-alpha 加 deadline。
 
 ## OBSOLETE / CLOSED
 

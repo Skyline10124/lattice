@@ -2,15 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.2-alpha
 milestone_name: Evented Runtime
-status: executing
-last_updated: "2026-05-22T09:20:00.000Z"
-last_activity: 2026-05-22 -- Phase 17 closeout docs refreshed
+status: milestone_complete
+last_updated: 2026-05-22T13:24:02.063Z
+last_activity: 2026-05-22 -- Phase 18 complete; milestone ready to close
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 6
-  total_plans: 15
-  completed_plans: 15
-  percent: 100
+  total_plans: 18
+  completed_plans: 18
+  percent: 86
+stopped_at: Milestone complete (Phase 18 was final phase)
 ---
 
 # Planning State
@@ -20,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-21)
 
 **Core value:** A user can run one session-centered generic agent through a small, understandable Rust runtime with simple model routing, simple tools, commit-backed history, and a CLI surface that does not hide extra architecture.
-**Current focus:** Phase 18 — CLI Live Rendering and Alpha Release Gate
+**Current focus:** Milestone complete
 
 ## Current Position
 
 Phase: 18
 Plan: Not started
-Status: Ready to discuss
-Last activity: 2026-05-22 -- Phase 17 closeout docs refreshed
+Status: Milestone complete
+Last activity: 2026-05-22
 
 ## Accumulated Context
 
@@ -56,6 +57,9 @@ Last activity: 2026-05-22 -- Phase 17 closeout docs refreshed
 - [Phase 16-02] `stream_turn` is now a true live event stream: `prepare_live_turn` validates startup synchronously (returns Err before stream on failure), `run_live_turn_task` uses mandatory `tokio::select!` concurrent drain loop, terminal event derived from `AgentTurnResult.status` (not ModelFinished presence per WR-01). `stream_turn_with_deps` preserved as buffered test seam (D-01). Channel capacity 256 (D-17). Receiver drop does not cancel the turn.
 - [Phase 16-03] 7 behavioral tests prove live path: startup failure as Err (API-04/05), event ordering, Completed/Error commit, commit failure as CommitFailed (COMM-03), commit stores delta only (COMM-01), branch population.
 - [Phase 17 closeout] Timeout documentation now describes cooperative deadline coverage for stream creation, stream consumption, and tool execution; live channel backpressure remains an accepted alpha gap. Phase 17 validation/verification docs and stale live-stream findings were refreshed before Phase 18.
+- [Phase 18] CLI `run` subcommand swapped from buffered `run_turn` to live `lattice_api::stream_turn` with per-event rendering (TokenDelta to stdout, tool/commit lifecycle to stderr), JSONL mode, accumulated `RunRenderState` for exit-code derivation, and `scripts/release-gate.sh` shipped as the VER-14 release gate.
+- [Phase 18] REQUIREMENTS.md traceability closed for CLI-05/06/07/VER-14; ROADMAP.md marks Phase 18 complete with 3/3 plans; all v1.2-alpha requirements are now mapped Complete.
+- [Phase 18] The v1.2-alpha milestone is ready to close — pending `/gsd:complete-milestone`.
 
 ### Blockers
 
