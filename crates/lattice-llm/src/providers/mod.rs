@@ -10,15 +10,27 @@ pub mod openai;
 
 use crate::types::LlmEvent;
 
-/// Parse `data` into a JSON value, returning the value or an error event.
-pub(crate) fn parse_json_data(provider: &str, data: &str) -> Result<serde_json::Value, LlmEvent> {
+/// Parse `data` into a JSON value.
+///
+/// Returns:
+/// - `Ok(Some(value))` for parsed JSON
+/// - `Ok(None)` for empty data or `[DONE]`
+/// - `Err(LlmEvent::Error)` for parse errors
+pub(crate) fn parse_json_data(
+    provider: &str,
+    data: &str,
+) -> Result<Option<serde_json::Value>, LlmEvent> {
     let trimmed = data.trim();
+
     if trimmed.is_empty() || trimmed == "[DONE]" {
-        return Err(LlmEvent::Started);
+        return Ok(None);
     }
-    serde_json::from_str(trimmed).map_err(|e| LlmEvent::Error {
-        message: format!("{} SSE JSON parse error: {}", provider, e),
-    })
+
+    serde_json::from_str(trimmed)
+        .map(Some)
+        .map_err(|e| LlmEvent::Error {
+            message: format!("{provider} SSE JSON parse error: {e}"),
+        })
 }
 
 /// Extract an API-level error event from a response JSON value.
@@ -68,5 +80,46 @@ pub(crate) fn token_usage_from_keys(
         prompt_tokens: u32_field(obj, prompt_key),
         completion_tokens: u32_field(obj, completion_key),
         total_tokens: u32_field(obj, total_key),
+    }
+}
+
+#[cfg(test)]
+mod parse_json_data_tests {
+    use super::*;
+
+    #[test]
+    fn parse_valid_json_returns_some() {
+        let result = parse_json_data("TestProvider", r#"{"key": "value"}"#);
+        assert!(matches!(result, Ok(Some(v)) if v.get("key").unwrap() == "value"));
+    }
+
+    #[test]
+    fn parse_empty_string_returns_none() {
+        let result = parse_json_data("TestProvider", "");
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn parse_whitespace_only_returns_none() {
+        let result = parse_json_data("TestProvider", "   \t\n  ");
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn parse_done_sentinel_returns_none() {
+        let result = parse_json_data("TestProvider", "[DONE]");
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn parse_done_with_whitespace_returns_none() {
+        let result = parse_json_data("TestProvider", "  [DONE]  ");
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn parse_invalid_json_returns_error() {
+        let result = parse_json_data("TestProvider", "{invalid}");
+        assert!(matches!(result, Err(LlmEvent::Error { .. })));
     }
 }

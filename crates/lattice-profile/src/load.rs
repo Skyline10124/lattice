@@ -147,7 +147,11 @@ fn load_prompt_file(profile_path: &Path, rel_path: &str) -> Result<String, Profi
 
     let canonical_package = package_dir
         .canonicalize()
-        .unwrap_or_else(|_| package_dir.to_path_buf());
+        .map_err(|source| ProfileError::SystemPathNotFound {
+            profile_path: profile_path.to_path_buf(),
+            given: package_dir.to_string_lossy().to_string(),
+            source,
+        })?;
     let canonical_resolved =
         resolved
             .canonicalize()

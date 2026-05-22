@@ -327,12 +327,32 @@ pub fn canonical_turn_commit_id(
 }
 
 fn hash_json(kind: &str, value: &serde_json::Value) -> String {
-    let json = serde_json::to_string(value).expect("JSON serialization must succeed");
+    let json = canonical_json(value);
     let mut hasher = Sha256::new();
     hasher.update(kind.as_bytes());
     hasher.update(b"\0");
     hasher.update(json.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Canonicalize JSON by sorting object keys alphabetically (recursive).
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            let pairs: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap(), canonical_json(&map[*k])))
+                .collect();
+            format!("{{{}}}", pairs.join(","))
+        }
+        serde_json::Value::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(canonical_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        _ => serde_json::to_string(value).unwrap(),
+    }
 }
 
 #[cfg(test)]

@@ -157,8 +157,8 @@ impl GeminiSseParser {
     /// Parse a Gemini SSE data chunk into [`LlmEvent`] values.
     pub fn parse_chunk(&mut self, _event_type: Option<&str>, data: &str) -> Vec<LlmEvent> {
         let root = match super::parse_json_data("Gemini", data) {
-            Ok(v) => v,
-            Err(LlmEvent::Started) => return vec![],
+            Ok(Some(v)) => v,
+            Ok(None) => return vec![],
             Err(e) => return vec![e],
         };
 

@@ -1,29 +1,37 @@
 use super::*;
 
-#[test]
-fn run_status_to_exit_code_completed_is_success() {
-    assert_eq!(
-        status_to_exit_code(&RunTurnStatus::Completed),
-        std::process::ExitCode::SUCCESS
-    );
-}
+// ─── Stream timeout constants (L-18-03) ───────────────────────────
 
 #[test]
-fn run_status_to_exit_code_error_is_1() {
-    let code = status_to_exit_code(&RunTurnStatus::Error);
-    assert_ne!(
-        format!("{:?}", code),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
+fn stream_timeout_constant_is_5_minutes() {
+    // STREAM_TIMEOUT_SECS must be 300 (5 minutes) per L-18-03 spec
+    const EXPECTED_TIMEOUT: u64 = 300;
+    assert_eq!(EXPECTED_TIMEOUT, STREAM_TIMEOUT_SECS);
 }
 
-#[test]
-fn run_status_to_exit_code_cancelled_is_1() {
-    let code = status_to_exit_code(&RunTurnStatus::Cancelled);
-    assert_ne!(
-        format!("{:?}", code),
-        format!("{:?}", std::process::ExitCode::SUCCESS)
-    );
+#[tokio::test]
+async fn stream_timeout_fires_after_duration() {
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::time;
+
+    // Create a stream that never yields
+    struct NeverStream;
+    impl futures::Stream for NeverStream {
+        type Item = TurnEvent;
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    let mut stream = NeverStream;
+    let timeout_duration = Duration::from_millis(50); // very short for test
+
+    let result = time::timeout(timeout_duration, stream.next()).await;
+    assert!(result.is_err(), "timeout should fire when stream never yields");
 }
 
 #[test]

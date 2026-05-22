@@ -17,6 +17,12 @@ pub enum ApiError {
     #[error("session '{0}' not found")]
     NotFound(String),
 
+    #[error("bad request: {0}")]
+    BadRequest(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -131,7 +137,19 @@ impl SessionApi {
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {
     match e {
         lattice_session::SessionError::NotFound(id) => ApiError::NotFound(id),
-        other => ApiError::Internal(other.to_string()),
+        lattice_session::SessionError::InvalidBranchName => {
+            ApiError::BadRequest("invalid branch name: format or length violation".into())
+        }
+        lattice_session::SessionError::MissingCommit(id) => {
+            ApiError::NotFound(format!("commit '{}' not found", id))
+        }
+        lattice_session::SessionError::Conflict(msg) => ApiError::Conflict(msg),
+        lattice_session::SessionError::Io { operation, path, source } => {
+            ApiError::Internal(format!("io error while {} '{}': {}", operation, path.display(), source))
+        }
+        lattice_session::SessionError::Database { path, source } => {
+            ApiError::Internal(format!("database error in '{}': {}", path.display(), source))
+        }
     }
 }
 

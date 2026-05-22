@@ -26,8 +26,13 @@ use lattice_profile::{ProfileError, ProfileSource};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time;
 
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
+
+/// Stream idle timeout in seconds (L-18-03).
+pub(crate) const STREAM_TIMEOUT_SECS: u64 = 300;
 
 /// Production LlmClient that delegates to `lattice_llm::chat`.
 struct RealLlmClient;
@@ -178,7 +183,7 @@ fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
 /// Each call emits exactly one `serde_json::to_string` line followed
 /// by `\n` via `writeln!`. No ANSI escapes are produced (D-B6 / D-D3).
 fn render_json_event<W: std::io::Write>(event: &TurnEvent, out: &mut W) -> std::io::Result<()> {
-    let line = serde_json::to_string(event).expect("TurnEvent serializes infallibly");
+    let line = serde_json::to_string(event).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     writeln!(out, "{}", line)
 }
 
@@ -423,6 +428,14 @@ async fn run_inner(
             eprintln!("{}: session '{}' not found", "error".red(), id);
             return Ok(std::process::ExitCode::from(2));
         }
+        Err(lattice_api::ApiError::BadRequest(msg)) => {
+            eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::Conflict(msg)) => {
+            eprintln!("{}: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
         Err(lattice_api::ApiError::Internal(msg)) => {
             eprintln!("{}: {}", "error".red(), msg);
             return Ok(std::process::ExitCode::from(1));
@@ -437,12 +450,25 @@ async fn run_inner(
     let mut err = stderr.lock();
 
     use futures::StreamExt;
-    while let Some(event) = stream.next().await {
+
+    loop {
+        let event = match time::timeout(Duration::from_secs(STREAM_TIMEOUT_SECS), stream.next()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => break,
+            Err(_) => {
+                out.flush()?;
+                writeln!(err, "{}: stream timed out after {}s", "error".red(), STREAM_TIMEOUT_SECS)?;
+                err.flush()?;
+                return Ok(std::process::ExitCode::from(1));
+            }
+        };
+
         if json {
             render_json_event(&event, &mut out)?;
         } else {
             render_human_event(&event, &mut state, &mut out, &mut err, verbose)?;
         }
+
         apply_event_to_state(&event, &mut state);
     }
 
@@ -618,15 +644,6 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-/// Kept for the preserved `run_status_to_exit_code_*` tests.
-#[allow(dead_code)]
-fn status_to_exit_code(status: &RunTurnStatus) -> std::process::ExitCode {
-    match status {
-        RunTurnStatus::Completed => std::process::ExitCode::SUCCESS,
-        RunTurnStatus::Error | RunTurnStatus::Cancelled => std::process::ExitCode::from(1),
-    }
 }
 
 #[cfg(test)]

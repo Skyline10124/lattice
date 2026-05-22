@@ -13,6 +13,18 @@ cargo build --workspace --all-features
 echo "==> cargo test -p lattice-llm"
 cargo test -p lattice-llm
 
+echo "==> cargo test -p lattice-session"
+cargo test -p lattice-session
+
+echo "==> cargo test -p lattice-tools"
+cargo test -p lattice-tools
+
+echo "==> cargo test -p lattice-profile"
+cargo test -p lattice-profile
+
+echo "==> cargo test -p lattice-hooks"
+cargo test -p lattice-hooks
+
 echo "==> cargo test -p lattice-agent --features test-utils"
 cargo test -p lattice-agent --features test-utils
 
