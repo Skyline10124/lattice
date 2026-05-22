@@ -104,6 +104,15 @@ The following capabilities are deferred beyond the current release:
 - **Plugins and orchestration (deferred)** — Plugin contracts and DAG runners for multi-agent coordination.
 - **Swarm and multi-agent collaboration (deferred)** — Session-graph-based coordination features.
 
+## Cursor Cloud specific instructions
+
+- **Rust version**: The declared MSRV is 1.85 but locked transitive dependencies (e.g. `icu_*`, `time`) require Rust 1.88+. Use `rustup default stable` (currently 1.95) to satisfy all deps.
+- **System dependency**: `libssl-dev` (and `pkg-config`) must be installed for the `openssl-sys` transitive dependency (pulled in via `reqwest`'s native-tls feature in the dependency graph).
+- **No external services needed**: All tests use mock/fake LLM clients. `cargo test` passes without any API keys or network access.
+- **Lint note**: `cargo clippy -- -D warnings` may flag new lints as Rust stable advances (e.g. `clippy::io_other_error` on 1.95). `cargo fmt --all --check` may also report diffs if rustfmt formatting rules have evolved since the code was last formatted.
+- **CLI demo commands** (no API key required): `cargo run -p lattice-cli -- doctor`, `resolve <alias>`, `models`, `session status`.
+- **Running the `run` subcommand** requires: (1) an agent profile at `.lattice/agents/default/agent.toml` in the working directory, and (2) the relevant provider API key env var (e.g. `ANTHROPIC_API_KEY`).
+
 ## License
 
 Apache-2.0
