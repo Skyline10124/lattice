@@ -43,6 +43,36 @@ struct NormalizedToolResult {
 
 // ── Observation builders ───────────────────────────────────────────────────
 
+fn last_terminal_reason(
+    session_store: &SqliteSessionGraphStore,
+    session_id: &str,
+) -> Option<String> {
+    session_store
+        .log(session_id)
+        .expect("log after commit")
+        .last()
+        .and_then(|entry| entry.terminal_reason.clone())
+}
+
+fn last_usage(
+    session_store: &SqliteSessionGraphStore,
+    session_id: &str,
+) -> Option<TurnUsageSummary> {
+    session_store
+        .log(session_id)
+        .expect("log after commit")
+        .last()
+        .and_then(|entry| entry.usage.clone())
+        .map(TurnUsageSummary::from)
+        .and_then(|usage| {
+            if usage.prompt_tokens == 0 && usage.completion_tokens == 0 && usage.total_tokens == 0 {
+                None
+            } else {
+                Some(usage)
+            }
+        })
+}
+
 /// Build observation from run_turn result + committed session store.
 fn observe_run_turn(
     result: &lattice_api::RunTurnResult,
@@ -78,25 +108,8 @@ fn observe_run_turn(
         })
         .collect();
 
-    // terminal_reason: None for Completed; for Error, extract from log entry
-    let terminal_reason = if result.status == RunTurnStatus::Error {
-        let log = session_store
-            .log(&result.session_id)
-            .expect("log after run_turn");
-        log.last().and_then(|entry| entry.terminal_reason.clone())
-    } else {
-        None
-    };
-
-    // Normalize zero-usage to None (matches stream side which has no
-    // ModelFinished on error paths, so usage is None there)
-    let usage = result.usage.as_ref().and_then(|u| {
-        if u.prompt_tokens == 0 && u.completion_tokens == 0 && u.total_tokens == 0 {
-            None
-        } else {
-            Some(u.clone())
-        }
-    });
+    let terminal_reason = last_terminal_reason(session_store, &result.session_id);
+    let usage = last_usage(session_store, &result.session_id);
 
     NormalizedTurnObservation {
         status: result.status.clone(),
@@ -143,32 +156,6 @@ fn observe_stream_turn(
         .map(|m| (m.role.clone(), m.content.clone()))
         .collect();
 
-    // Usage: sum all ModelFinished events (multi-round turns accumulate usage)
-    let mut total_prompt = 0u64;
-    let mut total_completion = 0u64;
-    let mut total_total = 0u64;
-    let mut has_usage = false;
-    for e in events {
-        if let TurnEvent::ModelFinished {
-            usage: Some(u), ..
-        } = e
-        {
-            total_prompt += u.prompt_tokens;
-            total_completion += u.completion_tokens;
-            total_total += u.total_tokens;
-            has_usage = true;
-        }
-    }
-    let usage = if has_usage {
-        Some(TurnUsageSummary {
-            prompt_tokens: total_prompt,
-            completion_tokens: total_completion,
-            total_tokens: total_total,
-        })
-    } else {
-        None
-    };
-
     // Tool results from ToolCallFinished events
     let tool_results: Vec<NormalizedToolResult> = events
         .iter()
@@ -189,11 +176,8 @@ fn observe_stream_turn(
         })
         .collect();
 
-    // terminal_reason from TurnFailed if present
-    let terminal_reason = events.iter().find_map(|e| match e {
-        TurnEvent::TurnFailed { reason } => Some(reason.clone()),
-        _ => None,
-    });
+    let terminal_reason = last_terminal_reason(session_store, &session_id);
+    let usage = last_usage(session_store, &session_id);
 
     NormalizedTurnObservation {
         status,
@@ -372,21 +356,21 @@ async fn consistency_completed_content_only() {
         loaded_profile: Some(ws.loaded.clone()),
     };
 
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        stream_session_api,
-        stream_agent_loop,
-        stream_request,
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
+    let events: Vec<TurnEvent> =
+        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
+            .await
+            .expect("stream_turn must start")
+            .collect()
+            .await;
 
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_obs = observe_stream_turn(&events, &stream_store);
 
     // --- Consistency assertion ---
-    assert_eq!(run_obs, stream_obs, "run_turn and stream_turn observations must match for completed content-only scenario");
+    assert_eq!(
+        run_obs, stream_obs,
+        "run_turn and stream_turn observations must match for completed content-only scenario"
+    );
 }
 
 // ── Test 2: Error after partial token (D-11 scenario 2) ───────────────────
@@ -467,18 +451,24 @@ async fn consistency_error_after_partial_token() {
         loaded_profile: Some(ws.loaded.clone()),
     };
 
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        stream_session_api,
-        stream_agent_loop,
-        stream_request,
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
+    let events: Vec<TurnEvent> =
+        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
+            .await
+            .expect("stream_turn must start")
+            .collect()
+            .await;
 
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_obs = observe_stream_turn(&events, &stream_store);
+
+    let event_reason = events.iter().find_map(|e| match e {
+        TurnEvent::TurnFailed { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        event_reason, stream_obs.terminal_reason,
+        "public TurnFailed reason must match committed terminal_reason"
+    );
 
     // Both should commit with Error status, partial content preserved
     assert_eq!(run_obs.status, RunTurnStatus::Error);
@@ -581,15 +571,12 @@ async fn consistency_tool_call_path() {
         loaded_profile: Some(ws.loaded.clone()),
     };
 
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        stream_session_api,
-        stream_agent_loop,
-        stream_request,
-    )
-    .await
-    .expect("stream_turn must start")
-    .collect()
-    .await;
+    let events: Vec<TurnEvent> =
+        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
+            .await
+            .expect("stream_turn must start")
+            .collect()
+            .await;
 
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_obs = observe_stream_turn(&events, &stream_store);

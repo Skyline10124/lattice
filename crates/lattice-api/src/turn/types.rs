@@ -7,9 +7,10 @@ use lattice_profile::LoadedAgentProfile;
 /// Request to run a turn through either [`run_turn`] or [`stream_turn`].
 ///
 /// Both facades accept the same input shape, so they share this single
-/// request type. `stream_turn` does not currently expose intermediate
-/// progress live — it executes the turn to completion and then replays
-/// buffered events — so callers do not need a distinct request type.
+/// request type. `run_turn` returns after the turn is committed, while
+/// `stream_turn` returns a live [`TurnEvent`] stream after startup validation
+/// so callers can observe model deltas, tool activity, terminal status, and
+/// commit lifecycle events as they occur.
 ///
 /// [`run_turn`]: crate::turn::run_turn
 /// [`stream_turn`]: crate::turn::stream_turn

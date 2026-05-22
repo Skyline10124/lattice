@@ -46,7 +46,7 @@ hooks -> llm -> session/profile/tools -> agent -> api -> cli
 ### Key Types
 
 - `ResolvedModel` — canonical model + provider + protocol + credential status
-- `StreamEvent` — normalized streaming events (tokens, reasoning, tool calls, usage)
+- `LlmEvent` / `TurnEvent` — provider streaming events and public turn stream events
 - `AgentLoop` — multi-turn agent loop with tool execution and injectable LlmClient/ToolCallExecutor
 - `ToolCall` / `ToolDefinition` — tool invocation types
 - `SessionGraphStore` — session graph persistence trait

@@ -17,7 +17,7 @@ key_files:
     - crates/lattice-api/src/turn/tests.rs
 decisions:
   - "BlockingLlmClient uses futures::stream::unfold with Pre/Post phase enum and tokio::sync::Notify for deterministic blocking"
-  - "Receiver drop test uses block-scoped stream lifetime instead of explicit drop() to satisfy clippy"
+  - "Receiver drop test uses block-scoped stream lifetime and polls for background commit completion with an outer timeout"
   - "cancelled_result() factory already existed; reused for stream_turn_cancelled_commits_cancelled"
 metrics:
   duration: 30m
@@ -45,7 +45,7 @@ Deterministic commit failure with real SQLite conflict, receiver drop tolerance,
 
 - **stream_turn_live_commit_failure_deterministic** (replaces racy `stream_turn_live_commit_failure_emits_commit_failed`): Uses BlockingLlmClient to guarantee the racing commit is inserted while the agent is blocked. Asserts: CommitFailed present with non-empty reason, TurnCommitted absent, HEAD has exactly 2 commits (first + racing), TokenDelta events appear before CommitFailed proving live activity before commit.
 
-- **stream_turn_live_receiver_drop_does_not_cancel**: Proves VER-12 — background task completes and commits despite the stream being dropped after receiving only TurnStarted.
+- **stream_turn_live_receiver_drop_does_not_cancel**: Proves VER-12 — background task completes and commits despite the stream being dropped after receiving only TurnStarted. Review closeout replaced the fixed sleep with polling plus an outer timeout to avoid CI flakiness.
 
 ### Task 2: Cancelled Buffered Seam and Error After Partial
 
@@ -63,5 +63,5 @@ None - plan executed exactly as written.
 - [x] crates/lattice-api/src/turn/tests.rs exists
 - [x] Commit 0645be0 exists in git log
 - [x] Commit a976701 exists in git log
-- [x] All 44 lattice-api tests pass (40 lib + 4 integration)
+- [x] `cargo test -p lattice-api stream_turn` passes
 - [x] Clippy clean with -D warnings

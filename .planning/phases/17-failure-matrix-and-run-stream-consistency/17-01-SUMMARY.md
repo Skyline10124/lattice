@@ -9,7 +9,7 @@ dependency_graph:
   affects: [lattice-api-turn-layer]
 tech_stack:
   added: []
-  patterns: [tokio-select-deadline, stream-outcome-timeout-variant]
+  patterns: [deadline-aware-await-helper, stream-outcome-timeout-variant]
 key_files:
   created: []
   modified:
@@ -18,7 +18,8 @@ key_files:
     - crates/lattice-agent/tests/agent_loop.rs
 decisions:
   - "Added StreamOutcome::Timeout variant to cleanly separate timeout from LLM errors (avoids 'LLM error: timeout' prefix)"
-  - "Cooperative deadline computed as Option<Instant> before run_turn_inner, threaded through to consume_model_stream"
+  - "Cooperative deadline computed as Option<Instant> before run_turn_inner, threaded through stream creation, stream consumption, and tool execution"
+  - "Expired deadlines are checked before awaiting; selects use sleep_until rather than saturating zero-duration sleeps"
 metrics:
   duration: 594s
   completed: "2026-05-22T07:35:00Z"
@@ -28,29 +29,34 @@ metrics:
 
 # Phase 17 Plan 01: Cooperative Deadline Timeout Summary
 
-Replaced outer `apply_optional_timeout` wrapper with cooperative deadline threaded into `run_turn_inner` and `consume_model_stream`, preserving partial state on timeout via `tokio::select!` at both `stream_chat().await` and `stream.next()` call sites.
+Replaced outer `apply_optional_timeout` wrapper with cooperative deadline handling threaded through `run_turn_inner`, `consume_model_stream`, and tool execution, preserving partial state on timeout at stream creation, stream consumption, and tool execution await points.
 
 ## One-liner
 
-Cooperative deadline via `tokio::select!` replaces outer timeout wrapper; partial content, events, and usage preserved on timeout with live/result event consistency proven.
+Cooperative deadline replaces the outer timeout wrapper; partial content, events, and usage are preserved on timeout with live/result event consistency proven.
 
 ## Changes
 
 ### Task 1: Implement cooperative deadline in agent loop
 - Removed `apply_optional_timeout` function entirely
 - Added `deadline: Option<Instant>` parameter to `run_turn_inner` and `consume_model_stream`
+- Added a shared deadline-aware await helper with a pre-await expiry check
 - `run_turn` and `run_turn_live` compute `deadline` from `request.timeout.map(|d| Instant::now() + d)` before calling `run_turn_inner`
-- `stream_chat().await` wrapped in `tokio::select!` against deadline — timeout before stream creation preserves accumulated events (ModelStarted)
-- `stream.next()` loop uses `tokio::select!` with `saturating_duration_since` — timeout mid-stream preserves partial content
+- `stream_chat().await` is wrapped against the deadline — timeout before stream creation preserves accumulated events (ModelStarted)
+- `stream.next()` loop uses the same helper and `sleep_until`, with timeout winning before any ready event if the deadline has already expired
+- `ToolCallExecutor::execute` is wrapped against the deadline — timeout during tool execution returns `Error(timeout)` without emitting a fake `ToolCallFinished`
 - Added `StreamOutcome::Timeout` variant with dedicated handling in `run_turn_inner` (clean `terminal_reason: "timeout"`)
 - Updated existing `agent_loop_timeout_returns_failed_status` test to expect ModelStarted preservation
 
 ### Task 2: Cooperative deadline timeout tests
 - Replaced `scenario_08_run_turn_live_honors_timeout` with `scenario_08_timeout_cooperative_preserves_partial`
 - Added `scenario_08b_timeout_on_stream_creation` for stream_chat hang path
+- Added `scenario_08c_timeout_during_tool_execution_preserves_state` for tool execution deadline coverage
+- Added `scenario_08d_expired_deadline_wins_over_ready_stream` for timeout-priority regression coverage
 - `SlowStreamLlm`: yields Token("partial "), Token("content") with delays, then hangs
 - `HangingStreamChatLlm`: `stream_chat` itself never returns (hangs on `futures::future::pending`)
 - D-15 assertions proven: status==Error, terminal_reason=="timeout", events non-empty, partial content preserved, messages flushed, `received == result.events`
+- Tool-timeout assertions proven: `ToolCallStarted` may be present, `ToolCallFinished` is not faked, assistant tool-call message is preserved, and no tool-result message is emitted
 
 ## Commits
 
@@ -83,6 +89,7 @@ Cooperative deadline via `tokio::select!` replaces outer timeout wrapper; partia
 cargo test -p lattice-agent --features test-utils: 52 passed
 cargo clippy -p lattice-agent --features test-utils -- -D warnings: No issues
 cargo build (full workspace): success
+cargo test -p lattice-agent --features test-utils timeout: passed after review fixes
 ```
 
 ## Self-Check: PASSED
@@ -91,3 +98,4 @@ cargo build (full workspace): success
 - Both task commits (e292a84, f9e5c95) found in git log
 - `apply_optional_timeout` confirmed removed (0 occurrences)
 - `deadline: Option<Instant>` present in both `run_turn_inner` and `consume_model_stream` signatures
+- Deadline helper covers `stream_chat`, `stream.next`, and `ToolCallExecutor::execute`

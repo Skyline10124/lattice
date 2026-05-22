@@ -6,11 +6,7 @@
 
 ## HIGH
 
-### H-06: `stream_turn` 不是真正的流式 — `streaming`
-- **位置**: `crates/lattice-api/src/turn/execute.rs:133-173`
-- **问题**: `stream_turn_with_deps` 内部执行完整个 turn 后用 `stream::iter` replay。调用方无法获得渐进 token 推送。
-- **计划**: 需将 AgentLoop 改为 channel-based 事件推送架构。
-- **关联**: P2-04
+(None)
 
 ## MEDIUM
 
@@ -46,6 +42,14 @@
 ### L-02: `parse_json_data` 用 `Err(LlmEvent::Started)` 做 sentinel — `api-design`
 - **位置**: `crates/lattice-llm/src/providers/mod.rs:14-22`
 - **问题**: 空数据/`[DONE]` 返回 `Err(LlmEvent::Started)` 表示"跳过"，语义混乱。
+
+## OBSOLETE / CLOSED
+
+### H-06: `stream_turn` 不是真正的流式 — `streaming`
+- **原位置**: `crates/lattice-api/src/turn/execute.rs`
+- **原问题**: production `stream_turn` 曾经执行完整个 turn 后 replay buffered events，调用方无法获得渐进 token 推送。
+- **当前状态**: Phase 16 已将 production `stream_turn` 改为 spawn + bounded channel 的 live stream；Phase 17 补充了 failure/consistency 覆盖。`stream_turn_with_deps` 仍是 buffered replay，但现在是测试 seam，不是 production public live path。
+- **后续**: CLI 仍然调用 `run_turn`，改为消费 public `TurnEvent` 属于 Phase 18，不再作为 H-06 open finding 跟踪。
 
 ## PARTIAL（已缓解，v1.2 完全修复）
 

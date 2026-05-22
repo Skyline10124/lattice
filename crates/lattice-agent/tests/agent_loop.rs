@@ -564,7 +564,10 @@ async fn agent_loop_timeout_returns_failed_status() {
     // Cooperative deadline (Phase 17): ModelStarted is emitted before
     // stream_chat is called, so events are preserved on timeout.
     assert!(
-        result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
         "timeout should preserve ModelStarted emitted before stream_chat"
     );
 }

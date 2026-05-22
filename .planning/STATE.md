@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.2-alpha
 milestone_name: Evented Runtime
 status: executing
-last_updated: "2026-05-22T08:12:47.584Z"
-last_activity: 2026-05-22 -- Phase 17 execution complete
+last_updated: "2026-05-22T09:20:00.000Z"
+last_activity: 2026-05-22 -- Phase 17 closeout docs refreshed
 progress:
   total_phases: 6
   completed_phases: 6
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-05-21)
 Phase: 18
 Plan: Not started
 Status: Ready to discuss
-Last activity: 2026-05-22 -- Phase 17 execution complete
+Last activity: 2026-05-22 -- Phase 17 closeout docs refreshed
 
 ## Accumulated Context
 
@@ -55,6 +55,7 @@ Last activity: 2026-05-22 -- Phase 17 execution complete
 - [Phase 16-01] `build_commit_input`, `TurnCommitContext`, `derive_terminal_event` extracted as pub(super) helpers in `execute.rs`; shared by buffered and live paths. tokio-stream added as workspace dep; tokio promoted to lattice-api runtime dep.
 - [Phase 16-02] `stream_turn` is now a true live event stream: `prepare_live_turn` validates startup synchronously (returns Err before stream on failure), `run_live_turn_task` uses mandatory `tokio::select!` concurrent drain loop, terminal event derived from `AgentTurnResult.status` (not ModelFinished presence per WR-01). `stream_turn_with_deps` preserved as buffered test seam (D-01). Channel capacity 256 (D-17). Receiver drop does not cancel the turn.
 - [Phase 16-03] 7 behavioral tests prove live path: startup failure as Err (API-04/05), event ordering, Completed/Error commit, commit failure as CommitFailed (COMM-03), commit stores delta only (COMM-01), branch population.
+- [Phase 17 closeout] Timeout documentation now describes cooperative deadline coverage for stream creation, stream consumption, and tool execution; live channel backpressure remains an accepted alpha gap. Phase 17 validation/verification docs and stale live-stream findings were refreshed before Phase 18.
 
 ### Blockers
 
@@ -62,6 +63,5 @@ Last activity: 2026-05-22 -- Phase 17 execution complete
 
 ### Todos
 
-- Phase 14/17: Preserve partial progress on timeout via cooperative deadline or streaming loop state.
-- Phase 17: Timeout may drop in-flight `run_turn_live` after live events have already been sent, while returned `AgentTurnResult` uses the legacy empty timeout shape (zero usage, empty messages, empty events). Phase 17 must reconcile timeout partial preservation **and** live/result event consistency — fixing only transcript partial without locking `live_received == result.events` would leave a silent observability gap. Scenario 08 in `crates/lattice-agent/tests/live_sink_and_cancel.rs` currently asserts only the result shape; extend it (or add a sibling) to assert received-event consistency once the reconciliation lands.
+- Phase 17 accepted gap: `emit_agent_event` still awaits bounded live-channel `send`, so a receiver that stays alive but stops draining can apply backpressure outside the cooperative deadline. This is intentionally not widened in the review fix because deadline-aware event emission needs a separate live/result event-consistency contract. Future work should either make `emit_agent_event` deadline-aware or explicitly narrow/document timeout semantics around live observer backpressure.
 - Phase 17: Reconcile `RunTurnStage` semantics with observed events/tool results or weaken/remove the field.

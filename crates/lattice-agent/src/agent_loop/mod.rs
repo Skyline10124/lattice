@@ -9,13 +9,14 @@ mod traits;
 mod types;
 
 use std::fmt;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
-use tokio::time::Instant;
 use lattice_tools::enabled_tools::{resolve_enabled_tools, EnabledTools};
+use tokio::time::Instant;
 
 use messages::convert_to_llm_message;
 
@@ -94,7 +95,8 @@ impl AgentLoop {
 
         // Compute cooperative deadline from request.timeout (D-13, Phase 17)
         let deadline = request.timeout.map(|d| Instant::now() + d);
-        self.run_turn_inner(&request, &enabled, None, deadline).await
+        self.run_turn_inner(&request, &enabled, None, deadline)
+            .await
     }
 
     /// Execute a single turn with a live `AgentTurnEvent` mirror channel.
@@ -283,55 +285,35 @@ impl AgentLoop {
                 }
             }
 
-            let stream = match deadline {
-                Some(dl) => {
-                    let remaining = dl.saturating_duration_since(Instant::now());
-                    tokio::select! {
-                        result = self.config.llm.stream_chat(chat_request) => {
-                            match result {
-                                Ok(s) => s,
-                                Err(err) => {
-                                    return AgentTurnResult {
-                                        messages: all_messages,
-                                        assistant_output: String::new(),
-                                        usage: accumulated_usage,
-                                        tool_results: tool_summaries,
-                                        status: AgentTurnStatus::Error,
-                                        terminal_reason: Some(format!("LLM error: {err}")),
-                                        events: all_events,
-                                    };
-                                }
-                            }
-                        }
-                        _ = tokio::time::sleep(remaining) => {
-                            // Timeout before stream creation — preserve accumulated state
-                            return AgentTurnResult {
-                                messages: all_messages,
-                                assistant_output: String::new(),
-                                usage: accumulated_usage,
-                                tool_results: tool_summaries,
-                                status: AgentTurnStatus::Error,
-                                terminal_reason: Some("timeout".to_string()),
-                                events: all_events,
-                            };
-                        }
-                    }
+            let stream = match await_with_deadline(
+                self.config.llm.stream_chat(chat_request),
+                deadline,
+            )
+            .await
+            {
+                Ok(Ok(s)) => s,
+                Ok(Err(err)) => {
+                    return AgentTurnResult {
+                        messages: all_messages,
+                        assistant_output: String::new(),
+                        usage: accumulated_usage,
+                        tool_results: tool_summaries,
+                        status: AgentTurnStatus::Error,
+                        terminal_reason: Some(format!("LLM error: {err}")),
+                        events: all_events,
+                    };
                 }
-                None => {
-                    match self.config.llm.stream_chat(chat_request).await {
-                        Ok(s) => s,
-                        Err(err) => {
-                            return AgentTurnResult {
-                                messages: all_messages,
-                                assistant_output: String::new(),
-                                usage: accumulated_usage,
-                                tool_results: tool_summaries,
-                                status: AgentTurnStatus::Error,
-                                terminal_reason: Some(format!("LLM error: {err}")),
-                                events: all_events,
-                            };
-                        }
-                    }
+                Err(DeadlineElapsed) => {
+                    // Timeout before stream creation — preserve accumulated state.
+                    return AgentTurnResult {
+                        messages: all_messages,
+                        assistant_output: String::new(),
+                        usage: accumulated_usage,
+                        tool_results: tool_summaries,
+                        status: AgentTurnStatus::Error,
+                        terminal_reason: Some("timeout".to_string()),
+                        events: all_events,
+                    };
                 }
             };
 
@@ -629,7 +611,25 @@ impl AgentLoop {
                             },
                         };
 
-                        let tool_result = self.config.tool_executor.execute(&executor_call).await;
+                        let tool_result = match await_with_deadline(
+                            self.config.tool_executor.execute(&executor_call),
+                            deadline,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(DeadlineElapsed) => {
+                                return AgentTurnResult {
+                                    messages: all_messages,
+                                    assistant_output: stream_result.assistant_content.clone(),
+                                    usage: accumulated_usage,
+                                    tool_results: tool_summaries,
+                                    status: AgentTurnStatus::Error,
+                                    terminal_reason: Some("timeout".to_string()),
+                                    events: all_events,
+                                };
+                            }
+                        };
                         let (ok, tool_content) = match tool_result {
                             Ok(output) => (true, output),
                             Err(error) => (false, error),
@@ -769,7 +769,7 @@ impl AgentLoop {
     /// Phase 17 adds:
     /// - `deadline` — when `Some`, each `stream.next()` is raced against the
     ///   remaining time via `tokio::select!`. On timeout, returns with
-    ///   `outcome: StreamOutcome::Error("timeout")` and all accumulated state
+    ///   `outcome: StreamOutcome::Timeout` and all accumulated state
     ///   preserved (D-13).
     async fn consume_model_stream(
         &self,
@@ -787,25 +787,19 @@ impl AgentLoop {
 
         loop {
             // Fetch next event, racing against deadline when configured (D-13).
-            let next_event = match deadline {
-                Some(dl) => {
-                    let remaining = dl.saturating_duration_since(Instant::now());
-                    tokio::select! {
-                        event = stream.next() => event,
-                        _ = tokio::time::sleep(remaining) => {
-                            // Deadline fired — return with accumulated partial state
-                            return StreamResult {
-                                assistant_content,
-                                reasoning_content,
-                                tool_calls: pending_calls,
-                                usage,
-                                finish_reason,
-                                outcome: StreamOutcome::Timeout,
-                            };
-                        }
-                    }
+            let next_event = match await_with_deadline(stream.next(), deadline).await {
+                Ok(event) => event,
+                Err(DeadlineElapsed) => {
+                    // Deadline fired — return with accumulated partial state.
+                    return StreamResult {
+                        assistant_content,
+                        reasoning_content,
+                        tool_calls: pending_calls,
+                        usage,
+                        finish_reason,
+                        outcome: StreamOutcome::Timeout,
+                    };
                 }
-                None => stream.next().await,
             };
 
             let event = match next_event {
@@ -1030,6 +1024,26 @@ async fn emit_agent_event(
     buffered.push(event.clone());
     if let Some(sender) = live {
         let _ = sender.send(event).await;
+    }
+}
+
+struct DeadlineElapsed;
+
+async fn await_with_deadline<T>(
+    fut: impl Future<Output = T>,
+    deadline: Option<Instant>,
+) -> Result<T, DeadlineElapsed> {
+    match deadline {
+        Some(dl) => {
+            if Instant::now() >= dl {
+                return Err(DeadlineElapsed);
+            }
+            tokio::select! {
+                result = fut => Ok(result),
+                _ = tokio::time::sleep_until(dl) => Err(DeadlineElapsed),
+            }
+        }
+        None => Ok(fut.await),
     }
 }
 

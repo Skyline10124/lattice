@@ -59,18 +59,18 @@ stream_turn_with_deps remains unchanged.
   ```
 - **D-09:** Observation sources must be explicit per field:
   - **status:** run side from `RunTurnResult.status`; stream side from `TurnCommitted.status`.
-  - **usage:** from committed metadata or public result/event usage, normalized.
+  - **usage:** from committed metadata, normalized.
   - **assistant_output:** from committed transcript assistant visible content (both sides read session store after commit). Do NOT reconstruct from TokenDelta events — durable history is the consistency anchor.
   - **tool_results:** run side from `RunTurnResult.tool_results`; stream side from committed tool messages (or `ToolCallFinished` events where equivalent).
-  - **terminal_reason:** compare only where both paths expose it through commit metadata or terminal event. If `RunTurnResult` doesn't expose terminal_reason, verify at event layer for Error paths only.
+  - **terminal_reason:** from committed metadata on both paths; Error stream paths also verify public `TurnFailed.reason` matches the committed reason.
   - **transcript_roles_and_content:** both sides read session log after commit, compare committed message sequence (role, content).
 - **D-10:** No snapshot testing. Structured `assert_eq!` on `NormalizedTurnObservation` is clearer than snapshot with masking.
 - **D-11:** Minimum three consistency scenarios: (1) Completed content-only, (2) Error after partial token, (3) Tool call path with `ToolCallFinished` and tool messages. Tool consistency scenario must build identical `LoadedAgentProfile` / enabled tool config for both `run_turn` and `stream_turn`, and use the same scripted `FakeToolExecutor` with deterministic outputs.
 
 ### Timeout reconciliation
-- **D-12:** The timeout defect is fixed in Phase 17. Current behavior: outer `tokio::time::timeout` drops in-flight future; live events already sent but `AgentTurnResult` is empty legacy shape (zero usage, empty messages/events). This violates run/stream consistency.
-- **D-13:** Fix approach: replace outer `tokio::time::timeout(run_turn_inner)` wrapper with cooperative deadline that covers both `stream_chat(request).await` (stream creation) and subsequent `stream.next()` calls. If timeout fires before the stream is created, return Error("timeout") with events emitted so far (usually just ModelStarted). If timeout fires during `stream.next()`, preserve accumulated partial content/reasoning. This ensures no regression from the old outer timeout — "stream creation hangs" remains interruptible.
-- **D-14:** Timeout reconciliation scope is limited to `run_turn_live` / agent-internal path. No public API timeout field is added to `RunTurnRequest`. No complex in-flight tool kill semantics.
+- **D-12:** The timeout defect is fixed in Phase 17. The old outer `tokio::time::timeout` behavior dropped in-flight state; the current cooperative deadline preserves accumulated events/messages.
+- **D-13:** Fix approach: replace outer `tokio::time::timeout(run_turn_inner)` wrapper with a cooperative deadline that covers `stream_chat(request).await` (stream creation), subsequent `stream.next()` calls, and `ToolCallExecutor::execute`. If timeout fires before the stream is created, return Error("timeout") with events emitted so far (usually just ModelStarted). If timeout fires during stream consumption or tool execution, preserve accumulated partial content/reasoning and do not synthesize completion events that did not happen.
+- **D-14:** Timeout reconciliation scope is limited to agent-internal LLM/tool await points. No public API timeout field is added to `RunTurnRequest`. No complex in-flight tool kill semantics, and live channel backpressure remains an accepted alpha gap.
 - **D-15:** Agent-layer timeout test asserts: (1) received live events == result.events (same events, same order — test must concurrently drain receiver, never await result before reading events); (2) status == Error; (3) terminal_reason contains "timeout"; (4) partial content preserved in `AgentTurnResult.messages` (not transcript — transcript is an API-layer commit concern, and public `RunTurnRequest` has no timeout field in alpha).
 
 ### Claude's Discretion

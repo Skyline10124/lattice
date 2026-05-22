@@ -26,9 +26,13 @@ pub struct AgentTurnRequest {
     /// Optional cancellation flag for external cancel support (D-09).
     /// When set to `true`, the loop terminates with `Cancelled` status.
     pub cancel_flag: Option<Arc<AtomicBool>>,
-    /// Optional timeout for the entire turn (D-09/D-10).
-    /// If the turn does not complete within this duration, it returns
-    /// `Error` status with a timeout terminal reason.
+    /// Optional cooperative deadline for LLM and tool execution.
+    ///
+    /// The agent checks this deadline around stream creation, stream
+    /// consumption, and tool execution. On expiry, it returns `Error` status
+    /// with a timeout terminal reason while preserving accumulated messages
+    /// and events. Alpha live-sink backpressure (`mpsc::Sender::send`) is not
+    /// covered by this deadline.
     pub timeout: Option<Duration>,
 }
 

@@ -1002,11 +1002,17 @@ async fn scenario_08_timeout_cooperative_preserves_partial() {
         "cooperative deadline must preserve events emitted before timeout"
     );
     assert!(
-        result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
         "ModelStarted must be present in events"
     );
     assert!(
-        result.events.iter().any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
         "TokenDelta events must be present (partial tokens yielded before timeout)"
     );
     // (4) partial content preserved in assistant_output
@@ -1075,17 +1081,178 @@ async fn scenario_08b_timeout_on_stream_creation() {
     assert_eq!(result.terminal_reason, Some("timeout".to_string()));
     // ModelStarted was emitted before stream_chat was called
     assert!(
-        result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
         "ModelStarted must be emitted before stream_chat call"
     );
     // No TokenDelta events (stream was never created)
     assert!(
-        !result.events.iter().any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
         "no TokenDelta should exist when stream_chat itself timed out"
     );
     // Live events match result.events
     assert_eq!(
         received, result.events,
         "live events must match result.events on stream-creation timeout"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8c — timeout during tool execution (Phase 17 review fix)
+// ---------------------------------------------------------------------------
+
+struct HangingToolExecutor;
+
+#[async_trait::async_trait]
+impl ToolCallExecutor for HangingToolExecutor {
+    async fn execute(&self, _call: &ToolCall) -> Result<String, String> {
+        futures::future::pending::<()>().await;
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn scenario_08c_timeout_during_tool_execution_preserves_state() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                LlmEvent::ToolCallStart {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                },
+                LlmEvent::ToolCallDelta {
+                    id: "call_1".to_string(),
+                    arguments_delta: "{}".to_string(),
+                },
+                LlmEvent::ToolCallEnd {
+                    id: "call_1".to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+    let executor = Arc::new(HangingToolExecutor);
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let mut request = make_request("read a file");
+    request.timeout = Some(std::time::Duration::from_millis(50));
+
+    let (result, received) = drive_run_turn_live(&loop_inst, request, 32).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert_eq!(result.terminal_reason, Some("timeout".to_string()));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        "ModelStarted must be preserved"
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })),
+        "ModelFinished for the tool-call round must be preserved"
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })),
+        "ToolCallStarted must be preserved"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ToolCallFinished { .. })),
+        "timeout during tool execution must not synthesize ToolCallFinished"
+    );
+    assert_eq!(
+        received, result.events,
+        "live events must match result.events on tool timeout"
+    );
+
+    let assistant_msg = result
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("assistant tool-call message should be preserved");
+    assert!(
+        assistant_msg
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.len() == 1),
+        "assistant tool-call message should retain the pending tool call"
+    );
+    assert!(
+        !result.messages.iter().any(|m| m.role == "tool"),
+        "no tool result message should be produced after tool timeout"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8d — expired deadline wins over ready stream (Phase 17 review fix)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scenario_08d_expired_deadline_wins_over_ready_stream() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                LlmEvent::Token {
+                    content: "must not be consumed".to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let mut request = make_request("hello");
+    request.timeout = Some(std::time::Duration::from_millis(0));
+
+    let (result, received) = drive_run_turn_live(&loop_inst, request, 32).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert_eq!(result.terminal_reason, Some("timeout".to_string()));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })),
+        "ModelStarted emitted before the deadline check should be preserved"
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { .. })),
+        "expired deadline must win over an immediately ready stream"
+    );
+    assert!(result.messages.is_empty());
+    assert!(result.assistant_output.is_empty());
+    assert_eq!(
+        received, result.events,
+        "live events must match result.events on expired-deadline timeout"
     );
 }

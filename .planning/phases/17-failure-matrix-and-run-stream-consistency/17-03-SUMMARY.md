@@ -16,8 +16,8 @@ key_files:
   modified: []
 decisions:
   - "Both observation builders read assistant_output and transcript from committed session store, not from live events or result fields (D-09)"
-  - "Zero-usage normalized to None for consistent comparison between buffered and streaming error paths"
-  - "Usage accumulated across all ModelFinished events for multi-round tool-call scenarios"
+  - "Both observation builders read usage and terminal_reason from committed log metadata after review fixes"
+  - "Zero-usage committed metadata is normalized to None for consistent comparison between buffered and streaming error paths"
   - "FakeStreamingLlmClient used for both paths to ensure identical LLM behavior through stream_chat"
 metrics:
   duration: 250s
@@ -32,7 +32,7 @@ Proved semantic consistency between `run_turn` (buffered) and `stream_turn` (liv
 
 ## One-liner
 
-NormalizedTurnObservation comparison proves run/stream durable-history consistency across content-only, error-partial, and tool-call scenarios; live ordering (TokenDelta before TurnCommitting) verified.
+NormalizedTurnObservation comparison proves run/stream durable-history consistency across content-only, error-partial, and tool-call scenarios; committed usage and terminal_reason metadata are compared directly; live ordering (TokenDelta before TurnCommitting) verified.
 
 ## Changes
 
@@ -40,8 +40,8 @@ NormalizedTurnObservation comparison proves run/stream durable-history consisten
 
 - Created `crates/lattice-api/tests/consistency.rs` with 4 integration tests
 - `NormalizedTurnObservation` struct: status, usage, assistant_output, tool_results, transcript_roles_and_content, terminal_reason
-- `observe_run_turn`: reads committed transcript via `SqliteSessionGraphStore::head_transcript`, normalizes zero-usage to None
-- `observe_stream_turn`: reads committed transcript from session store, sums all ModelFinished usage events, extracts terminal_reason from TurnFailed
+- `observe_run_turn`: reads committed transcript, usage, and terminal_reason via `SqliteSessionGraphStore`
+- `observe_stream_turn`: reads committed transcript, usage, and terminal_reason from the session store; error scenarios also assert public `TurnFailed.reason` matches committed metadata
 - `consistency_completed_content_only`: content-only scenario with assert_eq on observations
 - `consistency_error_after_partial_token`: both paths commit partial content "partial resp" with Error status
 - `consistency_tool_call_path`: tool results (read_file) and multi-round accumulated usage match
@@ -62,14 +62,14 @@ NormalizedTurnObservation comparison proves run/stream durable-history consisten
 - **Issue:** `run_turn` always returns `Some(TurnUsageSummary { 0, 0, 0 })` from `AgentTurnResult.usage` on error (no ModelFinished emitted), while stream observation returns `None` (no ModelFinished event to extract from)
 - **Fix:** Normalize zero-usage to `None` in `observe_run_turn` so both sides agree
 - **Files modified:** `crates/lattice-api/tests/consistency.rs`
-- **Commit:** 8dd8d00
+- **Commit:** review closeout
 
-**2. [Rule 1 - Bug] Multi-round usage accumulation in stream observation**
+**2. [Rule 1 - Bug] Durable metadata comparison for usage and terminal_reason**
 - **Found during:** Task 1
-- **Issue:** Stream observation only extracted usage from the first `ModelFinished` event, but tool-call scenarios have multiple rounds (each emitting ModelFinished with partial usage)
-- **Fix:** Sum all `ModelFinished` event usage values to match `run_turn`'s accumulated total
+- **Issue:** Initial consistency checks compared public result/event usage and only error event reasons, but did not prove committed metadata consistency.
+- **Fix:** Both observation builders now read usage and terminal_reason from the last committed log entry; error stream observations separately assert `TurnFailed.reason` equals the committed terminal reason.
 - **Files modified:** `crates/lattice-api/tests/consistency.rs`
-- **Commit:** 8dd8d00
+- **Commit:** review closeout
 
 ## Verification
 
@@ -77,6 +77,7 @@ NormalizedTurnObservation comparison proves run/stream durable-history consisten
 cargo test -p lattice-api --test consistency: 4 passed
 cargo test -p lattice-api: 48 passed (4 suites)
 cargo clippy -p lattice-api -- -D warnings: No issues
+cargo test --workspace: passed after review fixes
 ```
 
 ## Self-Check: PASSED
@@ -84,5 +85,5 @@ cargo clippy -p lattice-api -- -D warnings: No issues
 - `crates/lattice-api/tests/consistency.rs` exists on disk
 - Task commit 8dd8d00 found in git log
 - NormalizedTurnObservation struct present with all required fields
-- Both observation builders read from committed session store (head_transcript)
+- Both observation builders read transcript, usage, and terminal_reason from committed session state
 - Independent tempdirs confirmed (D-07)

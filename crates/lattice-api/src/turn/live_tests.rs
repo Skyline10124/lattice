@@ -151,15 +151,15 @@ impl LlmClient for BlockingLlmClient {
 
         // State machine: Pre -> (await notify) -> Post
         enum Phase {
-            Pre(VecDeque<LlmEvent>, Arc<tokio::sync::Notify>, VecDeque<LlmEvent>),
+            Pre(
+                VecDeque<LlmEvent>,
+                Arc<tokio::sync::Notify>,
+                VecDeque<LlmEvent>,
+            ),
             Post(VecDeque<LlmEvent>),
         }
 
-        let initial = Phase::Pre(
-            VecDeque::from(pre),
-            resume,
-            VecDeque::from(post),
-        );
+        let initial = Phase::Pre(VecDeque::from(pre), resume, VecDeque::from(post));
 
         let stream = futures::stream::unfold(initial, |state| async move {
             match state {
@@ -771,15 +771,15 @@ async fn stream_turn_live_receiver_drop_does_not_cancel() {
         // stream drops here — receiver gone
     };
 
-    // Give the background task time to finish and commit
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    // Verify commit appeared despite receiver drop
-    let session2 = make_session(dir.path());
-    let log = session2.log(&session_id).expect("should read log");
-    assert_eq!(
-        log.len(),
-        1,
-        "background task should still commit even after receiver drop (VER-12)"
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let session = make_session(dir.path());
+            if session.log(&session_id).map(|log| log.len()).unwrap_or(0) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background task should commit after receiver drop (VER-12)");
 }

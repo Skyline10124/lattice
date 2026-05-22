@@ -137,7 +137,7 @@
 1. Tests cover error after partial tokens, cancellation paths, receiver drop, and commit failure.
 2. `stream_turn` emits live activity before commit in at least one integration-style test.
 3. Final status, usage, tool summaries, and transcript delta match between `run_turn` and `stream_turn` terminal paths.
-4. HEAD movement is asserted for Completed, Error, Cancelled, and CommitFailed cases.
+4. HEAD movement is asserted for Completed, Error, CommitFailed, and Cancelled commit semantics via the buffered seam; public live cancellation remains deferred until `stream_turn` exposes a cancellation handle.
 
 ### Phase 18: CLI Live Rendering and Alpha Release Gate
 
