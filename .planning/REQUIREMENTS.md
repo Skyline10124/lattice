@@ -33,21 +33,21 @@
 
 ### Commit Semantics
 
-- [ ] **COMM-01**: Each turn commit stores only the current turn's transcript delta plus metadata, not the full HEAD transcript and not live event logs.
-- [ ] **COMM-02**: Completed, Error, and Cancelled turns all commit and advance HEAD when persistence succeeds.
-- [ ] **COMM-03**: Commit persistence failure emits `CommitFailed`, emits no `TurnCommitted`, and leaves HEAD unchanged.
-- [ ] **COMM-04**: Commit messages are derived from the first user message, bounded to 72 characters, and do not encode status prefixes.
-- [ ] **COMM-05**: `terminal_reason` stays a short human-readable string and no recovery-hint or failed-turn rewrite system is introduced.
+- [x] **COMM-01**: Each turn commit stores only the current turn's transcript delta plus metadata, not the full HEAD transcript and not live event logs.
+- [x] **COMM-02**: Completed, Error, and Cancelled turns all commit and advance HEAD when persistence succeeds. *(Phase 16 covers Completed and Error via public live path tests; Cancelled commit semantics are guaranteed by `derive_terminal_event` + `build_commit_input` code path but lack a public live path test until Phase 17 introduces a cancellation handle — see VER-12.)*
+- [x] **COMM-03**: Commit persistence failure emits `CommitFailed`, emits no `TurnCommitted`, and leaves HEAD unchanged.
+- [x] **COMM-04**: Commit messages are derived from the first user message, bounded to 72 characters, and do not encode status prefixes.
+- [x] **COMM-05**: `terminal_reason` stays a short human-readable string and no recovery-hint or failed-turn rewrite system is introduced.
 
 ### API Streaming
 
-- [ ] **API-04**: `stream_turn` prepares profile, model, session, parent commit, optional branch metadata, and head transcript before spawning any live task.
-- [ ] **API-05**: `stream_turn` returns startup failures as `Result::Err` before returning a stream and reports runtime outcomes as `TurnEvent` values after the stream starts.
-- [ ] **API-06**: The live public stream uses a single spawned task, bounded `mpsc` channel capacity 256, and `tokio-stream` receiver wrapping.
-- [ ] **API-07**: The live task maps `AgentTurnEvent` values to public `TurnEvent` values and derives `TurnFailed` / `TurnCancelled` from `AgentTurnResult.status`.
-- [ ] **API-08**: The live stream drains agent events before terminal and commit events, without nested bridge spawns that can reorder events.
-- [ ] **API-09**: The live `stream_turn` path bypasses `TurnDeps`; `TurnDeps` remains the buffered test seam for `run_turn_with_deps` and existing tests.
-- [ ] **API-10**: Dropping the event receiver does not cancel the turn; send errors are ignored and the background task still commits when possible.
+- [x] **API-04**: `stream_turn` prepares profile, model, session, parent commit, optional branch metadata, and head transcript before spawning any live task.
+- [x] **API-05**: `stream_turn` returns startup failures as `Result::Err` before returning a stream and reports runtime outcomes as `TurnEvent` values after the stream starts.
+- [x] **API-06**: The live public stream uses a single spawned task, bounded `mpsc` channel capacity 256, and `tokio-stream` receiver wrapping.
+- [x] **API-07**: The live task maps `AgentTurnEvent` values to public `TurnEvent` values and derives `TurnFailed` / `TurnCancelled` from `AgentTurnResult.status`.
+- [x] **API-08**: The live stream drains agent events before terminal and commit events, without nested bridge spawns that can reorder events.
+- [x] **API-09**: The live `stream_turn` path bypasses `TurnDeps`; `TurnDeps` remains the buffered test seam for `run_turn_with_deps` and existing tests.
+- [x] **API-10**: Dropping the event receiver does not cancel the turn; send errors are ignored and the background task still commits when possible.
 
 ### CLI
 

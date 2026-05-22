@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use futures::stream;
 use lattice_agent::{AgentLoop, AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{derive_commit_message, TurnCommitInput};
+use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 
 use super::deps::{RealTurnDeps, TurnDeps};
 use super::mapping::{build_agent_request, map_status, map_tool_results, resolve_model_and_prompt};
@@ -11,7 +11,74 @@ use super::types::{
 };
 use crate::session::{ApiError, Result, SessionApi};
 
+/// Context needed to construct a [`TurnCommitInput`] from either the buffered
+/// or live path. Both paths build one of these from their local variables and
+/// pass it to [`build_commit_input`].
+pub(super) struct TurnCommitContext {
+    pub session_id: String,
+    pub parent_ids: Vec<String>,
+    pub model: String,
+    pub provider: String,
+    pub profile_snapshot_id: Option<String>,
+}
+
+/// Build a [`TurnCommitInput`] from the user input, commit context, and agent
+/// result. Shared by both the buffered and live turn paths to ensure commit
+/// construction stays consistent (D-16).
+pub(super) fn build_commit_input(
+    user_input: &str,
+    ctx: &TurnCommitContext,
+    agent_result: &AgentTurnResult,
+) -> TurnCommitInput {
+    let commit_status = map_status(&agent_result.status).to_commit_status();
+
+    let mut commit_messages = Vec::new();
+    commit_messages.push(GraphMessage {
+        role: "user".to_string(),
+        content: user_input.to_string(),
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+    });
+    commit_messages.extend(agent_result.messages.iter().cloned());
+
+    let commit_message = derive_commit_message(&commit_messages);
+
+    TurnCommitInput {
+        session_id: ctx.session_id.clone(),
+        parent_ids: ctx.parent_ids.clone(),
+        messages: commit_messages,
+        profile_snapshot_id: ctx.profile_snapshot_id.clone(),
+        model: ctx.model.clone(),
+        provider: ctx.provider.clone(),
+        status: commit_status,
+        commit_message,
+        usage: Some(agent_result.usage.clone()),
+        terminal_reason: agent_result.terminal_reason.clone(),
+    }
+}
+
+/// Derive the terminal [`TurnEvent`] from the agent result status (D-10).
+///
+/// Returns `None` for `Completed` (no terminal event needed), `Some(TurnFailed)`
+/// for `Error`, and `Some(TurnCancelled)` for `Cancelled`. Terminal status is
+/// always derived from `AgentTurnResult.status`, never from the presence or
+/// absence of `ModelFinished` in the event stream (WR-01).
+pub(super) fn derive_terminal_event(result: &AgentTurnResult) -> Option<TurnEvent> {
+    match result.status {
+        AgentTurnStatus::Error => Some(TurnEvent::TurnFailed {
+            reason: result.terminal_reason.clone().unwrap_or_default(),
+        }),
+        AgentTurnStatus::Cancelled => Some(TurnEvent::TurnCancelled {
+            reason: result.terminal_reason.clone(),
+        }),
+        AgentTurnStatus::Completed => None,
+    }
+}
+
 /// Output of [`execute_turn_inner`] threaded back to the public facades.
+#[allow(dead_code)]
 struct ExecutedTurn {
     session_id: String,
     parent_commit_id: Option<String>,
@@ -57,38 +124,20 @@ async fn execute_turn_inner(deps: &dyn TurnDeps, request: &RunTurnRequest) -> Re
 
     stages.push(RunTurnStage::Tools);
 
-    let commit_status = map_status(&agent_result.status).to_commit_status();
-
-    let mut commit_messages = Vec::new();
-    commit_messages.push(lattice_session::GraphMessage {
-        role: "user".to_string(),
-        content: request.input.clone(),
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-        name: None,
-    });
-    commit_messages.extend(agent_result.messages.iter().cloned());
-
-    let commit_message = derive_commit_message(&commit_messages);
-
     let profile_snapshot_id = request
         .loaded_profile
         .as_ref()
         .map(|lp| lp.profile.agent.name.clone());
 
-    let commit_input = TurnCommitInput {
+    let ctx = TurnCommitContext {
         session_id: session_id.clone(),
         parent_ids,
-        messages: commit_messages,
-        profile_snapshot_id,
         model: model.clone(),
         provider,
-        status: commit_status,
-        commit_message,
-        usage: Some(agent_result.usage.clone()),
-        terminal_reason: agent_result.terminal_reason.clone(),
+        profile_snapshot_id,
     };
+
+    let commit_input = build_commit_input(&request.input, &ctx, &agent_result);
 
     stages.push(RunTurnStage::Commit);
     let commit_id = deps.commit_turn(commit_input)?;
@@ -147,7 +196,7 @@ pub async fn run_turn(
 /// This is a 1:1 mapping over the six process variants. Public terminal
 /// events (`TurnFailed`, `TurnCancelled`) and commit events are derived
 /// separately from `AgentTurnResult.status` and the commit outcome.
-fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
+pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
     match event {
         AgentTurnEvent::ModelStarted { provider, model } => {
             TurnEvent::ModelStarted { provider, model }
@@ -178,9 +227,9 @@ fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
     }
 }
 
-/// Execute a turn and replay its buffered events through injected deps.
-///
-/// See [`stream_turn`] for the live-vs-buffered note.
+/// Buffered replay seam for tests. Production `stream_turn` is live and
+/// bypasses `TurnDeps`.
+#[allow(dead_code)]
 pub async fn stream_turn_with_deps(
     deps: &dyn TurnDeps,
     request: RunTurnRequest,
@@ -212,18 +261,8 @@ pub async fn stream_turn_with_deps(
 
     // Terminal event derived from agent_result.status.
     // (No terminal events come from the agent loop itself — that's by design.)
-    match agent_result.status {
-        AgentTurnStatus::Error => {
-            turn_events.push(TurnEvent::TurnFailed {
-                reason: agent_result.terminal_reason.clone().unwrap_or_default(),
-            });
-        }
-        AgentTurnStatus::Cancelled => {
-            turn_events.push(TurnEvent::TurnCancelled {
-                reason: agent_result.terminal_reason.clone(),
-            });
-        }
-        AgentTurnStatus::Completed => {}
+    if let Some(terminal) = derive_terminal_event(&agent_result) {
+        turn_events.push(terminal);
     }
 
     // Commit lifecycle. The buffered path commits before constructing the
@@ -240,18 +279,14 @@ pub async fn stream_turn_with_deps(
     Ok(Box::pin(stream::iter(turn_events)))
 }
 
-/// Execute a turn and return its events as a stream.
+/// Execute a turn and return its events as a live stream.
 ///
-/// **Current behavior (v1.1):** the turn is executed to completion and
-/// committed first, then the buffered events — including the terminal
-/// [`TurnEvent::TurnCommitted`] — are replayed as a stream. This is *not* a
-/// live event feed: callers will not observe tokens or tool results until
-/// the turn finishes. The live event stream lands in alpha-v1.2.
+/// Startup failures are returned as `Result::Err`; runtime outcomes are
+/// emitted as [`TurnEvent`] values within the stream.
 pub async fn stream_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
     request: RunTurnRequest,
 ) -> Result<TurnEventStream> {
-    let deps = RealTurnDeps::new(session, agent_loop);
-    stream_turn_with_deps(&deps, request).await
+    super::live::stream_turn_live(session, agent_loop, request).await
 }

@@ -16,11 +16,14 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
 tempfile = { workspace = true }
+lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-tools = { workspace = true }
 lattice-profile = { workspace = true }
 blake3 = { workspace = true }

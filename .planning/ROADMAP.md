@@ -39,7 +39,11 @@
   - [x] 15-02-PLAN.md — Atomic streaming + cancel + live-sink: emit_agent_event, cancel-aware consume_model_stream, StreamOutcome::Cancelled, 5 cancel checkpoints, run_turn_live entrypoint
   - [x] 15-03-PLAN.md — Behavioral suite: tests/live_sink_and_cancel.rs covering all 7 D-18 scenarios + D-21 timeout regression with concurrent-drain helper
   - [x] 15-04-PLAN.md — Workspace gate: cargo fmt + clippy + workspace test, close STATE/ROADMAP/REQUIREMENTS for AGENT-08, AGENT-09, VER-11
-- [ ] Phase 16: Live API Stream and Commit Transaction — planned
+- [x] Phase 16: Live API Stream and Commit Transaction — 3/3 plans — completed 2026-05-22
+  Plans:
+  - [x] 16-01-PLAN.md — Add tokio-stream dep, extract build_commit_input/derive_terminal_event shared helpers
+  - [x] 16-02-PLAN.md — Implement live path: PreparedTurn, prepare_live_turn, run_live_turn_task with select! drain, rewrite stream_turn
+  - [x] 16-03-PLAN.md — Behavioral tests proving live stream_turn startup, ordering, commit, and failure
 - [ ] Phase 17: Failure Matrix and Run/Stream Consistency — planned
 - [ ] Phase 18: CLI Live Rendering and Alpha Release Gate — planned
 
@@ -158,10 +162,10 @@
 | 13. LLM Streaming | v1.2-alpha | 1/1 | Complete | 2026-05-21 |
 | 14. Agent Streaming | v1.2-alpha | 2/2 | Complete | 2026-05-21 |
 | 15. Agent Live Sink | v1.2-alpha | 4/4 | Complete | 2026-05-21 |
-| 16. API Live Stream | v1.2-alpha | 0/0 | Planned | — |
+| 16. API Live Stream | v1.2-alpha | 3/3 | Complete | 2026-05-22 |
 | 17. Failure Matrix | v1.2-alpha | 0/0 | Planned | — |
 | 18. CLI Live Rendering | v1.2-alpha | 0/0 | Planned | — |
 
 ---
 *Roadmap updated for v1.2-alpha milestone initialization: 2026-05-21*
-*Phase 15 plans drafted: 2026-05-22*
+*Phase 16 plans drafted: 2026-05-22*
