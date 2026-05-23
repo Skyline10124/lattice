@@ -355,3 +355,184 @@ fn head_transcript_uses_detached_head_commit_id() {
     assert_eq!(transcript.messages[1].content, "Hi there!");
     assert_eq!(transcript.messages[1].role, "assistant");
 }
+
+fn commit_input(
+    session_id: &str,
+    parent_ids: Vec<String>,
+    messages: Vec<GraphMessage>,
+) -> TurnCommitInput {
+    commit_input_with_usage(
+        session_id,
+        parent_ids,
+        messages,
+        TurnCommitStatus::Completed,
+        None,
+        None,
+    )
+}
+
+fn user_contents(messages: &[GraphMessage]) -> Vec<&str> {
+    messages.iter().map(|m| m.content.as_str()).collect()
+}
+
+/// Build A → B on main, C on side branch, M merge(parents: [B, C]).
+fn setup_merge_graph(store: &SqliteSessionGraphStore) -> (String, String, String, String) {
+    store
+        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create");
+
+    let commit_a = store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![],
+            vec![user_msg("A-user"), assistant_msg("A-assist")],
+        ))
+        .expect("commit A");
+
+    let commit_b = store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![commit_a.commit_id.clone()],
+            vec![user_msg("B-user"), assistant_msg("B-assist")],
+        ))
+        .expect("commit B");
+
+    store
+        .branch("sess-1", "side", Some(&commit_a.commit_id))
+        .expect("branch side");
+    store.checkout("sess-1", "side").expect("checkout side");
+
+    let commit_c = store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![commit_a.commit_id.clone()],
+            vec![user_msg("C-user"), assistant_msg("C-assist")],
+        ))
+        .expect("commit C");
+
+    store.checkout("sess-1", "main").expect("checkout main");
+
+    let commit_m = store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![commit_b.commit_id.clone(), commit_c.commit_id.clone()],
+            vec![user_msg("M-user"), assistant_msg("M-assist")],
+        ))
+        .expect("commit merge");
+
+    (
+        commit_a.commit_id,
+        commit_b.commit_id,
+        commit_c.commit_id,
+        commit_m.commit_id,
+    )
+}
+
+#[test]
+fn head_transcript_linear_history_unchanged_by_topological_traversal() {
+    let dir = temp_dir("linear_regression");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    store
+        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create");
+
+    let commit1 = store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![],
+            vec![user_msg("Turn 0"), assistant_msg("Response 0")],
+        ))
+        .expect("first commit");
+
+    store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![commit1.commit_id.clone()],
+            vec![user_msg("Turn 1"), assistant_msg("Response 1")],
+        ))
+        .expect("second commit");
+
+    store
+        .commit_turn(commit_input(
+            "sess-1",
+            vec![store.log("sess-1").unwrap().last().unwrap().commit_id.clone()],
+            vec![user_msg("Turn 2"), assistant_msg("Response 2")],
+        ))
+        .expect("third commit");
+
+    let transcript = store.head_transcript("sess-1").expect("head_transcript");
+    let contents = user_contents(&transcript.messages);
+
+    assert_eq!(
+        contents,
+        vec![
+            "Turn 0",
+            "Response 0",
+            "Turn 1",
+            "Response 1",
+            "Turn 2",
+            "Response 2",
+        ]
+    );
+}
+
+#[test]
+fn head_transcript_includes_second_parent_branch_on_merge() {
+    let dir = temp_dir("merge_second_parent");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    let (_a, _b, _c, merge_id) = setup_merge_graph(&store);
+
+    let transcript = store.head_transcript("sess-1").expect("head_transcript");
+    let contents = user_contents(&transcript.messages);
+
+    assert_eq!(
+        contents,
+        vec![
+            "A-user",
+            "A-assist",
+            "B-user",
+            "B-assist",
+            "C-user",
+            "C-assist",
+            "M-user",
+            "M-assist",
+        ],
+        "merge transcript must include side-branch (second parent) messages"
+    );
+    assert_eq!(transcript.parent_commit_id, Some(merge_id));
+}
+
+#[test]
+fn head_transcript_diamond_merge_does_not_duplicate_common_ancestor() {
+    let dir = temp_dir("diamond_merge");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    setup_merge_graph(&store);
+
+    let transcript = store.head_transcript("sess-1").expect("head_transcript");
+
+    assert_eq!(
+        transcript.messages.len(),
+        8,
+        "diamond merge should emit each commit's messages once"
+    );
+    assert_eq!(
+        transcript
+            .messages
+            .iter()
+            .filter(|m| m.content == "A-user")
+            .count(),
+        1,
+        "common ancestor A must appear exactly once"
+    );
+    assert_eq!(
+        transcript
+            .messages
+            .iter()
+            .filter(|m| m.content == "A-assist")
+            .count(),
+        1
+    );
+}

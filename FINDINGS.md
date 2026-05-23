@@ -12,12 +12,6 @@
 
 ## MEDIUM
 
-### M-11: `head_transcript` 只走 first-parent — `correctness`
-- **位置**: `crates/lattice-session/src/sqlite_graph/commit.rs`（`head_transcript_impl` ancestry 遍历）
-- **问题**: 合并后的分支消息永远不会出现在 transcript 重建结果中。
-- **排期**: 若 merge / 多 parent commit 已是用户可见能力，优先于 M-21；若 merge 仍非常用路径，可放在 v1.3-alpha 中段。
-- **计划**: 拓扑排序遍历所有可达 commit；测试须覆盖 diamond merge，避免重复消息或顺序不稳定。
-
 ### M-21: `AgentLoop` 每轮全量 `convert_to_llm_message` — `performance`
 - **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`（`run_turn_inner` 主循环）
 - **问题**: 多轮 tool loop（最高约 200 轮）中，每轮对当前全部 `messages` 做 `iter().map(convert_to_llm_message).collect()`。随对话变长，总 work 约为 **O(轮次 × 消息数)**，长会话下 CPU/分配开销显著。
@@ -41,6 +35,11 @@
 - **计划**: `select!` cancel + 工具 future；对可中断工具传 cancel 或子进程 kill（按工具类型分级）。
 
 ## OBSOLETE / CLOSED
+
+（完整修复记录见 [FIX.md](./FIX.md)。）
+
+### M-11: `head_transcript` 只走 first-parent — `correctness`
+- **当前状态**: `collect_reachable_commits_topological`（迭代 postorder DFS，`parents_json` 顺序稳定）；merge 含第二父分支；diamond 不重复 ancestor。见 FIX.md **M-11**。
 
 ### L-18-03: 无 stream 超时/deadline 机制 — `robustness`
 - **原位置**: `crates/lattice-cli/src/commands/run.rs:439`

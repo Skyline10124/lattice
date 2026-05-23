@@ -1,6 +1,6 @@
 //! Shared SQL helpers used across the SqliteSessionGraphStore impls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -158,6 +158,70 @@ impl SqliteSessionGraphStore {
             .map_err(|_| SessionError::MissingCommit(commit_id.to_string()))?;
 
         self.parse_json_column("parents_json", &parents_json)
+    }
+
+    fn graph_cycle_error(&self, commit_id: &str) -> SessionError {
+        SessionError::Database {
+            path: self.db_path.clone(),
+            source: rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("cycle detected in commit graph at {commit_id}"),
+                )),
+            ),
+        }
+    }
+
+    /// Collect all commits reachable from `head_commit_id` in stable topological
+    /// order (every parent before its child).
+    ///
+    /// Parent visit order follows `parents_json` array order: `parent_ids[0]`
+    /// (first parent / mainline) is traversed before additional merge parents.
+    /// Duplicate commits (e.g. diamond merge common ancestor) appear once.
+    pub(super) fn collect_reachable_commits_topological(
+        &self,
+        conn: &Connection,
+        head_commit_id: &str,
+    ) -> Result<Vec<String>> {
+        enum Frame {
+            Enter(String),
+            Exit(String),
+        }
+
+        let mut visiting = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut ordered = Vec::new();
+        let mut stack = vec![Frame::Enter(head_commit_id.to_string())];
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Enter(cid) => {
+                    if visited.contains(&cid) {
+                        continue;
+                    }
+                    if !visiting.insert(cid.clone()) {
+                        return Err(self.graph_cycle_error(&cid));
+                    }
+                    stack.push(Frame::Exit(cid.clone()));
+                    let parents = self.get_parent_ids(conn, &cid)?;
+                    for parent in parents.into_iter().rev() {
+                        if !visited.contains(&parent) {
+                            stack.push(Frame::Enter(parent));
+                        }
+                    }
+                }
+                Frame::Exit(cid) => {
+                    visiting.remove(&cid);
+                    if visited.insert(cid.clone()) {
+                        ordered.push(cid);
+                    }
+                }
+            }
+        }
+
+        Ok(ordered)
     }
 
     /// Load `message_ids_json` for many commits, chunking the `IN` clause

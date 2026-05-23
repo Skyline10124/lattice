@@ -4,6 +4,18 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## M-11 修复: head_transcript 拓扑遍历 merge 父分支 — 2026-05-23
+
+Verified: `cargo test -p lattice-session` ✓ (61 tests), `cargo clippy -p lattice-session -- -D warnings` ✓
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| M-11 | MEDIUM | `head_transcript_impl` 只走 first-parent，merge 侧消息丢失 | `collect_reachable_commits_topological`（迭代 postorder，`parents_json` 顺序）；linear / merge / diamond 测试 |
+
+文件: `lattice-session/src/sqlite_graph/helpers.rs`, `commit.rs`, `tests/head_transcript.rs`
+
+---
+
 ## H-06 修复: production `stream_turn` live streaming — 2026-05-23
 
 Verified: `cargo test -p lattice-api` ✓, `cargo test -p lattice-api --test consistency` ✓, `cargo test -p lattice-cli run_integration` ✓

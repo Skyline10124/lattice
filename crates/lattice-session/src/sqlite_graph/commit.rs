@@ -30,22 +30,16 @@ impl SqliteSessionGraphStore {
             Some(cid) => cid.clone(),
         };
 
-        // Walk first-parent ancestry from root to HEAD to collect ordered
-        // commit IDs. We reverse at the end to get root-first order.
-        let mut commit_ids_rev: Vec<String> = Vec::new();
-        let mut current = Some(parent_commit_id.clone());
-        while let Some(cid) = current {
-            commit_ids_rev.push(cid.clone());
-            let parents = self.get_parent_ids(&conn, &cid)?;
-            current = parents.into_iter().next();
-        }
-        commit_ids_rev.reverse();
+        // All reachable commits in topological order (M-11): includes merge
+        // parents, not just first-parent ancestry.
+        let commit_ids =
+            self.collect_reachable_commits_topological(&conn, &parent_commit_id)?;
 
         // Batch-load message IDs per commit, then all messages in two queries
         // (same pattern as log_impl tool_message_count resolution).
-        let commit_message_ids = self.commit_message_ids_batch(&conn, &commit_ids_rev)?;
+        let commit_message_ids = self.commit_message_ids_batch(&conn, &commit_ids)?;
         let mut ordered_message_ids: Vec<String> = Vec::new();
-        for cid in &commit_ids_rev {
+        for cid in &commit_ids {
             let message_ids = commit_message_ids
                 .get(cid)
                 .ok_or_else(|| SessionError::MissingCommit(cid.clone()))?;
