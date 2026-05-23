@@ -1,7 +1,7 @@
 //! agent loop: sequences LLM calls and tool execution for a single turn.
 //!
 //! This module implements the stable public main-path `AgentLoop`. It uses
-//! `lattice-llm` types at the model boundary and `lattice-tools::enabled_tools`
+//! `lattice-llm` types at the model boundary and `lattice-tooling::enabled_tools`
 //! for tool authorization.
 
 mod messages;
@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
-use lattice_tools::enabled_tools::{resolve_enabled_tools, EnabledTools};
+use lancet_executor::default_tool_definitions;
+use lattice_tooling::enabled_tools::{resolve_enabled_tools, EnabledTools};
 use tokio::time::Instant;
 
 use messages::{append_llm_message, graph_messages_to_llm};
@@ -74,7 +75,7 @@ impl AgentLoop {
     /// outcome.
     pub async fn run_turn(&self, request: AgentTurnRequest) -> AgentTurnResult {
         // Resolve enabled tools (T-09-02: fail before LLM call)
-        let enabled = match resolve_enabled_tools(&request.enabled_tools) {
+        let enabled = match resolve_enabled_tools(&request.enabled_tools, &default_tool_definitions()) {
             Ok(tools) => tools,
             Err(err) => {
                 return AgentTurnResult {
@@ -133,7 +134,7 @@ impl AgentLoop {
     ) -> AgentTurnResult {
         // Resolve enabled tools (T-09-02: fail before LLM call) — same shape
         // as `run_turn`, no live emission yet because the turn has not started.
-        let enabled = match resolve_enabled_tools(&request.enabled_tools) {
+        let enabled = match resolve_enabled_tools(&request.enabled_tools, &default_tool_definitions()) {
             Ok(tools) => tools,
             Err(err) => {
                 return AgentTurnResult {

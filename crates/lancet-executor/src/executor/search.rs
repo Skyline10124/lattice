@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::{DefaultToolExecutor, ToolLimits};
+use lattice_tooling::ToolLimits;
+use super::DefaultToolExecutor;
 
 const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
@@ -13,7 +14,7 @@ pub(super) async fn grep(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    use crate::tool_error::ToolError;
+    use lattice_tooling::ToolError;
 
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -70,7 +71,7 @@ pub(super) async fn find_files(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    use crate::tool_error::ToolError;
+    use lattice_tooling::ToolError;
 
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");

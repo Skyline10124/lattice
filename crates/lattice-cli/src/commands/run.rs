@@ -403,7 +403,7 @@ async fn run_inner(
     // Build AgentLoop with real LLM client and tool executor
     let enabled_tools = loaded_profile.profile.tools.enabled.clone();
     let project_root_str = project_root.to_string_lossy().to_string();
-    let tool_executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+    let tool_executor = lancet_executor::DefaultToolExecutor::for_project_root(
         &project_root_str,
         enabled_tools,
     )

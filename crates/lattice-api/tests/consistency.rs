@@ -15,7 +15,7 @@ use lattice_api::{
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
-use lattice_tools::executor::DefaultToolExecutor;
+use lancet_executor::DefaultToolExecutor;
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {

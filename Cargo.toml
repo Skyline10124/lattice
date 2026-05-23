@@ -5,7 +5,9 @@ members = [
     "crates/lattice-api",
     "crates/lattice-session",
     "crates/lattice-agent",
-    "crates/lattice-tools",
+    "crates/lattice-tooling",
+    "crates/lancet-protocol",
+    "crates/lancet-executor",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -24,7 +26,9 @@ lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-agent    = { path = "crates/lattice-agent" }
-lattice-tools    = { path = "crates/lattice-tools" }
+lattice-tooling  = { path = "crates/lattice-tooling" }
+lancet-protocol  = { path = "crates/lancet-protocol" }
+lancet-executor  = { path = "crates/lancet-executor" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 

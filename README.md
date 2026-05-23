@@ -17,9 +17,9 @@ lattice/
 │   ├── lattice-agent/       # Multi-turn agent loop, state, memory, hooks
 │   ├── lattice-api/         # API surface types and shared protocol
 │   └── lattice-cli/         # CLI (run, models, resolve, session, doctor)
-├── benches/
-├── examples/
-└── tests/
+├── README.md
+├── FINDINGS.md
+└── FIX.md
 ```
 
 ## Build

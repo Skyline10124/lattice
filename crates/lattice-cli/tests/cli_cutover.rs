@@ -217,7 +217,9 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-session",
         "lattice-profile",
         "lattice-agent",
-        "lattice-tools",
+        "lattice-tooling",
+        "lancet-protocol",
+        "lancet-executor",
         "lattice-api",
         "lattice-cli",
     ];

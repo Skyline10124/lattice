@@ -19,8 +19,7 @@ use std::path::Path;
 use async_trait::async_trait;
 
 use crate::edit::{apply_patch as apply_structured_patch, PatchResultEnvelope};
-use crate::tool_error::ToolError;
-use crate::ToolExecutor;
+use lattice_tooling::{ToolError, ToolExecutor, ToolLimits};
 
 const MAX_COMMAND_OUTPUT_SIZE: usize = 200 * 1024;
 
@@ -29,25 +28,6 @@ pub struct DefaultToolExecutor {
     pub(crate) limits: ToolLimits,
     http_client: reqwest::Client,
     authorized_tools: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolLimits {
-    pub max_read_size: usize,
-    pub max_write_size: usize,
-    pub max_http_response_size: usize,
-    pub max_command_timeout: u32,
-}
-
-impl Default for ToolLimits {
-    fn default() -> Self {
-        Self {
-            max_read_size: 10 * 1024 * 1024,
-            max_write_size: 1024 * 1024,
-            max_http_response_size: 10 * 1024 * 1024,
-            max_command_timeout: 30,
-        }
-    }
 }
 
 impl DefaultToolExecutor {

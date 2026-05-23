@@ -47,7 +47,7 @@ fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> TestFixture
     let store = SqliteSessionGraphStore::new(&sessions_path);
 
     let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
         &root.to_string_lossy(),
         enabled,
     )
@@ -268,7 +268,7 @@ async fn run_turn_uses_existing_session_transcript() {
             .build(),
     );
     let enabled: Vec<String> = vec![];
-    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
         &fixture._dir.path().to_string_lossy(),
         enabled,
     )
@@ -601,7 +601,7 @@ async fn run_turn_commits_parent_from_initial_transcript() {
 
     let session_api = SessionApi::sqlite(&fixture.sessions_path);
     let enabled: Vec<String> = vec![];
-    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
         &fixture._dir.path().to_string_lossy(),
         enabled,
     )

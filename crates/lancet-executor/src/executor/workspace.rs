@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use crate::tool_error::ToolError;
-use crate::DefaultToolExecutor;
+use lattice_tooling::ToolError;
+use super::DefaultToolExecutor;
 
 const DEFAULT_WORKSPACE_ENTRY_LIMIT: usize = 40;
 const MAX_WORKSPACE_ENTRY_LIMIT: usize = 100;

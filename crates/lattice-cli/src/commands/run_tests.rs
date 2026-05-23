@@ -213,7 +213,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
 
     // Build tool executor with the *workspace root* (the fix), not profile_dir
     let enabled = vec!["read_file".to_string()];
-    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
         &ws.to_string_lossy(),
         enabled,
     )
@@ -224,7 +224,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         "test-call",
         lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
     );
-    use lattice_tools::ToolExecutor as _;
+    use lattice_tooling::ToolExecutor as _;
     let result = executor
         .execute(&call)
         .await

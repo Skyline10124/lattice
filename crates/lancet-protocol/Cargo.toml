@@ -1,0 +1,11 @@
+[package]
+name = "lancet-protocol"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET controlled maintenance protocol: Card, Envelope, Guard abstractions"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

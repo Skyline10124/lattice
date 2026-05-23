@@ -2,10 +2,10 @@ use lattice_llm::security;
 
 pub(super) async fn web_fetch(
     http_client: &reqwest::Client,
-    limits: &crate::ToolLimits,
+    limits: &lattice_tooling::ToolLimits,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    use crate::tool_error::ToolError;
+    use lattice_tooling::ToolError;
     use futures::StreamExt;
 
     let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");

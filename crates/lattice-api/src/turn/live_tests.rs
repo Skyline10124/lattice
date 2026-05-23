@@ -24,7 +24,7 @@ use crate::session::SessionApi;
 struct NoOpToolExecutor;
 
 #[async_trait::async_trait]
-impl lattice_tools::ToolExecutor for NoOpToolExecutor {
+impl lattice_tooling::ToolExecutor for NoOpToolExecutor {
     async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
         Err("no tools configured in test".to_string())
     }

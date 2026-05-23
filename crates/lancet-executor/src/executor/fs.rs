@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::edit::content_hash;
-use crate::tool_error::ToolError;
-use crate::DefaultToolExecutor;
+use lattice_tooling::ToolError;
+use super::DefaultToolExecutor;
 
 use super::render;
 

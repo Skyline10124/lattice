@@ -1,13 +1,14 @@
 [package]
-name = "lattice-tools"
+name = "lancet-executor"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Tool definitions, registry, and execution framework"
+description = "LANCET tool executor: concrete tool implementations (fs, shell, patch, search, web)"
 
 [dependencies]
 lattice-llm = { workspace = true }
+lattice-tooling = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }

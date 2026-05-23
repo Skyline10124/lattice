@@ -72,11 +72,11 @@ pub trait LlmClient: Send + Sync {
 
 /// Re-export of the unified tool executor trait.
 ///
-/// The agent loop drives any implementation of `lattice_tools::ToolExecutor`
+/// The agent loop drives any implementation of `lattice_tooling::ToolExecutor`
 /// to handle tool calls. This re-export lets agent-layer callers depend on
-/// a single trait without importing `lattice-tools` directly.
+/// a single trait without importing `lattice-tooling` directly.
 ///
 /// Implementations return `Ok(content)` on success or `Err(message)` when
 /// the tool could not produce a valid result. The agent loop derives the
 /// `ok` flag and error summary from the Result variant.
-pub use lattice_tools::ToolExecutor as ToolCallExecutor;
+pub use lattice_tooling::ToolExecutor as ToolCallExecutor;

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::DefaultToolExecutor;
+use super::DefaultToolExecutor;
 
 impl DefaultToolExecutor {
     pub(super) fn resolve_user_path(&self, path: &str) -> PathBuf {

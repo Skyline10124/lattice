@@ -24,6 +24,7 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 lattice-agent = { workspace = true, features = ["test-utils"] }
-lattice-tools = { workspace = true }
+lattice-tooling = { workspace = true }
+lancet-executor = { workspace = true }
 lattice-profile = { workspace = true }
 blake3 = { workspace = true }

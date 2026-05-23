@@ -1,4 +1,4 @@
-use crate::ToolLimits;
+use lattice_tooling::ToolLimits;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;

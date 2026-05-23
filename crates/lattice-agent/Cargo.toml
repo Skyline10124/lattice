@@ -9,7 +9,8 @@ description = "AgentLoop execution for the session-centered runtime"
 [dependencies]
 lattice-llm = { workspace = true }
 lattice-session = { workspace = true }
-lattice-tools = { workspace = true }
+lattice-tooling = { workspace = true }
+lancet-executor = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
