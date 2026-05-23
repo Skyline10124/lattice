@@ -1,8 +1,10 @@
 //! Shared SQL helpers used across the SqliteSessionGraphStore impls.
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::graph::{TurnCommitStatus, TurnLogEntry};
+use crate::graph::{GraphMessage, GraphToolCall, TurnCommitStatus, TurnLogEntry};
 use crate::{Result, SessionError};
 
 use super::SqliteSessionGraphStore;
@@ -146,11 +148,7 @@ impl SqliteSessionGraphStore {
         Err(SessionError::MissingCommit(target.to_string()))
     }
 
-    pub(super) fn get_parent_ids(
-        &self,
-        conn: &Connection,
-        commit_id: &str,
-    ) -> Result<Vec<String>> {
+    pub(super) fn get_parent_ids(&self, conn: &Connection, commit_id: &str) -> Result<Vec<String>> {
         let parents_json: String = conn
             .query_row(
                 "SELECT parents_json FROM graph_commits WHERE commit_id=?1",
@@ -160,6 +158,149 @@ impl SqliteSessionGraphStore {
             .map_err(|_| SessionError::MissingCommit(commit_id.to_string()))?;
 
         self.parse_json_column("parents_json", &parents_json)
+    }
+
+    /// Load `message_ids_json` for many commits, chunking the `IN` clause
+    /// to stay within SQLite's bind-parameter limit.
+    pub(super) fn commit_message_ids_batch(
+        &self,
+        conn: &Connection,
+        commit_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>> {
+        if commit_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut out = HashMap::with_capacity(commit_ids.len());
+        for chunk in commit_ids.chunks(super::SQLITE_BIND_CHUNK_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT commit_id, message_ids_json FROM graph_commits WHERE commit_id IN ({placeholders})"
+            );
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = chunk
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+
+            for row in rows {
+                let (commit_id, message_ids_json) =
+                    row.map_err(|source| SessionError::Database {
+                        path: self.db_path.clone(),
+                        source,
+                    })?;
+                let message_ids: Vec<String> =
+                    self.parse_json_column("message_ids_json", &message_ids_json)?;
+                out.insert(commit_id, message_ids);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Load graph messages by ID, chunking the `IN` clause to stay within
+    /// SQLite's bind-parameter limit.
+    pub(super) fn load_graph_messages_by_id(
+        &self,
+        conn: &Connection,
+        message_ids: &[&str],
+    ) -> Result<HashMap<String, GraphMessage>> {
+        if message_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut out = HashMap::with_capacity(message_ids.len());
+        for chunk in message_ids.chunks(super::SQLITE_BIND_CHUNK_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT message_id, role, content, reasoning_content, tool_call_id, name, tool_calls_json
+                 FROM graph_messages WHERE message_id IN ({placeholders})"
+            );
+            let param_values: Vec<String> = chunk.iter().map(|s| (*s).to_string()).collect();
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let mut stmt = conn
+                .prepare(&sql)
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    let message_id: String = row.get(0)?;
+                    let role: String = row.get(1)?;
+                    let content: String = row.get(2)?;
+                    let reasoning_content: Option<String> = row.get(3)?;
+                    let tool_call_id: Option<String> = row.get(4)?;
+                    let name: Option<String> = row.get(5)?;
+                    let tool_calls_json: String = row.get(6)?;
+                    Ok((
+                        message_id,
+                        role,
+                        content,
+                        reasoning_content,
+                        tool_call_id,
+                        name,
+                        tool_calls_json,
+                    ))
+                })
+                .map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+
+            for row in rows {
+                let (
+                    message_id,
+                    role,
+                    content,
+                    reasoning_content,
+                    tool_call_id,
+                    name,
+                    tool_calls_json,
+                ) = row.map_err(|source| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source,
+                })?;
+                let tool_calls: Option<Vec<GraphToolCall>> = serde_json::from_str(&tool_calls_json)
+                    .ok()
+                    .filter(|v: &Vec<GraphToolCall>| !v.is_empty());
+                out.insert(
+                    message_id,
+                    GraphMessage {
+                        role,
+                        content,
+                        reasoning_content,
+                        tool_calls,
+                        tool_call_id,
+                        name,
+                    },
+                );
+            }
+        }
+        Ok(out)
     }
 
     pub(super) fn collect_ancestors(

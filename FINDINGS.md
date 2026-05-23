@@ -1,6 +1,6 @@
 # FINDINGS — Open Issues
 
-未修复项，留给 v1.2。已修复项见 [FIX.md](./FIX.md)。
+未修复项，留给后续 alpha 主线。已修复项见 [FIX.md](./FIX.md)。
 
 ---
 
@@ -8,25 +8,37 @@
 
 (None)
 
+---
+
 ## MEDIUM
 
-### M-04: DNS rebinding TOCTOU（lattice-llm） — `security`
-- **位置**: `crates/lattice-llm/src/security.rs:100-117`
-- **问题**: 验证时 DNS 解析一次检查非内网 IP，reqwest 发请求时再次解析。攻击者可在两次解析间切换到内网 IP。
-- **计划**: 需 reqwest `resolve()` 钉住 IP。
-
-### M-05: DNS rebinding TOCTOU（lattice-tools）+ 不完整黑名单 — `security`
-- **位置**: `crates/lattice-tools/src/executor/web.rs:12-15, 60-88`
-- **问题**: 同 M-04。rebinding 域名黑名单只有 `nip.io`/`xip.io`，缺少多个已知域名。
-
 ### M-11: `head_transcript` 只走 first-parent — `correctness`
-- **位置**: `crates/lattice-session/src/sqlite_graph.rs:219`
+- **位置**: `crates/lattice-session/src/sqlite_graph/commit.rs`（`head_transcript_impl` ancestry 遍历）
 - **问题**: 合并后的分支消息永远不会出现在 transcript 重建结果中。
-- **计划**: 需拓扑排序遍历所有可达 commit。
+- **排期**: 若 merge / 多 parent commit 已是用户可见能力，优先于 M-21；若 merge 仍非常用路径，可放在 v1.3-alpha 中段。
+- **计划**: 拓扑排序遍历所有可达 commit；测试须覆盖 diamond merge，避免重复消息或顺序不稳定。
+
+### M-21: `AgentLoop` 每轮全量 `convert_to_llm_message` — `performance`
+- **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`（`run_turn_inner` 主循环）
+- **问题**: 多轮 tool loop（最高约 200 轮）中，每轮对当前全部 `messages` 做 `iter().map(convert_to_llm_message).collect()`。随对话变长，总 work 约为 **O(轮次 × 消息数)**，长会话下 CPU/分配开销显著。
+- **排期**: 性能债，**非** v1.3-alpha 第一刀；controlled editing / 更密集 tool loop 变重要后再做。
+- **计划**: 增量维护 `Vec<lattice_llm::Message>`，每轮只 append 新 assistant/tool 消息；须厘清 system / head transcript / current turn delta 边界，避免重复喂给模型。
 
 ## LOW
 
-(None)
+### L-20: `SqliteSessionGraphStore` 单连接 `Mutex` 应用层串行化 — `performance` / `architecture`
+- **位置**: `crates/lattice-session/src/sqlite_graph/mod.rs`
+- **问题**: 虽启用 WAL，但全进程共享一个 `Connection` + `Mutex`，读写均独占；多会话/多任务并行时 DB 成为串行瓶颈。
+- **当前状态**: 本地 CLI 场景可接受；非 bug。
+- **排期**: 除非很快做并发 TUI、多 session daemon 或 HTTP server，否则属 v0-beta 前架构评估项，非 v1.3-alpha 开场项。
+- **计划**: 连接池或每任务独立 `Connection`（仍每连接 WAL）。
+
+### L-21: 工具执行 `await_with_deadline` 未与 `cancel_flag` 竞争 — `robustness`
+- **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`（`execute` 调用处）
+- **问题**: 用户取消后，须等当前工具跑完或触及 turn `deadline` 才能在 checkpoint #5 退出；长时 `bash` / `web_fetch` 取消滞后。
+- **当前状态**: Plan 15-02 **D-07** 明确不 abort in-flight 工具。
+- **升级条件**: 若 v1.3-alpha 引入 verification runner / long-running command workflow，**升为 Medium**。
+- **计划**: `select!` cancel + 工具 future；对可中断工具传 cancel 或子进程 kill（按工具类型分级）。
 
 ## OBSOLETE / CLOSED
 
@@ -35,13 +47,15 @@
 - **原问题**: `while let Some(event) = stream.next().await` 无超时，hung provider 会阻塞 CLI。
 - **当前状态**: CLI 加 5 分钟 idle timeout，超时写 stderr + exit 1。API/Agent durable deadline 留未来。
 
-### H-06: `stream_turn` 不是真正的流式 — `streaming`
-- **原位置**: `crates/lattice-api/src/turn/execute.rs`
-- **原问题**: production `stream_turn` 曾经执行完整个 turn 后 replay buffered events，调用方无法获得渐进 token 推送。
-- **当前状态**: Phase 16 已将 production `stream_turn` 改为 spawn + bounded channel 的 live stream；Phase 17 补充了 failure/consistency 覆盖。`stream_turn_with_deps` 仍是 buffered replay，但现在是测试 seam，不是 production public live path。
-- **后续**: CLI 仍然调用 `run_turn`，改为消费 public `TurnEvent` 属于 Phase 18，不再作为 H-06 open finding 跟踪。
+## PARTIAL
 
-## PARTIAL（已缓解，v1.2 完全修复）
+### M-04: `validate_base_url` DNS 检查与 HTTP 请求之间存在 TOCTOU — `security`
+- **已做**: 请求前 `resolve_public_socket_addrs`，`ClientBuilder::resolve_to_addrs` 钉住解析结果（`lattice-llm/src/client.rs`）。
+- **残留**: `validate_base_url` 阶段的 DNS 仍为 best-effort（离线 CI 可能不解析）；权威防护在 request-time pinning，配置时校验不能单独当作闭环。
+
+### M-05: `web_fetch` DNS rebinding / 黑名单 — `security`
+- **已做**: 与 M-04 共享 request-time 钉 IP；已知 rebinding 后缀硬拒绝（`DNS_REBINDING_DOMAIN_SUFFIXES`，`security.rs` + `web.rs`）。
+- **残留**: 黑名单不可穷尽（新 wildcard→IP 服务、非列表域名）；需持续维护或改为启发式（主机名编码 IP 模式）+ 仍依赖钉 IP 作为主防线。
 
 ### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security`
 - **已做**: 写入前 `symlink_metadata` 检测 symlink 并拒绝。

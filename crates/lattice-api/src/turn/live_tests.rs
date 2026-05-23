@@ -48,6 +48,7 @@ fn make_request(input: &str) -> RunTurnRequest {
         profile: None,
         model: None,
         loaded_profile: None,
+        cancel_flag: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         profile: None,
         model: None,
         loaded_profile: None,
+        cancel_flag: None,
     }
 }
 
@@ -782,4 +784,59 @@ async fn stream_turn_live_receiver_drop_does_not_cancel() {
     })
     .await
     .expect("background task should commit after receiver drop (VER-12)");
+}
+
+/// Many small token events to fill the bounded public channel when the
+/// consumer stops reading after `TurnStarted` (M-19b).
+fn flood_token_events(count: usize) -> Vec<LlmEvent> {
+    let mut events: Vec<LlmEvent> = (0..count)
+        .map(|i| LlmEvent::Token {
+            content: format!("tok{i}"),
+        })
+        .collect();
+    events.push(LlmEvent::Done {
+        finish_reason: "stop".to_string(),
+        usage: Some(TokenUsage {
+            prompt_tokens: 1,
+            completion_tokens: count as u32,
+            total_tokens: (count as u32) + 1,
+        }),
+    });
+    events
+}
+
+#[tokio::test]
+async fn stream_turn_live_slow_observer_still_commits() {
+    // M-19b: a consumer that stops reading must not block commit.
+    let dir = tempfile::tempdir().unwrap();
+    let session = make_session(dir.path());
+    let client = FakeStreamingLlmClient::builder()
+        .push_events(flood_token_events(400))
+        .build();
+    let agent_loop = make_agent_loop(client);
+    let request = make_request("slow observer");
+
+    let session_id = {
+        let mut stream = stream_turn_live(session, agent_loop, request)
+            .await
+            .expect("stream_turn_live should succeed");
+        let first = stream.next().await.expect("TurnStarted");
+        match first {
+            TurnEvent::TurnStarted { session_id, .. } => session_id,
+            other => panic!("expected TurnStarted, got {other:?}"),
+        }
+        // Stream dropped without draining token deltas — public channel backpressure.
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let session = make_session(dir.path());
+            if session.log(&session_id).map(|log| log.len()).unwrap_or(0) == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("turn must commit despite slow observer (M-19b)");
 }

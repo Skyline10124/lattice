@@ -682,9 +682,8 @@ async fn scenario_04_receiver_drop_does_not_cancel_turn() {
     });
 
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentTurnEvent>(8);
-    // Drop the receiver before any send has happened. emit_agent_event's
-    // `let _ = sender.send(event).await` swallows every SendError; the turn
-    // must still complete normally.
+    // Drop the receiver before any send has happened. Live mirror uses
+    // non-blocking `try_send` (M-19a); the turn must still complete normally.
     drop(rx);
 
     let result = loop_inst.run_turn_live(make_request("hello"), tx).await;
@@ -713,6 +712,53 @@ async fn scenario_04_receiver_drop_does_not_cancel_turn() {
         1
     );
     assert_eq!(result.assistant_output, "hi there");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 4b — full live channel without drain does not block the agent loop
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scenario_04b_full_live_channel_without_drain_completes() {
+    let mut token_events = Vec::new();
+    for i in 0..200 {
+        token_events.push(LlmEvent::Token {
+            content: format!("t{i}"),
+        });
+    }
+    token_events.push(LlmEvent::Done {
+        finish_reason: "stop".to_string(),
+        usage: None,
+    });
+
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(token_events)
+            .build(),
+    );
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: Arc::new(FakeToolExecutor::new(vec![])),
+    });
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<AgentTurnEvent>(4);
+    // Receiver exists but is never read — channel fills; M-19a must not block.
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        loop_inst.run_turn_live(make_request("flood"), tx),
+    )
+    .await
+    .expect("run_turn_live must not deadlock on full live channel");
+
+    assert_eq!(result.status, AgentTurnStatus::Completed);
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })),
+        "buffered events must remain complete under backpressure"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -1,10 +1,8 @@
-use lattice_agent::{
-    AgentToolResultSummary as AgentToolSummary, AgentTurnRequest, AgentTurnStatus,
-};
+use lattice_agent::{AgentTurnRequest, AgentTurnStatus};
 use lattice_llm::{ModelRouter, ModelTarget};
 use lattice_session::HeadTranscript;
 
-use super::types::{RunTurnRequest, RunTurnStatus, ToolResultSummary};
+use super::types::{RunTurnRequest, RunTurnStatus};
 
 /// Resolve model alias and system prompt from the request.
 pub(crate) fn resolve_model_and_prompt(
@@ -74,23 +72,9 @@ pub(crate) fn build_agent_request(
         provider,
         enabled_tools,
         project_root,
-        cancel_flag: None,
+        cancel_flag: request.cancel_flag.clone(),
         timeout: None,
     }
-}
-
-/// Convert agent tool result summaries to API tool result summaries.
-pub(crate) fn map_tool_results(summaries: &[AgentToolSummary]) -> Vec<ToolResultSummary> {
-    summaries
-        .iter()
-        .map(|s| ToolResultSummary {
-            tool_call_id: s.tool_call_id.clone(),
-            name: s.name.clone(),
-            ok: s.ok,
-            output_len: s.output_len,
-            error_summary: s.error_summary.clone(),
-        })
-        .collect()
 }
 
 /// Map agent turn status to API turn status.

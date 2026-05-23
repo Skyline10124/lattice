@@ -21,6 +21,12 @@ mod tests;
 
 pub(crate) const DEFAULT_BRANCH: &str = "main";
 
+/// Maximum number of `?` bind parameters per single `IN (...)` clause.
+/// SQLite's default compile-time limit is 999 (`SQLITE_MAX_VARIABLE_NUMBER`);
+/// newer builds may raise it, but we cannot assume the deployment target does.
+/// Queries with more IDs are split into chunks of this size and merged.
+pub(super) const SQLITE_BIND_CHUNK_SIZE: usize = 900;
+
 /// SQLite-backed session graph store.
 ///
 /// Uses a single shared connection guarded by a Mutex. The connection is

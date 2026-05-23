@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 
 use crate::graph::{
-    derive_commit_message, GraphHead, GraphMessage, SessionGraphStore, TurnCommit,
-    TurnCommitInput, TurnCommitStatus,
+    derive_commit_message, GraphHead, GraphMessage, SessionGraphStore, TurnCommit, TurnCommitInput,
+    TurnCommitStatus,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};

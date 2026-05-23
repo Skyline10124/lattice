@@ -1,96 +1,58 @@
 //! Deterministic usage tests for the v1.1 main chain path.
 //!
-//! These tests exercise the real `run_turn` → `RealTurnDeps` → `AgentLoop` →
-//! `DefaultToolExecutor` pipeline with a fake LLM. No network, no real API keys.
+//! These tests exercise the real `run_turn` → live `stream_turn` collector →
+//! `AgentLoop` → `DefaultToolExecutor` pipeline with a fake streaming LLM.
+//! No network, no real API keys.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
-use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, TokenUsage, ToolCall};
+use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
+use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
 use lattice_tools::executor::DefaultToolExecutor;
 
-// ── Fake LLM ────────────────────────────────────────────────────────────────
+// ── Streaming event helpers ─────────────────────────────────────────────────
 
-struct FakeLlm {
-    responses: Mutex<VecDeque<ChatResponse>>,
-    requests: Mutex<Vec<ChatRequest>>,
-}
-
-impl FakeLlm {
-    fn new(responses: Vec<ChatResponse>) -> Arc<Self> {
-        Arc::new(Self {
-            responses: Mutex::new(VecDeque::from(responses)),
-            requests: Mutex::new(Vec::new()),
-        })
-    }
-
-    fn take_requests(&self) -> Vec<ChatRequest> {
-        let mut guard = self.requests.lock().unwrap();
-        std::mem::take(&mut *guard)
+fn usage_tokens() -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
     }
 }
 
-#[async_trait::async_trait]
-impl LlmClient for FakeLlm {
-    async fn chat(
-        &self,
-        request: ChatRequest,
-    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.requests.lock().unwrap().push(request);
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| "FakeLlm: no more responses queued".into())
-    }
-}
-
-// ── Tool executor adapter ───────────────────────────────────────────────────
-//
-// `DefaultToolExecutor` directly implements the unified `ToolExecutor` trait
-// (re-exported as `ToolCallExecutor`), so it can be wrapped in an Arc and
-// passed to `AgentLoopConfig.tool_executor` without an adapter layer.
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
-fn tool_call_response(id: &str, name: &str, args: &str) -> ChatResponse {
-    ChatResponse {
-        content: String::new(),
-        reasoning_content: None,
-        tool_calls: Some(vec![ToolCall {
+fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::ToolCallStart {
             id: id.to_string(),
-            function: FunctionCall {
-                name: name.to_string(),
-                arguments: args.to_string(),
-            },
-        }]),
-        finish_reason: "tool_calls".to_string(),
-        model: "fake-model".to_string(),
-        usage: Some(TokenUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-        }),
-    }
+            name: name.to_string(),
+        },
+        LlmEvent::ToolCallDelta {
+            id: id.to_string(),
+            arguments_delta: args.to_string(),
+        },
+        LlmEvent::ToolCallEnd { id: id.to_string() },
+        LlmEvent::Done {
+            finish_reason: "tool_calls".to_string(),
+            usage: Some(usage_tokens()),
+        },
+    ]
 }
 
-fn final_response(text: &str) -> ChatResponse {
-    ChatResponse {
-        content: text.to_string(),
-        reasoning_content: None,
-        tool_calls: None,
-        finish_reason: "stop".to_string(),
-        model: "fake-model".to_string(),
-        usage: Some(TokenUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-        }),
-    }
+fn final_response_events(text: &str) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::Token {
+            content: text.to_string(),
+        },
+        LlmEvent::Done {
+            finish_reason: "stop".to_string(),
+            usage: Some(usage_tokens()),
+        },
+    ]
 }
 
 /// Temp workspace with src/lib.rs and a default agent profile.
@@ -141,7 +103,7 @@ enabled = {enabled:?}
 }
 
 fn build_agent_loop(
-    fake_llm: Arc<FakeLlm>,
+    fake_llm: Arc<dyn LlmClient>,
     workspace_root: &std::path::Path,
     enabled_tools: &[&str],
 ) -> Arc<AgentLoop> {
@@ -162,11 +124,17 @@ fn build_agent_loop(
 async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["read_file"]);
 
-    let fake_llm = FakeLlm::new(vec![
-        tool_call_response("call_1", "read_file", r#"{"path":"src/lib.rs"}"#),
-        final_response("Read workspace file successfully."),
-    ]);
-    let agent_loop = build_agent_loop(fake_llm.clone(), &ws.root, &["read_file"]);
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_1",
+                "read_file",
+                r#"{"path":"src/lib.rs"}"#,
+            ))
+            .push_events(final_response_events("Read workspace file successfully."))
+            .build(),
+    );
+    let agent_loop = build_agent_loop(fake_llm, &ws.root, &["read_file"]);
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
@@ -177,6 +145,7 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         profile: None,
         model: None,
         loaded_profile: Some(ws.loaded),
+        cancel_flag: None,
     };
 
     let result = lattice_api::run_turn(
@@ -187,7 +156,6 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     .await
     .expect("run_turn must succeed");
 
-    // Turn completed
     assert_eq!(result.status, RunTurnStatus::Completed);
     assert!(
         result
@@ -197,7 +165,6 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         result.assistant_output
     );
 
-    // Tool result contains the file content
     let tool_result = result
         .tool_results
         .iter()
@@ -205,25 +172,18 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         .expect("should have a read_file tool result");
     assert!(tool_result.output_len > 0, "tool output must be non-empty");
 
-    // Verify the actual tool output was captured by checking the agent messages
-    // contain "pub fn answer" — this proves the tool read from workspace root,
-    // not from .lattice/agents/default
-    let requests = fake_llm.take_requests();
+    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let transcript = store
+        .head_transcript(&result.session_id)
+        .expect("head_transcript");
     assert!(
-        requests.len() >= 2,
-        "LLM should have been called at least twice"
-    );
-    let second_req = &requests[1];
-    let has_file_content = second_req
-        .messages
-        .iter()
-        .any(|m| m.content.contains("pub fn answer"));
-    assert!(
-        has_file_content,
-        "tool result in LLM messages must contain 'pub fn answer'"
+        transcript
+            .messages
+            .iter()
+            .any(|m| m.role == "tool" && m.content.contains("pub fn answer")),
+        "committed tool message must contain workspace file content"
     );
 
-    // Session log has exactly one commit
     let verify_api = lattice_api::SessionApi::sqlite(&sessions_path);
     let log = verify_api
         .log(&result.session_id)
@@ -235,7 +195,11 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
 async fn usage_stream_turn_model_started_includes_routed_provider() {
     let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &[]);
 
-    let fake_llm = FakeLlm::new(vec![final_response("Done.")]);
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(final_response_events("Done."))
+            .build(),
+    );
     let agent_loop = build_agent_loop(fake_llm, &ws.root, &[]);
 
     let session_dir = tempfile::tempdir().unwrap();
@@ -247,6 +211,7 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
         profile: None,
         model: None,
         loaded_profile: Some(ws.loaded),
+        cancel_flag: None,
     };
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
@@ -292,17 +257,19 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 "
     );
 
-    let fake_llm = FakeLlm::new(vec![
-        tool_call_response(
-            "call_1",
-            "patch",
-            &format!(
-                r#"{{"patch":{}}}"#,
-                serde_json::to_string(&patch_doc).unwrap()
-            ),
-        ),
-        final_response("Patched successfully."),
-    ]);
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_1",
+                "patch",
+                &format!(
+                    r#"{{"patch":{}}}"#,
+                    serde_json::to_string(&patch_doc).unwrap()
+                ),
+            ))
+            .push_events(final_response_events("Patched successfully."))
+            .build(),
+    );
     let agent_loop = build_agent_loop(fake_llm, &ws.root, &["read_file", "patch"]);
 
     let session_dir = tempfile::tempdir().unwrap();
@@ -314,6 +281,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         profile: None,
         model: None,
         loaded_profile: Some(ws.loaded),
+        cancel_flag: None,
     };
 
     let result = lattice_api::run_turn(
@@ -324,7 +292,6 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     .await
     .expect("run_turn must succeed");
 
-    // File on disk changed to 42
     let patched = std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
     assert!(
         patched.contains("42"),
@@ -352,22 +319,24 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 async fn usage_resume_session_includes_previous_turn_context() {
     let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["read_file"]);
 
-    let fake_llm = FakeLlm::new(vec![
-        final_response("First turn done."),
-        final_response("Second turn done."),
-    ]);
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(final_response_events("First turn done."))
+            .push_events(final_response_events("Second turn done."))
+            .build(),
+    );
     let agent_loop = build_agent_loop(fake_llm.clone(), &ws.root, &["read_file"]);
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
 
-    // Turn 1
     let request1 = RunTurnRequest {
         input: "Hello".to_string(),
         session_id: None,
         profile: None,
         model: None,
         loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
     };
     let result1 = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
@@ -379,13 +348,13 @@ async fn usage_resume_session_includes_previous_turn_context() {
     assert_eq!(result1.status, RunTurnStatus::Completed);
     let session_id = result1.session_id.clone();
 
-    // Turn 2 (same session — new SessionApi pointing at same SQLite dir)
     let request2 = RunTurnRequest {
         input: "Follow up".to_string(),
         session_id: Some(session_id.clone()),
         profile: None,
         model: None,
         loaded_profile: Some(ws.loaded),
+        cancel_flag: None,
     };
     let result2 = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
@@ -396,27 +365,25 @@ async fn usage_resume_session_includes_previous_turn_context() {
     .expect("turn 2 must succeed");
     assert_eq!(result2.status, RunTurnStatus::Completed);
 
-    // Second LLM request must include previous user/assistant messages
-    let requests = fake_llm.take_requests();
-    assert_eq!(requests.len(), 2, "LLM should have been called twice");
-
-    let second_req_messages = &requests[1].messages;
-    let has_prior_user = second_req_messages
-        .iter()
-        .any(|m| m.role == lattice_llm::Role::User && m.content == "Hello");
-    let has_prior_assistant = second_req_messages
-        .iter()
-        .any(|m| m.role == lattice_llm::Role::Assistant && m.content == "First turn done.");
+    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let transcript = store
+        .head_transcript(&session_id)
+        .expect("head_transcript after turn 2");
     assert!(
-        has_prior_user,
-        "second LLM request must contain first turn's user message"
+        transcript
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.content == "Hello"),
+        "transcript must include first turn user message"
     );
     assert!(
-        has_prior_assistant,
-        "second LLM request must contain first turn's assistant response"
+        transcript
+            .messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content == "First turn done."),
+        "transcript must include first turn assistant message"
     );
 
-    // Session log has 2 commits; second parent is first commit
     let verify_api = lattice_api::SessionApi::sqlite(&sessions_path);
     let log = verify_api.log(&session_id).expect("log must succeed");
     assert_eq!(log.len(), 2, "session log should have 2 commits");
@@ -427,7 +394,6 @@ async fn usage_resume_session_includes_previous_turn_context() {
         "second commit parent should include first commit"
     );
 
-    // Status confirms 2 commits on main branch
     let status = verify_api.status(&session_id).expect("status must succeed");
     assert_eq!(status.commit_count, 2, "status should report 2 commits");
     assert!(

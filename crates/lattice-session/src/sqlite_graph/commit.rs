@@ -5,8 +5,7 @@ use rusqlite::{params, Connection};
 
 use crate::graph::{
     canonical_message_id, canonical_turn_commit_id, canonical_turn_seed, GraphMessage,
-    GraphToolCall, HeadTranscript, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry,
-    TurnUsage,
+    HeadTranscript, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry, TurnUsage,
 };
 use crate::{Result, SessionError};
 
@@ -42,63 +41,29 @@ impl SqliteSessionGraphStore {
         }
         commit_ids_rev.reverse();
 
-        // For each commit in order, read its message_ids_json and load the
-        // actual messages from graph_messages in stored ordinal order.
-        let mut all_messages: Vec<GraphMessage> = Vec::new();
+        // Batch-load message IDs per commit, then all messages in two queries
+        // (same pattern as log_impl tool_message_count resolution).
+        let commit_message_ids = self.commit_message_ids_batch(&conn, &commit_ids_rev)?;
+        let mut ordered_message_ids: Vec<String> = Vec::new();
         for cid in &commit_ids_rev {
-            let message_ids_json: String = conn
-                .query_row(
-                    "SELECT message_ids_json FROM graph_commits WHERE commit_id=?1",
-                    params![cid],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionError::MissingCommit(cid.clone()))?;
+            let message_ids = commit_message_ids
+                .get(cid)
+                .ok_or_else(|| SessionError::MissingCommit(cid.clone()))?;
+            ordered_message_ids.extend(message_ids.iter().cloned());
+        }
 
-            let message_ids: Vec<String> =
-                self.parse_json_column("message_ids_json", &message_ids_json)?;
+        let ordered_refs: Vec<&str> = ordered_message_ids.iter().map(String::as_str).collect();
+        let messages_by_id = self.load_graph_messages_by_id(&conn, &ordered_refs)?;
 
-            for mid in &message_ids {
-                let (role, content, reasoning_content, tool_call_id, name, tool_calls_json): (
-                    String,
-                    String,
-                    Option<String>,
-                    Option<String>,
-                    Option<String>,
-                    String,
-                ) = conn
-                    .query_row(
-                        "SELECT role, content, reasoning_content, tool_call_id, name, tool_calls_json
-                         FROM graph_messages WHERE message_id=?1",
-                        params![mid],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                                row.get(5)?,
-                            ))
-                        },
-                    )
-                    .map_err(|source| SessionError::Database {
-                        path: self.db_path.clone(),
-                        source,
-                    })?;
-
-                let tool_calls: Option<Vec<GraphToolCall>> = serde_json::from_str(&tool_calls_json)
-                    .ok()
-                    .filter(|v: &Vec<GraphToolCall>| !v.is_empty());
-
-                all_messages.push(GraphMessage {
-                    role,
-                    content,
-                    reasoning_content,
-                    tool_calls,
-                    tool_call_id,
-                    name,
-                });
-            }
+        let mut all_messages: Vec<GraphMessage> = Vec::with_capacity(ordered_message_ids.len());
+        for mid in &ordered_message_ids {
+            let message = messages_by_id
+                .get(mid)
+                .ok_or_else(|| SessionError::Database {
+                    path: self.db_path.clone(),
+                    source: rusqlite::Error::QueryReturnedNoRows,
+                })?;
+            all_messages.push(message.clone());
         }
 
         // The parent commit ID is the HEAD commit (the last in the chain).
@@ -208,16 +173,17 @@ impl SqliteSessionGraphStore {
             .flat_map(|r| r.message_ids.iter().map(|s| s.as_str()))
             .collect();
 
-        // Build a set of message_id -> role for tool count resolution.
+        // Build a set of tool-role message IDs, chunking the IN clause to
+        // stay within SQLite's bind-parameter limit (M-20).
         let mut tool_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if !all_message_ids.is_empty() {
-            let placeholders: String = std::iter::repeat_n("?", all_message_ids.len())
+        for chunk in all_message_ids.chunks(super::SQLITE_BIND_CHUNK_SIZE) {
+            let placeholders: String = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
                 "SELECT message_id FROM graph_messages WHERE message_id IN ({placeholders}) AND role = 'tool'"
             );
-            let params: Vec<Box<dyn rusqlite::types::ToSql>> = all_message_ids
+            let params: Vec<Box<dyn rusqlite::types::ToSql>> = chunk
                 .iter()
                 .map(|s| Box::new(s.to_string()) as Box<dyn rusqlite::types::ToSql>)
                 .collect();

@@ -154,12 +154,7 @@ impl SqliteSessionGraphStore {
         })
     }
 
-    pub(super) fn diff_impl(
-        &self,
-        session_id: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<GraphDiff> {
+    pub(super) fn diff_impl(&self, session_id: &str, from: &str, to: &str) -> Result<GraphDiff> {
         let conn = self.conn()?;
 
         // Resolve both targets to commit IDs.

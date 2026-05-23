@@ -16,3 +16,4 @@ book/
 findings/
 *.db
 .lattice/
+.cursor/

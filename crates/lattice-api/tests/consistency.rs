@@ -1,47 +1,29 @@
 //! Run/stream consistency integration tests (Phase 17, Plan 03, VER-13).
 //!
-//! Proves semantic consistency between `run_turn` (buffered) and `stream_turn`
-//! (live) paths across three scenarios using NormalizedTurnObservation comparison.
-//! Both observation builders read assistant_output and transcript from the
-//! committed session store (D-09), never from live events or result fields.
+//! Proves `run_turn` is equivalent to collecting a `stream_turn` event stream
+//! via [`collect_turn_result_from_events`], with durable session-store anchors.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
-use lattice_api::{RunTurnRequest, RunTurnStatus, SessionApi, TurnEvent, TurnUsageSummary};
-use lattice_llm::{ChatRequest, ChatResponse, LlmEvent, TokenUsage};
+use lattice_api::{
+    collect_turn_result_from_events, run_turn, stream_turn, RunTurnRequest, RunTurnResult,
+    RunTurnStatus, SessionApi, TurnEvent, TurnUsageSummary,
+};
+use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
 use lattice_tools::executor::DefaultToolExecutor;
 
-// ── NormalizedTurnObservation (D-08, D-09) ─────────────────────────────────
-
-/// Normalized observation struct that strips unstable fields (session_id,
-/// commit_id, timestamps) for structured comparison between run_turn and
-/// stream_turn outcomes.
 #[derive(Debug, PartialEq)]
-struct NormalizedTurnObservation {
+struct DurableTurnObservation {
     status: RunTurnStatus,
     usage: Option<TurnUsageSummary>,
     assistant_output: String,
-    tool_results: Vec<NormalizedToolResult>,
-    transcript_roles_and_content: Vec<(String, String)>,
     terminal_reason: Option<String>,
 }
-
-/// Normalized tool result for comparison (strips tool_call_id which may differ).
-#[derive(Debug, PartialEq)]
-struct NormalizedToolResult {
-    name: String,
-    ok: bool,
-    output_len: usize,
-    error_summary: Option<String>,
-}
-
-// ── Observation builders ───────────────────────────────────────────────────
 
 fn last_terminal_reason(
     session_store: &SqliteSessionGraphStore,
@@ -73,15 +55,14 @@ fn last_usage(
         })
 }
 
-/// Build observation from run_turn result + committed session store.
-fn observe_run_turn(
-    result: &lattice_api::RunTurnResult,
+fn observe_durable_turn(
     session_store: &SqliteSessionGraphStore,
-) -> NormalizedTurnObservation {
-    // Read committed transcript from session store (D-09: durable anchor)
+    session_id: &str,
+    status: RunTurnStatus,
+) -> DurableTurnObservation {
     let transcript = session_store
-        .head_transcript(&result.session_id)
-        .expect("head_transcript after run_turn commit");
+        .head_transcript(session_id)
+        .expect("head_transcript after commit");
 
     let assistant_output = transcript
         .messages
@@ -91,133 +72,13 @@ fn observe_run_turn(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
-    let transcript_roles_and_content: Vec<(String, String)> = transcript
-        .messages
-        .iter()
-        .map(|m| (m.role.clone(), m.content.clone()))
-        .collect();
-
-    let tool_results: Vec<NormalizedToolResult> = result
-        .tool_results
-        .iter()
-        .map(|t| NormalizedToolResult {
-            name: t.name.clone(),
-            ok: t.ok,
-            output_len: t.output_len,
-            error_summary: t.error_summary.clone(),
-        })
-        .collect();
-
-    let terminal_reason = last_terminal_reason(session_store, &result.session_id);
-    let usage = last_usage(session_store, &result.session_id);
-
-    NormalizedTurnObservation {
-        status: result.status.clone(),
-        usage,
-        assistant_output,
-        tool_results,
-        transcript_roles_and_content,
-        terminal_reason,
-    }
-}
-
-/// Build observation from stream_turn events + committed session store.
-fn observe_stream_turn(
-    events: &[TurnEvent],
-    session_store: &SqliteSessionGraphStore,
-) -> NormalizedTurnObservation {
-    // Find TurnCommitted to get session_id and status
-    let (session_id, status) = events
-        .iter()
-        .find_map(|e| match e {
-            TurnEvent::TurnCommitted {
-                session_id, status, ..
-            } => Some((session_id.clone(), status.clone())),
-            _ => None,
-        })
-        .expect("stream_turn must emit TurnCommitted");
-
-    // Read committed transcript from session store (D-09: durable anchor)
-    let transcript = session_store
-        .head_transcript(&session_id)
-        .expect("head_transcript after stream_turn commit");
-
-    let assistant_output = transcript
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "assistant")
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-
-    let transcript_roles_and_content: Vec<(String, String)> = transcript
-        .messages
-        .iter()
-        .map(|m| (m.role.clone(), m.content.clone()))
-        .collect();
-
-    // Tool results from ToolCallFinished events
-    let tool_results: Vec<NormalizedToolResult> = events
-        .iter()
-        .filter_map(|e| match e {
-            TurnEvent::ToolCallFinished {
-                name,
-                ok,
-                output_len,
-                error_summary,
-                ..
-            } => Some(NormalizedToolResult {
-                name: name.clone(),
-                ok: *ok,
-                output_len: *output_len,
-                error_summary: error_summary.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
-
-    let terminal_reason = last_terminal_reason(session_store, &session_id);
-    let usage = last_usage(session_store, &session_id);
-
-    NormalizedTurnObservation {
+    DurableTurnObservation {
         status,
-        usage,
+        usage: last_usage(session_store, session_id),
         assistant_output,
-        tool_results,
-        transcript_roles_and_content,
-        terminal_reason,
+        terminal_reason: last_terminal_reason(session_store, session_id),
     }
 }
-
-// ── Fake LLM (buffered path) ──────────────────────────────────────────────
-
-struct FakeLlm {
-    responses: Mutex<VecDeque<ChatResponse>>,
-}
-
-impl FakeLlm {
-    fn new(responses: Vec<ChatResponse>) -> Arc<Self> {
-        Arc::new(Self {
-            responses: Mutex::new(VecDeque::from(responses)),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl LlmClient for FakeLlm {
-    async fn chat(
-        &self,
-        _request: ChatRequest,
-    ) -> Result<ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
-        self.responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| "FakeLlm: no more responses queued".into())
-    }
-}
-
-// ── Workspace setup ───────────────────────────────────────────────────────
 
 struct Workspace {
     _dir: tempfile::TempDir,
@@ -281,26 +142,104 @@ fn build_agent_loop(
     }))
 }
 
-// ── Test 1: Completed content-only (D-11 scenario 1) ──────────────────────
+fn make_request(ws: &Workspace, input: &str) -> RunTurnRequest {
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: None,
+        profile: None,
+        model: None,
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+    }
+}
+
+fn build_agent_loop_with_events(
+    ws: &Workspace,
+    llm_events: Vec<LlmEvent>,
+    enabled_tools: &[&str],
+) -> Arc<AgentLoop> {
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(llm_events)
+            .build(),
+    );
+    build_agent_loop(llm, &ws.root, enabled_tools)
+}
+
+fn build_agent_loop_with_rounds(
+    ws: &Workspace,
+    rounds: Vec<Vec<LlmEvent>>,
+    enabled_tools: &[&str],
+) -> Arc<AgentLoop> {
+    let mut builder = FakeStreamingLlmClient::builder();
+    for round in rounds {
+        builder = builder.push_events(round);
+    }
+    let llm: Arc<dyn LlmClient> = Arc::new(builder.build());
+    build_agent_loop(llm, &ws.root, enabled_tools)
+}
+
+async fn assert_run_equals_collector(
+    ws: &Workspace,
+    llm_events: Vec<LlmEvent>,
+    enabled_tools: &[&str],
+    input: &str,
+) {
+    let stream_dir = tempfile::tempdir().unwrap();
+    let stream_sessions_path = stream_dir.path().join("sessions");
+    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_agent = build_agent_loop_with_events(ws, llm_events.clone(), enabled_tools);
+    let request = make_request(ws, input);
+
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+        .await
+        .expect("stream_turn must start")
+        .collect()
+        .await;
+
+    let collected =
+        collect_turn_result_from_events(events).expect("collector must finish on committed stream");
+
+    let run_dir = tempfile::tempdir().unwrap();
+    let run_sessions_path = run_dir.path().join("sessions");
+    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_agent = build_agent_loop_with_events(ws, llm_events, enabled_tools);
+    let run_result = run_turn(run_session, run_agent, request)
+        .await
+        .expect("run_turn must succeed");
+
+    assert_run_results_equivalent(&collected, &run_result);
+
+    let durable = observe_durable_turn(
+        &stream_store,
+        &collected.session_id,
+        collected.status.clone(),
+    );
+    assert_eq!(durable.status, collected.status);
+    assert_eq!(durable.assistant_output, collected.assistant_output);
+    assert_eq!(durable.usage, collected.usage);
+}
+
+fn assert_run_results_equivalent(collected: &RunTurnResult, run_result: &RunTurnResult) {
+    assert_eq!(collected.status, run_result.status);
+    assert_eq!(collected.assistant_output, run_result.assistant_output);
+    assert_eq!(collected.usage, run_result.usage);
+    assert_eq!(collected.tool_results, run_result.tool_results);
+    assert_eq!(collected.stages, run_result.stages);
+    assert!(
+        !run_result.session_id.is_empty(),
+        "run_turn must return a session_id"
+    );
+    assert!(
+        !run_result.commit_id.is_empty(),
+        "run_turn must return a commit_id"
+    );
+}
 
 #[tokio::test]
 async fn consistency_completed_content_only() {
     let ws = setup_workspace(&[]);
-
-    // Script: LLM returns "Hello, world!" with stop, usage {10, 5, 15}
-    let chat_response = ChatResponse {
-        content: "Hello, world!".to_string(),
-        reasoning_content: None,
-        tool_calls: None,
-        finish_reason: "stop".to_string(),
-        model: "fake-model".to_string(),
-        usage: Some(TokenUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-        }),
-    };
-
     let streaming_events = vec![
         LlmEvent::Token {
             content: "Hello, world!".to_string(),
@@ -315,75 +254,12 @@ async fn consistency_completed_content_only() {
         },
     ];
 
-    // --- Run path (independent tempdir, D-07) ---
-    let run_session_dir = tempfile::tempdir().unwrap();
-    let run_sessions_path = run_session_dir.path().join("sessions");
-    let run_session_api = SessionApi::sqlite(&run_sessions_path);
-    let run_llm = FakeLlm::new(vec![chat_response]);
-    let run_agent_loop = build_agent_loop(run_llm, &ws.root, &[]);
-
-    let run_request = RunTurnRequest {
-        input: "hi".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let run_result = lattice_api::run_turn(run_session_api, run_agent_loop, run_request)
-        .await
-        .expect("run_turn must succeed");
-
-    let run_store = SqliteSessionGraphStore::new(&run_sessions_path);
-    let run_obs = observe_run_turn(&run_result, &run_store);
-
-    // --- Stream path (independent tempdir, D-07) ---
-    let stream_session_dir = tempfile::tempdir().unwrap();
-    let stream_sessions_path = stream_session_dir.path().join("sessions");
-    let stream_session_api = SessionApi::sqlite(&stream_sessions_path);
-    let stream_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(streaming_events)
-            .build(),
-    );
-    let stream_agent_loop = build_agent_loop(stream_llm, &ws.root, &[]);
-
-    let stream_request = RunTurnRequest {
-        input: "hi".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let events: Vec<TurnEvent> =
-        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
-            .await
-            .expect("stream_turn must start")
-            .collect()
-            .await;
-
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_obs = observe_stream_turn(&events, &stream_store);
-
-    // --- Consistency assertion ---
-    assert_eq!(
-        run_obs, stream_obs,
-        "run_turn and stream_turn observations must match for completed content-only scenario"
-    );
+    assert_run_equals_collector(&ws, streaming_events, &[], "hi").await;
 }
-
-// ── Test 2: Error after partial token (D-11 scenario 2) ───────────────────
 
 #[tokio::test]
 async fn consistency_error_after_partial_token() {
     let ws = setup_workspace(&[]);
-
-    // Script: LLM yields Token("partial "), Token("resp"), then Error
-    // For the buffered path, the FakeLlm chat() returns an error (simulating
-    // the stream_chat default fallback encountering an error event).
-    // For the streaming path, we emit tokens then an in-band error.
-
     let streaming_events = vec![
         LlmEvent::Token {
             content: "partial ".to_string(),
@@ -396,97 +272,46 @@ async fn consistency_error_after_partial_token() {
         },
     ];
 
-    // The buffered FakeLlm uses the same event sequence via FakeStreamingLlmClient
-    // which aggregates events into a ChatResponse. When it encounters LlmEvent::Error,
-    // it returns Err from chat(). But the default stream_chat fallback on LlmClient
-    // calls chat() first. For consistency, both paths should use FakeStreamingLlmClient
-    // which handles both chat() and stream_chat() from the same event queue.
-
-    // --- Run path (independent tempdir, D-07) ---
-    // run_turn uses stream_chat (via the default fallback which calls chat, but
-    // FakeStreamingLlmClient overrides stream_chat directly). Actually, run_turn
-    // calls AgentLoop::run_turn which calls stream_chat. So both paths go through
-    // stream_chat. We can use FakeStreamingLlmClient for both.
-    let run_session_dir = tempfile::tempdir().unwrap();
-    let run_sessions_path = run_session_dir.path().join("sessions");
-    let run_session_api = SessionApi::sqlite(&run_sessions_path);
-    let run_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(streaming_events.clone())
-            .build(),
-    );
-    let run_agent_loop = build_agent_loop(run_llm, &ws.root, &[]);
-
-    let run_request = RunTurnRequest {
-        input: "hello".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let run_result = lattice_api::run_turn(run_session_api, run_agent_loop, run_request)
-        .await
-        .expect("run_turn must succeed (error is in-turn, not startup)");
-
-    let run_store = SqliteSessionGraphStore::new(&run_sessions_path);
-    let run_obs = observe_run_turn(&run_result, &run_store);
-
-    // --- Stream path (independent tempdir, D-07) ---
-    let stream_session_dir = tempfile::tempdir().unwrap();
-    let stream_sessions_path = stream_session_dir.path().join("sessions");
-    let stream_session_api = SessionApi::sqlite(&stream_sessions_path);
-    let stream_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(streaming_events)
-            .build(),
-    );
-    let stream_agent_loop = build_agent_loop(stream_llm, &ws.root, &[]);
-
-    let stream_request = RunTurnRequest {
-        input: "hello".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let events: Vec<TurnEvent> =
-        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
-            .await
-            .expect("stream_turn must start")
-            .collect()
-            .await;
-
+    let stream_dir = tempfile::tempdir().unwrap();
+    let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_obs = observe_stream_turn(&events, &stream_store);
+    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_agent = build_agent_loop_with_events(&ws, streaming_events.clone(), &[]);
+    let request = make_request(&ws, "hello");
+
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+        .await
+        .expect("stream_turn must start")
+        .collect()
+        .await;
+
+    let collected = collect_turn_result_from_events(events.clone()).unwrap();
+
+    let run_dir = tempfile::tempdir().unwrap();
+    let run_sessions_path = run_dir.path().join("sessions");
+    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_agent = build_agent_loop_with_events(&ws, streaming_events, &[]);
+    let run_result = run_turn(run_session, run_agent, request).await.unwrap();
+
+    assert_run_results_equivalent(&collected, &run_result);
+    assert_eq!(run_result.status, RunTurnStatus::Error);
+    assert_eq!(collected.assistant_output, "partial resp");
 
     let event_reason = events.iter().find_map(|e| match e {
         TurnEvent::TurnFailed { reason } => Some(reason.clone()),
         _ => None,
     });
-    assert_eq!(
-        event_reason, stream_obs.terminal_reason,
-        "public TurnFailed reason must match committed terminal_reason"
+    let durable = observe_durable_turn(
+        &stream_store,
+        &collected.session_id,
+        collected.status.clone(),
     );
-
-    // Both should commit with Error status, partial content preserved
-    assert_eq!(run_obs.status, RunTurnStatus::Error);
-    assert_eq!(stream_obs.status, RunTurnStatus::Error);
-    assert_eq!(
-        run_obs, stream_obs,
-        "run_turn and stream_turn observations must match for error-after-partial scenario"
-    );
+    assert_eq!(event_reason, durable.terminal_reason);
 }
-
-// ── Test 3: Tool call path (D-11 scenario 3) ─────────────────────────────
 
 #[tokio::test]
 async fn consistency_tool_call_path() {
     let ws = setup_workspace(&["read_file"]);
-
-    // Script: Round 1 — tool call to read_file. Round 2 — final response.
-    // Both paths use FakeStreamingLlmClient with identical event sequences.
 
     let round1_events = vec![
         LlmEvent::ToolCallStart {
@@ -524,74 +349,35 @@ async fn consistency_tool_call_path() {
         },
     ];
 
-    // --- Run path (independent tempdir, D-07) ---
-    let run_session_dir = tempfile::tempdir().unwrap();
-    let run_sessions_path = run_session_dir.path().join("sessions");
-    let run_session_api = SessionApi::sqlite(&run_sessions_path);
-    let run_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(round1_events.clone())
-            .push_events(round2_events.clone())
-            .build(),
-    );
-    let run_agent_loop = build_agent_loop(run_llm, &ws.root, &["read_file"]);
-
-    let run_request = RunTurnRequest {
-        input: "Read src/lib.rs".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let run_result = lattice_api::run_turn(run_session_api, run_agent_loop, run_request)
-        .await
-        .expect("run_turn must succeed");
-
-    let run_store = SqliteSessionGraphStore::new(&run_sessions_path);
-    let run_obs = observe_run_turn(&run_result, &run_store);
-
-    // --- Stream path (independent tempdir, D-07) ---
-    let stream_session_dir = tempfile::tempdir().unwrap();
-    let stream_sessions_path = stream_session_dir.path().join("sessions");
-    let stream_session_api = SessionApi::sqlite(&stream_sessions_path);
-    let stream_llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(round1_events)
-            .push_events(round2_events)
-            .build(),
-    );
-    let stream_agent_loop = build_agent_loop(stream_llm, &ws.root, &["read_file"]);
-
-    let stream_request = RunTurnRequest {
-        input: "Read src/lib.rs".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let events: Vec<TurnEvent> =
-        lattice_api::stream_turn(stream_session_api, stream_agent_loop, stream_request)
-            .await
-            .expect("stream_turn must start")
-            .collect()
-            .await;
-
+    let all_events = vec![round1_events.clone(), round2_events.clone()];
+    let stream_dir = tempfile::tempdir().unwrap();
+    let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_obs = observe_stream_turn(&events, &stream_store);
+    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_agent = build_agent_loop_with_rounds(&ws, all_events.clone(), &["read_file"]);
+    let request = make_request(&ws, "Read src/lib.rs");
 
-    // Both must produce identical tool_results and final transcript
-    assert_eq!(run_obs.status, RunTurnStatus::Completed);
-    assert_eq!(stream_obs.status, RunTurnStatus::Completed);
-    assert!(!run_obs.tool_results.is_empty(), "should have tool results");
-    assert_eq!(
-        run_obs, stream_obs,
-        "run_turn and stream_turn observations must match for tool-call scenario"
-    );
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+        .await
+        .expect("stream_turn must start")
+        .collect()
+        .await;
+
+    let collected = collect_turn_result_from_events(events).unwrap();
+
+    let run_dir = tempfile::tempdir().unwrap();
+    let run_sessions_path = run_dir.path().join("sessions");
+    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_agent = build_agent_loop_with_rounds(&ws, all_events, &["read_file"]);
+    let run_result = run_turn(run_session, run_agent, request).await.unwrap();
+
+    assert_run_results_equivalent(&collected, &run_result);
+    assert_eq!(run_result.status, RunTurnStatus::Completed);
+    assert!(!run_result.tool_results.is_empty());
+
+    let durable = observe_durable_turn(&stream_store, &collected.session_id, collected.status);
+    assert_eq!(durable.assistant_output, "File contents read successfully.");
 }
-
-// ── Test 4: Live activity ordering (VER-13) ──────────────────────────────
 
 #[tokio::test]
 async fn stream_turn_emits_activity_before_commit() {
@@ -620,53 +406,32 @@ async fn stream_turn_emits_activity_before_commit() {
             .build(),
     );
     let agent_loop = build_agent_loop(llm, &ws.root, &[]);
+    let request = make_request(&ws, "hi");
 
-    let request = RunTurnRequest {
-        input: "hi".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-    };
-
-    let events: Vec<TurnEvent> = lattice_api::stream_turn(session_api, agent_loop, request)
+    let events: Vec<TurnEvent> = stream_turn(session_api, agent_loop, request)
         .await
         .expect("stream_turn must start")
         .collect()
         .await;
 
-    // Find positions of key events
     let model_started_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::ModelStarted { .. }))
         .expect("must have ModelStarted");
-
     let token_delta_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TokenDelta { .. }))
         .expect("must have TokenDelta");
-
     let turn_committing_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitting))
         .expect("must have TurnCommitting");
-
     let turn_committed_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
         .expect("must have TurnCommitted");
 
-    // Assert ordering: ModelStarted < TokenDelta < TurnCommitting < TurnCommitted
-    assert!(
-        model_started_pos < token_delta_pos,
-        "ModelStarted (pos {model_started_pos}) must appear BEFORE TokenDelta (pos {token_delta_pos})"
-    );
-    assert!(
-        token_delta_pos < turn_committing_pos,
-        "TokenDelta (pos {token_delta_pos}) must appear BEFORE TurnCommitting (pos {turn_committing_pos})"
-    );
-    assert!(
-        turn_committing_pos < turn_committed_pos,
-        "TurnCommitting (pos {turn_committing_pos}) must appear BEFORE TurnCommitted (pos {turn_committed_pos})"
-    );
+    assert!(model_started_pos < token_delta_pos);
+    assert!(token_delta_pos < turn_committing_pos);
+    assert!(turn_committing_pos < turn_committed_pos);
 }

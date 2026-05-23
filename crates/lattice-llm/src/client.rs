@@ -311,6 +311,40 @@ fn find_event_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+fn parsed_request_host_port(url: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port_or_known_default()?;
+    Some((host, port))
+}
+
+fn is_localhost_request_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
+    let Some((host, port)) = parsed_request_host_port(url) else {
+        return Ok(reqwest::Client::new());
+    };
+
+    if security::host_is_dns_rebinding_domain(&host) {
+        return Err(LlmError::Other(format!(
+            "hostname '{}' is a known DNS rebinding domain and is not allowed",
+            host
+        )));
+    }
+
+    if is_localhost_request_host(&host) {
+        return Ok(reqwest::Client::new());
+    }
+
+    let pinned = security::resolve_public_socket_addrs(&host, port)?;
+    reqwest::Client::builder()
+        .resolve_to_addrs(host.as_str(), &pinned)
+        .build()
+        .map_err(|e| LlmError::Other(format!("failed to build HTTP client: {}", e)))
+}
+
 /// Dispatch a chat request to the appropriate provider and return a stream.
 pub async fn dispatch_stream(
     request: ChatRequest,
@@ -322,7 +356,7 @@ pub async fn dispatch_stream(
     let body = build_request_body(&request, &resolved);
     let headers = build_auth_headers(&resolved, &api_key);
 
-    let client = reqwest::Client::new();
+    let client = build_http_client_for_url(&url)?;
     let mut req_builder = client.post(&url).json(&body);
 
     for (name, value) in &headers {

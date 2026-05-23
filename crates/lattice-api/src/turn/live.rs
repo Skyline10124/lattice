@@ -6,6 +6,7 @@
 //! [`TurnEvent`] values through a bounded channel before committing.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -22,6 +23,10 @@ use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionAp
 
 /// Bounded channel capacity for the turn event stream (D-17).
 pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer (M-19b).
+/// After timeout, further public events are skipped but the turn still commits.
+const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// All state gathered during startup validation, before the live task spawns.
 ///
@@ -88,12 +93,46 @@ fn prepare_live_turn(session: &SessionApi, request: &RunTurnRequest) -> Result<P
     })
 }
 
-/// Fire-and-forget event emission (D-03).
+fn is_streaming_delta(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::TokenDelta { .. } | TurnEvent::ReasoningDelta { .. }
+    )
+}
+
+/// Best-effort public observer sink (M-19b).
 ///
-/// Send errors are silently ignored — receiver drop means the caller stopped
-/// observing, but the turn continues to completion.
-async fn emit_turn_event(sender: &mpsc::Sender<TurnEvent>, event: TurnEvent) {
-    let _ = sender.send(event).await;
+/// Streaming deltas use non-blocking `try_send` and may be dropped when the
+/// channel is full. Lifecycle, terminal, and commit events use a bounded wait;
+/// on timeout or failure the sink stops forwarding but the background task
+/// keeps draining the agent channel and completes the durable commit.
+struct ObserverSink {
+    sender: mpsc::Sender<TurnEvent>,
+    gave_up: bool,
+}
+
+impl ObserverSink {
+    fn new(sender: mpsc::Sender<TurnEvent>) -> Self {
+        Self {
+            sender,
+            gave_up: false,
+        }
+    }
+
+    async fn emit(&mut self, event: TurnEvent) {
+        if self.gave_up {
+            return;
+        }
+        if is_streaming_delta(&event) {
+            let _ = self.sender.try_send(event);
+            return;
+        }
+        let send = self.sender.send(event);
+        match tokio::time::timeout(OBSERVER_SEND_TIMEOUT, send).await {
+            Ok(Ok(())) => {}
+            _ => self.gave_up = true,
+        }
+    }
 }
 
 /// Background task that runs the agent loop, maps events live, and commits.
@@ -108,16 +147,16 @@ async fn run_live_turn_task(
     request: RunTurnRequest,
     turn_tx: mpsc::Sender<TurnEvent>,
 ) {
+    let mut observer = ObserverSink::new(turn_tx);
+
     // 1. Emit TurnStarted
-    emit_turn_event(
-        &turn_tx,
-        TurnEvent::TurnStarted {
+    observer
+        .emit(TurnEvent::TurnStarted {
             session_id: prepared.session_id.clone(),
             parent_commit_id: prepared.parent_commit_id.clone(),
             branch: prepared.branch.clone(),
-        },
-    )
-    .await;
+        })
+        .await;
 
     // 2. Build agent request
     let agent_request = build_agent_request(
@@ -135,12 +174,14 @@ async fn run_live_turn_task(
     // 4. Pin agent future
     let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
 
-    // 5. MANDATORY select! concurrent drain loop (D-20)
+    // 5. MANDATORY select! concurrent drain loop (D-20). Forwarding uses
+    // non-blocking / bounded-wait observer emission so a slow consumer cannot
+    // stall agent_rx drain (M-19b).
     let agent_result: AgentTurnResult = loop {
         tokio::select! {
             maybe_event = agent_rx.recv() => {
                 if let Some(event) = maybe_event {
-                    emit_turn_event(&turn_tx, map_agent_event(event)).await;
+                    observer.emit(map_agent_event(event)).await;
                 }
             }
             result = &mut agent_fut => {
@@ -149,18 +190,18 @@ async fn run_live_turn_task(
         }
     };
 
-    // 6. Post-loop drain: flush any remaining buffered events
+    // 6. Post-loop drain: flush agent channel without blocking on observer.
     while let Some(event) = agent_rx.recv().await {
-        emit_turn_event(&turn_tx, map_agent_event(event)).await;
+        observer.emit(map_agent_event(event)).await;
     }
 
     // 7. Terminal event derived from AgentTurnResult.status (D-10, WR-01)
     if let Some(terminal) = derive_terminal_event(&agent_result) {
-        emit_turn_event(&turn_tx, terminal).await;
+        observer.emit(terminal).await;
     }
 
     // 8. Emit TurnCommitting
-    emit_turn_event(&turn_tx, TurnEvent::TurnCommitting).await;
+    observer.emit(TurnEvent::TurnCommitting).await;
 
     // 9. Build commit context and input
     let ctx = TurnCommitContext {
@@ -173,28 +214,25 @@ async fn run_live_turn_task(
 
     let commit_input = build_commit_input(&request.input, &ctx, &agent_result);
 
-    // 10. Commit and emit result (D-13)
+    // 10. Commit and emit result (D-13). Commit runs even when the observer
+    // stopped accepting events (M-19b).
     match session.commit_turn(commit_input) {
         Ok(commit) => {
             let status = map_status(&agent_result.status);
-            emit_turn_event(
-                &turn_tx,
-                TurnEvent::TurnCommitted {
+            observer
+                .emit(TurnEvent::TurnCommitted {
                     session_id: prepared.session_id,
                     commit_id: commit.commit_id,
                     status,
-                },
-            )
-            .await;
+                })
+                .await;
         }
         Err(e) => {
-            emit_turn_event(
-                &turn_tx,
-                TurnEvent::CommitFailed {
+            observer
+                .emit(TurnEvent::CommitFailed {
                     reason: e.to_string(),
-                },
-            )
-            .await;
+                })
+                .await;
         }
     }
 

@@ -109,9 +109,9 @@ impl AgentLoop {
     /// complete: the live channel is a best-effort mirror, not a replacement.
     ///
     /// Drop semantics — if the receiver is dropped at any point during the
-    /// turn, subsequent live `send`s return `SendError` which `emit_agent_event`
-    /// silently swallows; the turn continues normally and returns a fully
-    /// populated `AgentTurnResult` (Plan 15-02 D-12).
+    /// turn, subsequent live `try_send`s fail and are ignored; the turn
+    /// continues normally and returns a fully populated `AgentTurnResult`
+    /// (Plan 15-02 D-12, M-19a).
     ///
     /// Cancellation — `request.cancel_flag` (set by the caller) is the sole
     /// cancel input (Plan 15-02 D-11 / D-17). All five new cancel checkpoints
@@ -1009,10 +1009,10 @@ impl AgentLoop {
 /// `buffered` so `AgentTurnResult.events` stays complete regardless of whether
 /// a live receiver is attached or has already been dropped.
 ///
-/// The live mirror is best-effort: receiver drop or any other `SendError` is
-/// silently swallowed via `let _ = sender.send(event).await;` (Plan 15-02
-/// D-12). The awaited `send` blocks on backpressure when the bounded channel
-/// is full — alpha policy, no `try_send`, no buffering.
+/// The live mirror is best-effort and non-blocking (M-19a): `try_send` never
+/// waits on a full bounded channel. `TokenDelta` / `ReasoningDelta` may be
+/// dropped under backpressure; lifecycle events use the same non-blocking path
+/// but remain complete in `buffered` for `AgentTurnResult.events`.
 ///
 /// Added in Plan 15-02 (D-12 / D-13) so every emission site in
 /// `run_turn_inner` and `consume_model_stream` routes through one path.
@@ -1023,7 +1023,7 @@ async fn emit_agent_event(
 ) {
     buffered.push(event.clone());
     if let Some(sender) = live {
-        let _ = sender.send(event).await;
+        let _ = sender.try_send(event);
     }
 }
 

@@ -1,19 +1,15 @@
 use std::sync::Arc;
 
-use futures::stream;
+use futures::StreamExt;
 use lattice_agent::{AgentLoop, AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 
-use super::deps::{RealTurnDeps, TurnDeps};
-use super::mapping::{build_agent_request, map_status, map_tool_results, resolve_model_and_prompt};
-use super::types::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, TurnEvent, TurnEventStream, TurnUsageSummary,
-};
-use crate::session::{ApiError, Result, SessionApi};
+use super::collector::RunTurnCollector;
+use super::mapping::map_status;
+use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream, TurnUsageSummary};
+use crate::session::{Result, SessionApi};
 
-/// Context needed to construct a [`TurnCommitInput`] from either the buffered
-/// or live path. Both paths build one of these from their local variables and
-/// pass it to [`build_commit_input`].
+/// Context needed to construct a [`TurnCommitInput`] from the live path.
 pub(super) struct TurnCommitContext {
     pub session_id: String,
     pub parent_ids: Vec<String>,
@@ -23,8 +19,8 @@ pub(super) struct TurnCommitContext {
 }
 
 /// Build a [`TurnCommitInput`] from the user input, commit context, and agent
-/// result. Shared by both the buffered and live turn paths to ensure commit
-/// construction stays consistent (D-16).
+/// result. Shared by the live turn path to ensure commit construction stays
+/// consistent (D-16).
 pub(super) fn build_commit_input(
     user_input: &str,
     ctx: &TurnCommitContext,
@@ -77,118 +73,22 @@ pub(super) fn derive_terminal_event(result: &AgentTurnResult) -> Option<TurnEven
     }
 }
 
-/// Output of [`execute_turn_inner`] threaded back to the public facades.
-#[allow(dead_code)]
-struct ExecutedTurn {
-    session_id: String,
-    parent_commit_id: Option<String>,
-    stages: Vec<RunTurnStage>,
-    agent_events: Vec<AgentTurnEvent>,
-    agent_result: AgentTurnResult,
-    commit_id: String,
-}
-
-/// Core turn orchestration.
-async fn execute_turn_inner(deps: &dyn TurnDeps, request: &RunTurnRequest) -> Result<ExecutedTurn> {
-    let mut stages = Vec::new();
-
-    stages.push(RunTurnStage::Profile);
-    let (model, system_prompt, provider) = resolve_model_and_prompt(request);
-
-    stages.push(RunTurnStage::Session);
-    let session_id = match &request.session_id {
-        Some(id) => deps.open_session(id)?,
-        None => deps.create_session(request)?,
-    };
-
-    let transcript = deps.head_transcript(&session_id)?;
-    let parent_commit_id = transcript.parent_commit_id.clone();
-    let parent_ids = parent_commit_id.clone().into_iter().collect::<Vec<_>>();
-
-    stages.push(RunTurnStage::Agent);
-    let agent_request = build_agent_request(
-        request,
-        &session_id,
-        transcript,
-        model.clone(),
-        system_prompt,
-        Some(provider.clone()).filter(|p| p != "unknown"),
-    );
-
-    let (agent_events, agent_result) = deps
-        .execute_agent_turn(agent_request)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    stages.push(RunTurnStage::Llm);
-
-    stages.push(RunTurnStage::Tools);
-
-    let profile_snapshot_id = request
-        .loaded_profile
-        .as_ref()
-        .map(|lp| lp.profile.agent.name.clone());
-
-    let ctx = TurnCommitContext {
-        session_id: session_id.clone(),
-        parent_ids,
-        model: model.clone(),
-        provider,
-        profile_snapshot_id,
-    };
-
-    let commit_input = build_commit_input(&request.input, &ctx, &agent_result);
-
-    stages.push(RunTurnStage::Commit);
-    let commit_id = deps.commit_turn(commit_input)?;
-
-    stages.push(RunTurnStage::Render);
-
-    Ok(ExecutedTurn {
-        session_id,
-        parent_commit_id,
-        stages,
-        agent_events,
-        agent_result,
-        commit_id,
-    })
-}
-
-/// Execute a synchronous turn with injected dependencies.
-pub async fn run_turn_with_deps(
-    deps: &dyn TurnDeps,
-    request: RunTurnRequest,
-) -> Result<RunTurnResult> {
-    let ExecutedTurn {
-        session_id,
-        stages,
-        agent_result,
-        commit_id,
-        ..
-    } = execute_turn_inner(deps, &request).await?;
-
-    Ok(RunTurnResult {
-        session_id,
-        commit_id,
-        assistant_output: agent_result.assistant_output,
-        status: map_status(&agent_result.status),
-        usage: Some(TurnUsageSummary::from(agent_result.usage)),
-        tool_results: map_tool_results(&agent_result.tool_results),
-        stages,
-    })
-}
-
 /// Execute a turn and return its final result once it has been committed.
 ///
 /// This is the synchronous facade: callers get a single
-/// [`RunTurnResult`] after the turn completes.
+/// [`RunTurnResult`] after the turn completes. Internally this drains the
+/// live [`stream_turn`] event stream via [`RunTurnCollector`].
 pub async fn run_turn(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
     request: RunTurnRequest,
 ) -> Result<RunTurnResult> {
-    let deps = RealTurnDeps::new(session, agent_loop);
-    run_turn_with_deps(&deps, request).await
+    let mut stream = stream_turn(session, agent_loop, request).await?;
+    let mut collector = RunTurnCollector::new();
+    while let Some(event) = stream.next().await {
+        collector.observe(event)?;
+    }
+    collector.finish()
 }
 
 /// Map a single agent process event to its public [`TurnEvent`] equivalent.
@@ -225,58 +125,6 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
             usage: usage.map(TurnUsageSummary::from),
         },
     }
-}
-
-/// Buffered replay seam for tests. Production `stream_turn` is live and
-/// bypasses `TurnDeps`.
-#[allow(dead_code)]
-pub async fn stream_turn_with_deps(
-    deps: &dyn TurnDeps,
-    request: RunTurnRequest,
-) -> Result<TurnEventStream> {
-    let ExecutedTurn {
-        session_id,
-        parent_commit_id,
-        agent_events,
-        agent_result,
-        commit_id,
-        ..
-    } = execute_turn_inner(deps, &request).await?;
-
-    let status = map_status(&agent_result.status);
-
-    let mut turn_events: Vec<TurnEvent> = Vec::with_capacity(agent_events.len() + 4);
-
-    // First public event: TurnStarted carries session and lineage context.
-    // `branch` is None in the buffered path; the live path (Phase 16) will
-    // populate it from the prepared turn context.
-    turn_events.push(TurnEvent::TurnStarted {
-        session_id: session_id.clone(),
-        parent_commit_id,
-        branch: None,
-    });
-
-    // Process events: 1:1 mapping over the agent's process-only vocabulary.
-    turn_events.extend(agent_events.into_iter().map(map_agent_event));
-
-    // Terminal event derived from agent_result.status.
-    // (No terminal events come from the agent loop itself — that's by design.)
-    if let Some(terminal) = derive_terminal_event(&agent_result) {
-        turn_events.push(terminal);
-    }
-
-    // Commit lifecycle. The buffered path commits before constructing the
-    // stream; if the commit had failed, we'd have returned `Err` from
-    // `execute_turn_inner` before reaching here. `CommitFailed` exists in
-    // the contract for Phase 16's live path.
-    turn_events.push(TurnEvent::TurnCommitting);
-    turn_events.push(TurnEvent::TurnCommitted {
-        session_id,
-        commit_id,
-        status,
-    });
-
-    Ok(Box::pin(stream::iter(turn_events)))
 }
 
 /// Execute a turn and return its events as a live stream.

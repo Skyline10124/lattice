@@ -144,12 +144,21 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
             ApiError::NotFound(format!("commit '{}' not found", id))
         }
         lattice_session::SessionError::Conflict(msg) => ApiError::Conflict(msg),
-        lattice_session::SessionError::Io { operation, path, source } => {
-            ApiError::Internal(format!("io error while {} '{}': {}", operation, path.display(), source))
-        }
-        lattice_session::SessionError::Database { path, source } => {
-            ApiError::Internal(format!("database error in '{}': {}", path.display(), source))
-        }
+        lattice_session::SessionError::Io {
+            operation,
+            path,
+            source,
+        } => ApiError::Internal(format!(
+            "io error while {} '{}': {}",
+            operation,
+            path.display(),
+            source
+        )),
+        lattice_session::SessionError::Database { path, source } => ApiError::Internal(format!(
+            "database error in '{}': {}",
+            path.display(),
+            source
+        )),
     }
 }
 

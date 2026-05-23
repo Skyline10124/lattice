@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
@@ -14,7 +16,7 @@ use lattice_profile::LoadedAgentProfile;
 ///
 /// [`run_turn`]: crate::turn::run_turn
 /// [`stream_turn`]: crate::turn::stream_turn
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunTurnRequest {
     pub input: String,
     pub session_id: Option<String>,
@@ -22,6 +24,19 @@ pub struct RunTurnRequest {
     pub model: Option<String>,
     #[serde(skip)]
     pub loaded_profile: Option<LoadedAgentProfile>,
+    /// Cooperative cancellation flag forwarded to the agent loop.
+    #[serde(skip)]
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+}
+
+impl PartialEq for RunTurnRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.input == other.input
+            && self.session_id == other.session_id
+            && self.profile == other.profile
+            && self.model == other.model
+            && self.loaded_profile == other.loaded_profile
+    }
 }
 
 /// A stage in the turn execution pipeline.

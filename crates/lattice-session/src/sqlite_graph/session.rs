@@ -240,21 +240,11 @@ impl SessionGraphStore for SqliteSessionGraphStore {
         self.checkout_impl(session_id, target)
     }
 
-    fn branch(
-        &self,
-        session_id: &str,
-        name: &str,
-        from: Option<&str>,
-    ) -> Result<GraphRef> {
+    fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> Result<GraphRef> {
         self.branch_impl(session_id, name, from)
     }
 
-    fn diff(
-        &self,
-        session_id: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<crate::graph::GraphDiff> {
+    fn diff(&self, session_id: &str, from: &str, to: &str) -> Result<crate::graph::GraphDiff> {
         self.diff_impl(session_id, from, to)
     }
 

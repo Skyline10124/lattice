@@ -31,7 +31,10 @@ async fn stream_timeout_fires_after_duration() {
     let timeout_duration = Duration::from_millis(50); // very short for test
 
     let result = time::timeout(timeout_duration, stream.next()).await;
-    assert!(result.is_err(), "timeout should fire when stream never yields");
+    assert!(
+        result.is_err(),
+        "timeout should fire when stream never yields"
+    );
 }
 
 #[test]
@@ -95,6 +98,25 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
             }),
         })
     }
+
+    async fn stream_chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Box::pin(futures::stream::iter(vec![
+            lattice_llm::LlmEvent::Token {
+                content: "stub response".to_string(),
+            },
+            lattice_llm::LlmEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: Some(lattice_llm::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                }),
+            },
+        ])))
+    }
 }
 
 struct NoopToolExecutor;
@@ -123,6 +145,7 @@ async fn run_integration_creates_session_and_returns_commit() {
         profile: None,
         model: Some("stub-model".to_string()),
         loaded_profile: None,
+        cancel_flag: None,
     };
 
     let result = lattice_api::run_turn(session_api, agent_loop, request).await;
@@ -157,6 +180,7 @@ async fn run_integration_missing_session_returns_not_found() {
         profile: None,
         model: Some("stub-model".to_string()),
         loaded_profile: None,
+        cancel_flag: None,
     };
 
     let result = lattice_api::run_turn(session_api, agent_loop, request).await;
@@ -659,10 +683,7 @@ fn exit_code_from_state_covers_all_da4_rows() {
 /// Drive a Vec<TurnEvent> through the human renderer with Vec<u8>
 /// writers, applying D-B4 final-newline policy, and return the
 /// captured stdout bytes, stderr bytes, and accumulated state.
-fn fake_event_loop(
-    events: Vec<TurnEvent>,
-    verbose: bool,
-) -> (Vec<u8>, Vec<u8>, RunRenderState) {
+fn fake_event_loop(events: Vec<TurnEvent>, verbose: bool) -> (Vec<u8>, Vec<u8>, RunRenderState) {
     let mut state = RunRenderState::default();
     let mut out: Vec<u8> = Vec::new();
     let mut err: Vec<u8> = Vec::new();
@@ -686,8 +707,7 @@ fn fake_jsonl_loop(events: Vec<TurnEvent>) -> (Vec<u8>, RunRenderState) {
     let mut state = RunRenderState::default();
     let mut out: Vec<u8> = Vec::new();
     for event in &events {
-        render_json_event(event, &mut out)
-            .expect("render_json_event must succeed against Vec<u8>");
+        render_json_event(event, &mut out).expect("render_json_event must succeed against Vec<u8>");
         apply_event_to_state(event, &mut state);
     }
     (out, state)

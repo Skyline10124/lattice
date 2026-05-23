@@ -31,8 +31,8 @@ pub struct AgentTurnRequest {
     /// The agent checks this deadline around stream creation, stream
     /// consumption, and tool execution. On expiry, it returns `Error` status
     /// with a timeout terminal reason while preserving accumulated messages
-    /// and events. Alpha live-sink backpressure (`mpsc::Sender::send`) is not
-    /// covered by this deadline.
+    /// and events. Live-sink backpressure uses non-blocking `try_send` (M-19a)
+    /// and is not covered by this deadline.
     pub timeout: Option<Duration>,
 }
 

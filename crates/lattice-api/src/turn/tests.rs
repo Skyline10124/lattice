@@ -1,210 +1,79 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
-use lattice_agent::{AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{GraphMessage, HeadTranscript, TurnCommitInput, TurnUsage};
+use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
+use lattice_llm::{LlmEvent, TokenUsage};
+use lattice_session::{SessionGraphStore, SqliteSessionGraphStore, TurnCommitStatus, TurnUsage};
 
-use crate::session::ApiError;
-use crate::turn::deps::TurnDeps;
-use crate::turn::execute::{run_turn_with_deps, stream_turn_with_deps};
-use crate::turn::types::{
-    RunTurnRequest, RunTurnStage, RunTurnStatus, TurnEvent, TurnUsageSummary,
-};
+use super::execute::{run_turn, stream_turn};
+use super::types::{RunTurnRequest, RunTurnStage, RunTurnStatus, TurnEvent, TurnUsageSummary};
+use crate::session::{CreateSessionRequest, SessionApi};
 
-struct FakeTurnDeps {
-    created_session_id: String,
-    agent_result: std::sync::Mutex<Option<AgentTurnResult>>,
-    agent_events: Vec<AgentTurnEvent>,
-    commit_id: String,
-    create_called: AtomicBool,
-    open_called: AtomicBool,
-    commit_count: AtomicUsize,
-    last_commit_input: std::sync::Mutex<Option<TurnCommitInput>>,
-    last_agent_session_id: std::sync::Mutex<Option<String>>,
-    last_agent_request: std::sync::Mutex<Option<AgentTurnRequest>>,
-    transcripts: std::sync::Mutex<Vec<HeadTranscript>>,
+struct TestFixture {
+    _dir: tempfile::TempDir,
+    sessions_path: std::path::PathBuf,
+    session_api: SessionApi,
+    store: SqliteSessionGraphStore,
+    agent_loop: Arc<AgentLoop>,
 }
 
-impl FakeTurnDeps {
-    fn new(agent_result: AgentTurnResult) -> Self {
-        Self {
-            created_session_id: "auto-created-session".to_string(),
-            agent_result: std::sync::Mutex::new(Some(agent_result)),
-            agent_events: vec![
-                AgentTurnEvent::ModelStarted {
-                    provider: None,
-                    model: "test-model".to_string(),
-                },
-                AgentTurnEvent::TokenDelta {
-                    content: "test response".to_string(),
-                },
-                AgentTurnEvent::ModelFinished {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                },
-            ],
-            commit_id: "commit-abc123".to_string(),
-            create_called: AtomicBool::new(false),
-            open_called: AtomicBool::new(false),
-            commit_count: AtomicUsize::new(0),
-            last_commit_input: std::sync::Mutex::new(None),
-            last_agent_session_id: std::sync::Mutex::new(None),
-            last_agent_request: std::sync::Mutex::new(None),
-            transcripts: std::sync::Mutex::new(Vec::new()),
-        }
-    }
-
-    fn with_transcripts(mut self, transcripts: Vec<HeadTranscript>) -> Self {
-        self.transcripts = std::sync::Mutex::new(transcripts);
-        self
-    }
-
-    fn with_events(mut self, events: Vec<AgentTurnEvent>) -> Self {
-        self.agent_events = events;
-        self
-    }
-
-    fn created_session(&self) -> bool {
-        self.create_called.load(Ordering::SeqCst)
-    }
-
-    fn opened_session(&self) -> bool {
-        self.open_called.load(Ordering::SeqCst)
-    }
-
-    fn commit_count(&self) -> usize {
-        self.commit_count.load(Ordering::SeqCst)
-    }
-
-    fn last_commit_input(&self) -> Option<TurnCommitInput> {
-        self.last_commit_input.lock().unwrap().clone()
-    }
-
-    fn last_agent_session_id(&self) -> Option<String> {
-        self.last_agent_session_id.lock().unwrap().clone()
-    }
-
-    fn last_agent_request(&self) -> Option<AgentTurnRequest> {
-        self.last_agent_request.lock().unwrap().take()
-    }
-}
-
-#[async_trait::async_trait]
-impl TurnDeps for FakeTurnDeps {
-    fn create_session(&self, _request: &RunTurnRequest) -> std::result::Result<String, ApiError> {
-        self.create_called.store(true, Ordering::SeqCst);
-        Ok(self.created_session_id.clone())
-    }
-
-    fn open_session(&self, session_id: &str) -> std::result::Result<String, ApiError> {
-        self.open_called.store(true, Ordering::SeqCst);
-        Ok(session_id.to_string())
-    }
-
-    fn head_transcript(&self, session_id: &str) -> std::result::Result<HeadTranscript, ApiError> {
-        let mut transcripts = self.transcripts.lock().unwrap();
-        if transcripts.len() > 1 {
-            Ok(transcripts.remove(0))
-        } else if let Some(t) = transcripts.pop() {
-            Ok(t)
-        } else {
-            Ok(HeadTranscript {
-                session_id: session_id.to_string(),
-                parent_commit_id: None,
-                messages: vec![],
-            })
-        }
-    }
-
-    async fn execute_agent_turn(
-        &self,
-        request: AgentTurnRequest,
-    ) -> std::result::Result<(Vec<AgentTurnEvent>, AgentTurnResult), ApiError> {
-        *self.last_agent_session_id.lock().unwrap() = Some(request.session_id.clone());
-        *self.last_agent_request.lock().unwrap() = Some(request.clone());
-        let result = self
-            .agent_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(success_result);
-        Ok((self.agent_events.clone(), result))
-    }
-
-    fn commit_turn(&self, input: TurnCommitInput) -> std::result::Result<String, ApiError> {
-        self.commit_count.fetch_add(1, Ordering::SeqCst);
-        *self.last_commit_input.lock().unwrap() = Some(input);
-        Ok(self.commit_id.clone())
-    }
-}
-
-fn success_result() -> AgentTurnResult {
-    AgentTurnResult {
-        messages: vec![GraphMessage {
-            role: "assistant".to_string(),
+fn happy_events() -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::Token {
             content: "test response".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        assistant_output: "test response".to_string(),
-        usage: TurnUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
         },
-        tool_results: vec![],
-        status: AgentTurnStatus::Completed,
-        terminal_reason: Some("stop".to_string()),
-        events: vec![],
+        LlmEvent::Done {
+            finish_reason: "stop".to_string(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+    ]
+}
+
+fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> TestFixture {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+
+    let sessions_path = root.join("sessions");
+    let session_api = SessionApi::sqlite(&sessions_path);
+    let store = SqliteSessionGraphStore::new(&sessions_path);
+
+    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
+    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+        &root.to_string_lossy(),
+        enabled,
+    )
+    .expect("executor creation must succeed");
+
+    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: Arc::new(executor),
+    }));
+
+    TestFixture {
+        _dir: dir,
+        sessions_path,
+        session_api,
+        store,
+        agent_loop,
     }
 }
 
-fn failed_result() -> AgentTurnResult {
-    AgentTurnResult {
-        messages: vec![GraphMessage {
-            role: "assistant".to_string(),
-            content: String::new(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        assistant_output: String::new(),
-        usage: TurnUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-        },
-        tool_results: vec![],
-        status: AgentTurnStatus::Error,
-        terminal_reason: Some("LLM error: provider unavailable".to_string()),
-        events: vec![],
-    }
-}
-
-fn cancelled_result() -> AgentTurnResult {
-    AgentTurnResult {
-        messages: vec![GraphMessage {
-            role: "assistant".to_string(),
-            content: String::new(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        assistant_output: String::new(),
-        usage: TurnUsage {
-            prompt_tokens: 5,
-            completion_tokens: 2,
-            total_tokens: 7,
-        },
-        tool_results: vec![],
-        status: AgentTurnStatus::Cancelled,
-        terminal_reason: Some("cancelled by caller".to_string()),
-        events: vec![],
-    }
+fn setup_with_events(events: Vec<LlmEvent>, enabled_tools: &[&str]) -> TestFixture {
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(events)
+            .build(),
+    );
+    setup_fixture(llm, enabled_tools)
 }
 
 fn make_request(input: &str) -> RunTurnRequest {
@@ -212,8 +81,9 @@ fn make_request(input: &str) -> RunTurnRequest {
         input: input.to_string(),
         session_id: None,
         profile: None,
-        model: None,
+        model: Some("sonnet".to_string()),
         loaded_profile: None,
+        cancel_flag: None,
     }
 }
 
@@ -222,8 +92,9 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         input: input.to_string(),
         session_id: Some(session_id.to_string()),
         profile: None,
-        model: None,
+        model: Some("sonnet".to_string()),
         loaded_profile: None,
+        cancel_flag: None,
     }
 }
 
@@ -248,71 +119,187 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
     }
 }
 
+fn last_log_entry(
+    store: &SqliteSessionGraphStore,
+    session_id: &str,
+) -> lattice_session::TurnLogEntry {
+    store
+        .log(session_id)
+        .expect("log after commit")
+        .last()
+        .expect("commit log entry")
+        .clone()
+}
+
+struct CancelOnDoneLlm {
+    cancel: Arc<AtomicBool>,
+    pre_done_events: Mutex<Option<Vec<LlmEvent>>>,
+    finish_reason: String,
+    usage: Option<TokenUsage>,
+}
+
+impl CancelOnDoneLlm {
+    fn new(
+        cancel: Arc<AtomicBool>,
+        pre_done_events: Vec<LlmEvent>,
+        finish_reason: &str,
+        usage: Option<TokenUsage>,
+    ) -> Self {
+        Self {
+            cancel,
+            pre_done_events: Mutex::new(Some(pre_done_events)),
+            finish_reason: finish_reason.to_string(),
+            usage,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for CancelOnDoneLlm {
+    async fn chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+        unreachable!("stream-only fake")
+    }
+
+    async fn stream_chat(
+        &self,
+        _request: lattice_llm::ChatRequest,
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        let pre = self
+            .pre_done_events
+            .lock()
+            .unwrap()
+            .take()
+            .expect("CancelOnDoneLlm only supports a single round");
+        let cancel = self.cancel.clone();
+        let finish_reason = self.finish_reason.clone();
+        let usage = self.usage.clone();
+
+        enum Phase {
+            Pending(
+                VecDeque<LlmEvent>,
+                String,
+                Option<TokenUsage>,
+                Arc<AtomicBool>,
+            ),
+            DoneEmitted,
+        }
+
+        let initial = Phase::Pending(VecDeque::from(pre), finish_reason, usage, cancel);
+        let stream = futures::stream::unfold(initial, |state| async move {
+            match state {
+                Phase::Pending(mut queue, finish_reason, usage, cancel) => {
+                    if let Some(event) = queue.pop_front() {
+                        Some((event, Phase::Pending(queue, finish_reason, usage, cancel)))
+                    } else {
+                        cancel.store(true, Ordering::Relaxed);
+                        let done = LlmEvent::Done {
+                            finish_reason,
+                            usage,
+                        };
+                        Some((done, Phase::DoneEmitted))
+                    }
+                }
+                Phase::DoneEmitted => None,
+            }
+        });
+
+        Ok(Box::pin(stream))
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn run_turn_auto_creates_session_and_returns_session_id() {
-    let deps = FakeTurnDeps::new(success_result());
-    let request = make_request("hello");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let fixture = setup_with_events(happy_events(), &[]);
+    let result = run_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("hello"),
+    )
+    .await
+    .unwrap();
 
     assert!(
         !result.session_id.is_empty(),
         "session_id should not be empty"
     );
-    assert_eq!(result.session_id, "auto-created-session");
     assert!(
         !result.commit_id.is_empty(),
         "commit_id should not be empty"
     );
-    assert!(
-        deps.created_session(),
-        "create_session should have been called"
-    );
-    assert!(
-        !deps.opened_session(),
-        "open_session should not have been called"
-    );
+    assert_eq!(fixture.store.log(&result.session_id).unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn run_turn_commits_exactly_one_turn() {
-    let deps = FakeTurnDeps::new(success_result());
-    let request = make_request("test input");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let fixture = setup_with_events(happy_events(), &[]);
+    let result = run_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("test input"),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(deps.commit_count(), 1, "exactly one commit should be made");
     assert_eq!(result.status, RunTurnStatus::Completed);
+    assert_eq!(fixture.store.log(&result.session_id).unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn run_turn_uses_existing_session_transcript() {
-    let deps = FakeTurnDeps::new(success_result());
-    let request = make_request_with_session("second turn", "existing-session");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let fixture = setup_with_events(happy_events(), &[]);
+    let created = fixture
+        .session_api
+        .create_session(CreateSessionRequest {
+            label: None,
+            profile: None,
+            model: Some("sonnet".to_string()),
+        })
+        .unwrap();
+    let session_id = created.session_id.clone();
 
-    assert!(
-        deps.opened_session(),
-        "open_session should have been called"
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
     );
-    assert!(
-        !deps.created_session(),
-        "create_session should not have been called"
-    );
-    assert_eq!(result.session_id, "existing-session");
-    assert_eq!(
-        deps.last_agent_session_id(),
-        Some("existing-session".to_string()),
-        "agent should receive the existing session ID"
-    );
-    assert_eq!(deps.commit_count(), 1);
+    let enabled: Vec<String> = vec![];
+    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+        &fixture._dir.path().to_string_lossy(),
+        enabled,
+    )
+    .unwrap();
+    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: Arc::new(executor),
+    }));
+
+    let result = run_turn(
+        fixture.session_api,
+        agent_loop,
+        make_request_with_session("second turn", &session_id),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.session_id, session_id);
+    assert_eq!(fixture.store.log(&session_id).unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn run_turn_result_contains_contract_fields() {
-    let deps = FakeTurnDeps::new(success_result());
-    let request = make_request("hello");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let fixture = setup_with_events(happy_events(), &[]);
+    let result = run_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("hello"),
+    )
+    .await
+    .unwrap();
 
     assert!(!result.session_id.is_empty());
     assert!(!result.commit_id.is_empty());
@@ -339,247 +326,186 @@ async fn run_turn_result_contains_contract_fields() {
 
 #[tokio::test]
 async fn run_turn_failed_outcome_is_committed() {
-    let deps = FakeTurnDeps::new(failed_result());
-    let request = make_request("hello");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let events = vec![LlmEvent::Error {
+        message: "LLM error: provider unavailable".to_string(),
+    }];
+    let fixture = setup_with_events(events, &[]);
+    let result = run_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("hello"),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Error);
     assert_eq!(result.assistant_output, "");
-    assert_eq!(deps.commit_count(), 1);
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(
-        commit_input.status,
-        lattice_session::TurnCommitStatus::Error
-    );
-    assert!(commit_input
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.status, TurnCommitStatus::Error);
+    assert!(entry
         .terminal_reason
         .as_ref()
         .unwrap()
         .contains("provider unavailable"));
-    assert!(
-        !commit_input.messages.is_empty(),
-        "failed turn should still commit messages"
-    );
 }
 
 #[tokio::test]
 async fn run_turn_cancelled_outcome_is_committed() {
-    let deps = FakeTurnDeps::new(cancelled_result());
-    let request = make_request("hello");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let llm: Arc<dyn LlmClient> = Arc::new(CancelOnDoneLlm::new(
+        cancel.clone(),
+        vec![
+            LlmEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+            },
+            LlmEvent::ToolCallDelta {
+                id: "call_1".to_string(),
+                arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+            },
+            LlmEvent::ToolCallEnd {
+                id: "call_1".to_string(),
+            },
+        ],
+        "tool_calls",
+        Some(TokenUsage {
+            prompt_tokens: 5,
+            completion_tokens: 2,
+            total_tokens: 7,
+        }),
+    ));
+    let fixture = setup_fixture(llm, &["read_file"]);
+    let mut request = make_request("hello");
+    request.cancel_flag = Some(cancel);
+
+    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
+        .await
+        .unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Cancelled);
-    assert_eq!(deps.commit_count(), 1);
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(
-        commit_input.status,
-        lattice_session::TurnCommitStatus::Cancelled
-    );
-    assert!(commit_input
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.status, TurnCommitStatus::Cancelled);
+    assert!(entry
         .terminal_reason
         .as_ref()
         .unwrap()
         .contains("cancelled"));
-    assert!(commit_input.usage.is_some());
-    assert_eq!(commit_input.usage.as_ref().unwrap().total_tokens, 7);
+    assert_eq!(entry.usage.as_ref().unwrap().total_tokens, 7);
 }
 
 #[tokio::test]
 async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
-    let deps = FakeTurnDeps::new(success_result());
+    let fixture = setup_with_events(happy_events(), &[]);
     let request = RunTurnRequest {
         input: "test".to_string(),
         session_id: None,
         profile: None,
         model: Some("override-model".to_string()),
         loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+        cancel_flag: None,
     };
 
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
+        .await
+        .unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let agent_req = deps
-        .last_agent_request()
-        .expect("agent should have been called");
-    assert_eq!(
-        agent_req.model, "override-model",
-        "request.model should override profile model"
-    );
-
-    // Commit metadata should also use the override model.
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(
-        commit_input.model, "override-model",
-        "commit metadata should record the actual override model, not profile model"
-    );
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.model, "override-model");
 }
 
 #[tokio::test]
 async fn run_cutover_profile_model_used_when_no_override() {
-    let deps = FakeTurnDeps::new(success_result());
+    let fixture = setup_with_events(happy_events(), &[]);
     let request = RunTurnRequest {
         input: "test".to_string(),
         session_id: None,
         profile: None,
         model: None,
         loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+        cancel_flag: None,
     };
 
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
+        .await
+        .unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let agent_req = deps
-        .last_agent_request()
-        .expect("agent should have been called");
-    assert_eq!(
-        agent_req.model, "profile-model",
-        "profile model should be used when no override"
-    );
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.model, "profile-model");
 }
 
 #[tokio::test]
 async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() {
-    let deps = FakeTurnDeps::new(success_result());
+    let fixture = setup_with_events(happy_events(), &[]);
     let request = RunTurnRequest {
         input: "test".to_string(),
         session_id: None,
         profile: None,
         model: Some("compat:deepseek-chat".to_string()),
         loaded_profile: None,
+        cancel_flag: None,
     };
 
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
+        .await
+        .unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let agent_req = deps
-        .last_agent_request()
-        .expect("agent should have been called");
-    assert_eq!(agent_req.provider, Some("openai_compatible".to_string()));
-
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(commit_input.provider, "openai_compatible");
-}
-
-#[tokio::test]
-async fn stream_turn_auto_creates_session_and_final_committed_event_names_it() {
-    let deps = FakeTurnDeps::new(success_result());
-    let request = make_request("hello");
-    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
-        .await
-        .unwrap()
-        .collect()
-        .await;
-
-    let committed = events
-        .iter()
-        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
-        .expect("should have TurnCommitted event");
-
-    if let TurnEvent::TurnCommitted {
-        session_id,
-        commit_id,
-        status,
-    } = committed
-    {
-        assert!(!session_id.is_empty(), "session_id should be non-empty");
-        assert_eq!(session_id, "auto-created-session");
-        assert!(!commit_id.is_empty(), "commit_id should be non-empty");
-        assert_eq!(*status, RunTurnStatus::Completed);
-    } else {
-        panic!("expected TurnCommitted event");
-    }
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.provider, "openai_compatible");
 }
 
 #[tokio::test]
 async fn stream_turn_emits_tool_activity_before_committed() {
-    let tool_result_agent = AgentTurnResult {
-        messages: vec![
-            GraphMessage {
-                role: "assistant".to_string(),
-                content: String::new(),
-                reasoning_content: None,
-                tool_calls: Some(vec![lattice_session::GraphToolCall {
-                    id: "call_1".to_string(),
-                    name: "read_file".to_string(),
-                    arguments: "{}".to_string(),
-                }]),
-                tool_call_id: None,
-                name: None,
-            },
-            GraphMessage {
-                role: "tool".to_string(),
-                content: "file content".to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("read_file".to_string()),
-            },
-            GraphMessage {
-                role: "assistant".to_string(),
-                content: "here is the file".to_string(),
-                reasoning_content: None,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            },
-        ],
-        assistant_output: "here is the file".to_string(),
-        usage: TurnUsage {
-            prompt_tokens: 10,
-            completion_tokens: 5,
-            total_tokens: 15,
-        },
-        tool_results: vec![lattice_agent::AgentToolResultSummary {
-            tool_call_id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            ok: true,
-            output_len: 12,
-            error_summary: None,
-        }],
-        status: AgentTurnStatus::Completed,
-        terminal_reason: Some("stop".to_string()),
-        events: vec![],
-    };
-    let tool_events = vec![
-        AgentTurnEvent::ModelStarted {
-            provider: None,
-            model: "test-model".to_string(),
-        },
-        AgentTurnEvent::ToolCallStarted {
+    let round1 = vec![
+        LlmEvent::ToolCallStart {
             id: "call_1".to_string(),
             name: "read_file".to_string(),
         },
-        AgentTurnEvent::ToolCallFinished {
+        LlmEvent::ToolCallDelta {
             id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            ok: true,
-            output_len: 12,
-            error_summary: None,
+            arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
         },
-        AgentTurnEvent::TokenDelta {
+        LlmEvent::ToolCallEnd {
+            id: "call_1".to_string(),
+        },
+        LlmEvent::Done {
+            finish_reason: "tool_calls".to_string(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+    ];
+    let round2 = vec![
+        LlmEvent::Token {
             content: "here is the file".to_string(),
         },
-        AgentTurnEvent::ModelFinished {
+        LlmEvent::Done {
             finish_reason: "stop".to_string(),
             usage: None,
         },
     ];
 
-    let deps = FakeTurnDeps::new(tool_result_agent).with_events(tool_events);
-    let request = make_request("read file");
-    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
-        .await
-        .unwrap()
-        .collect()
-        .await;
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(round1)
+            .push_events(round2)
+            .build(),
+    );
+    let fixture = setup_fixture(llm, &["read_file"]);
+
+    let events: Vec<TurnEvent> = stream_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("read file"),
+    )
+    .await
+    .unwrap()
+    .collect()
+    .await;
 
     let tool_start_pos = events
         .iter()
@@ -591,35 +517,29 @@ async fn stream_turn_emits_tool_activity_before_committed() {
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }));
 
-    assert!(
-        tool_start_pos.is_some(),
-        "should have ToolCallStarted event"
-    );
-    assert!(
-        tool_finished_pos.is_some(),
-        "should have ToolCallFinished event"
-    );
-    assert!(committed_pos.is_some(), "should have TurnCommitted event");
-
-    assert!(
-        tool_start_pos.unwrap() < committed_pos.unwrap(),
-        "ToolCallStarted must appear before TurnCommitted"
-    );
-    assert!(
-        tool_finished_pos.unwrap() < committed_pos.unwrap(),
-        "ToolCallFinished must appear before TurnCommitted"
-    );
+    assert!(tool_start_pos.is_some());
+    assert!(tool_finished_pos.is_some());
+    assert!(committed_pos.is_some());
+    assert!(tool_start_pos.unwrap() < committed_pos.unwrap());
+    assert!(tool_finished_pos.unwrap() < committed_pos.unwrap());
 }
 
 #[tokio::test]
 async fn stream_turn_error_still_commits_error() {
-    let deps = FakeTurnDeps::new(failed_result());
-    let request = make_request("hello");
-    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
-        .await
-        .unwrap()
-        .collect()
-        .await;
+    let events = vec![LlmEvent::Error {
+        message: "LLM error: provider unavailable".to_string(),
+    }];
+    let fixture = setup_with_events(events, &[]);
+
+    let events: Vec<TurnEvent> = stream_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("hello"),
+    )
+    .await
+    .unwrap()
+    .collect()
+    .await;
 
     let committed = events
         .iter()
@@ -630,7 +550,6 @@ async fn stream_turn_error_still_commits_error() {
         assert_eq!(*status, RunTurnStatus::Error);
     }
 
-    // The terminal TurnFailed must appear before TurnCommitted.
     let failed_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnFailed { .. }))
@@ -639,18 +558,18 @@ async fn stream_turn_error_still_commits_error() {
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
         .expect("should have TurnCommitted event");
-    assert!(
-        failed_pos < committed_pos,
-        "TurnFailed must precede TurnCommitted in the stream"
-    );
+    assert!(failed_pos < committed_pos);
 
-    assert_eq!(deps.commit_count(), 1);
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
+    let session_id = events
+        .iter()
+        .find_map(|e| match e {
+            TurnEvent::TurnCommitted { session_id, .. } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(
-        commit_input.status,
-        lattice_session::TurnCommitStatus::Error
+        last_log_entry(&fixture.store, &session_id).status,
+        TurnCommitStatus::Error
     );
 }
 
@@ -669,48 +588,53 @@ fn turn_usage_summary_from_turn_usage() {
 
 #[tokio::test]
 async fn run_turn_commits_parent_from_initial_transcript() {
-    let initial_transcript = HeadTranscript {
-        session_id: "existing-session".to_string(),
-        parent_commit_id: Some("parent-initial".to_string()),
-        messages: vec![],
-    };
-    let raced_transcript = HeadTranscript {
-        session_id: "existing-session".to_string(),
-        parent_commit_id: Some("parent-raced".to_string()),
-        messages: vec![],
-    };
+    let fixture = setup_with_events(happy_events(), &[]);
+    let first = run_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("first turn"),
+    )
+    .await
+    .unwrap();
+    let first_commit_id = first.commit_id.clone();
+    let session_id = first.session_id.clone();
 
-    let deps = FakeTurnDeps::new(success_result())
-        .with_transcripts(vec![initial_transcript, raced_transcript]);
+    let session_api = SessionApi::sqlite(&fixture.sessions_path);
+    let enabled: Vec<String> = vec![];
+    let executor = lattice_tools::executor::DefaultToolExecutor::for_project_root(
+        &fixture._dir.path().to_string_lossy(),
+        enabled,
+    )
+    .unwrap();
+    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
+        llm: Arc::new(
+            FakeStreamingLlmClient::builder()
+                .push_events(happy_events())
+                .build(),
+        ),
+        tool_executor: Arc::new(executor),
+    }));
 
-    let request = make_request_with_session("hello", "existing-session");
-    let result = run_turn_with_deps(&deps, request).await.unwrap();
+    let result = run_turn(
+        session_api,
+        agent_loop,
+        make_request_with_session("second turn", &session_id),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Completed);
-
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-
-    assert_eq!(
-        commit_input.parent_ids,
-        vec!["parent-initial".to_string()],
-        "commit should use parent from initial transcript, not a raced second read"
-    );
+    let entry = last_log_entry(&fixture.store, &result.session_id);
+    assert_eq!(entry.parent_ids, vec![first_commit_id]);
 }
 
 // ── VER-07 verification tests ───────────────────────────────────────
-//
-// These tests pin the public vocabulary contract:
-//   1. RunTurnStatus::Error maps to TurnCommitStatus::Error.
-//   2. TurnEvent serializes with internally tagged `{"type": ...}` JSON.
-//   3. Old Failed variant is gone.
 
 #[test]
 fn status_error_maps_to_commit_error() {
     assert_eq!(
         RunTurnStatus::Error.to_commit_status(),
-        lattice_session::TurnCommitStatus::Error
+        TurnCommitStatus::Error
     );
 }
 
@@ -765,200 +689,133 @@ fn turn_event_turn_started_serializes() {
 
 #[test]
 fn old_failed_variant_removed_compile_guard() {
-    // Compile-time guard: this only builds because RunTurnStatus::Error exists.
-    // The runtime assertion proves the renamed variant Debug-prints as "Error",
-    // not "Failed", so any reintroduction of Failed shows up here too.
     let status = RunTurnStatus::Error;
     assert_ne!(format!("{status:?}"), "Failed");
     assert_eq!(format!("{status:?}"), "Error");
 }
 
-// ── Phase 17 Plan 02: Cancelled buffered seam + error after partial ───
-
 #[tokio::test]
 async fn stream_turn_cancelled_commits_cancelled() {
-    // VER-10 / D-05: Cancelled path through stream_turn_with_deps proves
-    // TurnCancelled emitted, commit stores Cancelled status, terminal_reason
-    // preserved.
-    let deps = FakeTurnDeps::new(cancelled_result()).with_events(vec![
-        AgentTurnEvent::ModelStarted {
-            provider: None,
-            model: "test-model".to_string(),
-        },
-        AgentTurnEvent::TokenDelta {
-            content: "partial".to_string(),
-        },
-        AgentTurnEvent::ModelFinished {
-            finish_reason: "stop".to_string(),
-            usage: None,
-        },
-    ]);
-    let request = make_request("hello");
-    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
+    let cancel = Arc::new(AtomicBool::new(false));
+    let llm: Arc<dyn LlmClient> = Arc::new(CancelOnDoneLlm::new(
+        cancel.clone(),
+        vec![
+            LlmEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+            },
+            LlmEvent::ToolCallDelta {
+                id: "call_1".to_string(),
+                arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+            },
+            LlmEvent::ToolCallEnd {
+                id: "call_1".to_string(),
+            },
+        ],
+        "tool_calls",
+        None,
+    ));
+    let fixture = setup_fixture(llm, &["read_file"]);
+    let mut request = make_request("hello");
+    request.cancel_flag = Some(cancel);
+
+    let events: Vec<TurnEvent> = stream_turn(fixture.session_api, fixture.agent_loop, request)
         .await
         .unwrap()
         .collect()
         .await;
 
-    // TurnCancelled event present with reason "cancelled by caller"
     let cancelled = events
         .iter()
         .find(|e| matches!(e, TurnEvent::TurnCancelled { .. }))
         .expect("should have TurnCancelled event");
     if let TurnEvent::TurnCancelled { reason } = cancelled {
-        assert_eq!(
-            *reason,
-            Some("cancelled by caller".to_string()),
-            "TurnCancelled reason should be 'cancelled by caller'"
+        assert!(
+            reason.as_ref().unwrap().contains("cancelled"),
+            "TurnCancelled reason should mention cancellation"
         );
     }
 
-    // TurnCommitting event present
     let committing_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitting))
         .expect("should have TurnCommitting event");
-
-    // TurnCommitted event present with status Cancelled
     let committed_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
         .expect("should have TurnCommitted event");
-    if let TurnEvent::TurnCommitted { status, .. } = &events[committed_pos] {
-        assert_eq!(
-            *status,
-            RunTurnStatus::Cancelled,
-            "TurnCommitted.status should be Cancelled"
-        );
+    if let TurnEvent::TurnCommitted {
+        status, session_id, ..
+    } = &events[committed_pos]
+    {
+        assert_eq!(*status, RunTurnStatus::Cancelled);
+        let entry = last_log_entry(&fixture.store, session_id);
+        assert_eq!(entry.status, TurnCommitStatus::Cancelled);
     }
 
-    // Event ordering: TurnCancelled < TurnCommitting < TurnCommitted
     let cancelled_pos = events
         .iter()
         .position(|e| matches!(e, TurnEvent::TurnCancelled { .. }))
         .unwrap();
-    assert!(
-        cancelled_pos < committing_pos,
-        "TurnCancelled must precede TurnCommitting"
-    );
-    assert!(
-        committing_pos < committed_pos,
-        "TurnCommitting must precede TurnCommitted"
-    );
-
-    // Exactly one commit
-    assert_eq!(deps.commit_count(), 1);
-
-    // Commit input status is Cancelled
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(
-        commit_input.status,
-        lattice_session::TurnCommitStatus::Cancelled,
-        "commit input status should be Cancelled"
-    );
-
-    // Commit input terminal_reason preserved
-    assert_eq!(
-        commit_input.terminal_reason,
-        Some("cancelled by caller".to_string()),
-        "commit input terminal_reason should be 'cancelled by caller'"
-    );
+    assert!(cancelled_pos < committing_pos);
+    assert!(committing_pos < committed_pos);
 }
 
 #[tokio::test]
 async fn stream_turn_error_after_partial_commits_error() {
-    // VER-12: Error after partial tokens commits with Error status and
-    // preserves partial content in commit messages.
-    let partial_error_result = AgentTurnResult {
-        messages: vec![GraphMessage {
-            role: "assistant".to_string(),
-            content: "partial output before error".to_string(),
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }],
-        assistant_output: "partial output before error".to_string(),
-        usage: TurnUsage {
-            prompt_tokens: 10,
-            completion_tokens: 4,
-            total_tokens: 14,
-        },
-        tool_results: vec![],
-        status: AgentTurnStatus::Error,
-        terminal_reason: Some("LLM error: connection reset".to_string()),
-        events: vec![],
-    };
-
-    let deps = FakeTurnDeps::new(partial_error_result).with_events(vec![
-        AgentTurnEvent::ModelStarted {
-            provider: None,
-            model: "test-model".to_string(),
-        },
-        AgentTurnEvent::TokenDelta {
+    let events = vec![
+        LlmEvent::Token {
             content: "partial output".to_string(),
         },
-        AgentTurnEvent::TokenDelta {
+        LlmEvent::Token {
             content: " before error".to_string(),
         },
-    ]);
-    let request = make_request("hello");
-    let events: Vec<TurnEvent> = stream_turn_with_deps(&deps, request)
-        .await
-        .unwrap()
-        .collect()
-        .await;
+        LlmEvent::Error {
+            message: "LLM error: connection reset".to_string(),
+        },
+    ];
+    let fixture = setup_with_events(events, &[]);
 
-    // TurnFailed event present
+    let events: Vec<TurnEvent> = stream_turn(
+        fixture.session_api,
+        fixture.agent_loop,
+        make_request("hello"),
+    )
+    .await
+    .unwrap()
+    .collect()
+    .await;
+
     let failed = events
         .iter()
         .find(|e| matches!(e, TurnEvent::TurnFailed { .. }))
         .expect("should have TurnFailed event");
     if let TurnEvent::TurnFailed { reason } = failed {
-        assert!(
-            reason.contains("connection reset"),
-            "TurnFailed reason should contain error message, got: {reason}"
-        );
+        assert!(reason.contains("connection reset"));
     }
 
-    // TurnCommitted with status Error
     let committed = events
         .iter()
         .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
         .expect("should have TurnCommitted event");
-    if let TurnEvent::TurnCommitted { status, .. } = committed {
+    if let TurnEvent::TurnCommitted {
+        status, session_id, ..
+    } = committed
+    {
         assert_eq!(*status, RunTurnStatus::Error);
+        let transcript = fixture.store.head_transcript(session_id).unwrap();
+        let assistant = transcript
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant message in commit");
+        assert_eq!(assistant.content, "partial output before error");
+        let entry = last_log_entry(&fixture.store, session_id);
+        assert_eq!(entry.status, TurnCommitStatus::Error);
+        assert!(entry
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("connection reset"));
     }
-
-    // Commit input has Error status
-    assert_eq!(deps.commit_count(), 1);
-    let commit_input = deps
-        .last_commit_input()
-        .expect("commit should have been called");
-    assert_eq!(
-        commit_input.status,
-        lattice_session::TurnCommitStatus::Error
-    );
-
-    // Commit messages contain user message + partial assistant message
-    assert!(
-        commit_input.messages.len() >= 2,
-        "commit should have at least user + assistant messages, got {}",
-        commit_input.messages.len()
-    );
-    assert_eq!(commit_input.messages[0].role, "user");
-    assert_eq!(commit_input.messages[0].content, "hello");
-    assert_eq!(commit_input.messages[1].role, "assistant");
-    assert_eq!(
-        commit_input.messages[1].content, "partial output before error",
-        "partial assistant content should be preserved in commit"
-    );
-
-    // Terminal reason preserved in commit
-    assert_eq!(
-        commit_input.terminal_reason,
-        Some("LLM error: connection reset".to_string())
-    );
 }

@@ -1,22 +1,12 @@
 //! Turn execution and streaming API.
 //!
-//! [`run_turn`] orchestrates durable turn execution through the `TurnDeps`
-//! dependency seam: create/open session, read transcript, invoke agent loop,
-//! commit exactly one turn, and return typed results. [`stream_turn`] takes
-//! the same [`RunTurnRequest`] and returns a live stream of [`TurnEvent`]
-//! values backed by a spawned task and bounded channel; startup failures are
-//! returned as `Result::Err` before the stream, runtime outcomes arrive as
-//! events within the stream.
-//!
-//! # Dependency seam
-//!
-//! Production callers use [`run_turn`] which internally constructs
-//! [`RealTurnDeps`]. Tests use [`run_turn_with_deps`] with a fake
-//! implementation of [`TurnDeps`] to avoid live provider calls, direct
-//! SQLite access, or public exposure of internal handles. The live
-//! `stream_turn` path bypasses `TurnDeps` entirely.
+//! [`stream_turn`] is the single production execution core: it runs the agent
+//! loop live, emits public [`TurnEvent`] values through a bounded channel, and
+//! commits exactly one turn. [`run_turn`] is a synchronous facade that drains
+//! the same live stream via [`collector::RunTurnCollector`] and returns
+//! [`RunTurnResult`].
 
-mod deps;
+mod collector;
 mod execute;
 mod live;
 mod mapping;
@@ -28,6 +18,7 @@ mod tests;
 #[cfg(test)]
 mod live_tests;
 
+pub use collector::collect_turn_result_from_events;
 pub use execute::{run_turn, stream_turn};
 pub use types::{
     RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,

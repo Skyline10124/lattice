@@ -183,7 +183,8 @@ fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
 /// Each call emits exactly one `serde_json::to_string` line followed
 /// by `\n` via `writeln!`. No ANSI escapes are produced (D-B6 / D-D3).
 fn render_json_event<W: std::io::Write>(event: &TurnEvent, out: &mut W) -> std::io::Result<()> {
-    let line = serde_json::to_string(event).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(event)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     writeln!(out, "{}", line)
 }
 
@@ -419,6 +420,7 @@ async fn run_inner(
         profile: profile.map(str::to_string),
         model,
         loaded_profile: Some(loaded_profile),
+        cancel_flag: None,
     };
 
     // D-A1: drive stream_turn instead of run_turn
@@ -452,16 +454,22 @@ async fn run_inner(
     use futures::StreamExt;
 
     loop {
-        let event = match time::timeout(Duration::from_secs(STREAM_TIMEOUT_SECS), stream.next()).await {
-            Ok(Some(event)) => event,
-            Ok(None) => break,
-            Err(_) => {
-                out.flush()?;
-                writeln!(err, "{}: stream timed out after {}s", "error".red(), STREAM_TIMEOUT_SECS)?;
-                err.flush()?;
-                return Ok(std::process::ExitCode::from(1));
-            }
-        };
+        let event =
+            match time::timeout(Duration::from_secs(STREAM_TIMEOUT_SECS), stream.next()).await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(_) => {
+                    out.flush()?;
+                    writeln!(
+                        err,
+                        "{}: stream timed out after {}s",
+                        "error".red(),
+                        STREAM_TIMEOUT_SECS
+                    )?;
+                    err.flush()?;
+                    return Ok(std::process::ExitCode::from(1));
+                }
+            };
 
         if json {
             render_json_event(&event, &mut out)?;

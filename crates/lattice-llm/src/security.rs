@@ -3,10 +3,43 @@
 //! Validates that provider base URLs are safe before HTTP clients connect:
 //! HTTPS-only for public hosts, plain HTTP allowed only for localhost
 //! development endpoints, no userinfo, and no private/reserved IP targets.
+//!
+//! DNS rebinding: hostnames are resolved at request time and pinned with
+//! `reqwest::RequestBuilder::resolve` so a second lookup cannot redirect to
+//! a private address after validation (M-04).
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 
 use crate::stub::LlmError;
+
+/// Public DNS services that map arbitrary labels to attacker-chosen IPs.
+pub const DNS_REBINDING_DOMAIN_SUFFIXES: &[&str] = &[
+    "nip.io",
+    "xip.io",
+    "sslip.io",
+    "localtest.me",
+    "lvh.me",
+    "vcap.me",
+    "burrow.io",
+];
+
+/// Returns true when `host` is a known DNS rebinding helper domain.
+pub fn host_is_dns_rebinding_domain(host: &str) -> bool {
+    DNS_REBINDING_DOMAIN_SUFFIXES
+        .iter()
+        .any(|suffix| host_matches_domain_suffix(host, suffix))
+}
+
+fn host_matches_domain_suffix(host: &str, suffix: &str) -> bool {
+    host.eq_ignore_ascii_case(suffix)
+        || (host.len() > suffix.len() + 1
+            && host.as_bytes().get(host.len() - suffix.len() - 1) == Some(&b'.')
+            && host[host.len() - suffix.len()..].eq_ignore_ascii_case(suffix))
+}
+
+fn is_localhost_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
 
 fn is_private_or_reserved(ip: IpAddr) -> bool {
     match ip {
@@ -34,6 +67,11 @@ fn is_private_or_reserved(ip: IpAddr) -> bool {
     }
 }
 
+/// Returns true for loopback, RFC1918, link-local, documentation, and related reserved space.
+pub fn is_private_or_reserved_ip(ip: IpAddr) -> bool {
+    is_private_or_reserved(ip)
+}
+
 fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
     let segments = v6.segments();
     if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
@@ -46,6 +84,64 @@ fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
         return is_private_or_reserved(IpAddr::V4(v4));
     }
     false
+}
+
+/// Resolve `host:port` and return socket addresses that are all on the public internet.
+///
+/// Used immediately before HTTP requests; callers should pin these addresses with
+/// `reqwest::RequestBuilder::resolve` to close DNS rebinding TOCTOU.
+pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, LlmError> {
+    if host_is_dns_rebinding_domain(host) {
+        return Err(LlmError::Other(format!(
+            "hostname '{}' is a known DNS rebinding domain and is not allowed",
+            host
+        )));
+    }
+
+    if is_localhost_host(host) {
+        return Err(LlmError::Other(format!(
+            "hostname '{}' is localhost and cannot be resolved for remote pinning",
+            host
+        )));
+    }
+
+    if let Ok(ip) = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        if is_private_or_reserved(ip) {
+            return Err(LlmError::Other(format!(
+                "hostname targets private/reserved IP {}",
+                ip
+            )));
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+
+    let addrs: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| LlmError::Other(format!("DNS resolution failed for '{}': {}", host, e)))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(LlmError::Other(format!(
+            "hostname '{}' did not resolve to any address",
+            host
+        )));
+    }
+
+    for addr in &addrs {
+        if is_private_or_reserved(addr.ip()) {
+            return Err(LlmError::Other(format!(
+                "hostname '{}' resolves to private/reserved IP {}",
+                host,
+                addr.ip()
+            )));
+        }
+    }
+
+    Ok(addrs)
 }
 
 /// Validate a provider base URL.
@@ -97,13 +193,20 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
         }
     }
 
-    // DNS-based check: resolve hostname and reject if it points to private IP space.
-    if !host_str.ends_with(".local")
-        && host_str != "localhost"
-        && host_str != "127.0.0.1"
-        && host_str != "::1"
-    {
-        if let Ok(addrs) = ToSocketAddrs::to_socket_addrs(&format!("{}:443", host_str)) {
+    if host_is_dns_rebinding_domain(host_str) {
+        return Err(LlmError::Other(format!(
+            "base_url hostname '{}' is a known DNS rebinding domain and is not allowed",
+            host_str
+        )));
+    }
+
+    // Best-effort DNS check when resolution is available (offline CI may not resolve).
+    // Request-time pinning in `client::build_http_client_for_url` is authoritative.
+    if !host_str.ends_with(".local") && !is_localhost_host(host_str) {
+        let port = parsed
+            .port()
+            .unwrap_or(if scheme == "https" { 443 } else { 80 });
+        if let Ok(addrs) = (host_str, port).to_socket_addrs() {
             for addr in addrs {
                 if is_private_or_reserved(addr.ip()) {
                     return Err(LlmError::Other(format!(
@@ -191,5 +294,40 @@ mod tests {
         // url crate parses "https:///v1" as host="v1" path="/" — valid.
         // Use a non-parseable URL to exercise the "no host" path.
         assert!(validate_base_url("https://").is_err());
+    }
+
+    #[test]
+    fn reject_dns_rebinding_domains_in_base_url() {
+        for host in [
+            "nip.io",
+            "sub.nip.io",
+            "xip.io",
+            "sslip.io",
+            "localtest.me",
+            "lvh.me",
+            "vcap.me",
+            "burrow.io",
+        ] {
+            let url = format!("https://{host}/v1");
+            let err = validate_base_url(&url).expect_err("rebinding domain must be rejected");
+            assert!(
+                err.to_string().contains("rebinding"),
+                "expected rebinding error for {host}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_public_socket_addrs_rejects_private_literal() {
+        let err = resolve_public_socket_addrs("10.0.0.1", 443)
+            .expect_err("private literal must be rejected");
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn resolve_public_socket_addrs_rejects_rebinding_domain() {
+        let err = resolve_public_socket_addrs("evil.nip.io", 443)
+            .expect_err("rebinding domain must be rejected");
+        assert!(err.to_string().contains("rebinding"));
     }
 }
