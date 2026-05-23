@@ -4,6 +4,22 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## M-21 修复: AgentLoop 增量维护 LLM messages — 2026-05-23
+
+Verified: `cargo test -p lattice-agent --features test-utils` ✓, `cargo clippy -p lattice-agent --features test-utils --all-targets -- -D warnings` ✓
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| M-21 | MEDIUM | 每轮 tool loop 全量 `convert_to_llm_message` | turn 初建 `llm_messages`；tool round 仅 `append_llm_message` |
+
+**Fixed:** repeated GraphMessage → `lattice_llm::Message` conversion on every LLM round.
+
+**Residual:** `ChatRequest { messages: llm_messages.clone(), ... }` still clones the full provider message `Vec` each round because `ChatRequest` owns `Vec<Message>`. Eliminating that cost needs API-shape work (`Arc<[Message]>`, borrowed requests, builder reuse, etc.) — intentionally out of scope for M-21.
+
+文件: `lattice-agent/src/agent_loop/mod.rs`, `messages.rs`, `tests/agent_loop.rs`
+
+---
+
 ## M-11 修复: head_transcript 拓扑遍历 merge 父分支 — 2026-05-23
 
 Verified: `cargo test -p lattice-session` ✓ (61 tests), `cargo clippy -p lattice-session -- -D warnings` ✓

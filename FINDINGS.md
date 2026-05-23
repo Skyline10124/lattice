@@ -12,11 +12,7 @@
 
 ## MEDIUM
 
-### M-21: `AgentLoop` 每轮全量 `convert_to_llm_message` — `performance`
-- **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`（`run_turn_inner` 主循环）
-- **问题**: 多轮 tool loop（最高约 200 轮）中，每轮对当前全部 `messages` 做 `iter().map(convert_to_llm_message).collect()`。随对话变长，总 work 约为 **O(轮次 × 消息数)**，长会话下 CPU/分配开销显著。
-- **排期**: 性能债，**非** v1.3-alpha 第一刀；controlled editing / 更密集 tool loop 变重要后再做。
-- **计划**: 增量维护 `Vec<lattice_llm::Message>`，每轮只 append 新 assistant/tool 消息；须厘清 system / head transcript / current turn delta 边界，避免重复喂给模型。
+(None)
 
 ## LOW
 
@@ -38,8 +34,8 @@
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
 
-### M-11: `head_transcript` 只走 first-parent — `correctness`
-- **当前状态**: `collect_reachable_commits_topological`（迭代 postorder DFS，`parents_json` 顺序稳定）；merge 含第二父分支；diamond 不重复 ancestor。见 FIX.md **M-11**。
+### M-21: `AgentLoop` 每轮全量 `convert_to_llm_message` — `performance`
+- **当前状态**: 消除每轮 GraphMessage→LLM Message 全量转换；tool round 仅 append。**残留**: 每轮 `ChatRequest` 仍 clone 全量 `Vec<Message>`，仍存在 `O(rounds × messages)`（见 FIX.md **M-21** Residual）。
 
 ### L-18-03: 无 stream 超时/deadline 机制 — `robustness`
 - **原位置**: `crates/lattice-cli/src/commands/run.rs:439`

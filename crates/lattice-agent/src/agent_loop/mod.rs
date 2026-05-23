@@ -18,7 +18,7 @@ use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
 use lattice_tools::enabled_tools::{resolve_enabled_tools, EnabledTools};
 use tokio::time::Instant;
 
-use messages::convert_to_llm_message;
+use messages::{append_llm_message, graph_messages_to_llm};
 
 /// Hard upper bound on LLM rounds within a single turn.
 ///
@@ -178,6 +178,25 @@ impl AgentLoop {
         // Build initial messages from transcript + user input
         let mut messages = self.build_messages(request, enabled);
 
+        let mut llm_messages = match graph_messages_to_llm(&messages) {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                return AgentTurnResult {
+                    messages: Vec::new(),
+                    assistant_output: String::new(),
+                    usage: TurnUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                    },
+                    tool_results: Vec::new(),
+                    status: AgentTurnStatus::Error,
+                    terminal_reason: Some(e),
+                    events: Vec::new(),
+                };
+            }
+        };
+
         let mut all_messages: Vec<GraphMessage> = Vec::new();
         let mut all_events: Vec<AgentTurnEvent> = Vec::new();
         let mut accumulated_usage = TurnUsage {
@@ -224,28 +243,9 @@ impl AgentLoop {
                 }
             }
 
-            // Call the LLM
-            let llm_messages: Vec<lattice_llm::Message> = match messages
-                .iter()
-                .map(convert_to_llm_message)
-                .collect::<Result<Vec<_>, String>>()
-            {
-                Ok(msgs) => msgs,
-                Err(e) => {
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Error,
-                        terminal_reason: Some(e),
-                        events: all_events,
-                    };
-                }
-            };
-
+            // Call the LLM (M-21: reuse incrementally maintained provider cache).
             let chat_request = lattice_llm::ChatRequest {
-                messages: llm_messages,
+                messages: llm_messages.clone(),
                 tools: enabled.definitions.clone(),
                 target: lattice_llm::ModelTarget {
                     model: request.model.clone(),
@@ -549,7 +549,18 @@ impl AgentLoop {
                         name: None,
                     };
                     messages.push(assistant_msg.clone());
-                    all_messages.push(assistant_msg);
+                    all_messages.push(assistant_msg.clone());
+                    if let Err(e) = append_llm_message(&mut llm_messages, &assistant_msg) {
+                        return AgentTurnResult {
+                            messages: all_messages,
+                            assistant_output: stream_result.assistant_content,
+                            usage: accumulated_usage,
+                            tool_results: tool_summaries,
+                            status: AgentTurnStatus::Error,
+                            terminal_reason: Some(e),
+                            events: all_events,
+                        };
+                    }
 
                     // Cancel checkpoint #3 (Plan 15-02 D-06 / D-08): the
                     // assistant tool-call message is committed above; observe
@@ -672,7 +683,18 @@ impl AgentLoop {
                             name: Some(call.name.clone()),
                         };
                         messages.push(tool_msg.clone());
-                        all_messages.push(tool_msg);
+                        all_messages.push(tool_msg.clone());
+                        if let Err(e) = append_llm_message(&mut llm_messages, &tool_msg) {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: stream_result.assistant_content.clone(),
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Error,
+                                terminal_reason: Some(e),
+                                events: all_events,
+                            };
+                        }
 
                         // Cancel checkpoint #5 (Plan 15-02 D-06 / D-07): the
                         // just-finished tool's `ToolCallStarted` /

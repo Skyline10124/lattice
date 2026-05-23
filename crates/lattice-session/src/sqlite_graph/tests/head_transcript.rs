@@ -445,7 +445,7 @@ fn head_transcript_linear_history_unchanged_by_topological_traversal() {
         ))
         .expect("first commit");
 
-    store
+    let commit2 = store
         .commit_turn(commit_input(
             "sess-1",
             vec![commit1.commit_id.clone()],
@@ -456,7 +456,7 @@ fn head_transcript_linear_history_unchanged_by_topological_traversal() {
     store
         .commit_turn(commit_input(
             "sess-1",
-            vec![store.log("sess-1").unwrap().last().unwrap().commit_id.clone()],
+            vec![commit2.commit_id.clone()],
             vec![user_msg("Turn 2"), assistant_msg("Response 2")],
         ))
         .expect("third commit");

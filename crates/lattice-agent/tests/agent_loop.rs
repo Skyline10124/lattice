@@ -318,3 +318,91 @@ async fn agent_loop_terminates_at_hard_cap_when_llm_loops_forever() {
     );
     assert_eq!(llm.call_count.load(Ordering::SeqCst), 200);
 }
+
+#[tokio::test]
+async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
+    struct CapturingMultiRoundLlm {
+        responses: std::sync::Mutex<Vec<lattice_llm::ChatResponse>>,
+        captured: std::sync::Mutex<Vec<lattice_llm::ChatRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for CapturingMultiRoundLlm {
+        async fn chat(
+            &self,
+            request: lattice_llm::ChatRequest,
+        ) -> Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.captured.lock().unwrap().push(request);
+            let mut responses = self.responses.lock().unwrap();
+            if responses.is_empty() {
+                return Err("no more fake responses".into());
+            }
+            Ok(responses.remove(0))
+        }
+    }
+
+    let llm = Arc::new(CapturingMultiRoundLlm {
+        responses: std::sync::Mutex::new(vec![
+            lattice_llm::ChatResponse {
+                content: String::new(),
+                reasoning_content: None,
+                tool_calls: Some(vec![lattice_llm::ToolCall {
+                    id: "call_1".to_string(),
+                    function: lattice_llm::FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: r#"{"path":"a.txt"}"#.to_string(),
+                    },
+                }]),
+                finish_reason: "tool_calls".to_string(),
+                model: "test-model".to_string(),
+                usage: None,
+            },
+            lattice_llm::ChatResponse {
+                content: "final answer".to_string(),
+                reasoning_content: None,
+                tool_calls: None,
+                finish_reason: "stop".to_string(),
+                model: "test-model".to_string(),
+                usage: None,
+            },
+        ]),
+        captured: std::sync::Mutex::new(Vec::new()),
+    });
+
+    let executor = Arc::new(FakeToolExecutor::new(vec!["tool body".to_string()]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm: llm.clone(),
+        tool_executor: executor,
+    });
+
+    let result = loop_inst
+        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .await;
+
+    assert_eq!(result.status, AgentTurnStatus::Completed);
+    assert_eq!(result.assistant_output, "final answer");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected two LLM rounds (tool call then final answer)"
+    );
+
+    let second = &captured[1];
+    assert_eq!(second.messages.len(), 3, "user + assistant tool-call + tool result");
+    assert_eq!(second.messages[0].role, lattice_llm::Role::User);
+    assert_eq!(second.messages[0].content, "hello");
+    assert_eq!(second.messages[1].role, lattice_llm::Role::Assistant);
+    assert!(
+        second.messages[1].tool_calls.is_some(),
+        "second-round request must include assistant tool-call message"
+    );
+    assert_eq!(second.messages[2].role, lattice_llm::Role::Tool);
+    assert_eq!(second.messages[2].content, "tool body");
+    assert_eq!(
+        second.messages[2].tool_call_id.as_deref(),
+        Some("call_1"),
+        "second-round request must include prior tool result (M-21)"
+    );
+}
