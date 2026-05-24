@@ -4,6 +4,22 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Phase 19 review fixes: CEP core / JSON-RPC wire — 2026-05-24
+
+Verified: `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lancet-executor` ✓ (44 tests + 1 doctest), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lancet-protocol` ✓ (46 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lattice-profile cep` ✓ (10 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo clippy -p lancet-executor -p lancet-protocol -p lattice-profile --all-targets -- -D warnings` ✓
+
+| # | 严重度 | 问题 | 修复 |
+|---|--------|------|------|
+| P19-CR-01 | CRITICAL | `LancetServer::run` 用 vector 截断追踪 cancellation sender，乱序完成时会丢掉仍在运行 handler 的 cancel handle | 改为按 call id 存储 `HashMap<u64, watch::Sender<bool>>`，task join 后只移除对应 id；新增乱序完成后 shutdown 仍能 cancel 剩余 handler 的回归测试 |
+| P19-CR-02 | HIGH | `EventSink::emit` 在 bounded event channel 上 `send().await`，普通 `call()` 不 drain events 时会死锁 | progress event 改为 best-effort `try_send` drop-on-full；新增 buffer=1 且不消费 events 的 call 完成测试 |
+| P19-CR-03 | MEDIUM | JSON-RPC helper / `wire_code()` / `to_jsonrpc_error()` 对标准错误码映射不一致 | `CepError` inherent helpers 统一复用 public constructors；新增 parse/method/params 标准 code 映射，`wire_code()` 与 `to_jsonrpc_error()` 共用同一映射函数 |
+| P19-CR-04 | MEDIUM | compile-fail doctest 因无效 `ImpactKind::ReadOnly` 失败，未证明 catalog sealing | doctest 改用有效 `ImpactKind::WorkspaceObservation`，现在失败点落在缺失 `CatalogMethod` bound |
+| P19-CR-05 | LOW | `[cep]` flatten extension 静默接受标量 typo | `CepSection` 改为自定义 deserialize，只保留 table-valued future sub-tables，拒绝 `cep.*` 标量 typo |
+
+文件: `crates/lancet-executor/src/transport.rs`, `crates/lancet-executor/src/registry.rs`, `crates/lancet-protocol/src/error.rs`, `crates/lattice-profile/src/schema.rs`
+
+---
+
 ## M-21 修复: AgentLoop 增量维护 LLM messages — 2026-05-23
 
 Verified: `cargo test -p lattice-agent --features test-utils` ✓, `cargo clippy -p lattice-agent --features test-utils --all-targets -- -D warnings` ✓

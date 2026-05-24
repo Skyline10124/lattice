@@ -9,6 +9,8 @@ description = "LANCET tool executor: concrete tool implementations (fs, shell, p
 [dependencies]
 lattice-llm = { workspace = true }
 lattice-tooling = { workspace = true }
+lancet-protocol = { workspace = true }
+schemars = { workspace = true }
 async-trait = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }

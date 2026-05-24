@@ -114,6 +114,7 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
                 system_path: None,
             },
             tools: lattice_profile::ToolsSection::default(),
+            cep: lattice_profile::CepSection::default(),
         },
         system_prompt: system_prompt.to_string(),
     }

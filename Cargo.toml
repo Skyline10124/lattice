@@ -55,6 +55,7 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
+schemars = "0.8"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }

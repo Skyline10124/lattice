@@ -107,6 +107,7 @@ The following capabilities are deferred beyond the current release:
 ## Cursor Cloud specific instructions
 
 - **Rust version**: The declared MSRV is 1.85 but locked transitive dependencies (e.g. `icu_*`, `time`) require Rust 1.88+. Use `rustup default stable` (currently 1.95) to satisfy all deps.
+- **Build dirs**: `.cargo/config.toml` pins `target-dir = "target"` and `TMPDIR = build/tmp` so agent/sandbox builds avoid `/tmp/cursor-sandbox-cache` disk quota errors. No manual `CARGO_TARGET_DIR`/`TMPDIR` exports needed for normal `cargo build` / `cargo test`.
 - **System dependency**: `libssl-dev` (and `pkg-config`) must be installed for the `openssl-sys` transitive dependency (pulled in via `reqwest`'s native-tls feature in the dependency graph).
 - **No external services needed**: All tests use mock/fake LLM clients. `cargo test` passes without any API keys or network access.
 - **Lint note**: `cargo clippy -- -D warnings` may flag new lints as Rust stable advances (e.g. `clippy::io_other_error` on 1.95). `cargo fmt --all --check` may also report diffs if rustfmt formatting rules have evolved since the code was last formatted.

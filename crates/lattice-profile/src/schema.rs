@@ -1,4 +1,6 @@
-use serde::{Deserialize, Serialize};
+use lancet_protocol::CepMode;
+use serde::{de, Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
 ///
@@ -12,6 +14,57 @@ pub struct AgentProfile {
     pub prompt: PromptSection,
     #[serde(default)]
     pub tools: ToolsSection,
+    #[serde(default)]
+    pub cep: CepSection,
+}
+
+/// Phase 19 `[cep]` profile section. Only `mode` is typed; future sub-tables
+/// (e.g. `[cep.command]`, `[cep.network]`) deserialize into `extensions`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CepSection {
+    #[serde(default = "default_cep_mode")]
+    pub mode: CepMode,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, toml::Value>,
+}
+
+fn default_cep_mode() -> CepMode {
+    CepMode::Enforce
+}
+
+impl Default for CepSection {
+    fn default() -> Self {
+        Self {
+            mode: default_cep_mode(),
+            extensions: BTreeMap::new(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CepSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut raw = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
+        let mode = match raw.remove("mode") {
+            Some(value) => value.try_into().map_err(de::Error::custom)?,
+            None => default_cep_mode(),
+        };
+
+        for (key, value) in &raw {
+            if !matches!(value, toml::Value::Table(_)) {
+                return Err(de::Error::custom(format!(
+                    "unknown scalar field `cep.{key}`; only `mode` and future sub-tables are supported"
+                )));
+            }
+        }
+
+        Ok(Self {
+            mode,
+            extensions: raw,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -342,6 +395,141 @@ tags = ["coding"]
 system = "hi"
 "#;
         assert!(parse(toml).is_err());
+    }
+
+    // ── CEP section ───────────────────────────────────────────────────
+
+    fn minimal_profile_prefix() -> &'static str {
+        r#"
+schema_version = 1
+
+[agent]
+name = "t"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+"#
+    }
+
+    #[test]
+    fn cep_defaults_to_enforce_when_section_absent() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Enforce);
+        assert!(profile.cep.extensions.is_empty());
+    }
+
+    #[test]
+    fn cep_parses_enforce_mode() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Enforce);
+    }
+
+    #[test]
+    fn cep_parses_warn_mode() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "warn"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Warn);
+    }
+
+    #[test]
+    fn cep_parses_off_mode() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "off"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Off);
+    }
+
+    #[test]
+    fn cep_rejects_invalid_mode() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "permissive"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn cep_rejects_scalar_extension_typos() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mod = "off"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(err.to_string().contains("cep.mod"), "got: {err}");
+    }
+
+    #[test]
+    fn cep_preserves_future_sub_tables_in_extensions() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.command]
+allow_shell = true
+
+[cep.network]
+host_allowlist = ["example.com"]
+
+[cep.observation]
+max_read_bytes = 4096
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Enforce);
+        assert!(profile.cep.extensions.contains_key("command"));
+        assert!(profile.cep.extensions.contains_key("network"));
+        assert!(profile.cep.extensions.contains_key("observation"));
+    }
+
+    #[test]
+    fn cep_serializes_future_sub_tables_flattened() {
+        let mut command = toml::map::Map::new();
+        command.insert("allow_shell".into(), toml::Value::Boolean(true));
+
+        let mut extensions = BTreeMap::new();
+        extensions.insert("command".into(), toml::Value::Table(command));
+
+        let section = CepSection {
+            mode: CepMode::Warn,
+            extensions,
+        };
+        let serialized = toml::to_string(&section).unwrap();
+        assert!(serialized.contains("mode = \"warn\""), "got: {serialized}");
+        assert!(serialized.contains("[command]"), "got: {serialized}");
+        assert!(!serialized.contains("extensions"), "got: {serialized}");
     }
 
     // ── Tools section defaults ────────────────────────────────────────

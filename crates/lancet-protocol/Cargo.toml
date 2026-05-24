@@ -4,8 +4,10 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET controlled maintenance protocol: Card, Envelope, Guard abstractions"
+description = "CEP (Controlled Execution Protocol) wire types: JSON-RPC 2.0 frames, envelopes, and typed errors"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+schemars = { workspace = true }
