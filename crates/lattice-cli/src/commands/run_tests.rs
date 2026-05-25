@@ -123,7 +123,10 @@ struct NoopToolExecutor;
 
 #[async_trait::async_trait]
 impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
-    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+    async fn execute(
+        &self,
+        _call: &lattice_llm::ToolCall,
+    ) -> Result<String, lattice_agent::ToolExecutionError> {
         Ok("no-op".to_string())
     }
 }
@@ -132,12 +135,7 @@ impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
 async fn run_integration_creates_session_and_returns_commit() {
     let temp = tempfile::tempdir().unwrap();
     let session_api = lattice_api::SessionApi::sqlite(temp.path());
-    let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
-        lattice_agent::AgentLoopConfig {
-            llm: std::sync::Arc::new(StubLlmClient),
-            tool_executor: std::sync::Arc::new(NoopToolExecutor),
-        },
-    ));
+    let llm = std::sync::Arc::new(StubLlmClient);
 
     let request = lattice_api::RunTurnRequest {
         input: "hello".to_string(),
@@ -146,9 +144,11 @@ async fn run_integration_creates_session_and_returns_commit() {
         model: Some("stub-model".to_string()),
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(temp.path().to_string_lossy().to_string()),
     };
 
-    let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+    let result = lattice_api::run_turn(session_api, request).await;
 
     match result {
         Ok(turn_result) => {
@@ -167,12 +167,7 @@ async fn run_integration_creates_session_and_returns_commit() {
 async fn run_integration_missing_session_returns_not_found() {
     let temp = tempfile::tempdir().unwrap();
     let session_api = lattice_api::SessionApi::sqlite(temp.path());
-    let agent_loop = std::sync::Arc::new(lattice_agent::AgentLoop::new(
-        lattice_agent::AgentLoopConfig {
-            llm: std::sync::Arc::new(StubLlmClient),
-            tool_executor: std::sync::Arc::new(NoopToolExecutor),
-        },
-    ));
+    let llm = std::sync::Arc::new(StubLlmClient);
 
     let request = lattice_api::RunTurnRequest {
         input: "hello".to_string(),
@@ -181,9 +176,11 @@ async fn run_integration_missing_session_returns_not_found() {
         model: Some("stub-model".to_string()),
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(temp.path().to_string_lossy().to_string()),
     };
 
-    let result = lattice_api::run_turn(session_api, agent_loop, request).await;
+    let result = lattice_api::run_turn(session_api, request).await;
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -196,47 +193,82 @@ async fn run_integration_missing_session_returns_not_found() {
 
 #[tokio::test]
 async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
-    // Regression: run_inner used to pass loaded_profile.package_dir
-    // (.lattice/agents/default) as the tool executor's project_root,
-    // which broke read_file/grep/etc for files outside that subdirectory.
     let workspace = tempfile::tempdir().unwrap();
     let ws = workspace.path();
+    std::env::set_current_dir(ws).unwrap();
 
-    // Create workspace content: src/lib.rs at the workspace root
     std::fs::create_dir_all(ws.join("src")).unwrap();
     std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
 
-    // Create profile directory that is a *subdirectory* of the workspace
     let profile_dir = ws.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
 
-    // Build tool executor with the *workspace root* (the fix), not profile_dir
-    let enabled = vec!["read_file".to_string()];
-    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
-        &ws.to_string_lossy(),
-        enabled,
-    )
-    .expect("executor creation must succeed");
-
-    // read_file("src/lib.rs") must resolve against workspace root, not profile_dir
-    let call = lattice_llm::ToolCall::new(
-        "test-call",
-        lattice_llm::FunctionCall::new("read_file", r#"{"path":"src/lib.rs"}"#),
+    let session_api = lattice_api::SessionApi::sqlite(ws.join("sessions"));
+    let llm: std::sync::Arc<dyn lattice_agent::LlmClient> = std::sync::Arc::new(
+        lattice_agent::testing::FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                lattice_llm::LlmEvent::ToolCallStart {
+                    id: "call_1".to_string(),
+                    name: "workspace.read_file".to_string(),
+                },
+                lattice_llm::LlmEvent::ToolCallDelta {
+                    id: "call_1".to_string(),
+                    arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+                },
+                lattice_llm::LlmEvent::ToolCallEnd {
+                    id: "call_1".to_string(),
+                },
+                lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
     );
-    use lattice_tooling::ToolExecutor as _;
-    let result = executor
-        .execute(&call)
+
+    let request = lattice_api::RunTurnRequest {
+        input: "read file".to_string(),
+        session_id: None,
+        profile: None,
+        model: Some("stub-model".to_string()),
+        loaded_profile: Some(lattice_profile::LoadedAgentProfile {
+            path: profile_dir.join("agent.toml"),
+            package_dir: profile_dir.clone(),
+            profile: lattice_profile::AgentProfile {
+                schema_version: 1,
+                agent: lattice_profile::AgentSection {
+                    name: "test".to_string(),
+                    model: "stub-model".to_string(),
+                    description: None,
+                },
+                prompt: lattice_profile::PromptSection {
+                    system: None,
+                    system_path: None,
+                },
+                tools: lattice_profile::ToolsSection {
+                    enabled: vec!["workspace.read_file".to_string()],
+                    ..Default::default()
+                },
+                cep: lattice_profile::CepSection::default(),
+            },
+            system_prompt: String::new(),
+        }),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.to_string_lossy().to_string()),
+    };
+
+    let result = lattice_api::run_turn(session_api, request)
         .await
-        .unwrap_or_else(|e| format!("Error: {e}"));
+        .expect("run_turn should succeed through API-owned CEP runtime");
 
     assert!(
-        result.contains("fn main()"),
-        "read_file must succeed via workspace root; got: {result}"
-    );
-    assert!(
-        !result.contains("outside the project root"),
-        "must not be rejected as out-of-root"
+        result
+            .tool_results
+            .iter()
+            .any(|tool| tool.ok && tool.name == "workspace.read_file"),
+        "expected successful workspace.read_file via workspace-root CEP runtime"
     );
 }
 

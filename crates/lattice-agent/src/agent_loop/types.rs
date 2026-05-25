@@ -2,7 +2,10 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lattice_llm::ToolDefinition;
 use lattice_session::{GraphMessage, HeadTranscript, TurnUsage};
+
+use super::traits::CepErrorPayload;
 
 /// Input for a single agent turn.
 #[derive(Debug, Clone)]
@@ -19,10 +22,8 @@ pub struct AgentTurnRequest {
     pub model: String,
     /// Optional provider override.
     pub provider: Option<String>,
-    /// Explicit tool names to enable for this turn.
-    pub enabled_tools: Vec<String>,
-    /// Project root for tool execution path containment.
-    pub project_root: String,
+    /// Pre-resolved tool definitions for this turn (assembled by the API layer).
+    pub tool_definitions: Vec<ToolDefinition>,
     /// Optional cancellation flag for external cancel support (D-09).
     /// When set to `true`, the loop terminates with `Cancelled` status.
     pub cancel_flag: Option<Arc<AtomicBool>>,
@@ -60,6 +61,8 @@ pub struct AgentToolResultSummary {
     pub output_len: usize,
     /// Optional error summary (first 200 chars of error output).
     pub error_summary: Option<String>,
+    /// Structured CEP error metadata when the executor adapter mapped a CEP failure.
+    pub cep_error: Option<CepErrorPayload>,
 }
 
 /// Result of a completed agent turn.
@@ -133,5 +136,34 @@ pub enum AgentTurnEvent {
     ModelFinished {
         finish_reason: String,
         usage: Option<TurnUsage>,
+    },
+    /// A CEP call has started on the embedded server (distinct from model-facing tool calls).
+    CepCallStarted {
+        call_id: u64,
+        method: String,
+        impact_kind: String,
+        audit_id: i64,
+        semantic_stage: String,
+        guard_stage: String,
+    },
+    /// A CEP call has finished on the embedded server.
+    CepCallFinished {
+        call_id: u64,
+        method: String,
+        impact_kind: String,
+        audit_id: i64,
+        ok: bool,
+        semantic_stage: String,
+        guard_stage: String,
+        error_code: Option<String>,
+    },
+    /// Staged bridge lifecycle guard metadata (Phase 20 only; not Guard L1 enforcement).
+    CepGuardVerdict {
+        call_id: u64,
+        method: String,
+        semantic_stage: String,
+        guard_stage: String,
+        policy_enforced: bool,
+        semantic_status: Option<String>,
     },
 }

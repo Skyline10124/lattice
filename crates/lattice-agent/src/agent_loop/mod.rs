@@ -1,8 +1,8 @@
 //! agent loop: sequences LLM calls and tool execution for a single turn.
 //!
 //! This module implements the stable public main-path `AgentLoop`. It uses
-//! `lattice-llm` types at the model boundary and `lattice-tooling::enabled_tools`
-//! for tool authorization.
+//! `lattice-llm` types at the model boundary; tool inventory is resolved
+//! upstream and passed in as pre-resolved definitions.
 
 mod messages;
 mod traits;
@@ -15,8 +15,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
-use lancet_executor::default_tool_definitions;
-use lattice_tooling::enabled_tools::{resolve_enabled_tools, EnabledTools};
 use tokio::time::Instant;
 
 use messages::{append_llm_message, graph_messages_to_llm};
@@ -30,7 +28,7 @@ use messages::{append_llm_message, graph_messages_to_llm};
 /// constraining legitimate long tasks).
 const MAX_TURN_ROUNDS: u32 = 200;
 
-pub use traits::{LlmClient, ToolCallExecutor};
+pub use traits::{CepErrorPayload, LlmClient, ToolCallExecutor, ToolExecutionError};
 pub use types::{
     AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus,
 };
@@ -74,30 +72,9 @@ impl AgentLoop {
     /// sequentially, and repeat until a final assistant response or terminal
     /// outcome.
     pub async fn run_turn(&self, request: AgentTurnRequest) -> AgentTurnResult {
-        // Resolve enabled tools (T-09-02: fail before LLM call)
-        let enabled = match resolve_enabled_tools(&request.enabled_tools, &default_tool_definitions()) {
-            Ok(tools) => tools,
-            Err(err) => {
-                return AgentTurnResult {
-                    messages: Vec::new(),
-                    assistant_output: String::new(),
-                    usage: TurnUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
-                    },
-                    tool_results: Vec::new(),
-                    status: AgentTurnStatus::Error,
-                    terminal_reason: Some(format!("unknown enabled tools: {err}")),
-                    events: Vec::new(),
-                };
-            }
-        };
-
         // Compute cooperative deadline from request.timeout (D-13, Phase 17)
         let deadline = request.timeout.map(|d| Instant::now() + d);
-        self.run_turn_inner(&request, &enabled, None, deadline)
-            .await
+        self.run_turn_inner(&request, None, deadline).await
     }
 
     /// Execute a single turn with a live `AgentTurnEvent` mirror channel.
@@ -132,31 +109,9 @@ impl AgentLoop {
         request: AgentTurnRequest,
         events: tokio::sync::mpsc::Sender<AgentTurnEvent>,
     ) -> AgentTurnResult {
-        // Resolve enabled tools (T-09-02: fail before LLM call) — same shape
-        // as `run_turn`, no live emission yet because the turn has not started.
-        let enabled = match resolve_enabled_tools(&request.enabled_tools, &default_tool_definitions()) {
-            Ok(tools) => tools,
-            Err(err) => {
-                return AgentTurnResult {
-                    messages: Vec::new(),
-                    assistant_output: String::new(),
-                    usage: TurnUsage {
-                        prompt_tokens: 0,
-                        completion_tokens: 0,
-                        total_tokens: 0,
-                    },
-                    tool_results: Vec::new(),
-                    status: AgentTurnStatus::Error,
-                    terminal_reason: Some(format!("unknown enabled tools: {err}")),
-                    events: Vec::new(),
-                };
-            }
-        };
-
         // Compute cooperative deadline from request.timeout (D-13, Phase 17)
         let deadline = request.timeout.map(|d| Instant::now() + d);
-        self.run_turn_inner(&request, &enabled, Some(&events), deadline)
-            .await
+        self.run_turn_inner(&request, Some(&events), deadline).await
     }
 
     /// Inner turn execution (called by `run_turn` and `run_turn_live`).
@@ -172,12 +127,11 @@ impl AgentLoop {
     async fn run_turn_inner(
         &self,
         request: &AgentTurnRequest,
-        enabled: &EnabledTools,
         live_events: Option<&tokio::sync::mpsc::Sender<AgentTurnEvent>>,
         deadline: Option<Instant>,
     ) -> AgentTurnResult {
         // Build initial messages from transcript + user input
-        let mut messages = self.build_messages(request, enabled);
+        let mut messages = self.build_messages(request);
 
         let mut llm_messages = match graph_messages_to_llm(&messages) {
             Ok(msgs) => msgs,
@@ -247,7 +201,7 @@ impl AgentLoop {
             // Call the LLM (M-21: reuse incrementally maintained provider cache).
             let chat_request = lattice_llm::ChatRequest {
                 messages: llm_messages.clone(),
-                tools: enabled.definitions.clone(),
+                tools: request.tool_definitions.clone(),
                 target: lattice_llm::ModelTarget {
                     model: request.model.clone(),
                     provider: request.provider.clone(),
@@ -642,9 +596,9 @@ impl AgentLoop {
                                 };
                             }
                         };
-                        let (ok, tool_content) = match tool_result {
-                            Ok(output) => (true, output),
-                            Err(error) => (false, error),
+                        let (ok, tool_content, cep_error) = match tool_result {
+                            Ok(output) => (true, output, None),
+                            Err(error) => (false, error.message.clone(), error.cep_error.clone()),
                         };
 
                         let error_summary = if ok {
@@ -672,6 +626,7 @@ impl AgentLoop {
                             ok,
                             output_len: tool_content.len(),
                             error_summary,
+                            cep_error,
                         });
 
                         // Full tool result as GraphMessage (D-23..D-26: no summarization)
@@ -988,11 +943,7 @@ impl AgentLoop {
 
     /// Build the initial message list from the transcript, system prompt,
     /// and current user input (D-11).
-    fn build_messages(
-        &self,
-        request: &AgentTurnRequest,
-        _enabled: &EnabledTools,
-    ) -> Vec<GraphMessage> {
+    fn build_messages(&self, request: &AgentTurnRequest) -> Vec<GraphMessage> {
         let mut messages = Vec::new();
 
         // System prompt first (if present)

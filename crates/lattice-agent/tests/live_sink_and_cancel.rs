@@ -15,15 +15,23 @@ use std::sync::Mutex;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
-    ToolCallExecutor,
+    ToolCallExecutor, ToolExecutionError,
 };
-use lattice_llm::{LlmEvent, ToolCall};
+use lattice_llm::{LlmEvent, ToolCall, ToolDefinition};
 use lattice_session::HeadTranscript;
 
 // ---------------------------------------------------------------------------
 // Test helpers (duplicated from streaming_delta.rs — Rust integration tests
 // don't share helpers across files).
 // ---------------------------------------------------------------------------
+
+fn read_file_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "workspace.read_file",
+        "Read a file",
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+    )
+}
 
 /// Build a minimal `AgentTurnRequest` with no cancel flag and no timeout.
 fn make_request(user_input: &str) -> AgentTurnRequest {
@@ -38,8 +46,7 @@ fn make_request(user_input: &str) -> AgentTurnRequest {
         system_prompt: None,
         model: "test-model".to_string(),
         provider: None,
-        enabled_tools: vec!["read_file".to_string()],
-        project_root: "/tmp".to_string(),
+        tool_definitions: vec![read_file_tool_definition()],
         cancel_flag: None,
         timeout: None,
     }
@@ -58,8 +65,7 @@ fn make_request_with_cancel(user_input: &str, flag: Arc<AtomicBool>) -> AgentTur
         system_prompt: None,
         model: "test-model".to_string(),
         provider: None,
-        enabled_tools: vec!["read_file".to_string()],
-        project_root: "/tmp".to_string(),
+        tool_definitions: vec![read_file_tool_definition()],
         cancel_flag: Some(flag),
         timeout: None,
     }
@@ -98,12 +104,12 @@ async fn drive_run_turn_live(
 // ---------------------------------------------------------------------------
 
 struct FakeToolExecutor {
-    results: Mutex<VecDeque<Result<String, String>>>,
+    results: Mutex<VecDeque<Result<String, ToolExecutionError>>>,
     execution_order: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeToolExecutor {
-    fn new(results: Vec<Result<String, String>>) -> Self {
+    fn new(results: Vec<Result<String, ToolExecutionError>>) -> Self {
         Self {
             results: Mutex::new(VecDeque::from(results)),
             execution_order: Arc::new(Mutex::new(Vec::new())),
@@ -113,13 +119,12 @@ impl FakeToolExecutor {
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for FakeToolExecutor {
-    async fn execute(&self, call: &ToolCall) -> Result<String, String> {
+    async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
         self.execution_order.lock().unwrap().push(call.id.clone());
         let mut results = self.results.lock().unwrap();
         match results.pop_front() {
-            Some(Ok(output)) => Ok(output),
-            Some(Err(msg)) => Err(msg),
-            None => Err("no more fake results".to_string()),
+            Some(result) => result,
+            None => Err(ToolExecutionError::simple("no more fake results")),
         }
     }
 }
@@ -148,7 +153,7 @@ impl CancelOnFirstTool {
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for CancelOnFirstTool {
-    async fn execute(&self, call: &ToolCall) -> Result<String, String> {
+    async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
         if !self.fired.swap(true, Ordering::Relaxed) {
             self.cancel.store(true, Ordering::Relaxed);
         }
@@ -1156,7 +1161,7 @@ struct HangingToolExecutor;
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for HangingToolExecutor {
-    async fn execute(&self, _call: &ToolCall) -> Result<String, String> {
+    async fn execute(&self, _call: &ToolCall) -> Result<String, ToolExecutionError> {
         futures::future::pending::<()>().await;
         unreachable!()
     }
@@ -1169,7 +1174,7 @@ async fn scenario_08c_timeout_during_tool_execution_preserves_state() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "call_1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "call_1".to_string(),

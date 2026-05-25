@@ -44,10 +44,7 @@ pub(crate) fn append_llm_message(
 pub(crate) fn graph_messages_to_llm(
     messages: &[GraphMessage],
 ) -> Result<Vec<lattice_llm::Message>, String> {
-    messages
-        .iter()
-        .map(convert_to_llm_message)
-        .collect()
+    messages.iter().map(convert_to_llm_message).collect()
 }
 
 #[cfg(test)]

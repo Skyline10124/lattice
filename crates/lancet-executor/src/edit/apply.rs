@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use lattice_tooling::{ToolLimits, ToolError};
+use lattice_tooling::{ToolError, ToolLimits};
 
 use super::hash::content_hash;
 use super::parser::parse_patch_document;

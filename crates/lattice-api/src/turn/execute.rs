@@ -1,11 +1,15 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use lattice_agent::{AgentLoop, AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
+#[cfg(test)]
+use lattice_agent::AgentLoop;
+use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 
 use super::collector::RunTurnCollector;
-use super::mapping::map_status;
+use super::lancet::build_production_turn_deps;
+use super::llm::RealLlmClient;
+use super::mapping::{map_status, resolve_project_root};
 use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream, TurnUsageSummary};
 use crate::session::{Result, SessionApi};
 
@@ -74,16 +78,8 @@ pub(super) fn derive_terminal_event(result: &AgentTurnResult) -> Option<TurnEven
 }
 
 /// Execute a turn and return its final result once it has been committed.
-///
-/// This is the synchronous facade: callers get a single
-/// [`RunTurnResult`] after the turn completes. Internally this drains the
-/// live [`stream_turn`] event stream via [`RunTurnCollector`].
-pub async fn run_turn(
-    session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
-    request: RunTurnRequest,
-) -> Result<RunTurnResult> {
-    let mut stream = stream_turn(session, agent_loop, request).await?;
+pub async fn run_turn(session: SessionApi, request: RunTurnRequest) -> Result<RunTurnResult> {
+    let mut stream = stream_turn(session, request).await?;
     let mut collector = RunTurnCollector::new();
     while let Some(event) = stream.next().await {
         collector.observe(event)?;
@@ -124,17 +120,108 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
             finish_reason,
             usage: usage.map(TurnUsageSummary::from),
         },
+        AgentTurnEvent::CepCallStarted {
+            call_id,
+            method,
+            impact_kind,
+            audit_id,
+            semantic_stage,
+            guard_stage,
+        } => TurnEvent::CepCallStarted {
+            call_id,
+            method,
+            impact_kind,
+            audit_id,
+            semantic_stage,
+            guard_stage,
+        },
+        AgentTurnEvent::CepCallFinished {
+            call_id,
+            method,
+            impact_kind,
+            audit_id,
+            ok,
+            semantic_stage,
+            guard_stage,
+            error_code,
+        } => TurnEvent::CepCallFinished {
+            call_id,
+            method,
+            impact_kind,
+            audit_id,
+            ok,
+            semantic_stage,
+            guard_stage,
+            error_code,
+        },
+        AgentTurnEvent::CepGuardVerdict {
+            call_id,
+            method,
+            semantic_stage,
+            guard_stage,
+            policy_enforced,
+            semantic_status,
+        } => TurnEvent::CepGuardVerdict {
+            call_id,
+            method,
+            semantic_stage,
+            guard_stage,
+            policy_enforced,
+            semantic_status,
+        },
     }
 }
 
+fn enabled_tools(request: &RunTurnRequest) -> Vec<String> {
+    request
+        .loaded_profile
+        .as_ref()
+        .map(|lp| lp.profile.tools.enabled.clone())
+        .unwrap_or_default()
+}
+
+fn production_llm(request: &RunTurnRequest) -> Arc<dyn lattice_agent::LlmClient> {
+    if let Some(llm) = request.test_llm.clone() {
+        return llm;
+    }
+    Arc::new(RealLlmClient)
+}
+
 /// Execute a turn and return its events as a live stream.
-///
-/// Startup failures are returned as `Result::Err`; runtime outcomes are
-/// emitted as [`TurnEvent`] values within the stream.
-pub async fn stream_turn(
+pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
+    let project_root = resolve_project_root(&request);
+    let deps = build_production_turn_deps(
+        &project_root,
+        &enabled_tools(&request),
+        production_llm(&request),
+        request.test_llm.is_some(),
+    )?;
+    super::live::stream_turn_live(session, request, deps).await
+}
+
+/// Test-only stream entry point with a prebuilt AgentLoop.
+#[cfg(test)]
+pub async fn stream_turn_with_agent(
     session: SessionApi,
     agent_loop: Arc<AgentLoop>,
     request: RunTurnRequest,
+    tool_definitions: Vec<lattice_llm::ToolDefinition>,
 ) -> Result<TurnEventStream> {
-    super::live::stream_turn_live(session, agent_loop, request).await
+    super::live::stream_turn_live_with_agent(session, agent_loop, request, tool_definitions).await
+}
+
+/// Test-only run entry point with a prebuilt AgentLoop.
+#[cfg(test)]
+pub async fn run_turn_with_agent(
+    session: SessionApi,
+    agent_loop: Arc<AgentLoop>,
+    request: RunTurnRequest,
+    tool_definitions: Vec<lattice_llm::ToolDefinition>,
+) -> Result<RunTurnResult> {
+    let mut stream = stream_turn_with_agent(session, agent_loop, request, tool_definitions).await?;
+    let mut collector = RunTurnCollector::new();
+    while let Some(event) = stream.next().await {
+        collector.observe(event)?;
+    }
+    collector.finish()
 }

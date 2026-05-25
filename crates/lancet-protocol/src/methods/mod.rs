@@ -14,7 +14,10 @@ pub use workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile};
 
 mod sealed {
     use super::{
-        command::Run, envelope::Declare, external::Fetch, session::TodoWrite,
+        command::Run,
+        envelope::Declare,
+        external::Fetch,
+        session::TodoWrite,
         workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile},
     };
     use crate::method::sealed::Sealed;

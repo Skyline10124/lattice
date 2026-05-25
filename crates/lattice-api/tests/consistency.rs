@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
+use lattice_agent::LlmClient;
 use lattice_api::{
     collect_turn_result_from_events, run_turn, stream_turn, RunTurnRequest, RunTurnResult,
     RunTurnStatus, SessionApi, TurnEvent, TurnUsageSummary,
@@ -15,7 +15,6 @@ use lattice_api::{
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
-use lancet_executor::DefaultToolExecutor;
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {
@@ -126,23 +125,8 @@ enabled = {enabled:?}
     }
 }
 
-fn build_agent_loop(
-    llm: Arc<dyn LlmClient>,
-    workspace_root: &std::path::Path,
-    enabled_tools: &[&str],
-) -> Arc<AgentLoop> {
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let executor =
-        DefaultToolExecutor::for_project_root(&workspace_root.to_string_lossy(), enabled)
-            .expect("executor creation must succeed");
-
-    Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm,
-        tool_executor: Arc::new(executor),
-    }))
-}
-
-fn make_request(ws: &Workspace, input: &str) -> RunTurnRequest {
+fn make_request(ws: &Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurnRequest {
+    std::env::set_current_dir(&ws.root).expect("set workspace cwd");
     RunTurnRequest {
         input: input.to_string(),
         session_id: None,
@@ -150,49 +134,40 @@ fn make_request(ws: &Workspace, input: &str) -> RunTurnRequest {
         model: None,
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
     }
 }
 
-fn build_agent_loop_with_events(
-    ws: &Workspace,
-    llm_events: Vec<LlmEvent>,
-    enabled_tools: &[&str],
-) -> Arc<AgentLoop> {
-    let llm: Arc<dyn LlmClient> = Arc::new(
+fn llm_with_events(llm_events: Vec<LlmEvent>) -> Arc<dyn LlmClient> {
+    Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(llm_events)
             .build(),
-    );
-    build_agent_loop(llm, &ws.root, enabled_tools)
+    )
 }
 
-fn build_agent_loop_with_rounds(
-    ws: &Workspace,
-    rounds: Vec<Vec<LlmEvent>>,
-    enabled_tools: &[&str],
-) -> Arc<AgentLoop> {
+fn llm_with_rounds(rounds: Vec<Vec<LlmEvent>>) -> Arc<dyn LlmClient> {
     let mut builder = FakeStreamingLlmClient::builder();
     for round in rounds {
         builder = builder.push_events(round);
     }
-    let llm: Arc<dyn LlmClient> = Arc::new(builder.build());
-    build_agent_loop(llm, &ws.root, enabled_tools)
+    Arc::new(builder.build())
 }
 
 async fn assert_run_equals_collector(
     ws: &Workspace,
     llm_events: Vec<LlmEvent>,
-    enabled_tools: &[&str],
+    _enabled_tools: &[&str],
     input: &str,
 ) {
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_agent = build_agent_loop_with_events(ws, llm_events.clone(), enabled_tools);
-    let request = make_request(ws, input);
+    let stream_request = make_request(ws, input, llm_with_events(llm_events.clone()));
 
-    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
         .expect("stream_turn must start")
         .collect()
@@ -204,8 +179,8 @@ async fn assert_run_equals_collector(
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_agent = build_agent_loop_with_events(ws, llm_events, enabled_tools);
-    let run_result = run_turn(run_session, run_agent, request)
+    let run_request = make_request(ws, input, llm_with_events(llm_events));
+    let run_result = run_turn(run_session, run_request)
         .await
         .expect("run_turn must succeed");
 
@@ -276,10 +251,9 @@ async fn consistency_error_after_partial_token() {
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_agent = build_agent_loop_with_events(&ws, streaming_events.clone(), &[]);
-    let request = make_request(&ws, "hello");
+    let stream_request = make_request(&ws, "hello", llm_with_events(streaming_events.clone()));
 
-    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
         .expect("stream_turn must start")
         .collect()
@@ -290,8 +264,8 @@ async fn consistency_error_after_partial_token() {
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_agent = build_agent_loop_with_events(&ws, streaming_events, &[]);
-    let run_result = run_turn(run_session, run_agent, request).await.unwrap();
+    let run_request = make_request(&ws, "hello", llm_with_events(streaming_events));
+    let run_result = run_turn(run_session, run_request).await.unwrap();
 
     assert_run_results_equivalent(&collected, &run_result);
     assert_eq!(run_result.status, RunTurnStatus::Error);
@@ -311,12 +285,12 @@ async fn consistency_error_after_partial_token() {
 
 #[tokio::test]
 async fn consistency_tool_call_path() {
-    let ws = setup_workspace(&["read_file"]);
+    let ws = setup_workspace(&["workspace.read_file"]);
 
     let round1_events = vec![
         LlmEvent::ToolCallStart {
             id: "call_1".to_string(),
-            name: "read_file".to_string(),
+            name: "workspace.read_file".to_string(),
         },
         LlmEvent::ToolCallDelta {
             id: "call_1".to_string(),
@@ -354,10 +328,9 @@ async fn consistency_tool_call_path() {
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_agent = build_agent_loop_with_rounds(&ws, all_events.clone(), &["read_file"]);
-    let request = make_request(&ws, "Read src/lib.rs");
+    let stream_request = make_request(&ws, "Read src/lib.rs", llm_with_rounds(all_events.clone()));
 
-    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_agent, request.clone())
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
         .expect("stream_turn must start")
         .collect()
@@ -368,8 +341,8 @@ async fn consistency_tool_call_path() {
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_agent = build_agent_loop_with_rounds(&ws, all_events, &["read_file"]);
-    let run_result = run_turn(run_session, run_agent, request).await.unwrap();
+    let run_request = make_request(&ws, "Read src/lib.rs", llm_with_rounds(all_events));
+    let run_result = run_turn(run_session, run_request).await.unwrap();
 
     assert_run_results_equivalent(&collected, &run_result);
     assert_eq!(run_result.status, RunTurnStatus::Completed);
@@ -400,15 +373,10 @@ async fn stream_turn_emits_activity_before_commit() {
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
-    let llm: Arc<dyn LlmClient> = Arc::new(
-        FakeStreamingLlmClient::builder()
-            .push_events(streaming_events)
-            .build(),
-    );
-    let agent_loop = build_agent_loop(llm, &ws.root, &[]);
-    let request = make_request(&ws, "hi");
+    let llm = llm_with_events(streaming_events);
+    let request = make_request(&ws, "hi", llm);
 
-    let events: Vec<TurnEvent> = stream_turn(session_api, agent_loop, request)
+    let events: Vec<TurnEvent> = stream_turn(session_api, request)
         .await
         .expect("stream_turn must start")
         .collect()

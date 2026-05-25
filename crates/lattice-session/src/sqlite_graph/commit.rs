@@ -32,8 +32,7 @@ impl SqliteSessionGraphStore {
 
         // All reachable commits in topological order (M-11): includes merge
         // parents, not just first-parent ancestry.
-        let commit_ids =
-            self.collect_reachable_commits_topological(&conn, &parent_commit_id)?;
+        let commit_ids = self.collect_reachable_commits_topological(&conn, &parent_commit_id)?;
 
         // Batch-load message IDs per commit, then all messages in two queries
         // (same pattern as log_impl tool_message_count resolution).

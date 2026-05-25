@@ -21,7 +21,7 @@ pub mod methods;
 // Public re-exports of common types
 pub use catalog::{catalog, CATALOG};
 pub use envelope::{
-    BaseExecutionEnvelope, CepMode, Capability, Constraints, ExecutionEnvelope, GuardVerdict,
+    BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, GuardVerdict,
     Impact, ImpactKind, Intent, OnFailure, Scope, VerifyCommand,
 };
 pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability};

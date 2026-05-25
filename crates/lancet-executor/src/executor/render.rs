@@ -40,7 +40,7 @@ pub(super) fn render_file_slice(
     rendered.join("\n")
 }
 
-pub(super) fn render_todos(args: &serde_json::Value) -> Result<String, String> {
+pub(crate) fn render_todos(args: &serde_json::Value) -> Result<String, String> {
     let todos = args
         .get("todos")
         .and_then(|v| v.as_array())

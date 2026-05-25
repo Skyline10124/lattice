@@ -2,9 +2,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use lattice_agent::{
-    AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, LlmClient, ToolCallExecutor,
+    AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, CepErrorPayload, LlmClient,
+    ToolCallExecutor, ToolExecutionError,
 };
+use lattice_llm::ToolDefinition;
 use lattice_session::{GraphMessage, HeadTranscript};
+
+fn read_file_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "workspace.read_file",
+        "Read a file",
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+    )
+}
 
 struct FakeLlm {
     responses: std::sync::Mutex<Vec<Result<lattice_llm::ChatResponse, String>>>,
@@ -34,11 +44,11 @@ impl LlmClient for FakeLlm {
 }
 
 struct FakeToolExecutor {
-    results: std::sync::Mutex<Vec<String>>,
+    results: std::sync::Mutex<Vec<Result<String, ToolExecutionError>>>,
 }
 
 impl FakeToolExecutor {
-    fn new(results: Vec<String>) -> Self {
+    fn new(results: Vec<Result<String, ToolExecutionError>>) -> Self {
         Self {
             results: std::sync::Mutex::new(results),
         }
@@ -47,16 +57,16 @@ impl FakeToolExecutor {
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for FakeToolExecutor {
-    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, ToolExecutionError> {
         let mut results = self.results.lock().unwrap();
         if results.is_empty() {
-            return Err("no more fake results".to_string());
+            return Err(ToolExecutionError::simple("no more fake results"));
         }
-        Ok(results.remove(0))
+        results.remove(0)
     }
 }
 
-fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnRequest {
+fn make_request(user_input: &str, tool_definitions: Vec<ToolDefinition>) -> AgentTurnRequest {
     AgentTurnRequest {
         session_id: "test-session".to_string(),
         transcript: HeadTranscript {
@@ -68,8 +78,7 @@ fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnReques
         system_prompt: None,
         model: "test-model".to_string(),
         provider: None,
-        enabled_tools,
-        project_root: "/tmp".to_string(),
+        tool_definitions,
         cancel_flag: None,
         timeout: None,
     }
@@ -78,7 +87,7 @@ fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnReques
 fn make_request_with_transcript(
     user_input: &str,
     transcript_messages: Vec<GraphMessage>,
-    enabled_tools: Vec<String>,
+    tool_definitions: Vec<ToolDefinition>,
 ) -> AgentTurnRequest {
     AgentTurnRequest {
         session_id: "test-session".to_string(),
@@ -91,8 +100,7 @@ fn make_request_with_transcript(
         system_prompt: None,
         model: "test-model".to_string(),
         provider: None,
-        enabled_tools,
-        project_root: "/tmp".to_string(),
+        tool_definitions,
         cancel_flag: None,
         timeout: None,
     }
@@ -162,7 +170,7 @@ async fn agent_loop_builds_messages_from_transcript_and_user_input() {
     let request = make_request_with_transcript(
         "current question",
         transcript_messages,
-        vec!["read_file".to_string()],
+        vec![read_file_tool_definition()],
     );
 
     let result = loop_inst.run_turn(request).await;
@@ -215,7 +223,7 @@ async fn agent_loop_prepends_system_prompt_when_present() {
         tool_executor: executor,
     });
 
-    let mut request = make_request("hello", vec!["read_file".to_string()]);
+    let mut request = make_request("hello", vec![read_file_tool_definition()]);
     request.system_prompt = Some("You are a helpful assistant.".to_string());
 
     let result = loop_inst.run_turn(request).await;
@@ -227,36 +235,6 @@ async fn agent_loop_prepends_system_prompt_when_present() {
     assert_eq!(captured.messages[0].content, "You are a helpful assistant.");
     assert_eq!(captured.messages[1].role, lattice_llm::Role::User);
     assert_eq!(captured.messages[1].content, "hello");
-}
-
-#[tokio::test]
-async fn agent_loop_unknown_enabled_tools_fails_before_llm_call() {
-    let llm = Arc::new(FakeLlm::new(vec![]));
-    let executor = Arc::new(FakeToolExecutor::new(vec![]));
-    let loop_inst = AgentLoop::new(AgentLoopConfig {
-        llm,
-        tool_executor: executor,
-    });
-
-    let request = make_request(
-        "hello",
-        vec!["read_file".to_string(), "nonexistent_tool".to_string()],
-    );
-
-    let result = loop_inst.run_turn(request).await;
-    assert_eq!(result.status, AgentTurnStatus::Error);
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("unknown enabled tools"));
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("nonexistent_tool"));
-    assert!(result.messages.is_empty());
-    assert_eq!(result.assistant_output, "");
 }
 
 struct InfiniteToolCallLlm {
@@ -276,7 +254,7 @@ impl LlmClient for InfiniteToolCallLlm {
             tool_calls: Some(vec![lattice_llm::ToolCall {
                 id: format!("call_{n}"),
                 function: lattice_llm::FunctionCall {
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                     arguments: r#"{"path": "x.txt"}"#.to_string(),
                 },
             }]),
@@ -291,7 +269,7 @@ struct InfiniteToolExecutor;
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for InfiniteToolExecutor {
-    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
+    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, ToolExecutionError> {
         Ok("ok".to_string())
     }
 }
@@ -307,7 +285,7 @@ async fn agent_loop_terminates_at_hard_cap_when_llm_loops_forever() {
         tool_executor: executor,
     });
 
-    let request = make_request("loop forever", vec!["read_file".to_string()]);
+    let request = make_request("loop forever", vec![read_file_tool_definition()]);
     let result = loop_inst.run_turn(request).await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -349,7 +327,7 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
                 tool_calls: Some(vec![lattice_llm::ToolCall {
                     id: "call_1".to_string(),
                     function: lattice_llm::FunctionCall {
-                        name: "read_file".to_string(),
+                        name: "workspace.read_file".to_string(),
                         arguments: r#"{"path":"a.txt"}"#.to_string(),
                     },
                 }]),
@@ -369,14 +347,14 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
         captured: std::sync::Mutex::new(Vec::new()),
     });
 
-    let executor = Arc::new(FakeToolExecutor::new(vec!["tool body".to_string()]));
+    let executor = Arc::new(FakeToolExecutor::new(vec![Ok("tool body".to_string())]));
     let loop_inst = AgentLoop::new(AgentLoopConfig {
         llm: llm.clone(),
         tool_executor: executor,
     });
 
     let result = loop_inst
-        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .run_turn(make_request("hello", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -390,7 +368,11 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
     );
 
     let second = &captured[1];
-    assert_eq!(second.messages.len(), 3, "user + assistant tool-call + tool result");
+    assert_eq!(
+        second.messages.len(),
+        3,
+        "user + assistant tool-call + tool result"
+    );
     assert_eq!(second.messages[0].role, lattice_llm::Role::User);
     assert_eq!(second.messages[0].content, "hello");
     assert_eq!(second.messages[1].role, lattice_llm::Role::Assistant);
@@ -405,4 +387,83 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
         Some("call_1"),
         "second-round request must include prior tool result (M-21)"
     );
+}
+
+#[tokio::test]
+async fn tool_execution_error_structured_payload_preserved() {
+    let cep_error = CepErrorPayload {
+        code: -32042,
+        message: "path outside workspace".to_string(),
+        data: serde_json::json!({"path": "../secret"}),
+        retriability: "Permanent".to_string(),
+    };
+
+    let llm = Arc::new(FakeLlm::new(vec![
+        Ok(lattice_llm::ChatResponse {
+            content: String::new(),
+            reasoning_content: None,
+            tool_calls: Some(vec![lattice_llm::ToolCall {
+                id: "call_err".to_string(),
+                function: lattice_llm::FunctionCall {
+                    name: "workspace.read_file".to_string(),
+                    arguments: r#"{"path":"../secret"}"#.to_string(),
+                },
+            }]),
+            finish_reason: "tool_calls".to_string(),
+            model: "test-model".to_string(),
+            usage: None,
+        }),
+        Ok(lattice_llm::ChatResponse {
+            content: "handled error".to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            finish_reason: "stop".to_string(),
+            model: "test-model".to_string(),
+            usage: None,
+        }),
+    ]));
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![Err(ToolExecutionError {
+        message: "path outside workspace".to_string(),
+        cep_error: Some(cep_error.clone()),
+    })]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let result = loop_inst
+        .run_turn(make_request(
+            "read secret",
+            vec![read_file_tool_definition()],
+        ))
+        .await;
+
+    assert_eq!(result.status, AgentTurnStatus::Completed);
+    assert_eq!(result.tool_results.len(), 1);
+    let summary = &result.tool_results[0];
+    assert!(!summary.ok);
+    assert_eq!(
+        summary.error_summary.as_deref(),
+        Some("path outside workspace")
+    );
+    assert_eq!(summary.cep_error.as_ref(), Some(&cep_error));
+
+    let finished = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            lattice_agent::AgentTurnEvent::ToolCallFinished {
+                id,
+                name,
+                ok,
+                error_summary,
+                ..
+            } if id == "call_err" => Some((name.clone(), *ok, error_summary.clone())),
+            _ => None,
+        })
+        .expect("ToolCallFinished event for failed tool");
+    assert_eq!(finished.0, "workspace.read_file");
+    assert!(!finished.1);
+    assert_eq!(finished.2.as_deref(), Some("path outside workspace"));
 }

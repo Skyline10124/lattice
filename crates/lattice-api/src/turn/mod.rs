@@ -8,12 +8,17 @@
 
 mod collector;
 mod execute;
+mod lancet;
 mod live;
+mod llm;
 mod mapping;
 mod types;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lancet_tests;
 
 #[cfg(test)]
 mod live_tests;
@@ -24,3 +29,6 @@ pub use types::{
     RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
     TurnEventStream, TurnUsageSummary,
 };
+
+#[doc(hidden)]
+pub use lancet::LancetExecutorAdapter;

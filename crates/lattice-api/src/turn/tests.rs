@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
+use lattice_agent::LlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore, TurnCommitStatus, TurnUsage};
 
@@ -14,10 +14,12 @@ use crate::session::{CreateSessionRequest, SessionApi};
 
 struct TestFixture {
     _dir: tempfile::TempDir,
+    project_root: String,
     sessions_path: std::path::PathBuf,
     session_api: SessionApi,
     store: SqliteSessionGraphStore,
-    agent_loop: Arc<AgentLoop>,
+    llm: Arc<dyn LlmClient>,
+    enabled_tools: Vec<String>,
 }
 
 fn happy_events() -> Vec<LlmEvent> {
@@ -46,24 +48,14 @@ fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> TestFixture
     let session_api = SessionApi::sqlite(&sessions_path);
     let store = SqliteSessionGraphStore::new(&sessions_path);
 
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
-        &root.to_string_lossy(),
-        enabled,
-    )
-    .expect("executor creation must succeed");
-
-    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm,
-        tool_executor: Arc::new(executor),
-    }));
-
     TestFixture {
         _dir: dir,
+        project_root: root.to_string_lossy().to_string(),
         sessions_path,
         session_api,
         store,
-        agent_loop,
+        llm,
+        enabled_tools: enabled_tools.iter().map(|s| s.to_string()).collect(),
     }
 }
 
@@ -84,6 +76,8 @@ fn make_request(input: &str) -> RunTurnRequest {
         model: Some("sonnet".to_string()),
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: None,
+        test_project_root: None,
     }
 }
 
@@ -95,13 +89,23 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         model: Some("sonnet".to_string()),
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: None,
+        test_project_root: None,
     }
 }
 
 fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::LoadedAgentProfile {
+    make_loaded_profile_with_tools(model, system_prompt, &[])
+}
+
+fn make_loaded_profile_with_tools(
+    model: &str,
+    system_prompt: &str,
+    enabled_tools: &[String],
+) -> lattice_profile::LoadedAgentProfile {
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),
-        package_dir: std::path::PathBuf::from("/tmp/test"),
+        package_dir: std::env::current_dir().unwrap_or_else(|_| "/tmp".into()),
         profile: lattice_profile::AgentProfile {
             schema_version: 1,
             agent: lattice_profile::AgentSection {
@@ -113,11 +117,32 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
                 system: Some(system_prompt.to_string()),
                 system_path: None,
             },
-            tools: lattice_profile::ToolsSection::default(),
+            tools: lattice_profile::ToolsSection {
+                enabled: enabled_tools.to_vec(),
+                ..Default::default()
+            },
             cep: lattice_profile::CepSection::default(),
         },
         system_prompt: system_prompt.to_string(),
     }
+}
+
+fn with_test_llm(
+    mut request: RunTurnRequest,
+    llm: Arc<dyn LlmClient>,
+    enabled_tools: &[String],
+    project_root: &str,
+) -> RunTurnRequest {
+    request.test_llm = Some(llm);
+    request.test_project_root = Some(project_root.to_string());
+    if request.loaded_profile.is_none() && !enabled_tools.is_empty() {
+        request.loaded_profile = Some(make_loaded_profile_with_tools(
+            "sonnet",
+            "System from profile.",
+            enabled_tools,
+        ));
+    }
+    request
 }
 
 fn last_log_entry(
@@ -218,8 +243,12 @@ async fn run_turn_auto_creates_session_and_returns_session_id() {
     let fixture = setup_with_events(happy_events(), &[]);
     let result = run_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("hello"),
+        with_test_llm(
+            make_request("hello"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap();
@@ -240,8 +269,12 @@ async fn run_turn_commits_exactly_one_turn() {
     let fixture = setup_with_events(happy_events(), &[]);
     let result = run_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("test input"),
+        with_test_llm(
+            make_request("test input"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap();
@@ -268,24 +301,11 @@ async fn run_turn_uses_existing_session_transcript() {
             .push_events(happy_events())
             .build(),
     );
-    let enabled: Vec<String> = vec![];
-    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
-        &fixture._dir.path().to_string_lossy(),
-        enabled,
-    )
-    .unwrap();
-    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm,
-        tool_executor: Arc::new(executor),
-    }));
+    let mut request = make_request_with_session("second turn", &session_id);
+    request.test_llm = Some(llm);
+    request.test_project_root = Some(fixture.project_root.clone());
 
-    let result = run_turn(
-        fixture.session_api,
-        agent_loop,
-        make_request_with_session("second turn", &session_id),
-    )
-    .await
-    .unwrap();
+    let result = run_turn(fixture.session_api, request).await.unwrap();
 
     assert_eq!(result.session_id, session_id);
     assert_eq!(fixture.store.log(&session_id).unwrap().len(), 1);
@@ -296,8 +316,12 @@ async fn run_turn_result_contains_contract_fields() {
     let fixture = setup_with_events(happy_events(), &[]);
     let result = run_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("hello"),
+        with_test_llm(
+            make_request("hello"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap();
@@ -333,8 +357,12 @@ async fn run_turn_failed_outcome_is_committed() {
     let fixture = setup_with_events(events, &[]);
     let result = run_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("hello"),
+        with_test_llm(
+            make_request("hello"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap();
@@ -358,7 +386,7 @@ async fn run_turn_cancelled_outcome_is_committed() {
         vec![
             LlmEvent::ToolCallStart {
                 id: "call_1".to_string(),
-                name: "read_file".to_string(),
+                name: "workspace.read_file".to_string(),
             },
             LlmEvent::ToolCallDelta {
                 id: "call_1".to_string(),
@@ -375,13 +403,21 @@ async fn run_turn_cancelled_outcome_is_committed() {
             total_tokens: 7,
         }),
     ));
-    let fixture = setup_fixture(llm, &["read_file"]);
+    let fixture = setup_fixture(llm, &["workspace.read_file"]);
     let mut request = make_request("hello");
     request.cancel_flag = Some(cancel);
 
-    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
-        .await
-        .unwrap();
+    let result = run_turn(
+        fixture.session_api,
+        with_test_llm(
+            request,
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Cancelled);
     let entry = last_log_entry(&fixture.store, &result.session_id);
@@ -397,18 +433,23 @@ async fn run_turn_cancelled_outcome_is_committed() {
 #[tokio::test]
 async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
     let fixture = setup_with_events(happy_events(), &[]);
-    let request = RunTurnRequest {
-        input: "test".to_string(),
-        session_id: None,
-        profile: None,
-        model: Some("override-model".to_string()),
-        loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
-        cancel_flag: None,
-    };
+    let request = with_test_llm(
+        RunTurnRequest {
+            input: "test".to_string(),
+            session_id: None,
+            profile: None,
+            model: Some("override-model".to_string()),
+            loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+            cancel_flag: None,
+            test_llm: None,
+            test_project_root: None,
+        },
+        fixture.llm.clone(),
+        &fixture.enabled_tools,
+        &fixture.project_root,
+    );
 
-    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
-        .await
-        .unwrap();
+    let result = run_turn(fixture.session_api, request).await.unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
     let entry = last_log_entry(&fixture.store, &result.session_id);
@@ -418,18 +459,23 @@ async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
 #[tokio::test]
 async fn run_cutover_profile_model_used_when_no_override() {
     let fixture = setup_with_events(happy_events(), &[]);
-    let request = RunTurnRequest {
-        input: "test".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
-        cancel_flag: None,
-    };
+    let request = with_test_llm(
+        RunTurnRequest {
+            input: "test".to_string(),
+            session_id: None,
+            profile: None,
+            model: None,
+            loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
+            cancel_flag: None,
+            test_llm: None,
+            test_project_root: None,
+        },
+        fixture.llm.clone(),
+        &fixture.enabled_tools,
+        &fixture.project_root,
+    );
 
-    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
-        .await
-        .unwrap();
+    let result = run_turn(fixture.session_api, request).await.unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
     let entry = last_log_entry(&fixture.store, &result.session_id);
@@ -439,18 +485,23 @@ async fn run_cutover_profile_model_used_when_no_override() {
 #[tokio::test]
 async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() {
     let fixture = setup_with_events(happy_events(), &[]);
-    let request = RunTurnRequest {
-        input: "test".to_string(),
-        session_id: None,
-        profile: None,
-        model: Some("compat:deepseek-chat".to_string()),
-        loaded_profile: None,
-        cancel_flag: None,
-    };
+    let request = with_test_llm(
+        RunTurnRequest {
+            input: "test".to_string(),
+            session_id: None,
+            profile: None,
+            model: Some("compat:deepseek-chat".to_string()),
+            loaded_profile: None,
+            cancel_flag: None,
+            test_llm: None,
+            test_project_root: None,
+        },
+        fixture.llm.clone(),
+        &fixture.enabled_tools,
+        &fixture.project_root,
+    );
 
-    let result = run_turn(fixture.session_api, fixture.agent_loop, request)
-        .await
-        .unwrap();
+    let result = run_turn(fixture.session_api, request).await.unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
     let entry = last_log_entry(&fixture.store, &result.session_id);
@@ -496,12 +547,16 @@ async fn stream_turn_emits_tool_activity_before_committed() {
             .push_events(round2)
             .build(),
     );
-    let fixture = setup_fixture(llm, &["read_file"]);
+    let fixture = setup_fixture(llm, &["workspace.read_file"]);
 
     let events: Vec<TurnEvent> = stream_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("read file"),
+        with_test_llm(
+            make_request("read file"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap()
@@ -534,8 +589,12 @@ async fn stream_turn_error_still_commits_error() {
 
     let events: Vec<TurnEvent> = stream_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("hello"),
+        with_test_llm(
+            make_request("hello"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap()
@@ -592,8 +651,12 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let fixture = setup_with_events(happy_events(), &[]);
     let first = run_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("first turn"),
+        with_test_llm(
+            make_request("first turn"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap();
@@ -601,28 +664,16 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let session_id = first.session_id.clone();
 
     let session_api = SessionApi::sqlite(&fixture.sessions_path);
-    let enabled: Vec<String> = vec![];
-    let executor = lancet_executor::DefaultToolExecutor::for_project_root(
-        &fixture._dir.path().to_string_lossy(),
-        enabled,
-    )
-    .unwrap();
-    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: Arc::new(
-            FakeStreamingLlmClient::builder()
-                .push_events(happy_events())
-                .build(),
-        ),
-        tool_executor: Arc::new(executor),
-    }));
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut request = make_request_with_session("second turn", &session_id);
+    request.test_llm = Some(llm);
+    request.test_project_root = Some(fixture.project_root.clone());
 
-    let result = run_turn(
-        session_api,
-        agent_loop,
-        make_request_with_session("second turn", &session_id),
-    )
-    .await
-    .unwrap();
+    let result = run_turn(session_api, request).await.unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Completed);
     let entry = last_log_entry(&fixture.store, &result.session_id);
@@ -703,7 +754,7 @@ async fn stream_turn_cancelled_commits_cancelled() {
         vec![
             LlmEvent::ToolCallStart {
                 id: "call_1".to_string(),
-                name: "read_file".to_string(),
+                name: "workspace.read_file".to_string(),
             },
             LlmEvent::ToolCallDelta {
                 id: "call_1".to_string(),
@@ -716,15 +767,23 @@ async fn stream_turn_cancelled_commits_cancelled() {
         "tool_calls",
         None,
     ));
-    let fixture = setup_fixture(llm, &["read_file"]);
+    let fixture = setup_fixture(llm, &["workspace.read_file"]);
     let mut request = make_request("hello");
     request.cancel_flag = Some(cancel);
 
-    let events: Vec<TurnEvent> = stream_turn(fixture.session_api, fixture.agent_loop, request)
-        .await
-        .unwrap()
-        .collect()
-        .await;
+    let events: Vec<TurnEvent> = stream_turn(
+        fixture.session_api,
+        with_test_llm(
+            request,
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
+    )
+    .await
+    .unwrap()
+    .collect()
+    .await;
 
     let cancelled = events
         .iter()
@@ -779,8 +838,12 @@ async fn stream_turn_error_after_partial_commits_error() {
 
     let events: Vec<TurnEvent> = stream_turn(
         fixture.session_api,
-        fixture.agent_loop,
-        make_request("hello"),
+        with_test_llm(
+            make_request("hello"),
+            fixture.llm.clone(),
+            &fixture.enabled_tools,
+            &fixture.project_root,
+        ),
     )
     .await
     .unwrap()
@@ -819,4 +882,99 @@ async fn stream_turn_error_after_partial_commits_error() {
             .unwrap()
             .contains("connection reset"));
     }
+}
+
+#[tokio::test]
+async fn stream_turn_emits_cep_lifecycle_events() {
+    use lancet_protocol::methods::TodoWrite;
+    use lancet_protocol::CepMethod;
+
+    let tool_events = vec![
+        LlmEvent::ToolCallStart {
+            id: "c1".to_string(),
+            name: TodoWrite::NAME.to_string(),
+        },
+        LlmEvent::ToolCallDelta {
+            id: "c1".to_string(),
+            arguments_delta: r#"{"todos":[]}"#.to_string(),
+        },
+        LlmEvent::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+        LlmEvent::Done {
+            finish_reason: "tool_calls".to_string(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7,
+            }),
+        },
+        LlmEvent::Token {
+            content: "done".to_string(),
+        },
+        LlmEvent::Done {
+            finish_reason: "stop".to_string(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+            }),
+        },
+    ];
+
+    let fixture = setup_with_events(tool_events, &[TodoWrite::NAME]);
+    let request = with_test_llm(
+        make_request("write todos"),
+        fixture.llm.clone(),
+        &fixture.enabled_tools,
+        &fixture.project_root,
+    );
+
+    let events: Vec<TurnEvent> = stream_turn(fixture.session_api, request)
+        .await
+        .expect("stream_turn should start")
+        .collect()
+        .await;
+
+    let cep_started = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::CepCallStarted { .. }))
+        .expect("CepCallStarted must be present");
+    let cep_finished = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::CepCallFinished { .. }))
+        .expect("CepCallFinished must be present");
+    assert!(
+        cep_started < cep_finished,
+        "CepCallStarted must precede CepCallFinished"
+    );
+
+    let guard = events
+        .iter()
+        .find(|e| matches!(e, TurnEvent::CepGuardVerdict { .. }))
+        .expect("CepGuardVerdict from bridge metadata must be present");
+    if let TurnEvent::CepGuardVerdict {
+        guard_stage,
+        policy_enforced,
+        semantic_stage,
+        ..
+    } = guard
+    {
+        assert_eq!(guard_stage, "bridge_lifecycle_only");
+        assert!(!policy_enforced);
+        assert_eq!(semantic_stage, "phase20_legacy_bridge");
+    }
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::ToolCallStarted { .. })),
+        "ToolCallStarted must remain distinct from CepCallStarted"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::ToolCallFinished { .. })),
+        "ToolCallFinished must remain distinct from CepCallFinished"
+    );
 }

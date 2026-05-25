@@ -109,7 +109,11 @@ mod tests {
         let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 10] = [
             (&catalog[0], ReadFile::IMPACT, ReadFile::CAPABILITY),
             (&catalog[1], Grep::IMPACT, Grep::CAPABILITY),
-            (&catalog[2], ListDirectory::IMPACT, ListDirectory::CAPABILITY),
+            (
+                &catalog[2],
+                ListDirectory::IMPACT,
+                ListDirectory::CAPABILITY,
+            ),
             (&catalog[3], FindFiles::IMPACT, FindFiles::CAPABILITY),
             (&catalog[4], Fetch::IMPACT, Fetch::CAPABILITY),
             (&catalog[5], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
@@ -120,7 +124,11 @@ mod tests {
         ];
 
         for (descriptor, impact, capability) in checks {
-            assert_eq!(descriptor.impact, impact, "impact mismatch for {}", descriptor.name);
+            assert_eq!(
+                descriptor.impact, impact,
+                "impact mismatch for {}",
+                descriptor.name
+            );
             assert_eq!(
                 descriptor.capability, capability,
                 "capability mismatch for {}",

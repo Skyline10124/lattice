@@ -5,18 +5,24 @@
 //! that drains agent events concurrently via `tokio::select!`, and emits public
 //! [`TurnEvent`] values through a bounded channel before committing.
 
+#[cfg(test)]
 use std::sync::Arc;
+
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use lattice_agent::{AgentLoop, AgentTurnEvent, AgentTurnResult};
+#[cfg(test)]
+use lattice_agent::AgentLoop;
+
+use lattice_agent::{AgentTurnEvent, AgentTurnResult};
 use lattice_session::GraphHead;
 
 use super::execute::{
     build_commit_input, derive_terminal_event, map_agent_event, TurnCommitContext,
 };
+use super::lancet::{map_cep_tool_event, ProductionTurnDeps};
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionApi};
@@ -142,11 +148,33 @@ impl ObserverSink {
 /// the final event, closing the stream.
 async fn run_live_turn_task(
     session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
     prepared: PreparedTurn,
     request: RunTurnRequest,
     turn_tx: mpsc::Sender<TurnEvent>,
+    mut deps: ProductionTurnDeps,
 ) {
+    let ProductionTurnDeps {
+        agent_loop,
+        tool_definitions,
+        runtime,
+        lancet_client,
+        audit,
+        audit_context,
+        #[cfg(test)]
+            build_metrics: _build_metrics,
+        ..
+    } = &mut deps;
+
+    {
+        let mut ctx = audit_context.write().await;
+        ctx.turn_id = format!(
+            "{}:{}",
+            prepared.session_id,
+            prepared.parent_commit_id.as_deref().unwrap_or("root")
+        );
+        ctx.session_id = prepared.session_id.clone();
+    }
+
     let mut observer = ObserverSink::new(turn_tx);
 
     // 1. Emit TurnStarted
@@ -166,10 +194,21 @@ async fn run_live_turn_task(
         prepared.model.clone(),
         prepared.system_prompt.clone(),
         Some(prepared.provider.clone()).filter(|p| p != "unknown"),
+        tool_definitions.clone(),
     );
 
     // 3. Create agent event channel
     let (agent_tx, mut agent_rx) = mpsc::channel::<AgentTurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
+
+    let cep_client = lancet_client.clone();
+    let cep_agent_tx = agent_tx.clone();
+    let cep_forwarder = tokio::spawn(async move {
+        while let Some(event) = cep_client.next_event().await {
+            if let Some(agent_event) = map_cep_tool_event(event) {
+                let _ = cep_agent_tx.try_send(agent_event);
+            }
+        }
+    });
 
     // 4. Pin agent future
     let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
@@ -185,6 +224,7 @@ async fn run_live_turn_task(
                 }
             }
             result = &mut agent_fut => {
+                cep_forwarder.abort();
                 break result;
             }
         }
@@ -194,6 +234,11 @@ async fn run_live_turn_task(
     while let Some(event) = agent_rx.recv().await {
         observer.emit(map_agent_event(event)).await;
     }
+
+    cep_forwarder.abort();
+
+    runtime.shutdown().await;
+    audit.await_pending().await;
 
     // 7. Terminal event derived from AgentTurnResult.status (D-10, WR-01)
     if let Some(terminal) = derive_terminal_event(&agent_result) {
@@ -240,23 +285,49 @@ async fn run_live_turn_task(
 }
 
 /// Execute a turn and return its events as a live stream.
-///
-/// Startup failures (model resolution, session open/create, transcript read,
-/// status check) are returned as `Result::Err`. Runtime outcomes — including
-/// commit success or failure — are emitted as [`TurnEvent`] values within the
-/// stream.
 pub(super) async fn stream_turn_live(
     session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
     request: RunTurnRequest,
+    deps: ProductionTurnDeps,
 ) -> Result<TurnEventStream> {
     let prepared = prepare_live_turn(&session, &request)?;
 
     let (tx, rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
-        run_live_turn_task(session, agent_loop, prepared, request, tx).await;
+        run_live_turn_task(session, prepared, request, tx, deps).await;
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
+}
+
+/// Test-only live path that injects a prebuilt AgentLoop without Lancet runtime construction.
+#[cfg(test)]
+pub(super) async fn stream_turn_live_with_agent(
+    session: SessionApi,
+    agent_loop: Arc<AgentLoop>,
+    request: RunTurnRequest,
+    tool_definitions: Vec<lattice_llm::ToolDefinition>,
+) -> Result<TurnEventStream> {
+    let _prepared = prepare_live_turn(&session, &request)?;
+    let deps = ProductionTurnDeps {
+        agent_loop,
+        tool_definitions,
+        runtime: super::lancet::LancetTurnRuntime::dummy(),
+        lancet_client: {
+            let (client, _server) = lancet_executor::LancetTransport::pair(1);
+            client
+        },
+        audit: Arc::new(
+            lancet_executor::CepAuditStore::in_memory().expect("in-memory audit store"),
+        ),
+        audit_context: Arc::new(tokio::sync::RwLock::new(
+            lancet_executor::CepAuditContext::default(),
+        )),
+        build_metrics: super::lancet::Phase20BuildMetrics {
+            adapter_instances: 0,
+            transport_pairs: 0,
+        },
+    };
+    stream_turn_live(session, request, deps).await
 }

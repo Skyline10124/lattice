@@ -4,7 +4,8 @@ pub mod agent_loop;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopConfig, AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest,
-    AgentTurnResult, AgentTurnStatus, LlmClient, ToolCallExecutor,
+    AgentTurnResult, AgentTurnStatus, CepErrorPayload, LlmClient, ToolCallExecutor,
+    ToolExecutionError,
 };
 
 #[cfg(feature = "test-utils")]

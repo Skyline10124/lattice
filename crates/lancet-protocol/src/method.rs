@@ -155,7 +155,9 @@ mod tests {
             Capability::Inspect
         );
         assert_eq!(
-            RequiredCapability::MutateSessionState.resolve(&empty).unwrap(),
+            RequiredCapability::MutateSessionState
+                .resolve(&empty)
+                .unwrap(),
             Capability::MutateSessionState
         );
     }

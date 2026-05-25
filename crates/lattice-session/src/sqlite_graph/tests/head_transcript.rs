@@ -490,14 +490,7 @@ fn head_transcript_includes_second_parent_branch_on_merge() {
     assert_eq!(
         contents,
         vec![
-            "A-user",
-            "A-assist",
-            "B-user",
-            "B-assist",
-            "C-user",
-            "C-assist",
-            "M-user",
-            "M-assist",
+            "A-user", "A-assist", "B-user", "B-assist", "C-user", "C-assist", "M-user", "M-assist",
         ],
         "merge transcript must include side-branch (second parent) messages"
     );

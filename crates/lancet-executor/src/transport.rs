@@ -1,22 +1,49 @@
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
+use crate::audit::{
+    impact_kind_for_method, impact_kind_label, AuditOutcome, AuditStart, CepAuditContext,
+    CepAuditStore, GUARD_STAGE, SEMANTIC_STAGE,
+};
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_protocol::{
-    error::to_jsonrpc_error, CatalogMethod, CepError, Id, ToolEvent, ToolResult,
+    envelope::BaseExecutionEnvelope, error::to_jsonrpc_error, CatalogMethod, CepError, Id,
+    ToolEvent, ToolResult,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task::JoinSet;
 
 type BoxCallFuture<T> = Pin<Box<dyn Future<Output = Result<T, CepError>> + Send>>;
 type BoxValueCallFuture = BoxCallFuture<Value>;
+
+/// Server-side audit and lifecycle configuration for a turn-scoped runtime.
+#[derive(Clone)]
+pub struct ServerRunConfig {
+    pub audit: Arc<CepAuditStore>,
+    pub audit_context: Arc<RwLock<CepAuditContext>>,
+    pub base_envelope: BaseExecutionEnvelope,
+}
+
+impl ServerRunConfig {
+    /// In-memory audit store with stable test identifiers.
+    pub fn in_memory_for_tests() -> Self {
+        Self {
+            audit: Arc::new(CepAuditStore::in_memory().expect("in-memory audit store")),
+            audit_context: Arc::new(RwLock::new(CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "test turn observation"),
+        }
+    }
+}
 
 /// Factory for in-process client/server transport pairs.
 pub struct LancetTransport;
@@ -257,7 +284,11 @@ impl LancetServer {
     /// Run the server loop until the request channel closes or shutdown is signaled.
     ///
     /// On shutdown, all in-flight handlers receive cancellation and are joined before return.
-    pub async fn run(mut self, registry: MethodRegistry) -> Result<(), CepError> {
+    pub async fn run(
+        mut self,
+        registry: MethodRegistry,
+        config: ServerRunConfig,
+    ) -> Result<(), CepError> {
         let mut join_set: JoinSet<u64> = JoinSet::new();
         let mut cancel_senders: HashMap<u64, watch::Sender<bool>> = HashMap::new();
         let mut shutdown = false;
@@ -283,8 +314,9 @@ impl LancetServer {
                             cancel_senders.insert(request_id, request.cancel_tx.clone());
                             let event_tx = self.event_tx.clone();
                             let registry = registry.clone();
+                            let config = config.clone();
                             join_set.spawn(async move {
-                                handle_request(registry, request, event_tx).await;
+                                handle_request(registry, request, event_tx, config).await;
                                 request_id
                             });
                         }
@@ -314,6 +346,8 @@ impl LancetServer {
             let _ = res;
         }
 
+        config.audit.await_pending().await;
+
         Ok(())
     }
 }
@@ -322,7 +356,14 @@ async fn handle_request(
     registry: MethodRegistry,
     request: ServerRequest,
     event_tx: mpsc::Sender<ToolEvent>,
+    config: ServerRunConfig,
 ) {
+    let ServerRunConfig {
+        audit,
+        audit_context,
+        base_envelope,
+    } = config;
+
     let ServerRequest {
         id,
         method,
@@ -331,22 +372,41 @@ async fn handle_request(
         cancel_tx,
     } = request;
 
+    let ctx_snapshot = audit_context.read().await.clone();
+    let audit_start = match audit.start_call(&ctx_snapshot, id, &method, Some("started")) {
+        Ok(start) => start,
+        Err(_) => {
+            let _ = response_tx.send(Err(CepError::internal_error("audit start failed")));
+            return;
+        }
+    };
+
+    emit_cep_call_started(&event_tx, id, &method, audit_start.audit_id).await;
+
     let cancel_rx = cancel_tx.subscribe();
     let ctx = HandlerContext {
         call_id: id,
-        events: EventSink::new(event_tx, id),
+        events: EventSink::new(event_tx.clone(), id),
         cancellation: Cancellation::new(cancel_rx),
+        base_envelope,
     };
 
-    let result = registry.dispatch(&method, params, ctx).await;
+    let dispatch_result = registry.dispatch(&method, params, ctx).await;
 
-    let response = match result {
+    finalize_audit_for_dispatch(&audit, audit_start, &method, &dispatch_result);
+    let ok = dispatch_result.is_ok();
+    let error_code = dispatch_result
+        .as_ref()
+        .err()
+        .map(|err| format!("{:?}", err.code));
+
+    let response = match &dispatch_result {
         Ok(result) => ToolResult::Success {
-            result,
+            result: result.clone(),
             id: Id::Number(id as i64),
         },
         Err(err) => {
-            let (code, message, data) = to_jsonrpc_error(&err);
+            let (code, message, data) = to_jsonrpc_error(err);
             ToolResult::Error {
                 error: lancet_protocol::ErrorObject {
                     code,
@@ -358,9 +418,137 @@ async fn handle_request(
         }
     };
 
+    emit_cep_call_finished(
+        &event_tx,
+        id,
+        &method,
+        audit_start.audit_id,
+        ok,
+        error_code.as_deref(),
+    )
+    .await;
+
     if response_tx.send(Ok(response)).is_err() {
         let _ = cancel_tx.send(true);
     }
+}
+
+fn finalize_audit_for_dispatch(
+    audit: &CepAuditStore,
+    audit_start: AuditStart,
+    method: &str,
+    dispatch_result: &Result<Value, CepError>,
+) {
+    match dispatch_result {
+        Ok(value) => {
+            let summary = compact_success_summary(method, value);
+            let metadata = compact_success_metadata(method, value);
+            let _ = audit.finalize_call(
+                audit_start,
+                AuditOutcome::Success { summary },
+                Some("bridged_legacy_body"),
+                metadata.as_deref(),
+            );
+        }
+        Err(err) if err.message == "call cancelled" => {
+            let _ = audit.finalize_call(audit_start, AuditOutcome::Cancelled, None, None);
+        }
+        Err(err) => {
+            let code = format!("{:?}", err.code);
+            let summary = compact_error_summary(err);
+            let _ = audit.finalize_call(
+                audit_start,
+                AuditOutcome::Error { code, summary },
+                None,
+                None,
+            );
+        }
+    }
+}
+
+fn compact_success_summary(method: &str, value: &Value) -> String {
+    match method {
+        "session.todo_write" => {
+            let count = value
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            format!("todo_count={count}")
+        }
+        "workspace.read_file" => "read_file".to_string(),
+        _ => format!("method={method}"),
+    }
+}
+
+fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
+    match method {
+        "session.todo_write" => {
+            let count = value
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            Some(format!(r#"{{"outcome":"todo_write","count":{count}}}"#))
+        }
+        _ => Some(format!(r#"{{"method":"{method}"}}"#)),
+    }
+}
+
+fn compact_error_summary(err: &CepError) -> String {
+    if err.message.starts_with("Method not found:") {
+        "unknown method".to_string()
+    } else {
+        err.message.chars().take(120).collect()
+    }
+}
+
+async fn emit_cep_call_started(
+    event_tx: &mpsc::Sender<ToolEvent>,
+    call_id: u64,
+    method: &str,
+    audit_id: i64,
+) {
+    let impact_kind = impact_kind_for_method(method)
+        .map(impact_kind_label)
+        .unwrap_or("unknown");
+    let event = ToolEvent::new(
+        "cep.call_started".to_string(),
+        json!({
+            "call_id": call_id,
+            "method": method,
+            "impact_kind": impact_kind,
+            "audit_id": audit_id,
+            "semantic_stage": SEMANTIC_STAGE,
+            "guard_stage": GUARD_STAGE,
+        }),
+    );
+    let _ = event_tx.try_send(event);
+}
+
+async fn emit_cep_call_finished(
+    event_tx: &mpsc::Sender<ToolEvent>,
+    call_id: u64,
+    method: &str,
+    audit_id: i64,
+    ok: bool,
+    error_code: Option<&str>,
+) {
+    let mut payload = json!({
+        "call_id": call_id,
+        "method": method,
+        "audit_id": audit_id,
+        "ok": ok,
+        "semantic_stage": SEMANTIC_STAGE,
+        "guard_stage": GUARD_STAGE,
+    });
+    if let Some(code) = error_code {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("error_code".to_string(), Value::String(code.to_string()));
+        }
+    }
+    let event = ToolEvent::new("cep.call_finished".to_string(), payload);
+    let _ = event_tx.try_send(event);
 }
 
 #[cfg(test)]
@@ -373,6 +561,7 @@ mod tests {
         TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
     };
     use lancet_protocol::methods::TodoWrite;
+    use lancet_protocol::CepMethod;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::time::sleep;
@@ -398,7 +587,12 @@ mod tests {
             })
         });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let result = client
             .call::<TodoWrite>(TodoWriteParams {
@@ -416,12 +610,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn base_envelope_visible_in_handler_context() {
+        use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap().to_string();
+        let envelope =
+            BaseExecutionEnvelope::for_workspace_root(&root, "phase20 handler observation");
+        let expected_root = envelope.inner.scope.workspace_root.clone();
+        let registry = todo_registry(move |_params, ctx| {
+            let expected_root = expected_root.clone();
+            async move {
+                assert_eq!(
+                    ctx.base_envelope.inner.scope.workspace_root.as_deref(),
+                    expected_root.as_deref()
+                );
+                assert!(ctx
+                    .base_envelope
+                    .inner
+                    .capabilities
+                    .contains(&Capability::Inspect));
+                assert!(ctx
+                    .base_envelope
+                    .inner
+                    .capabilities
+                    .iter()
+                    .any(|cap| matches!(cap, Capability::ReadPath { .. })));
+                Ok(TodoWriteResult { todos: vec![] })
+            }
+        });
+
+        let (client, server) = LancetTransport::pair(8);
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.base_envelope = envelope;
+        let server_task = tokio::spawn(async move {
+            server.run(registry, config).await.unwrap();
+        });
+
+        client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap();
+
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn transport_structured_error_round_trip() {
         let (client, server) = LancetTransport::pair(8);
         let registry =
             todo_registry(|_params, _ctx| async move { Err(method_not_found("injected")) });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let err = client
             .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
@@ -437,7 +684,12 @@ mod tests {
     async fn transport_unknown_raw_method_returns_32601() {
         let (client, server) = LancetTransport::pair(8);
         let registry = MethodRegistry::new();
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let err = client
             .call_raw("crafted.unknown", serde_json::json!({}))
@@ -459,7 +711,12 @@ mod tests {
             })
         });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let result = client
             .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
@@ -490,12 +747,17 @@ mod tests {
         });
 
         let events = client.events();
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let call = client.call::<TodoWrite>(TodoWriteParams { todos: vec![] });
         let mut collected = Vec::new();
         let collect = async {
-            while collected.len() < 3 {
+            while collected.len() < 5 {
                 if let Some(event) = events.lock().await.recv().await {
                     collected.push(event);
                 }
@@ -505,16 +767,16 @@ mod tests {
         let (response, _) = tokio::join!(call, collect);
         response.unwrap();
 
-        assert_eq!(collected.len(), 3);
-        assert_eq!(collected[0].method, "started");
-        assert_eq!(collected[1].method, "progress");
-        assert_eq!(collected[2].method, "finished");
+        assert_eq!(collected.len(), 5);
+        assert_eq!(collected[0].method, "cep.call_started");
+        assert_eq!(collected[1].method, "started");
+        assert_eq!(collected[2].method, "progress");
+        assert_eq!(collected[3].method, "finished");
+        assert_eq!(collected[4].method, "cep.call_finished");
 
         for event in &collected {
             assert_eq!(event.params["call_id"], 1);
         }
-
-        assert_eq!(collected.last().unwrap().method, "finished");
 
         drop(client);
         server_task.abort();
@@ -534,7 +796,12 @@ mod tests {
             })
         });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let result = tokio::time::timeout(
             Duration::from_secs(1),
@@ -568,7 +835,12 @@ mod tests {
             }
         });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
         let notified = observed.notified();
         let ready_wait = ready.notified();
 
@@ -598,7 +870,12 @@ mod tests {
             Err(call_cancelled())
         });
 
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams { todos: vec![] });
         tokio::pin!(call);
@@ -630,7 +907,12 @@ mod tests {
 
         let notified = cleaned.notified();
         let shutdown = server.shutdown_handle();
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let (call, _control) = client.start_call::<TodoWrite>(TodoWriteParams { todos: vec![] });
         tokio::pin!(call);
@@ -679,7 +961,12 @@ mod tests {
         });
 
         let shutdown = server.shutdown_handle();
-        let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+        let server_task = tokio::spawn(async move {
+            server
+                .run(registry, ServerRunConfig::in_memory_for_tests())
+                .await
+                .unwrap()
+        });
 
         let (hanging_call, _hanging_control) = client.start_call::<TodoWrite>(TodoWriteParams {
             todos: vec![TodoItem {
@@ -733,7 +1020,12 @@ mod tests {
                 })
             });
 
-            let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+            let server_task = tokio::spawn(async move {
+                server
+                    .run(registry, ServerRunConfig::in_memory_for_tests())
+                    .await
+                    .unwrap()
+            });
             let _ = client
                 .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
                 .await;
@@ -742,6 +1034,78 @@ mod tests {
         }
 
         assert_eq!(ACTIVE_HANDLERS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cep_audit_transport_success_appends_one_row() {
+        let config = ServerRunConfig::in_memory_for_tests();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = todo_registry(|params, _ctx| async move {
+            Ok(TodoWriteResult {
+                todos: params.todos,
+            })
+        });
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let _ = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap();
+        drop(client);
+        server_task.await.unwrap();
+
+        assert_eq!(audit.row_count().unwrap(), 1);
+        let row = audit.row_by_audit_id(1).unwrap();
+        assert_eq!(row.method, TodoWrite::NAME);
+        assert!(row.ended_at.is_some());
+        assert_eq!(row.semantic_stage, SEMANTIC_STAGE);
+        assert_eq!(row.guard_stage, GUARD_STAGE);
+        assert!(!row.policy_enforced);
+    }
+
+    #[tokio::test]
+    async fn cep_audit_transport_unknown_method_appends_row() {
+        let config = ServerRunConfig::in_memory_for_tests();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = MethodRegistry::new();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let err = client
+            .call_raw("crafted.unknown", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(wire_code_for_error(&err), jsonrpc::METHOD_NOT_FOUND);
+        drop(client);
+        server_task.await.unwrap();
+
+        assert_eq!(audit.row_count().unwrap(), 1);
+        assert!(audit.row_by_audit_id(1).unwrap().ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn cep_audit_transport_cancellation_finalizes_row() {
+        let config = ServerRunConfig::in_memory_for_tests();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = todo_registry(|_params, mut ctx| async move {
+            ctx.cancellation.cancelled().await;
+            Err(call_cancelled())
+        });
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams { todos: vec![] });
+        sleep(Duration::from_millis(20)).await;
+        control.cancel();
+        let _ = call.await;
+        drop(client);
+        server_task.await.unwrap();
+
+        assert_eq!(audit.row_count().unwrap(), 1);
+        let row = audit.row_by_audit_id(1).unwrap();
+        assert_eq!(row.result_or_error.as_deref(), Some("cancelled"));
+        assert!(row.ended_at.is_some());
     }
 
     #[cfg(unix)]
@@ -798,7 +1162,12 @@ mod tests {
                     })
                     .unwrap();
 
-                let server_task = tokio::spawn(async move { server.run(registry).await.unwrap() });
+                let server_task = tokio::spawn(async move {
+                    server
+                        .run(registry, ServerRunConfig::in_memory_for_tests())
+                        .await
+                        .unwrap()
+                });
                 let child_done_wait = child_done.notified();
 
                 let (call, control) =

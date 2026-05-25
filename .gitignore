@@ -1,4 +1,4 @@
-/target
+target/
 *.swp
 *.swo
 *~
@@ -10,6 +10,7 @@
 .sisyphus/
 .pytest_cache/
 .worktrees/
+.cargo/
 __pycache__/
 *.py[cod]
 book/
@@ -18,3 +19,5 @@ docs/
 *.db
 .lattice/
 .cursor/
+build/
+.tmp/

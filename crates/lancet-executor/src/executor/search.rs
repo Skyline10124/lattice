@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use lattice_tooling::ToolLimits;
 use super::DefaultToolExecutor;
+use lattice_tooling::ToolLimits;
 
 const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
@@ -10,7 +10,7 @@ const MAX_GREP_LIMIT: usize = 1000;
 const DEFAULT_LIST_LIMIT: usize = 200;
 const MAX_LIST_LIMIT: usize = 1000;
 
-pub(super) async fn grep(
+pub(crate) async fn grep(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {
@@ -67,7 +67,7 @@ pub(super) async fn grep(
     }
 }
 
-pub(super) async fn find_files(
+pub(crate) async fn find_files(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {

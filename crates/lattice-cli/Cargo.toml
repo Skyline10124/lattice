@@ -12,9 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 lattice-session = { workspace = true }
-lattice-agent = { workspace = true }
+lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-tooling = { workspace = true }
-lancet-executor = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
 lattice-llm = { workspace = true }

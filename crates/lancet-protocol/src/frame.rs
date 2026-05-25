@@ -8,8 +8,7 @@
 pub type ToolCall<P = serde_json::Value> = crate::jsonrpc::Request<P>;
 
 /// A CEP tool result — a JSON-RPC response with CEP-typed error data.
-pub type ToolResult<R = serde_json::Value> =
-    crate::jsonrpc::Response<R, crate::error::CepError>;
+pub type ToolResult<R = serde_json::Value> = crate::jsonrpc::Response<R, crate::error::CepError>;
 
 /// A CEP tool event — a JSON-RPC notification (no id) for streaming progress.
 pub type ToolEvent<P = serde_json::Value> = crate::jsonrpc::Notification<P>;
@@ -19,9 +18,7 @@ pub type ToolError = crate::jsonrpc::ErrorObject<crate::error::CepError>;
 
 #[cfg(test)]
 mod tests {
-    use crate::error::{
-        CepError, CepErrorCode, CepErrorData, ExecutionErrorData, Retriability,
-    };
+    use crate::error::{CepError, CepErrorCode, CepErrorData, ExecutionErrorData, Retriability};
     use crate::frame::{ToolCall, ToolError, ToolEvent, ToolResult};
     use crate::jsonrpc::{ErrorObject, Id};
     use serde_json::json;
@@ -41,10 +38,8 @@ mod tests {
 
     #[test]
     fn tool_event_is_jsonrpc_notification() {
-        let event: ToolEvent = crate::jsonrpc::Notification::new(
-            "progress".into(),
-            json!({"percent": 75}),
-        );
+        let event: ToolEvent =
+            crate::jsonrpc::Notification::new("progress".into(), json!({"percent": 75}));
         let serialized = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         assert!(parsed.get("id").is_none());

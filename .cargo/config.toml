@@ -1,8 +1,0 @@
-[build]
-# Keep artifacts in the workspace instead of Cursor sandbox cache (/tmp/cursor-sandbox-cache),
-# which has a small disk quota and causes "Disk quota exceeded" during builds.
-target-dir = "target"
-
-[env]
-# cc-rs / ring / openssl build scripts also write assembler temps to TMPDIR.
-TMPDIR = { value = "build/tmp", relative = true, force = true }

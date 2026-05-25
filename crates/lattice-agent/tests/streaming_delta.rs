@@ -7,16 +7,24 @@ use std::sync::Mutex;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
-    ToolCallExecutor,
+    ToolCallExecutor, ToolExecutionError,
 };
-use lattice_llm::{LlmEvent, TokenUsage};
+use lattice_llm::{LlmEvent, TokenUsage, ToolDefinition};
 use lattice_session::HeadTranscript;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnRequest {
+fn read_file_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        "workspace.read_file",
+        "Read a file",
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+    )
+}
+
+fn make_request(user_input: &str, tool_definitions: Vec<ToolDefinition>) -> AgentTurnRequest {
     AgentTurnRequest {
         session_id: "test-session".to_string(),
         transcript: HeadTranscript {
@@ -28,8 +36,7 @@ fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnReques
         system_prompt: None,
         model: "test-model".to_string(),
         provider: None,
-        enabled_tools,
-        project_root: "/tmp".to_string(),
+        tool_definitions,
         cancel_flag: None,
         timeout: None,
     }
@@ -38,12 +45,12 @@ fn make_request(user_input: &str, enabled_tools: Vec<String>) -> AgentTurnReques
 /// Tool executor that returns queued Ok/Err results in FIFO order
 /// and records which tool-call IDs were executed.
 struct FakeToolExecutor {
-    results: Mutex<VecDeque<Result<String, String>>>,
+    results: Mutex<VecDeque<Result<String, ToolExecutionError>>>,
     execution_order: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeToolExecutor {
-    fn new(results: Vec<Result<String, String>>) -> Self {
+    fn new(results: Vec<Result<String, ToolExecutionError>>) -> Self {
         Self {
             results: Mutex::new(VecDeque::from(results)),
             execution_order: Arc::new(Mutex::new(Vec::new())),
@@ -57,13 +64,12 @@ impl FakeToolExecutor {
 
 #[async_trait::async_trait]
 impl ToolCallExecutor for FakeToolExecutor {
-    async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, String> {
+    async fn execute(&self, call: &lattice_llm::ToolCall) -> Result<String, ToolExecutionError> {
         self.execution_order.lock().unwrap().push(call.id.clone());
         let mut results = self.results.lock().unwrap();
         match results.pop_front() {
-            Some(Ok(output)) => Ok(output),
-            Some(Err(msg)) => Err(msg),
-            None => Err("no more fake results".to_string()),
+            Some(result) => result,
+            None => Err(ToolExecutionError::simple("no more fake results")),
         }
     }
 }
@@ -127,7 +133,7 @@ async fn streaming_multi_chunk_tokens_assemble_into_one_message() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("ping", vec!["read_file".to_string()]))
+        .run_turn(make_request("ping", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -177,7 +183,7 @@ async fn streaming_reasoning_separate_from_visible() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("what?", vec!["read_file".to_string()]))
+        .run_turn(make_request("what?", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -200,7 +206,7 @@ async fn streaming_tool_call_assembly_and_sequential_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -238,13 +244,16 @@ async fn streaming_tool_call_assembly_and_sequential_execution() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read a.txt", vec!["read_file".to_string()]))
+        .run_turn(make_request(
+            "read a.txt",
+            vec![read_file_tool_definition()],
+        ))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
     assert_eq!(result.tool_results.len(), 1);
     assert!(result.tool_results[0].ok);
-    assert_eq!(result.tool_results[0].name, "read_file");
+    assert_eq!(result.tool_results[0].name, "workspace.read_file");
 
     // Verify execution order: c1 was executed
     let exec_order = order.lock().unwrap();
@@ -289,7 +298,7 @@ async fn streaming_incomplete_tool_call_error_no_execution() {
                 },
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -309,7 +318,7 @@ async fn streaming_incomplete_tool_call_error_no_execution() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read a", vec!["read_file".to_string()]))
+        .run_turn(make_request("read a", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -338,7 +347,7 @@ async fn streaming_invalid_tool_call_json_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -362,7 +371,7 @@ async fn streaming_invalid_tool_call_json_no_execution() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read", vec!["read_file".to_string()]))
+        .run_turn(make_request("read", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -396,7 +405,7 @@ async fn streaming_tool_call_delta_after_end_is_error_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -424,7 +433,7 @@ async fn streaming_tool_call_delta_after_end_is_error_no_execution() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read", vec!["read_file".to_string()]))
+        .run_turn(make_request("read", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -455,7 +464,7 @@ async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -482,7 +491,7 @@ async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read", vec!["read_file".to_string()]))
+        .run_turn(make_request("read", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -517,7 +526,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -528,7 +537,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
                 },
                 LlmEvent::ToolCallStart {
                     id: "c2".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c2".to_string(),
@@ -565,7 +574,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read both", vec!["read_file".to_string()]))
+        .run_turn(make_request("read both", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -586,7 +595,7 @@ async fn streaming_multiple_tool_calls_one_invalid_none_executed() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -621,7 +630,10 @@ async fn streaming_multiple_tool_calls_one_invalid_none_executed() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("call tools", vec!["read_file".to_string()]))
+        .run_turn(make_request(
+            "call tools",
+            vec![read_file_tool_definition()],
+        ))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -660,7 +672,7 @@ async fn streaming_mid_stream_error_preserves_partial_content() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .run_turn(make_request("hello", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -711,7 +723,7 @@ async fn streaming_exhausted_without_done_is_error() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .run_turn(make_request("hello", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
@@ -745,7 +757,7 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -772,7 +784,7 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
     );
 
     let executor = Arc::new(FakeToolExecutor::new(vec![Err(
-        "file not found".to_string()
+        ToolExecutionError::simple("file not found"),
     )]));
     let loop_inst = AgentLoop::new(AgentLoopConfig {
         llm,
@@ -780,7 +792,10 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("read missing", vec!["read_file".to_string()]))
+        .run_turn(make_request(
+            "read missing",
+            vec![read_file_tool_definition()],
+        ))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -805,7 +820,7 @@ async fn streaming_multi_round_tool_loop() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -822,7 +837,7 @@ async fn streaming_multi_round_tool_loop() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c2".to_string(),
-                    name: "read_file".to_string(),
+                    name: "workspace.read_file".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c2".to_string(),
@@ -862,7 +877,10 @@ async fn streaming_multi_round_tool_loop() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("multi-round", vec!["read_file".to_string()]))
+        .run_turn(make_request(
+            "multi-round",
+            vec![read_file_tool_definition()],
+        ))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -901,7 +919,7 @@ async fn streaming_started_event_ignored_no_double_model_started() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .run_turn(make_request("hello", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
@@ -941,7 +959,7 @@ async fn streaming_backward_compat_fake_llm_chat_only_still_works() {
     });
 
     let result = loop_inst
-        .run_turn(make_request("hello", vec!["read_file".to_string()]))
+        .run_turn(make_request("hello", vec![read_file_tool_definition()]))
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Completed);

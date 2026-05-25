@@ -53,8 +53,16 @@ mod tests {
     fn projected_names_are_full_dotted_names() {
         let projected = to_tool_definitions(catalog());
         for tool in &projected {
-            assert!(tool.name.contains('.'), "expected dotted name: {}", tool.name);
-            assert!(!tool.name.contains('/'), "slash names forbidden: {}", tool.name);
+            assert!(
+                tool.name.contains('.'),
+                "expected dotted name: {}",
+                tool.name
+            );
+            assert!(
+                !tool.name.contains('/'),
+                "slash names forbidden: {}",
+                tool.name
+            );
         }
     }
 

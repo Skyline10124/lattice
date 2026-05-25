@@ -26,7 +26,7 @@ const MAX_COMMAND_OUTPUT_SIZE: usize = 200 * 1024;
 pub struct DefaultToolExecutor {
     pub(crate) project_root: String,
     pub(crate) limits: ToolLimits,
-    http_client: reqwest::Client,
+    pub(crate) http_client: reqwest::Client,
     authorized_tools: BTreeSet<String>,
 }
 
@@ -91,6 +91,115 @@ impl DefaultToolExecutor {
             authorized_tools: enabled_tool_names.into_iter().map(Into::into).collect(),
         })
     }
+
+    pub(crate) fn for_bridge(
+        project_root: &str,
+        http_client: reqwest::Client,
+    ) -> Result<Self, String> {
+        let canonical = std::fs::canonicalize(project_root)
+            .map_err(|e| format!("cannot canonicalize project root '{}': {}", project_root, e))?;
+        Ok(Self {
+            project_root: canonical.to_string_lossy().to_string(),
+            limits: ToolLimits::default(),
+            http_client,
+            authorized_tools: BTreeSet::new(),
+        })
+    }
+}
+
+pub(crate) async fn apply_patch_body(
+    executor: &DefaultToolExecutor,
+    patch: &str,
+) -> Result<String, String> {
+    let envelope: PatchResultEnvelope =
+        apply_structured_patch(Path::new(&executor.project_root), &executor.limits, patch).await;
+    let body = serde_json::to_string(&envelope).unwrap_or_else(|error| {
+        serde_json::json!({
+            "ok": false,
+            "summary": "failed to serialize patch result envelope",
+            "errors": [{
+                "code": "io_error",
+                "message": format!("failed to serialize patch result envelope: {error}"),
+                "path": null,
+                "operation_index": null,
+                "hunk_index": null
+            }],
+            "changed_files": [],
+            "attempted_operations": []
+        })
+        .to_string()
+    });
+    if envelope.ok {
+        Ok(body)
+    } else {
+        Err(body)
+    }
+}
+
+impl DefaultToolExecutor {
+    pub(crate) async fn bridge_read_file(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        fs::read_file(self, args).await
+    }
+
+    pub(crate) async fn bridge_grep(&self, args: &serde_json::Value) -> Result<String, String> {
+        search::grep(self, args).await
+    }
+
+    pub(crate) async fn bridge_list_directory(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        fs::list_directory(self, args).await
+    }
+
+    pub(crate) async fn bridge_find_files(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        search::find_files(self, args).await
+    }
+
+    pub(crate) async fn bridge_web_fetch(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        web::web_fetch(&self.http_client, &self.limits, args).await
+    }
+
+    pub(crate) fn bridge_render_todos(args: &serde_json::Value) -> Result<String, String> {
+        render::render_todos(args)
+    }
+
+    pub(crate) async fn bridge_execute_bash(
+        &self,
+        command: &str,
+    ) -> Result<std::process::Output, String> {
+        shell::execute_bash(&self.project_root, &self.limits, command).await
+    }
+
+    pub(crate) async fn bridge_execute_argv(
+        &self,
+        argv: &[String],
+        cwd: Option<&str>,
+        env: &std::collections::BTreeMap<String, String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<std::process::Output, String> {
+        shell::execute_argv(&self.project_root, &self.limits, argv, cwd, env, timeout_ms).await
+    }
+
+    pub(crate) async fn bridge_write_file(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<String, String> {
+        fs::write_file(self, args).await
+    }
+
+    pub(crate) async fn bridge_patch(&self, patch: &str) -> Result<String, String> {
+        apply_patch_body(self, patch).await
+    }
 }
 
 fn preview_utf8(value: &str, max: usize) -> &str {
@@ -146,30 +255,7 @@ impl ToolExecutor for DefaultToolExecutor {
             }
             "patch" => {
                 let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
-                let envelope: PatchResultEnvelope =
-                    apply_structured_patch(Path::new(&self.project_root), &self.limits, patch)
-                        .await;
-                let body = serde_json::to_string(&envelope).unwrap_or_else(|error| {
-                    serde_json::json!({
-                        "ok": false,
-                        "summary": "failed to serialize patch result envelope",
-                        "errors": [{
-                            "code": "io_error",
-                            "message": format!("failed to serialize patch result envelope: {error}"),
-                            "path": null,
-                            "operation_index": null,
-                            "hunk_index": null
-                        }],
-                        "changed_files": [],
-                        "attempted_operations": []
-                    })
-                    .to_string()
-                });
-                if envelope.ok {
-                    Ok(body)
-                } else {
-                    Err(body)
-                }
+                apply_patch_body(self, patch).await
             }
             "web_fetch" => web::web_fetch(&self.http_client, &self.limits, &args).await,
             other => Err(format!("Unknown tool: {other}")),

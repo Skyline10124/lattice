@@ -1,6 +1,7 @@
 //! Typed method registry for CEP catalog dispatch.
 
 use lancet_protocol::{
+    envelope::BaseExecutionEnvelope,
     error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData},
     CatalogMethod, CepError, CepErrorCode, CepErrorData, Retriability, ToolEvent,
 };
@@ -81,6 +82,8 @@ pub struct HandlerContext {
     pub events: EventSink,
     /// Cancellation receiver; polled or awaited by the handler.
     pub cancellation: Cancellation,
+    /// Turn-scoped base envelope injected by the composition layer.
+    pub base_envelope: BaseExecutionEnvelope,
 }
 
 /// Typed registry of catalog method handlers.
@@ -215,12 +218,23 @@ pub fn wire_code_for_error(err: &CepError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::methods::session::{
         TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
     };
     use lancet_protocol::methods::TodoWrite;
     use lancet_protocol::CepMethod;
+
+    fn test_handler_context(call_id: u64, event_tx: mpsc::Sender<ToolEvent>) -> HandlerContext {
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        HandlerContext {
+            call_id,
+            events: EventSink::new(event_tx, call_id),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "registry test"),
+        }
+    }
 
     fn sample_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -238,12 +252,7 @@ mod tests {
     async fn registry_typed_handler_dispatch_returns_result() {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-        };
+        let ctx = test_handler_context(1, event_tx);
 
         let params = serde_json::to_value(TodoWriteParams {
             todos: vec![TodoItem {
@@ -265,12 +274,7 @@ mod tests {
     async fn registry_invalid_params_returns_32602() {
         let registry = sample_registry();
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 2,
-            events: EventSink::new(event_tx, 2),
-            cancellation: Cancellation::new(cancel_rx),
-        };
+        let ctx = test_handler_context(2, event_tx);
 
         let err = registry
             .dispatch(TodoWrite::NAME, serde_json::json!({"bad": true}), ctx)
@@ -281,20 +285,39 @@ mod tests {
 
     #[tokio::test]
     async fn registry_unknown_method_returns_32601() {
-        let registry = sample_registry();
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = MethodRegistry::new();
+        crate::register_phase20_legacy_backend(
+            &mut registry,
+            dir.path().to_str().unwrap(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 3,
-            events: EventSink::new(event_tx, 3),
-            cancellation: Cancellation::new(cancel_rx),
-        };
+        let ctx = test_handler_context(3, event_tx);
 
         let err = registry
             .dispatch("not.in.catalog", serde_json::json!({}), ctx)
             .await
             .unwrap_err();
         assert_eq!(wire_code_for_error(&err), jsonrpc::METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn registry_full_catalog_registered_via_public_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = MethodRegistry::new();
+        crate::register_phase20_legacy_backend(
+            &mut registry,
+            dir.path().to_str().unwrap(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+
+        for descriptor in lancet_protocol::catalog() {
+            assert!(registry.contains(descriptor.name));
+        }
     }
 
     #[test]

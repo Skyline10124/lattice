@@ -177,7 +177,9 @@ impl BaseExecutionEnvelope {
     /// (it is not a workspace mutation). Phase 21 (PROF-02) consumes this
     /// builder when wiring `session.todo_write`.
     pub fn with_session_state(mut self) -> Self {
-        self.inner.capabilities.insert(Capability::MutateSessionState);
+        self.inner
+            .capabilities
+            .insert(Capability::MutateSessionState);
         self
     }
 
@@ -281,7 +283,10 @@ mod tests {
         let envelope: ExecutionEnvelope = serde_json::from_value(json).unwrap();
         assert_eq!(envelope.extensions["custom_extension"], 42);
         assert_eq!(envelope.scope.extensions["custom_scope_field"], true);
-        assert_eq!(envelope.constraints.extensions["custom_constraint"], "extra");
+        assert_eq!(
+            envelope.constraints.extensions["custom_constraint"],
+            "extra"
+        );
 
         // Round-trip preserves extensions
         let serialized = serde_json::to_string(&envelope).unwrap();
@@ -293,7 +298,9 @@ mod tests {
     fn base_envelope_for_workspace_root_includes_read_and_inspect() {
         let base = BaseExecutionEnvelope::for_workspace_root("/home/user/project", "inspect repo");
         let caps = &base.inner.capabilities;
-        let has_read = caps.iter().any(|c| matches!(c, Capability::ReadPath { .. }));
+        let has_read = caps
+            .iter()
+            .any(|c| matches!(c, Capability::ReadPath { .. }));
         let has_inspect = caps.iter().any(|c| matches!(c, Capability::Inspect));
         assert!(has_read);
         assert!(has_inspect);
@@ -389,11 +396,8 @@ mod tests {
             extensions: serde_json::Map::new(),
         };
 
-        let call: crate::frame::ToolCall<ExecutionEnvelope> = crate::jsonrpc::Request::new(
-            crate::jsonrpc::Id::Number(1),
-            "execute".into(),
-            envelope,
-        );
+        let call: crate::frame::ToolCall<ExecutionEnvelope> =
+            crate::jsonrpc::Request::new(crate::jsonrpc::Id::Number(1), "execute".into(), envelope);
         let serialized = serde_json::to_string(&call).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&serialized).unwrap();
         // params is the direct envelope, not nested under a CEP wrapper

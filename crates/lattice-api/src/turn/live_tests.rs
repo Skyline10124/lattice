@@ -1,7 +1,7 @@
 //! Behavioral tests for the live `stream_turn` path (Phase 16 Plan 03, Phase 17 Plan 02).
 //!
 //! These tests exercise the full live path: real SessionApi backed by SQLite,
-//! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live
+//! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live_with_agent
 //! function. No internal boundaries are mocked.
 
 use std::collections::VecDeque;
@@ -13,7 +13,7 @@ use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::SessionGraphStore;
 
-use super::live::stream_turn_live;
+use super::live::stream_turn_live_with_agent;
 use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use crate::session::SessionApi;
 
@@ -24,9 +24,14 @@ use crate::session::SessionApi;
 struct NoOpToolExecutor;
 
 #[async_trait::async_trait]
-impl lattice_tooling::ToolExecutor for NoOpToolExecutor {
-    async fn execute(&self, _call: &lattice_llm::ToolCall) -> Result<String, String> {
-        Err("no tools configured in test".to_string())
+impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
+    async fn execute(
+        &self,
+        _call: &lattice_llm::ToolCall,
+    ) -> Result<String, lattice_agent::ToolExecutionError> {
+        Err(lattice_agent::ToolExecutionError::simple(
+            "no tools configured in test",
+        ))
     }
 }
 
@@ -49,6 +54,8 @@ fn make_request(input: &str) -> RunTurnRequest {
         model: None,
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: None,
+        test_project_root: None,
     }
 }
 
@@ -60,6 +67,8 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         model: None,
         loaded_profile: None,
         cancel_flag: None,
+        test_llm: None,
+        test_project_root: None,
     }
 }
 
@@ -188,7 +197,7 @@ impl LlmClient for BlockingLlmClient {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn stream_turn_live_basic_completed() {
+async fn stream_turn_live_with_agent_basic_completed() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -197,9 +206,9 @@ async fn stream_turn_live_basic_completed() {
     let agent_loop = make_agent_loop(client);
     let request = make_request("hello");
 
-    let stream = stream_turn_live(session, agent_loop, request)
+    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
         .await
-        .expect("stream_turn_live should succeed");
+        .expect("stream_turn_live_with_agent should succeed");
     let events: Vec<TurnEvent> = stream.collect().await;
 
     // First event is TurnStarted with non-empty session_id
@@ -278,7 +287,7 @@ async fn stream_turn_live_basic_completed() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_error_commits_error() {
+async fn stream_turn_live_with_agent_error_commits_error() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     // Push an error event that will cause the agent loop to fail
@@ -288,9 +297,9 @@ async fn stream_turn_live_error_commits_error() {
     let agent_loop = make_agent_loop(client);
     let request = make_request("hello");
 
-    let stream = stream_turn_live(session, agent_loop, request)
+    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
         .await
-        .expect("stream_turn_live should succeed (error is in-stream)");
+        .expect("stream_turn_live_with_agent should succeed (error is in-stream)");
     let events: Vec<TurnEvent> = stream.collect().await;
 
     // Contains TurnFailed with non-empty reason
@@ -335,7 +344,7 @@ async fn stream_turn_live_error_commits_error() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_event_ordering() {
+async fn stream_turn_live_with_agent_event_ordering() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -344,9 +353,9 @@ async fn stream_turn_live_event_ordering() {
     let agent_loop = make_agent_loop(client);
     let request = make_request("test ordering");
 
-    let stream = stream_turn_live(session, agent_loop, request)
+    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
         .await
-        .expect("stream_turn_live should succeed");
+        .expect("stream_turn_live_with_agent should succeed");
     let events: Vec<TurnEvent> = stream.collect().await;
 
     // TurnStarted is first
@@ -406,7 +415,7 @@ async fn stream_turn_live_event_ordering() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_startup_failure_no_stream() {
+async fn stream_turn_live_with_agent_startup_failure_no_stream() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -417,7 +426,7 @@ async fn stream_turn_live_startup_failure_no_stream() {
     // Pass a request with session_id pointing to a non-existent session
     let request = make_request_with_session("hello", "non-existent-session-id");
 
-    let result = stream_turn_live(session, agent_loop, request).await;
+    let result = stream_turn_live_with_agent(session, agent_loop, request, vec![]).await;
 
     // Should return Err, not Ok with error events inside the stream (API-04/API-05)
     assert!(
@@ -427,7 +436,7 @@ async fn stream_turn_live_startup_failure_no_stream() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_commit_stores_delta_only() {
+async fn stream_turn_live_with_agent_commit_stores_delta_only() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -436,9 +445,9 @@ async fn stream_turn_live_commit_stores_delta_only() {
     let agent_loop = make_agent_loop(client);
     let request = make_request("What is 2+2?");
 
-    let stream = stream_turn_live(session, agent_loop, request)
+    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
         .await
-        .expect("stream_turn_live should succeed");
+        .expect("stream_turn_live_with_agent should succeed");
     let events: Vec<TurnEvent> = stream.collect().await;
 
     // Extract session_id and commit_id from TurnCommitted
@@ -513,7 +522,7 @@ async fn stream_turn_live_commit_stores_delta_only() {
     let agent_loop2 = make_agent_loop(client2);
     let request2 = make_request_with_session("follow-up question", &session_id);
 
-    let stream2 = stream_turn_live(session3, agent_loop2, request2)
+    let stream2 = stream_turn_live_with_agent(session3, agent_loop2, request2, vec![])
         .await
         .expect("second turn should succeed");
     let events2: Vec<TurnEvent> = stream2.collect().await;
@@ -558,7 +567,7 @@ async fn stream_turn_live_commit_stores_delta_only() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_branch_populated() {
+async fn stream_turn_live_with_agent_branch_populated() {
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -567,9 +576,9 @@ async fn stream_turn_live_branch_populated() {
     let agent_loop = make_agent_loop(client);
     let request = make_request("hello");
 
-    let stream = stream_turn_live(session, agent_loop, request)
+    let stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
         .await
-        .expect("stream_turn_live should succeed");
+        .expect("stream_turn_live_with_agent should succeed");
     let events: Vec<TurnEvent> = stream.collect().await;
 
     // TurnStarted.branch should be Some (default branch name) when session is on a branch
@@ -589,7 +598,7 @@ async fn stream_turn_live_branch_populated() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_commit_failure_deterministic() {
+async fn stream_turn_live_with_agent_commit_failure_deterministic() {
     // D-01/D-02/D-03: Deterministic commit failure using BlockingLlmClient
     // and real SQLite parent conflict.
     let dir = tempfile::tempdir().unwrap();
@@ -610,7 +619,7 @@ async fn stream_turn_live_commit_failure_deterministic() {
         .build();
     let agent_loop1 = make_agent_loop(client1);
     let request1 = make_request_with_session("first turn", &session_id);
-    let stream1 = stream_turn_live(session, agent_loop1, request1)
+    let stream1 = stream_turn_live_with_agent(session, agent_loop1, request1, vec![])
         .await
         .expect("first turn should succeed");
     let events1: Vec<TurnEvent> = stream1.collect().await;
@@ -651,9 +660,9 @@ async fn stream_turn_live_commit_failure_deterministic() {
     }));
     let request2 = make_request_with_session("second turn", &session_id);
 
-    // stream_turn_live returning Ok guarantees prepare_live_turn completed
+    // stream_turn_live_with_agent returning Ok guarantees prepare_live_turn completed
     // with the stale parent (D-02 synchronization point a).
-    let stream2 = stream_turn_live(session2, agent_loop2, request2)
+    let stream2 = stream_turn_live_with_agent(session2, agent_loop2, request2, vec![])
         .await
         .expect("second turn prepare should succeed");
 
@@ -746,7 +755,7 @@ async fn stream_turn_live_commit_failure_deterministic() {
 }
 
 #[tokio::test]
-async fn stream_turn_live_receiver_drop_does_not_cancel() {
+async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
     // VER-12: Receiver drop does not cancel a live turn — the background
     // task completes and commits despite the stream being dropped.
     let dir = tempfile::tempdir().unwrap();
@@ -761,9 +770,9 @@ async fn stream_turn_live_receiver_drop_does_not_cancel() {
     // when the block ends — receiver gone, background task should still
     // commit (API-10, VER-12).
     let session_id = {
-        let mut stream = stream_turn_live(session, agent_loop, request)
+        let mut stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
             .await
-            .expect("stream_turn_live should succeed");
+            .expect("stream_turn_live_with_agent should succeed");
         let first_event = stream.next().await.expect("should get TurnStarted");
         if let TurnEvent::TurnStarted { session_id, .. } = first_event {
             session_id
@@ -806,7 +815,7 @@ fn flood_token_events(count: usize) -> Vec<LlmEvent> {
 }
 
 #[tokio::test]
-async fn stream_turn_live_slow_observer_still_commits() {
+async fn stream_turn_live_with_agent_slow_observer_still_commits() {
     // M-19b: a consumer that stops reading must not block commit.
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
@@ -817,9 +826,9 @@ async fn stream_turn_live_slow_observer_still_commits() {
     let request = make_request("slow observer");
 
     let session_id = {
-        let mut stream = stream_turn_live(session, agent_loop, request)
+        let mut stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
             .await
-            .expect("stream_turn_live should succeed");
+            .expect("stream_turn_live_with_agent should succeed");
         let first = stream.next().await.expect("TurnStarted");
         match first {
             TurnEvent::TurnStarted { session_id, .. } => session_id,

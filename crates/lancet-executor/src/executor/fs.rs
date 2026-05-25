@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use super::DefaultToolExecutor;
 use crate::edit::content_hash;
 use lattice_tooling::ToolError;
-use super::DefaultToolExecutor;
 
 use super::render;
 
@@ -69,7 +69,7 @@ impl DefaultToolExecutor {
     }
 }
 
-pub(super) async fn read_file(
+pub(crate) async fn read_file(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {
@@ -96,7 +96,7 @@ pub(super) async fn read_file(
         .await
 }
 
-pub(super) async fn write_file(
+pub(crate) async fn write_file(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {
@@ -146,7 +146,7 @@ pub(super) async fn write_file(
     Ok(format!("Wrote {} bytes to {}", content.len(), path))
 }
 
-pub(super) async fn list_directory(
+pub(crate) async fn list_directory(
     executor: &DefaultToolExecutor,
     args: &serde_json::Value,
 ) -> Result<String, String> {

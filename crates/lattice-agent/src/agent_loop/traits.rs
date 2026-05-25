@@ -1,3 +1,47 @@
+use lattice_llm::ToolCall;
+
+/// Structured CEP error metadata preserved by the agent loop for API/CLI observation.
+///
+/// Plain data fields only — no imports from `lancet-protocol` error enums.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CepErrorPayload {
+    pub code: i32,
+    pub message: String,
+    pub data: serde_json::Value,
+    pub retriability: String,
+}
+
+/// Tool execution failure with optional structured CEP metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolExecutionError {
+    pub message: String,
+    pub cep_error: Option<CepErrorPayload>,
+}
+
+impl ToolExecutionError {
+    pub fn simple(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cep_error: None,
+        }
+    }
+}
+
+impl From<String> for ToolExecutionError {
+    fn from(message: String) -> Self {
+        Self::simple(message)
+    }
+}
+
+/// Injectable tool executor for the agent loop.
+///
+/// Production implementations dispatch through the API-layer CEP adapter.
+/// Test implementations return deterministic fake responses.
+#[async_trait::async_trait]
+pub trait ToolCallExecutor: Send + Sync {
+    async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError>;
+}
+
 /// Injectable LLM client for the agent loop.
 ///
 /// Production implementations call real providers. Test implementations
@@ -69,14 +113,3 @@ pub trait LlmClient: Send + Sync {
         Ok(Box::pin(futures::stream::iter(events)))
     }
 }
-
-/// Re-export of the unified tool executor trait.
-///
-/// The agent loop drives any implementation of `lattice_tooling::ToolExecutor`
-/// to handle tool calls. This re-export lets agent-layer callers depend on
-/// a single trait without importing `lattice-tooling` directly.
-///
-/// Implementations return `Ok(content)` on success or `Err(message)` when
-/// the tool could not produce a valid result. The agent loop derives the
-/// `ok` flag and error summary from the Result variant.
-pub use lattice_tooling::ToolExecutor as ToolCallExecutor;

@@ -3,8 +3,8 @@
 //! Domain-neutral request, notification, and response types conforming to
 //! the JSON-RPC 2.0 specification (<https://www.jsonrpc.org/specification>).
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const JSONRPC_VERSION: &str = "2.0";
 
@@ -137,14 +137,8 @@ where
         let raw: RawResponse<R, E> = Deserialize::deserialize(d)?;
 
         match (raw.result, raw.error) {
-            (Some(result), None) => Ok(Response::Success {
-                result,
-                id: raw.id,
-            }),
-            (None, Some(error)) => Ok(Response::Error {
-                error,
-                id: raw.id,
-            }),
+            (Some(result), None) => Ok(Response::Success { result, id: raw.id }),
+            (None, Some(error)) => Ok(Response::Error { error, id: raw.id }),
             (Some(_), Some(_)) => Err(D::Error::custom(
                 "JSON-RPC response must not contain both \"result\" and \"error\"",
             )),
@@ -168,8 +162,7 @@ mod tests {
             json!({"path": "/tmp/test"}),
         );
         let serialized = serde_json::to_string(&req).unwrap();
-        let deserialized: Request<serde_json::Value> =
-            serde_json::from_str(&serialized).unwrap();
+        let deserialized: Request<serde_json::Value> = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.id, Id::Number(1));
         assert_eq!(deserialized.method, "execute");
         assert_eq!(deserialized.params["path"], "/tmp/test");

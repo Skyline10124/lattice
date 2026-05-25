@@ -1,0 +1,323 @@
+use std::sync::Arc;
+
+use lancet_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
+use lancet_protocol::catalog;
+use lancet_protocol::error::{
+    jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
+    PermissionErrorData, StateErrorData, ValidationErrorData,
+};
+use lancet_protocol::methods::command::Run;
+use lancet_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lancet_protocol::methods::workspace::{ReadFile, ReadFileResult};
+use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
+use lattice_agent::{ToolCallExecutor, ToolExecutionError};
+use lattice_llm::{FunctionCall, ToolCall};
+
+use super::lancet::LancetExecutorAdapter;
+
+fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
+where
+    F: Fn(TodoWriteParams, lancet_executor::HandlerContext) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<TodoWriteResult, CepError>> + Send + 'static,
+{
+    let mut registry = MethodRegistry::new();
+    registry
+        .register_method::<TodoWrite, _, _>(handler)
+        .unwrap();
+    registry
+}
+
+async fn adapter_over_registry(registry: MethodRegistry) -> LancetExecutorAdapter {
+    let (client, server) = LancetTransport::pair(8);
+    let server_task = tokio::spawn(async move {
+        let _ = server
+            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .await;
+    });
+    let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
+    let adapter = LancetExecutorAdapter::new(client, enabled);
+    tokio::task::yield_now().await;
+    std::mem::forget(server_task);
+    adapter
+}
+
+fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
+    let payload = err
+        .cep_error
+        .as_ref()
+        .expect("structured cep_error payload");
+    assert_eq!(payload.code, expected_code);
+    assert!(!payload.message.is_empty());
+    assert!(!payload.data.is_null());
+    assert!(!payload.retriability.is_empty());
+}
+
+#[tokio::test]
+async fn lancet_executor_adapter_parse_error_maps_to_32700() {
+    let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
+        Ok(TodoWriteResult {
+            todos: params.todos,
+        })
+    }))
+    .await;
+
+    let err = adapter
+        .execute(&ToolCall {
+            id: "call_1".to_string(),
+            function: FunctionCall {
+                name: TodoWrite::NAME.to_string(),
+                arguments: "{not-json".to_string(),
+            },
+        })
+        .await
+        .expect_err("malformed JSON must fail");
+
+    assert_cep_payload(&err, jsonrpc::PARSE_ERROR);
+}
+
+#[tokio::test]
+async fn lancet_executor_adapter_rejects_profile_disabled_command_run() {
+    let adapter = LancetExecutorAdapter::new(
+        LancetTransport::pair(8).0,
+        ["workspace.read_file".to_string()],
+    );
+    let err = adapter
+        .execute(&ToolCall {
+            id: "call_1".to_string(),
+            function: FunctionCall {
+                name: Run::NAME.to_string(),
+                arguments: r#"{"argv":["echo","blocked"]}"#.to_string(),
+            },
+        })
+        .await
+        .expect_err("disabled catalog method must fail before server dispatch");
+
+    assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn lancet_executor_adapter_allows_enabled_workspace_read_file() {
+    let mut registry = MethodRegistry::new();
+    registry
+        .register_method::<ReadFile, _, _>(|params, _ctx| async move {
+            Ok(ReadFileResult {
+                content: params.path,
+                content_hash: None,
+            })
+        })
+        .unwrap();
+    let (client, server) = LancetTransport::pair(8);
+    let server_task = tokio::spawn(async move {
+        let _ = server
+            .run(registry, ServerRunConfig::in_memory_for_tests())
+            .await;
+    });
+    let adapter = LancetExecutorAdapter::new(client, [ReadFile::NAME.to_string()]);
+    tokio::task::yield_now().await;
+    std::mem::forget(server_task);
+
+    let result = adapter
+        .execute(&ToolCall {
+            id: "call_1".to_string(),
+            function: FunctionCall {
+                name: ReadFile::NAME.to_string(),
+                arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+            },
+        })
+        .await
+        .expect("enabled tool should execute");
+    assert!(result.contains("src/lib.rs"));
+}
+
+#[tokio::test]
+async fn lancet_executor_adapter_unknown_method_maps_to_32601() {
+    let adapter = adapter_over_registry(MethodRegistry::new()).await;
+
+    let err = adapter
+        .execute(&ToolCall {
+            id: "call_1".to_string(),
+            function: FunctionCall {
+                name: "crafted.unknown".to_string(),
+                arguments: "{}".to_string(),
+            },
+        })
+        .await
+        .expect_err("unknown method must fail before server dispatch");
+
+    assert_cep_payload(&err, jsonrpc::METHOD_NOT_FOUND);
+}
+
+#[tokio::test]
+async fn lancet_executor_adapter_invalid_params_maps_to_32602() {
+    let mut registry = MethodRegistry::new();
+    registry
+        .register_method::<ReadFile, _, _>(|params, _ctx| async move {
+            Ok(ReadFileResult {
+                content: params.path,
+                content_hash: None,
+            })
+        })
+        .unwrap();
+    let adapter = adapter_over_registry(registry).await;
+
+    let err = adapter
+        .execute(&ToolCall {
+            id: "call_1".to_string(),
+            function: FunctionCall {
+                name: ReadFile::NAME.to_string(),
+                arguments: r#"{}"#.to_string(),
+            },
+        })
+        .await
+        .expect_err("schema mismatch must fail");
+
+    assert_cep_payload(&err, jsonrpc::INVALID_PARAMS);
+    let field = err
+        .cep_error
+        .as_ref()
+        .unwrap()
+        .data
+        .get("field")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert_eq!(field, "path");
+}
+
+macro_rules! cep_family_test {
+    ($name:ident, $code:expr, $data:expr, $retriability:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            let expected = CepError::new($code, "family error", $data, $retriability);
+            let expected_message = expected.message.clone();
+            let expected_data = expected.data.clone();
+            let wire_code = expected.wire_code();
+            let server_err = Arc::new(expected);
+            let adapter = adapter_over_registry(todo_registry({
+                let server_err = Arc::clone(&server_err);
+                move |_params, _ctx| {
+                    let err = Arc::clone(&server_err);
+                    async move { Err((*err).clone()) }
+                }
+            }))
+            .await;
+
+            let err = adapter
+                .execute(&ToolCall {
+                    id: "call_1".to_string(),
+                    function: FunctionCall {
+                        name: TodoWrite::NAME.to_string(),
+                        arguments: r#"{"todos":[]}"#.to_string(),
+                    },
+                })
+                .await
+                .expect_err("CEP family error must propagate");
+
+            assert_cep_payload(&err, wire_code);
+            let payload = err.cep_error.as_ref().unwrap();
+            assert_eq!(payload.message, expected_message);
+            assert_eq!(payload.retriability, "permanent");
+            assert_eq!(payload.data, serde_json::to_value(&expected_data).unwrap());
+        }
+    };
+}
+
+cep_family_test!(
+    lancet_executor_adapter_validation_family_preserves_payload,
+    CepErrorCode::SchemaMismatch,
+    CepErrorData::Validation(ValidationErrorData {
+        field: "path".into(),
+        reason: "bad".into(),
+    }),
+    Retriability::Permanent
+);
+
+cep_family_test!(
+    lancet_executor_adapter_permission_family_preserves_payload,
+    CepErrorCode::CapabilityNotGranted,
+    CepErrorData::Permission(PermissionErrorData {
+        required_capability: "read_path".into(),
+        active_envelope_id: None,
+        granted_capabilities: vec![],
+    }),
+    Retriability::Permanent
+);
+
+cep_family_test!(
+    lancet_executor_adapter_execution_family_preserves_payload,
+    CepErrorCode::ExecutionFailed,
+    CepErrorData::Execution(ExecutionErrorData {
+        command: "ls".into(),
+        exit_code: Some(1),
+        stderr: Some("failed".into()),
+    }),
+    Retriability::Permanent
+);
+
+cep_family_test!(
+    lancet_executor_adapter_state_family_preserves_payload,
+    CepErrorCode::StaleContext,
+    CepErrorData::State(StateErrorData {
+        resource: "session".into(),
+        reason: "stale".into(),
+    }),
+    Retriability::Permanent
+);
+
+cep_family_test!(
+    lancet_executor_adapter_guard_family_preserves_payload,
+    CepErrorCode::GuardDenied,
+    CepErrorData::Guard(GuardErrorData {
+        method: TodoWrite::NAME.into(),
+        reason: "denied".into(),
+    }),
+    Retriability::Permanent
+);
+
+cep_family_test!(
+    lancet_executor_adapter_effect_family_preserves_payload,
+    CepErrorCode::EffectViolation,
+    CepErrorData::Effect(EffectErrorData {
+        declared_impact: "read".into(),
+        observed_impact: "write".into(),
+    }),
+    Retriability::Permanent
+);
+
+#[tokio::test]
+async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
+    use tempfile::TempDir;
+
+    use lattice_agent::testing::FakeStreamingLlmClient;
+    use lattice_agent::LlmClient;
+
+    use super::lancet::build_production_turn_deps;
+    use super::llm::RealLlmClient;
+
+    let dir = TempDir::new().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![lattice_llm::LlmEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: None,
+            }])
+            .build(),
+    );
+
+    let deps = build_production_turn_deps(dir.path().to_str().unwrap(), &[], llm, true)
+        .expect("production runtime should build");
+
+    assert_eq!(deps.build_metrics.adapter_instances, 1);
+    assert_eq!(deps.build_metrics.transport_pairs, 1);
+
+    let deps2 = build_production_turn_deps(
+        dir.path().to_str().unwrap(),
+        &["workspace.read_file".to_string()],
+        Arc::new(RealLlmClient),
+        false,
+    )
+    .expect("second runtime build");
+    assert_eq!(deps2.build_metrics.adapter_instances, 1);
+    assert_eq!(deps2.build_metrics.transport_pairs, 1);
+}

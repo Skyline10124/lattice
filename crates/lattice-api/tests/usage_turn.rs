@@ -1,19 +1,18 @@
 //! Deterministic usage tests for the v1.1 main chain path.
 //!
 //! These tests exercise the real `run_turn` → live `stream_turn` collector →
-//! `AgentLoop` → `DefaultToolExecutor` pipeline with a fake streaming LLM.
+//! `AgentLoop` CEP adapter pipeline with a fake streaming LLM.
 //! No network, no real API keys.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
+use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
-use lancet_executor::DefaultToolExecutor;
 
 // ── Streaming event helpers ─────────────────────────────────────────────────
 
@@ -102,56 +101,43 @@ enabled = {enabled:?}
     }
 }
 
-fn build_agent_loop(
-    fake_llm: Arc<dyn LlmClient>,
-    workspace_root: &std::path::Path,
-    enabled_tools: &[&str],
-) -> Arc<AgentLoop> {
-    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
-    let executor =
-        DefaultToolExecutor::for_project_root(&workspace_root.to_string_lossy(), enabled)
-            .expect("executor creation must succeed");
-
-    Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: fake_llm,
-        tool_executor: Arc::new(executor),
-    }))
+fn make_request(ws: &Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurnRequest {
+    std::env::set_current_dir(&ws.root).expect("set workspace cwd");
+    RunTurnRequest {
+        input: input.to_string(),
+        session_id: None,
+        profile: None,
+        model: None,
+        loaded_profile: Some(ws.loaded.clone()),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: Some(ws.root.to_string_lossy().to_string()),
+    }
 }
 
 // ── Test 1: read workspace file through default profile ─────────────────────
 
 #[tokio::test]
 async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "read_file",
+                "workspace.read_file",
                 r#"{"path":"src/lib.rs"}"#,
             ))
             .push_events(final_response_events("Read workspace file successfully."))
             .build(),
     );
-    let agent_loop = build_agent_loop(fake_llm, &ws.root, &["read_file"]);
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
 
-    let request = RunTurnRequest {
-        input: "Read src/lib.rs".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded),
-        cancel_flag: None,
-    };
-
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        agent_loop,
-        request,
+        make_request(&ws, "Read src/lib.rs", fake_llm),
     )
     .await
     .expect("run_turn must succeed");
@@ -168,8 +154,8 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     let tool_result = result
         .tool_results
         .iter()
-        .find(|t| t.name == "read_file")
-        .expect("should have a read_file tool result");
+        .find(|t| t.name == "workspace.read_file")
+        .expect("should have a workspace.read_file tool result");
     assert!(tool_result.output_len > 0, "tool output must be non-empty");
 
     let store = SqliteSessionGraphStore::new(&sessions_path);
@@ -200,24 +186,13 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
             .push_events(final_response_events("Done."))
             .build(),
     );
-    let agent_loop = build_agent_loop(fake_llm, &ws.root, &[]);
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
 
-    let request = RunTurnRequest {
-        input: "Hello".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded),
-        cancel_flag: None,
-    };
-
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        agent_loop,
-        request,
+        make_request(&ws, "Hello", fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -236,11 +211,63 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
     assert_eq!(model_started.1, "sonnet");
 }
 
+// ── Test: profile-disabled command.run is rejected before CEP dispatch ─────
+
+#[tokio::test]
+async fn rejects_profile_disabled_command_run() {
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_1",
+                "command.run",
+                r#"{"argv":["echo","blocked"]}"#,
+            ))
+            .push_events(final_response_events("Should not execute command.run."))
+            .build(),
+    );
+
+    let session_dir = tempfile::tempdir().unwrap();
+    let sessions_path = session_dir.path().join("sessions");
+
+    let events: Vec<TurnEvent> = lattice_api::stream_turn(
+        lattice_api::SessionApi::sqlite(&sessions_path),
+        make_request(&ws, "Try command.run", fake_llm),
+    )
+    .await
+    .expect("stream_turn must start")
+    .collect()
+    .await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            TurnEvent::ToolCallFinished {
+                name,
+                ok: false,
+                ..
+            } if name == "command.run"
+        )),
+        "disabled command.run must surface as a failed ToolCallFinished"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            TurnEvent::CepCallStarted { method, .. } if method == "command.run"
+        )),
+        "disabled command.run must not emit CepCallStarted"
+    );
+}
+
 // ── Test 2: patch workspace file and commit ─────────────────────────────────
 
 #[tokio::test]
 async fn usage_run_turn_can_patch_workspace_file_and_commit() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 1 }", &["read_file", "patch"]);
+    let ws = setup_workspace(
+        "pub fn answer() -> i32 { 1 }",
+        &["workspace.read_file", "workspace.patch"],
+    );
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
@@ -261,7 +288,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "patch",
+                "workspace.patch",
                 &format!(
                     r#"{{"patch":{}}}"#,
                     serde_json::to_string(&patch_doc).unwrap()
@@ -270,24 +297,11 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
             .push_events(final_response_events("Patched successfully."))
             .build(),
     );
-    let agent_loop = build_agent_loop(fake_llm, &ws.root, &["read_file", "patch"]);
-
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-
-    let request = RunTurnRequest {
-        input: "Change the answer to 42".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded),
-        cancel_flag: None,
-    };
-
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        agent_loop,
-        request,
+        make_request(&ws, "Change the answer to 42", fake_llm),
     )
     .await
     .expect("run_turn must succeed");
@@ -308,8 +322,11 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     assert_eq!(log.len(), 1);
 
     assert!(
-        result.tool_results.iter().any(|t| t.name == "patch"),
-        "should have a patch tool result"
+        result
+            .tool_results
+            .iter()
+            .any(|t| t.name == "workspace.patch"),
+        "should have a workspace.patch tool result"
     );
 }
 
@@ -317,7 +334,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 
 #[tokio::test]
 async fn usage_resume_session_includes_previous_turn_context() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -325,44 +342,24 @@ async fn usage_resume_session_includes_previous_turn_context() {
             .push_events(final_response_events("Second turn done."))
             .build(),
     );
-    let agent_loop = build_agent_loop(fake_llm.clone(), &ws.root, &["read_file"]);
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
 
-    let request1 = RunTurnRequest {
-        input: "Hello".to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded.clone()),
-        cancel_flag: None,
-    };
     let result1 = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        agent_loop.clone(),
-        request1,
+        make_request(&ws, "Hello", fake_llm.clone()),
     )
     .await
     .expect("turn 1 must succeed");
     assert_eq!(result1.status, RunTurnStatus::Completed);
     let session_id = result1.session_id.clone();
 
-    let request2 = RunTurnRequest {
-        input: "Follow up".to_string(),
-        session_id: Some(session_id.clone()),
-        profile: None,
-        model: None,
-        loaded_profile: Some(ws.loaded),
-        cancel_flag: None,
-    };
-    let result2 = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
-        agent_loop,
-        request2,
-    )
-    .await
-    .expect("turn 2 must succeed");
+    let mut request2 = make_request(&ws, "Follow up", fake_llm);
+    request2.session_id = Some(session_id.clone());
+    let result2 = lattice_api::run_turn(lattice_api::SessionApi::sqlite(&sessions_path), request2)
+        .await
+        .expect("turn 2 must succeed");
     assert_eq!(result2.status, RunTurnStatus::Completed);
 
     let store = SqliteSessionGraphStore::new(&sessions_path);

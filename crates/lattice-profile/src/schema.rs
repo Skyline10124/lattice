@@ -141,7 +141,7 @@ description = "A full-featured agent"
 system_path = "prompt.md"
 
 [tools]
-enabled = ["grep", "read_file", "bash"]
+enabled = ["workspace.grep", "workspace.read_file", "command.run"]
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(
@@ -150,7 +150,10 @@ enabled = ["grep", "read_file", "bash"]
         );
         assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
         let tools = &profile.tools;
-        assert_eq!(tools.enabled, vec!["grep", "read_file", "bash"]);
+        assert_eq!(
+            tools.enabled,
+            vec!["workspace.grep", "workspace.read_file", "command.run"]
+        );
     }
 
     // ── Top-level section rejection ───────────────────────────────────

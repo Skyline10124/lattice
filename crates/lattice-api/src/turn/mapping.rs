@@ -1,5 +1,5 @@
 use lattice_agent::{AgentTurnRequest, AgentTurnStatus};
-use lattice_llm::{ModelRouter, ModelTarget};
+use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
 use lattice_session::HeadTranscript;
 
 use super::types::{RunTurnRequest, RunTurnStatus};
@@ -38,6 +38,15 @@ pub(crate) fn resolve_model_and_prompt(
     (model, system_prompt, provider)
 }
 
+pub(crate) fn resolve_project_root(request: &RunTurnRequest) -> String {
+    if let Some(root) = &request.test_project_root {
+        return root.clone();
+    }
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "/".to_string())
+}
+
 /// Build an AgentTurnRequest from the API request, session context, and resolved model/prompt.
 pub(crate) fn build_agent_request(
     request: &RunTurnRequest,
@@ -46,23 +55,8 @@ pub(crate) fn build_agent_request(
     model: String,
     system_prompt: Option<String>,
     provider: Option<String>,
+    tool_definitions: Vec<ToolDefinition>,
 ) -> AgentTurnRequest {
-    let enabled_tools = request
-        .loaded_profile
-        .as_ref()
-        .map(|lp| lp.profile.tools.enabled.clone())
-        .unwrap_or_default();
-
-    let project_root = request
-        .loaded_profile
-        .as_ref()
-        .map(|lp| lp.package_dir.to_string_lossy().to_string())
-        .unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "/".to_string())
-        });
-
     AgentTurnRequest {
         session_id: session_id.to_string(),
         transcript,
@@ -70,8 +64,7 @@ pub(crate) fn build_agent_request(
         system_prompt,
         model,
         provider,
-        enabled_tools,
-        project_root,
+        tool_definitions,
         cancel_flag: request.cancel_flag.clone(),
         timeout: None,
     }

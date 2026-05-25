@@ -28,7 +28,7 @@ model = {model}
 system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
-enabled = ["read_file", "grep", "find_files", "list_directory", "workspace_context"]
+enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
 "#
     )
 }
@@ -57,7 +57,7 @@ description = "Read-only agent for code understanding and review"
 system = "You are a code reader and reviewer. Read and analyze code carefully. Do not suggest edits or run commands. Explain your reasoning clearly."
 
 [tools]
-enabled = ["read_file", "grep", "find_files", "list_directory", "workspace_context"]
+enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
 "#
     )
 }
@@ -86,7 +86,7 @@ description = "Editing agent for refactoring, fixing, and applying patches"
 system = "You are a code editor. Read, edit, and refactor code within the project. Use read, write, and patch tools for changes. Be precise and explain your edits."
 
 [tools]
-enabled = ["read_file", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context"]
+enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write"]
 "#
     )
 }
@@ -113,7 +113,7 @@ description = "Full development agent for coding, planning, and troubleshooting"
 system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Fetch web docs when needed. Be methodical and explain your reasoning."
 
 [tools]
-enabled = ["read_file", "write_file", "patch", "grep", "find_files", "list_directory", "todo_write", "workspace_context", "bash", "web_fetch"]
+enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write", "command.run", "web.fetch"]
 "#
     )
 }
@@ -268,19 +268,18 @@ mod tests {
         assert!(!profile.tools.enabled.is_empty());
         // No shell, web, or editing tools
         let enabled = &profile.tools.enabled;
-        assert!(!enabled.contains(&"bash".to_string()));
-        assert!(!enabled.contains(&"web_fetch".to_string()));
-        assert!(!enabled.contains(&"write_file".to_string()));
-        assert!(!enabled.contains(&"patch".to_string()));
+        assert!(!enabled.contains(&"command.run".to_string()));
+        assert!(!enabled.contains(&"web.fetch".to_string()));
+        assert!(!enabled.contains(&"workspace.write_file".to_string()));
+        assert!(!enabled.contains(&"workspace.patch".to_string()));
     }
 
     #[test]
     fn reader_template_has_no_shell_or_web() {
         let toml_str = default_reader_template("r", "haiku").to_lowercase();
-        assert!(!toml_str.contains("shell"));
-        assert!(!toml_str.contains("web"));
+        assert!(!toml_str.contains("command.run"));
+        assert!(!toml_str.contains("web.fetch"));
         assert!(!toml_str.contains("editing"));
-        assert!(!toml_str.contains("bash"));
     }
 
     #[test]
@@ -289,11 +288,10 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("reader template must parse");
         let expected: Vec<&str> = vec![
-            "read_file",
-            "grep",
-            "find_files",
-            "list_directory",
-            "workspace_context",
+            "workspace.read_file",
+            "workspace.grep",
+            "workspace.find_files",
+            "workspace.list_directory",
         ];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
@@ -313,20 +311,18 @@ mod tests {
         assert_eq!(profile.agent.model, "sonnet");
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"write_file".to_string()));
-        assert!(enabled.contains(&"patch".to_string()));
-        assert!(enabled.contains(&"todo_write".to_string()));
+        assert!(enabled.contains(&"workspace.write_file".to_string()));
+        assert!(enabled.contains(&"workspace.patch".to_string()));
+        assert!(enabled.contains(&"session.todo_write".to_string()));
         // No shell or web
-        assert!(!enabled.contains(&"bash".to_string()));
-        assert!(!enabled.contains(&"web_fetch".to_string()));
+        assert!(!enabled.contains(&"command.run".to_string()));
+        assert!(!enabled.contains(&"web.fetch".to_string()));
     }
 
     #[test]
     fn editor_template_has_no_web_fetch_tool() {
         let toml_str = default_editor_template("e", "sonnet");
-        // The word "web" may appear in comments, but the tool name
-        // "web_fetch" must not appear as an enabled tool.
-        assert!(!toml_str.contains("web_fetch"));
+        assert!(!toml_str.contains("web.fetch"));
     }
 
     #[test]
@@ -335,14 +331,13 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("editor template must parse");
         let expected: Vec<&str> = vec![
-            "read_file",
-            "write_file",
-            "patch",
-            "grep",
-            "find_files",
-            "list_directory",
-            "todo_write",
-            "workspace_context",
+            "workspace.read_file",
+            "workspace.write_file",
+            "workspace.patch",
+            "workspace.grep",
+            "workspace.find_files",
+            "workspace.list_directory",
+            "session.todo_write",
         ];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
@@ -362,11 +357,11 @@ mod tests {
         assert_eq!(profile.agent.model, "sonnet");
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"bash".to_string()));
-        assert!(enabled.contains(&"web_fetch".to_string()));
-        assert!(enabled.contains(&"write_file".to_string()));
-        assert!(enabled.contains(&"patch".to_string()));
-        assert!(enabled.contains(&"todo_write".to_string()));
+        assert!(enabled.contains(&"command.run".to_string()));
+        assert!(enabled.contains(&"web.fetch".to_string()));
+        assert!(enabled.contains(&"workspace.write_file".to_string()));
+        assert!(enabled.contains(&"workspace.patch".to_string()));
+        assert!(enabled.contains(&"session.todo_write".to_string()));
     }
 
     #[test]
@@ -375,16 +370,15 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("dev template must parse");
         let expected: Vec<&str> = vec![
-            "read_file",
-            "write_file",
-            "patch",
-            "grep",
-            "find_files",
-            "list_directory",
-            "todo_write",
-            "workspace_context",
-            "bash",
-            "web_fetch",
+            "workspace.read_file",
+            "workspace.write_file",
+            "workspace.patch",
+            "workspace.grep",
+            "workspace.find_files",
+            "workspace.list_directory",
+            "session.todo_write",
+            "command.run",
+            "web.fetch",
         ];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
@@ -476,6 +470,54 @@ mod tests {
                 !profile.tools.enabled.is_empty(),
                 "{name} template must have non-empty tools.enabled"
             );
+        }
+    }
+
+    #[test]
+    fn default_templates_use_only_dotted_catalog_names() {
+        for (name, toml_str) in [
+            ("default", default_agent_template("t", "sonnet")),
+            ("reader", default_reader_template("t", "sonnet")),
+            ("editor", default_editor_template("t", "sonnet")),
+            ("dev", default_dev_template("t", "sonnet")),
+        ] {
+            let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
+            for tool in &profile.tools.enabled {
+                assert!(
+                    tool.contains('.'),
+                    "{name} template tool '{tool}' must be a dotted CEP method name"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_templates_exclude_legacy_aliases_and_workspace_context() {
+        let legacy = vec![
+            ["read", "_file"].concat(),
+            ['g', 'r', 'e', 'p'].iter().collect::<String>(),
+            ["find", "_files"].concat(),
+            ["list", "_directory"].concat(),
+            ["write", "_file"].concat(),
+            ['p', 'a', 't', 'c', 'h'].iter().collect::<String>(),
+            ['b', 'a', 's', 'h'].iter().collect::<String>(),
+            ["web", "_fetch"].concat(),
+            ["todo", "_write"].concat(),
+            ["workspace", "_context"].concat(),
+        ];
+        for toml_str in [
+            default_agent_template("t", "sonnet"),
+            default_reader_template("t", "sonnet"),
+            default_editor_template("t", "sonnet"),
+            default_dev_template("t", "sonnet"),
+        ] {
+            for alias in &legacy {
+                assert!(
+                    !toml_str.contains(&format!("\"{alias}\"")),
+                    "template must not contain legacy tool name '{alias}'"
+                );
+            }
         }
     }
 

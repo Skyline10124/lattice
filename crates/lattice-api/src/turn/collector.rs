@@ -100,7 +100,10 @@ impl RunTurnCollector {
             TurnEvent::TurnCommitting
             | TurnEvent::ModelStarted { .. }
             | TurnEvent::ReasoningDelta { .. }
-            | TurnEvent::ToolCallStarted { .. } => {}
+            | TurnEvent::ToolCallStarted { .. }
+            | TurnEvent::CepCallStarted { .. }
+            | TurnEvent::CepCallFinished { .. }
+            | TurnEvent::CepGuardVerdict { .. } => {}
         }
         Ok(())
     }

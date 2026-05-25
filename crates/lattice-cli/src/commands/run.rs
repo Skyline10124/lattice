@@ -21,11 +21,9 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use lattice_agent::{AgentLoop, AgentLoopConfig};
 use lattice_profile::{ProfileError, ProfileSource};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 
@@ -33,33 +31,6 @@ use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
 
 /// Stream idle timeout in seconds (L-18-03).
 pub(crate) const STREAM_TIMEOUT_SECS: u64 = 300;
-
-/// Production LlmClient that delegates to `lattice_llm::chat`.
-struct RealLlmClient;
-
-#[async_trait::async_trait]
-impl lattice_agent::agent_loop::LlmClient for RealLlmClient {
-    async fn chat(
-        &self,
-        request: lattice_llm::ChatRequest,
-    ) -> std::result::Result<lattice_llm::ChatResponse, Box<dyn std::error::Error + Send + Sync>>
-    {
-        lattice_llm::chat(request)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-    }
-
-    async fn stream_chat(
-        &self,
-        request: lattice_llm::ChatRequest,
-    ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        lattice_llm::stream(request)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
-    }
-}
-
-/// Terminal signal accumulated from `TurnFailed` or `TurnCancelled`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalSignal {
     Failed { reason: String },
@@ -289,6 +260,24 @@ fn render_human_event<WOut: Write, WErr: Write>(
             flush_before_status(out, err, state)?;
             writeln!(err, "{} commit failed: {reason}", "✗".red())?;
         }
+        TurnEvent::CepCallStarted { method, .. } => {
+            if verbose {
+                flush_before_status(out, err, state)?;
+                writeln!(err, "{} cep {method}", "·".dimmed())?;
+            }
+        }
+        TurnEvent::CepCallFinished { method, ok, .. } => {
+            if verbose {
+                flush_before_status(out, err, state)?;
+                if *ok {
+                    writeln!(err, "{} cep {method}", "✓".green())?;
+                } else {
+                    writeln!(err, "{} cep {method}", "✗".red())?;
+                }
+            }
+        }
+        // Bridge lifecycle guard metadata is observation-only in human mode.
+        TurnEvent::CepGuardVerdict { .. } => {}
     }
     Ok(())
 }
@@ -400,20 +389,6 @@ async fn run_inner(
     let session_dir = default_session_dir();
     let session_api = lattice_api::SessionApi::sqlite(session_dir);
 
-    // Build AgentLoop with real LLM client and tool executor
-    let enabled_tools = loaded_profile.profile.tools.enabled.clone();
-    let project_root_str = project_root.to_string_lossy().to_string();
-    let tool_executor = lancet_executor::DefaultToolExecutor::for_project_root(
-        &project_root_str,
-        enabled_tools,
-    )
-    .map_err(|e| anyhow::anyhow!("tool executor setup: {e}"))?;
-
-    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
-        llm: Arc::new(RealLlmClient),
-        tool_executor: Arc::new(tool_executor),
-    }));
-
     let request = RunTurnRequest {
         input: prompt,
         session_id,
@@ -421,10 +396,12 @@ async fn run_inner(
         model,
         loaded_profile: Some(loaded_profile),
         cancel_flag: None,
+        test_llm: None,
+        test_project_root: None,
     };
 
-    // D-A1: drive stream_turn instead of run_turn
-    let mut stream = match lattice_api::stream_turn(session_api, agent_loop, request).await {
+    // D-A1: drive stream_turn; lattice-api owns Lancet runtime construction
+    let mut stream = match lattice_api::stream_turn(session_api, request).await {
         Ok(s) => s,
         Err(lattice_api::ApiError::NotFound(id)) => {
             eprintln!("{}: session '{}' not found", "error".red(), id);

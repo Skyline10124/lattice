@@ -16,7 +16,7 @@ use lattice_profile::LoadedAgentProfile;
 ///
 /// [`run_turn`]: crate::turn::run_turn
 /// [`stream_turn`]: crate::turn::stream_turn
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RunTurnRequest {
     pub input: String,
     pub session_id: Option<String>,
@@ -27,6 +27,12 @@ pub struct RunTurnRequest {
     /// Cooperative cancellation flag forwarded to the agent loop.
     #[serde(skip)]
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Test-only LLM injection for lattice-api integration tests.
+    #[serde(skip)]
+    pub test_llm: Option<Arc<dyn lattice_agent::LlmClient>>,
+    /// Test-only project root for CEP runtime and legacy backend wiring.
+    #[serde(skip)]
+    pub test_project_root: Option<String>,
 }
 
 impl PartialEq for RunTurnRequest {
@@ -181,6 +187,35 @@ pub enum TurnEvent {
     },
     /// Commit persistence failed.
     CommitFailed { reason: String },
+    /// A CEP call has started on the embedded server.
+    CepCallStarted {
+        call_id: u64,
+        method: String,
+        impact_kind: String,
+        audit_id: i64,
+        semantic_stage: String,
+        guard_stage: String,
+    },
+    /// A CEP call has finished on the embedded server.
+    CepCallFinished {
+        call_id: u64,
+        method: String,
+        impact_kind: String,
+        audit_id: i64,
+        ok: bool,
+        semantic_stage: String,
+        guard_stage: String,
+        error_code: Option<String>,
+    },
+    /// Staged bridge lifecycle guard metadata (Phase 20 bridge only).
+    CepGuardVerdict {
+        call_id: u64,
+        method: String,
+        semantic_stage: String,
+        guard_stage: String,
+        policy_enforced: bool,
+        semantic_status: Option<String>,
+    },
 }
 
 /// Boxed stream of TurnEvent values.
