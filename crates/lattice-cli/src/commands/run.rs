@@ -154,8 +154,7 @@ fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
 /// Each call emits exactly one `serde_json::to_string` line followed
 /// by `\n` via `writeln!`. No ANSI escapes are produced (D-B6 / D-D3).
 fn render_json_event<W: std::io::Write>(event: &TurnEvent, out: &mut W) -> std::io::Result<()> {
-    let line = serde_json::to_string(event)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
     writeln!(out, "{}", line)
 }
 

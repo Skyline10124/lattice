@@ -3,6 +3,8 @@
 pub mod command;
 pub mod envelope;
 pub mod external;
+#[cfg(feature = "inspect-scaffold")]
+pub mod scaffold;
 pub mod session;
 pub mod workspace;
 
@@ -11,6 +13,9 @@ pub use envelope::Declare;
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile};
+
+#[cfg(feature = "inspect-scaffold")]
+pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 
 mod sealed {
     use super::{

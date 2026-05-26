@@ -119,18 +119,6 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
     }
 }
 
-struct NoopToolExecutor;
-
-#[async_trait::async_trait]
-impl lattice_agent::agent_loop::ToolCallExecutor for NoopToolExecutor {
-    async fn execute(
-        &self,
-        _call: &lattice_llm::ToolCall,
-    ) -> Result<String, lattice_agent::ToolExecutionError> {
-        Ok("no-op".to_string())
-    }
-}
-
 #[tokio::test]
 async fn run_integration_creates_session_and_returns_commit() {
     let temp = tempfile::tempdir().unwrap();
@@ -248,7 +236,6 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 },
                 tools: lattice_profile::ToolsSection {
                     enabled: vec!["workspace.read_file".to_string()],
-                    ..Default::default()
                 },
                 cep: lattice_profile::CepSection::default(),
             },

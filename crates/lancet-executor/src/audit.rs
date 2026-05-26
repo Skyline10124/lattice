@@ -12,6 +12,117 @@ pub const SEMANTIC_STAGE: &str = "phase20_legacy_bridge";
 pub const GUARD_STAGE: &str = "bridge_lifecycle_only";
 pub const POLICY_ENFORCED: bool = false;
 
+pub const SEMANTIC_STAGE_NATIVE: &str = "phase21_native";
+pub const GUARD_STAGE_NATIVE: &str = "cep_policy_lifecycle";
+
+pub const SEMANTIC_STAGE_SCAFFOLD: &str = "scaffold";
+
+/// Feature-gated scaffold methods (not in default `CATALOG` or production registry).
+pub const SCAFFOLD_METHODS: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
+
+/// Returns true when `method` is an inspect/navigate scaffold stub.
+pub fn is_scaffold_method(method: &str) -> bool {
+    SCAFFOLD_METHODS.contains(&method)
+}
+
+/// Catalog methods served by Phase 21 native handlers in the production registry.
+pub const PHASE21_NATIVE_METHODS: [&str; 6] = [
+    "workspace.read_file",
+    "workspace.grep",
+    "workspace.list_directory",
+    "workspace.find_files",
+    "web.fetch",
+    "session.todo_write",
+];
+
+/// Phase 22-pending methods that remain on the Phase 20 legacy bridge in production.
+pub const PHASE22_PENDING_BRIDGE_METHODS: [&str; 4] = [
+    "command.run",
+    "workspace.write_file",
+    "workspace.patch",
+    "envelope.declare",
+];
+
+/// Returns true when `method` is registered as a Phase 21 native handler in production.
+pub fn is_phase21_native_method(method: &str) -> bool {
+    PHASE21_NATIVE_METHODS.contains(&method)
+}
+
+/// Per-call audit lifecycle metadata (replaces compile-time constants per row).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallAuditMetadata {
+    pub semantic_stage: String,
+    pub semantic_status: Option<String>,
+    pub guard_stage: String,
+    pub policy_enforced: bool,
+    pub denial_source: Option<String>,
+    pub backend_invoked: Option<bool>,
+    pub observation_source: Option<String>,
+}
+
+impl CallAuditMetadata {
+    /// Phase 20 legacy bridge defaults (`policy_enforced = false`).
+    pub fn bridge_defaults() -> Self {
+        Self {
+            semantic_stage: SEMANTIC_STAGE.to_string(),
+            semantic_status: Some("started".to_string()),
+            guard_stage: GUARD_STAGE.to_string(),
+            policy_enforced: false,
+            denial_source: None,
+            backend_invoked: None,
+            observation_source: None,
+        }
+    }
+
+    /// Phase 21 native handler with CEP policy enforcement.
+    pub fn native_policy_enforced(semantic_status: Option<&str>) -> Self {
+        Self {
+            semantic_stage: SEMANTIC_STAGE_NATIVE.to_string(),
+            semantic_status: semantic_status.map(str::to_string),
+            guard_stage: GUARD_STAGE_NATIVE.to_string(),
+            policy_enforced: true,
+            denial_source: None,
+            backend_invoked: Some(true),
+            observation_source: None,
+        }
+    }
+
+    /// Feature-gated inspect/navigate scaffold stub (no workspace access, no budget charge).
+    pub fn scaffold_stub() -> Self {
+        Self {
+            semantic_stage: SEMANTIC_STAGE_SCAFFOLD.to_string(),
+            semantic_status: Some("not_yet_routed".to_string()),
+            guard_stage: GUARD_STAGE_NATIVE.to_string(),
+            policy_enforced: true,
+            denial_source: None,
+            backend_invoked: Some(false),
+            observation_source: None,
+        }
+    }
+
+    pub fn with_denial_source(mut self, source: &str) -> Self {
+        self.denial_source = Some(source.to_string());
+        self.backend_invoked = Some(false);
+        self
+    }
+
+    pub fn with_observation_source(mut self, source: &str) -> Self {
+        self.observation_source = Some(source.to_string());
+        self
+    }
+
+    /// Per-method audit metadata for the production registry (native vs bridge vs scaffold).
+    pub fn for_production_dispatch(method: &str) -> Self {
+        if is_phase21_native_method(method) {
+            Self::native_policy_enforced(Some("started"))
+        } else if is_scaffold_method(method) {
+            Self::scaffold_stub()
+        } else {
+            Self::bridge_defaults()
+        }
+    }
+}
+
 /// Per-turn identifiers attached to every audit row.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CepAuditContext {
@@ -123,14 +234,14 @@ impl CepAuditStore {
         ctx: &CepAuditContext,
         call_id: u64,
         method: &str,
-        semantic_status: Option<&str>,
+        metadata: &CallAuditMetadata,
     ) -> Result<AuditStart, AuditError> {
         let started_at = chrono_now();
         let impact_kind = impact_kind_for_method(method)
             .map(impact_kind_label)
             .unwrap_or("unknown")
             .to_string();
-        let semantic_status = semantic_status.unwrap_or("started");
+        let semantic_status = metadata.semantic_status.as_deref().unwrap_or("started");
 
         let conn = self.conn.lock().expect("audit mutex poisoned");
         conn.execute(
@@ -145,10 +256,10 @@ impl CepAuditStore {
                 impact_kind,
                 ctx.turn_id,
                 ctx.session_id,
-                SEMANTIC_STAGE,
+                metadata.semantic_stage,
                 semantic_status,
-                GUARD_STAGE,
-                if POLICY_ENFORCED { 1 } else { 0 },
+                metadata.guard_stage,
+                if metadata.policy_enforced { 1 } else { 0 },
             ],
         )
         .map_err(|source| AuditError::Database {
@@ -318,7 +429,12 @@ mod tests {
         let store = CepAuditStore::in_memory().unwrap();
         let ctx = test_context();
         let start = store
-            .start_call(&ctx, 42, TodoWriteMethod::NAME, Some("started"))
+            .start_call(
+                &ctx,
+                42,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(
@@ -351,7 +467,12 @@ mod tests {
     fn cep_audit_error_path_finalizes_ended_at() {
         let store = CepAuditStore::in_memory().unwrap();
         let start = store
-            .start_call(&test_context(), 7, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                7,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(
@@ -377,7 +498,12 @@ mod tests {
     fn cep_audit_unknown_method_and_cancel_paths_finalize() {
         let store = CepAuditStore::in_memory().unwrap();
         let unknown = store
-            .start_call(&test_context(), 1, "crafted.unknown", None)
+            .start_call(
+                &test_context(),
+                1,
+                "crafted.unknown",
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(
@@ -392,14 +518,24 @@ mod tests {
             .unwrap();
 
         let cancelled = store
-            .start_call(&test_context(), 2, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                2,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(cancelled, AuditOutcome::Cancelled, None, None)
             .unwrap();
 
         let channel = store
-            .start_call(&test_context(), 3, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                3,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(channel, AuditOutcome::ResponseChannelClosed, None, None)
@@ -418,7 +554,12 @@ mod tests {
             "todos": [{"content": "very long secret payload that must not be duplicated", "status": "pending"}]
         });
         let start = store
-            .start_call(&test_context(), 9, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                9,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         store
             .finalize_call(
@@ -451,7 +592,12 @@ mod tests {
                 .expect("drop audit table");
         }
 
-        let result = store.start_call(&test_context(), 1, TodoWriteMethod::NAME, None);
+        let result = store.start_call(
+            &test_context(),
+            1,
+            TodoWriteMethod::NAME,
+            &CallAuditMetadata::bridge_defaults(),
+        );
         assert!(result.is_err());
         assert_eq!(store.pending.load(Ordering::SeqCst), 0);
     }
@@ -460,7 +606,12 @@ mod tests {
     fn cep_audit_failed_finalize_still_decrements_pending() {
         let store = CepAuditStore::in_memory().unwrap();
         let start = store
-            .start_call(&test_context(), 2, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                2,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         assert_eq!(store.pending.load(Ordering::SeqCst), 1);
         {
@@ -481,12 +632,119 @@ mod tests {
         assert_eq!(store.pending.load(Ordering::SeqCst), 0);
     }
 
+    #[test]
+    fn cep_audit_native_and_bridge_rows_coexist() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx = test_context();
+        let bridge = store
+            .start_call(
+                &ctx,
+                1,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                bridge,
+                AuditOutcome::Success {
+                    summary: "todo_count=0".into(),
+                },
+                Some("bridged_legacy_body"),
+                None,
+            )
+            .unwrap();
+
+        let native = store
+            .start_call(
+                &ctx,
+                2,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                native,
+                AuditOutcome::Success {
+                    summary: "read_file".into(),
+                },
+                Some("native_handler"),
+                Some(r#"{"observation_source":"workspace","bytes_returned":10}"#),
+            )
+            .unwrap();
+
+        assert!(
+            !store
+                .row_by_audit_id(bridge.audit_id)
+                .unwrap()
+                .policy_enforced
+        );
+        assert!(
+            store
+                .row_by_audit_id(native.audit_id)
+                .unwrap()
+                .policy_enforced
+        );
+        assert_eq!(
+            store
+                .row_by_audit_id(bridge.audit_id)
+                .unwrap()
+                .semantic_stage,
+            SEMANTIC_STAGE
+        );
+        assert_eq!(
+            store
+                .row_by_audit_id(native.audit_id)
+                .unwrap()
+                .semantic_stage,
+            SEMANTIC_STAGE_NATIVE
+        );
+    }
+
+    #[test]
+    fn cep_audit_metadata_json_excludes_full_payloads() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let secret = "very long secret file body that must not appear in audit";
+        let start = store
+            .start_call(
+                &test_context(),
+                5,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                start,
+                AuditOutcome::Success {
+                    summary: "bytes_returned=42".into(),
+                },
+                Some("native_handler"),
+                Some(r#"{"bytes_returned":42,"truncated":false}"#),
+            )
+            .unwrap();
+        let row = store.row_by_audit_id(start.audit_id).unwrap();
+        let blob = format!(
+            "{:?}{}",
+            row.result_or_error,
+            row.metadata_json.unwrap_or_default()
+        );
+        assert!(!blob.contains(secret));
+        let _ = secret;
+    }
+
     #[tokio::test]
     async fn cep_audit_await_pending_waits_for_finalization() {
         let store = Arc::new(CepAuditStore::in_memory().unwrap());
         let store_clone = Arc::clone(&store);
         let start = store
-            .start_call(&test_context(), 1, TodoWriteMethod::NAME, None)
+            .start_call(
+                &test_context(),
+                1,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::bridge_defaults(),
+            )
             .unwrap();
         let finalize = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

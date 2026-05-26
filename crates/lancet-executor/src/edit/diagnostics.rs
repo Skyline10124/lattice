@@ -1,6 +1,7 @@
 use super::types::{PatchDiagnostic, PatchErrorCode};
 
 impl PatchErrorCode {
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             PatchErrorCode::ParseError => "parse_error",

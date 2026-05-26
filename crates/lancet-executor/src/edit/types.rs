@@ -8,6 +8,7 @@ pub struct PatchDocument {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub enum PatchOperation {
     AddFile {
         path: String,
@@ -64,6 +65,7 @@ pub struct PatchHunk {
 }
 
 impl PatchHunk {
+    #[cfg(test)]
     pub fn context_lines(&self) -> Vec<&str> {
         self.lines
             .iter()
@@ -74,6 +76,7 @@ impl PatchHunk {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn removed_lines(&self) -> Vec<&str> {
         self.lines
             .iter()
@@ -84,6 +87,7 @@ impl PatchHunk {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn inserted_lines(&self) -> Vec<&str> {
         self.lines
             .iter()

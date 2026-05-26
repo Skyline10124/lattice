@@ -27,6 +27,26 @@ pub fn catalog() -> &'static [MethodDescriptor] {
     &*CATALOG
 }
 
+#[cfg(feature = "inspect-scaffold")]
+use crate::methods::scaffold::{Inspect, Navigate};
+
+/// Feature-gated scaffold descriptors (`workspace.inspect`, `workspace.navigate`).
+///
+/// Never merged into [`catalog`] / [`CATALOG`]; use only via [`scaffold_catalog`].
+#[cfg(feature = "inspect-scaffold")]
+pub static SCAFFOLD_CATALOG: LazyLock<[MethodDescriptor; 2]> = LazyLock::new(|| {
+    [
+        MethodDescriptor::for_method::<Inspect>(),
+        MethodDescriptor::for_method::<Navigate>(),
+    ]
+});
+
+/// Borrow the inspect/navigate scaffold catalog (requires `inspect-scaffold` feature).
+#[cfg(feature = "inspect-scaffold")]
+pub fn scaffold_catalog() -> &'static [MethodDescriptor] {
+    &*SCAFFOLD_CATALOG
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +160,99 @@ mod tests {
     #[test]
     fn catalog_len_is_ten() {
         assert_eq!(catalog().len(), 10);
+    }
+
+    #[test]
+    fn default_catalog_has_no_inspect_or_navigate() {
+        for descriptor in catalog() {
+            assert_ne!(descriptor.name, "workspace.inspect");
+            assert_ne!(descriptor.name, "workspace.navigate");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "inspect-scaffold"))]
+mod scaffold_tests {
+    use super::*;
+    use crate::methods::scaffold::ScaffoldStubResult;
+    use schemars::schema_for;
+
+    const SCAFFOLD_ORDER: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
+
+    #[test]
+    fn scaffold_catalog_contains_inspect_and_navigate() {
+        let names: Vec<_> = scaffold_catalog().iter().map(|d| d.name).collect();
+        assert_eq!(names, SCAFFOLD_ORDER);
+    }
+
+    #[test]
+    fn scaffold_descriptors_have_object_params_schema() {
+        for descriptor in scaffold_catalog() {
+            let schema = (descriptor.params_schema)();
+            assert_eq!(
+                schema.get("type").and_then(|v| v.as_str()),
+                Some("object"),
+                "params schema for {} must be an object",
+                descriptor.name,
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_result_schema_includes_status_semantic_stage_and_routed() {
+        let schema = schema_for!(ScaffoldStubResult);
+        let props = schema
+            .schema
+            .object
+            .expect("object schema")
+            .properties
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for field in ["status", "semantic_stage", "routed"] {
+            assert!(
+                props.contains(&field.to_string()),
+                "ScaffoldStubResult missing {field}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod catalog_default_snapshot {
+    use super::*;
+
+    #[test]
+    fn catalog_default_snapshot_unchanged_with_all_features() {
+        assert_eq!(catalog().len(), 10);
+        let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            [
+                "workspace.read_file",
+                "workspace.grep",
+                "workspace.list_directory",
+                "workspace.find_files",
+                "web.fetch",
+                "session.todo_write",
+                "command.run",
+                "workspace.write_file",
+                "workspace.patch",
+                "envelope.declare",
+            ]
+        );
+        for descriptor in catalog() {
+            assert_ne!(descriptor.name, "workspace.inspect");
+            assert_ne!(descriptor.name, "workspace.navigate");
+        }
+    }
+
+    #[cfg(feature = "inspect-scaffold")]
+    #[test]
+    fn catalog_default_snapshot_scaffold_is_separate() {
+        assert_eq!(scaffold_catalog().len(), 2);
+        assert!(!catalog()
+            .iter()
+            .any(|d| d.name == "workspace.inspect" || d.name == "workspace.navigate"));
     }
 }

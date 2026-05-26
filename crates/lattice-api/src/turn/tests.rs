@@ -119,7 +119,6 @@ fn make_loaded_profile_with_tools(
             },
             tools: lattice_profile::ToolsSection {
                 enabled: enabled_tools.to_vec(),
-                ..Default::default()
             },
             cep: lattice_profile::CepSection::default(),
         },
@@ -949,21 +948,29 @@ async fn stream_turn_emits_cep_lifecycle_events() {
         "CepCallStarted must precede CepCallFinished"
     );
 
-    let guard = events
+    let cep_started_event = events
         .iter()
-        .find(|e| matches!(e, TurnEvent::CepGuardVerdict { .. }))
-        .expect("CepGuardVerdict from bridge metadata must be present");
-    if let TurnEvent::CepGuardVerdict {
-        guard_stage,
-        policy_enforced,
+        .find(
+            |e| matches!(e, TurnEvent::CepCallStarted { method, .. } if method == TodoWrite::NAME),
+        )
+        .expect("CepCallStarted for session.todo_write must be present");
+    if let TurnEvent::CepCallStarted {
         semantic_stage,
+        guard_stage,
+        impact_kind,
         ..
-    } = guard
+    } = cep_started_event
     {
-        assert_eq!(guard_stage, "bridge_lifecycle_only");
-        assert!(!policy_enforced);
-        assert_eq!(semantic_stage, "phase20_legacy_bridge");
+        assert_eq!(semantic_stage, "phase21_native");
+        assert_eq!(guard_stage, "cep_policy_lifecycle");
+        assert_eq!(impact_kind, "session_state_mutation");
     }
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, TurnEvent::CepGuardVerdict { .. })),
+        "native session.todo_write must not emit Phase 20 bridge guard metadata"
+    );
 
     assert!(
         events

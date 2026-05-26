@@ -22,6 +22,8 @@ pub struct FetchResult {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
 }
 
 impl CepMethod for Fetch {
@@ -44,5 +46,21 @@ mod tests {
         assert_eq!(Fetch::NAME, "web.fetch");
         assert!(Fetch::NAME.contains('.'));
         assert!(!Fetch::NAME.contains('/'));
+    }
+
+    #[test]
+    fn fetch_result_has_additive_truncated_field() {
+        let value = serde_json::json!({
+            "status": 404,
+            "body": "not found",
+            "content_type": "text/plain",
+            "truncated": true
+        });
+        let parsed: FetchResult = serde_json::from_value(value).expect("deserialize FetchResult");
+        assert_eq!(parsed.status, 404);
+        assert_eq!(parsed.truncated, Some(true));
+        let legacy = serde_json::json!({ "status": 200, "body": "ok" });
+        let without: FetchResult = serde_json::from_value(legacy).expect("legacy shape");
+        assert_eq!(without.truncated, None);
     }
 }

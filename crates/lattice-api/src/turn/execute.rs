@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-#[cfg(test)]
-use lattice_agent::AgentLoop;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 
@@ -190,38 +188,13 @@ fn production_llm(request: &RunTurnRequest) -> Arc<dyn lattice_agent::LlmClient>
 /// Execute a turn and return its events as a live stream.
 pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
     let project_root = resolve_project_root(&request);
+    let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.cep);
     let deps = build_production_turn_deps(
         &project_root,
         &enabled_tools(&request),
         production_llm(&request),
         request.test_llm.is_some(),
+        cep,
     )?;
     super::live::stream_turn_live(session, request, deps).await
-}
-
-/// Test-only stream entry point with a prebuilt AgentLoop.
-#[cfg(test)]
-pub async fn stream_turn_with_agent(
-    session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
-    request: RunTurnRequest,
-    tool_definitions: Vec<lattice_llm::ToolDefinition>,
-) -> Result<TurnEventStream> {
-    super::live::stream_turn_live_with_agent(session, agent_loop, request, tool_definitions).await
-}
-
-/// Test-only run entry point with a prebuilt AgentLoop.
-#[cfg(test)]
-pub async fn run_turn_with_agent(
-    session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
-    request: RunTurnRequest,
-    tool_definitions: Vec<lattice_llm::ToolDefinition>,
-) -> Result<RunTurnResult> {
-    let mut stream = stream_turn_with_agent(session, agent_loop, request, tool_definitions).await?;
-    let mut collector = RunTurnCollector::new();
-    while let Some(event) = stream.next().await {
-        collector.observe(event)?;
-    }
-    collector.finish()
 }

@@ -1,4 +1,4 @@
-pub(super) fn render_file_slice(
+pub(crate) fn render_file_slice(
     content: &str,
     offset: usize,
     limit: usize,
@@ -92,20 +92,4 @@ pub(crate) fn render_todos(args: &serde_json::Value) -> Result<String, String> {
     )];
     lines.extend(rendered);
     Ok(lines.join("\n"))
-}
-
-pub(super) fn truncate_output(mut output: String, limit: usize, label: &str) -> String {
-    if output.len() <= limit {
-        return output;
-    }
-    let mut end = limit;
-    while !output.is_char_boundary(end) {
-        end -= 1;
-    }
-    output.truncate(end);
-    output.push_str(&format!(
-        "\n[TRUNCATED: {} exceeded {} bytes]",
-        label, limit
-    ));
-    output
 }

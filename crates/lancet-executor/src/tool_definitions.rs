@@ -17,6 +17,15 @@ use lattice_llm::ToolDefinition;
 /// stripping, rename maps, or hand-written JSON schemas. The full dotted method
 /// name (`workspace.read_file`, `command.run`, …) is the single identity used
 /// for the wire, the registry, the audit, and the LLM-facing tool name.
+/// Project feature-gated scaffold descriptors into LLM-facing tool definitions.
+///
+/// Not part of the default alpha tool surface; call only in tests/experiments with
+/// `inspect-scaffold` enabled.
+#[cfg(feature = "inspect-scaffold")]
+pub fn scaffold_tool_definitions() -> Vec<ToolDefinition> {
+    to_tool_definitions(lancet_protocol::scaffold_catalog())
+}
+
 pub fn to_tool_definitions(catalog: &[MethodDescriptor]) -> Vec<ToolDefinition> {
     catalog
         .iter()
@@ -89,5 +98,42 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn default_projection_has_no_inspect_or_navigate() {
+        let projected = to_tool_definitions(catalog());
+        for tool in &projected {
+            assert_ne!(tool.name, "workspace.inspect");
+            assert_ne!(tool.name, "workspace.navigate");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "inspect-scaffold"))]
+mod scaffold_tool_definitions {
+    use super::*;
+    use lancet_protocol::scaffold_catalog;
+
+    #[test]
+    fn scaffold_tool_definitions_match_scaffold_catalog() {
+        let projected = scaffold_tool_definitions();
+        assert_eq!(projected.len(), scaffold_catalog().len());
+        for (tool, descriptor) in projected.iter().zip(scaffold_catalog().iter()) {
+            assert_eq!(tool.name, descriptor.name);
+            assert!(tool.name.contains('.'));
+            assert_eq!(
+                tool.parameters.get("type").and_then(|v| v.as_str()),
+                Some("object")
+            );
+        }
+    }
+
+    #[test]
+    fn scaffold_tool_definitions_include_inspect_and_navigate() {
+        let projected = scaffold_tool_definitions();
+        let names: Vec<_> = projected.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"workspace.inspect"));
+        assert!(names.contains(&"workspace.navigate"));
     }
 }

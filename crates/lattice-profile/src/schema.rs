@@ -18,14 +18,56 @@ pub struct AgentProfile {
     pub cep: CepSection,
 }
 
-/// Phase 19 `[cep]` profile section. Only `mode` is typed; future sub-tables
-/// (e.g. `[cep.command]`, `[cep.network]`) deserialize into `extensions`.
+/// Phase 19 `[cep]` profile section with Phase 21 PROF-02 typed sub-tables.
+///
+/// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
+/// typed fields. Other future sub-tables (e.g. `[cep.command]`) remain in
+/// `extensions`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct CepSection {
     #[serde(default = "default_cep_mode")]
     pub mode: CepMode,
+    #[serde(default)]
+    pub project_root: Option<CepProjectRootSection>,
+    #[serde(default)]
+    pub observation: Option<CepObservationSection>,
+    #[serde(default)]
+    pub network: Option<CepNetworkSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
+}
+
+/// `[cep.project_root]` — effective workspace scope for observation policy.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepProjectRootSection {
+    #[serde(default)]
+    pub root: Option<String>,
+}
+
+/// `[cep.observation]` — path allow roots and observation/todo budget limits.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepObservationSection {
+    #[serde(default)]
+    pub allowed_roots: Vec<String>,
+    pub max_single_read_bytes: Option<usize>,
+    pub max_turn_observation_bytes: Option<usize>,
+    pub max_grep_matches: Option<usize>,
+    pub max_list_entries: Option<usize>,
+    pub max_find_paths: Option<usize>,
+    pub max_todo_ops: Option<usize>,
+}
+
+/// `[cep.network]` — `web.fetch` host policy and response size cap.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepNetworkSection {
+    pub allow_public_https: Option<bool>,
+    pub allow_localhost: Option<bool>,
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    pub max_web_response_bytes: Option<usize>,
 }
 
 fn default_cep_mode() -> CepMode {
@@ -36,6 +78,9 @@ impl Default for CepSection {
     fn default() -> Self {
         Self {
             mode: default_cep_mode(),
+            project_root: None,
+            observation: None,
+            network: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -60,8 +105,24 @@ impl<'de> Deserialize<'de> for CepSection {
             }
         }
 
+        let project_root = raw
+            .remove("project_root")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
+        let observation = raw
+            .remove("observation")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
+        let network = raw
+            .remove("network")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
+
         Ok(Self {
             mode,
+            project_root,
+            observation,
+            network,
             extensions: raw,
         })
     }
@@ -492,7 +553,51 @@ mod = "off"
     }
 
     #[test]
-    fn cep_preserves_future_sub_tables_in_extensions() {
+    fn cep_parses_typed_prof02_sub_tables() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.project_root]
+root = "."
+
+[cep.observation]
+allowed_roots = ["."]
+max_single_read_bytes = 4096
+max_turn_observation_bytes = 8192
+max_grep_matches = 500
+max_list_entries = 300
+max_find_paths = 400
+max_todo_ops = 10
+
+[cep.network]
+allow_public_https = true
+allow_localhost = false
+allowed_hosts = ["example.com"]
+max_web_response_bytes = 2048
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Enforce);
+        let project_root = profile.cep.project_root.as_ref().unwrap();
+        assert_eq!(project_root.root.as_deref(), Some("."));
+        let observation = profile.cep.observation.as_ref().unwrap();
+        assert_eq!(observation.allowed_roots, vec!["."]);
+        assert_eq!(observation.max_single_read_bytes, Some(4096));
+        assert_eq!(observation.max_turn_observation_bytes, Some(8192));
+        assert_eq!(observation.max_grep_matches, Some(500));
+        let network = profile.cep.network.as_ref().unwrap();
+        assert_eq!(network.allow_public_https, Some(true));
+        assert_eq!(network.allow_localhost, Some(false));
+        assert_eq!(network.allowed_hosts, vec!["example.com"]);
+        assert_eq!(network.max_web_response_bytes, Some(2048));
+    }
+
+    #[test]
+    fn cep_preserves_untyped_future_sub_tables_in_extensions() {
         let toml = format!(
             r#"{prefix}
 
@@ -501,20 +606,49 @@ mode = "enforce"
 
 [cep.command]
 allow_shell = true
-
-[cep.network]
-host_allowlist = ["example.com"]
-
-[cep.observation]
-max_read_bytes = 4096
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
         assert_eq!(profile.cep.mode, CepMode::Enforce);
         assert!(profile.cep.extensions.contains_key("command"));
-        assert!(profile.cep.extensions.contains_key("network"));
-        assert!(profile.cep.extensions.contains_key("observation"));
+        assert!(profile.cep.project_root.is_none());
+        assert!(profile.cep.observation.is_none());
+        assert!(profile.cep.network.is_none());
+    }
+
+    #[test]
+    fn cep_older_profile_mode_only_still_parses() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.cep.mode, CepMode::Enforce);
+        assert!(profile.cep.project_root.is_none());
+        assert!(profile.cep.observation.is_none());
+        assert!(profile.cep.network.is_none());
+    }
+
+    #[test]
+    fn cep_observation_rejects_network_only_field() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep.observation]
+max_web_response_bytes = 1024
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_web_response_bytes"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -527,6 +661,9 @@ max_read_bytes = 4096
 
         let section = CepSection {
             mode: CepMode::Warn,
+            project_root: None,
+            observation: None,
+            network: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();

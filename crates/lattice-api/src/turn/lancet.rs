@@ -1,14 +1,15 @@
 //! Turn-scoped Lancet runtime composition and the CEP client-backed executor adapter.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use lancet_executor::{
-    impact_kind_for_method, impact_kind_label, register_phase20_legacy_backend,
-    to_tool_definitions, wire_code_for_error, CepAuditContext, CepAuditStore, LancetClient,
-    LancetTransport, MethodRegistry, ServerRunConfig,
+    impact_kind_for_method, impact_kind_label, register_production_method_registry,
+    to_tool_definitions, wire_code_for_error, BudgetLimits, CallAuditMetadata, CepAuditContext,
+    CepAuditStore, LancetClient, LancetTransport, MethodRegistry, NetworkPolicyConfig,
+    ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext, ServerRunConfig,
 };
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
@@ -27,6 +28,7 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::ToolCall;
+use lattice_profile::{CepNetworkSection, CepObservationSection, CepSection};
 use lattice_tooling::resolve_enabled_tools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -194,26 +196,195 @@ pub(crate) fn resolve_catalog_tool_definitions(
     Ok(resolved.definitions)
 }
 
+/// Build executor-facing Phase 21 policy from profile `[cep]` and the runtime project root.
+pub(crate) fn phase21_policy_from_profile(
+    cep: &CepSection,
+    runtime_project_root: &Path,
+) -> Result<Phase21PolicyConfig, ApiError> {
+    let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot canonicalize project root '{}': {err}",
+            runtime_project_root.display()
+        ))
+    })?;
+
+    let effective_root = match cep.project_root.as_ref().and_then(|s| s.root.as_deref()) {
+        Some(profile_root) => {
+            let resolved = resolve_profile_path(&runtime_root, profile_root)?;
+            canonicalize_existing(&resolved, "cep.project_root.root")?
+        }
+        None => runtime_root.clone(),
+    };
+
+    if !effective_root.starts_with(&runtime_root) {
+        return Err(ApiError::BadRequest(format!(
+            "cep.project_root.root '{}' resolves outside runtime project root",
+            effective_root.display()
+        )));
+    }
+
+    let mut observation = ObservationPolicyConfig::defaults_for_root(&effective_root);
+    if let Some(section) = cep.observation.as_ref() {
+        apply_observation_profile(section, &mut observation, &effective_root)?;
+    }
+
+    let mut network = NetworkPolicyConfig::safe_defaults();
+    if let Some(section) = cep.network.as_ref() {
+        apply_network_profile(section, &mut network);
+    }
+
+    let budget = BudgetLimits {
+        max_single_read_bytes: observation.max_single_read_bytes,
+        max_turn_observation_bytes: observation.max_turn_observation_bytes,
+        max_grep_matches: observation.max_grep_matches,
+        max_list_entries: observation.max_list_entries,
+        max_find_paths: observation.max_find_paths,
+        max_todo_ops: observation.max_todo_ops,
+    };
+
+    Ok(Phase21PolicyConfig {
+        project_root: effective_root,
+        observation,
+        network,
+        budget,
+    })
+}
+
+fn apply_observation_profile(
+    section: &CepObservationSection,
+    observation: &mut ObservationPolicyConfig,
+    effective_root: &Path,
+) -> Result<(), ApiError> {
+    if !section.allowed_roots.is_empty() {
+        let mut roots = Vec::with_capacity(section.allowed_roots.len());
+        for root in &section.allowed_roots {
+            let resolved = resolve_profile_path(effective_root, root)?;
+            let canonical = canonicalize_existing(&resolved, "cep.observation.allowed_roots")?;
+            if !canonical.starts_with(effective_root) {
+                return Err(ApiError::BadRequest(format!(
+                    "cep.observation.allowed_roots entry '{}' is outside effective project root",
+                    root
+                )));
+            }
+            roots.push(canonical);
+        }
+        observation.allowed_roots = roots;
+    }
+    if let Some(value) = section.max_single_read_bytes {
+        observation.max_single_read_bytes = value;
+    }
+    if let Some(value) = section.max_turn_observation_bytes {
+        observation.max_turn_observation_bytes = value;
+    }
+    if let Some(value) = section.max_grep_matches {
+        observation.max_grep_matches = value;
+    }
+    if let Some(value) = section.max_list_entries {
+        observation.max_list_entries = value;
+    }
+    if let Some(value) = section.max_find_paths {
+        observation.max_find_paths = value;
+    }
+    if let Some(value) = section.max_todo_ops {
+        observation.max_todo_ops = value;
+    }
+    Ok(())
+}
+
+fn apply_network_profile(section: &CepNetworkSection, network: &mut NetworkPolicyConfig) {
+    if let Some(value) = section.allow_public_https {
+        network.allow_public_https = value;
+    }
+    if let Some(value) = section.allow_localhost {
+        network.allow_localhost = value;
+    }
+    if !section.allowed_hosts.is_empty() {
+        network.allowed_hosts = section.allowed_hosts.clone();
+    }
+    if let Some(value) = section.max_web_response_bytes {
+        network.max_web_response_bytes = value;
+    }
+}
+
+fn resolve_profile_path(base: &Path, path: &str) -> Result<PathBuf, ApiError> {
+    let candidate = PathBuf::from(path);
+    let resolved = if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(candidate)
+    };
+    Ok(resolved)
+}
+
+fn canonicalize_existing(path: &Path, field: &str) -> Result<PathBuf, ApiError> {
+    if !path.exists() {
+        return Err(ApiError::BadRequest(format!(
+            "{field} '{}' does not exist",
+            path.display()
+        )));
+    }
+    std::fs::canonicalize(path).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot canonicalize {field} '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn production_base_envelope_from_policy(
+    project_root: &str,
+    enabled_tools: &[String],
+    policy: &Phase21PolicyConfig,
+) -> Result<BaseExecutionEnvelope, ApiError> {
+    let mut base_envelope =
+        BaseExecutionEnvelope::for_workspace_root(project_root, "phase21 turn observation");
+    if enabled_tools.iter().any(|name| name == TodoWrite::NAME) {
+        base_envelope = base_envelope.with_session_state();
+    }
+    if enabled_tools.iter().any(|name| name == Fetch::NAME) {
+        for host in &policy.network.allowed_hosts {
+            let host = host.trim();
+            if !host.is_empty() {
+                base_envelope = base_envelope.with_fetch_host(host);
+            }
+        }
+    }
+    base_envelope
+        .validate_no_write_or_command()
+        .map_err(|err| ApiError::Internal(format!("invalid base envelope: {err}")))?;
+    Ok(base_envelope)
+}
+
+/// Build the production turn `BaseExecutionEnvelope` from profile policy and enabled tools.
+#[cfg(test)]
+pub(crate) fn production_base_envelope(
+    project_root: &str,
+    enabled_tools: &[String],
+    cep: Option<&CepSection>,
+) -> Result<BaseExecutionEnvelope, ApiError> {
+    let policy = match cep {
+        Some(cep_section) => phase21_policy_from_profile(cep_section, Path::new(project_root))?,
+        None => Phase21PolicyConfig::defaults_for_project_root(project_root),
+    };
+    production_base_envelope_from_policy(project_root, enabled_tools, &policy)
+}
+
 /// Construct one turn-scoped Lancet runtime and inject it into a fresh AgentLoop.
 pub(crate) fn build_production_turn_deps(
     project_root: &str,
     enabled_tools: &[String],
     llm: Arc<dyn lattice_agent::LlmClient>,
     in_memory_audit: bool,
+    cep: Option<&CepSection>,
 ) -> Result<ProductionTurnDeps, ApiError> {
     let tool_definitions = resolve_catalog_tool_definitions(enabled_tools)?;
 
-    let mut base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(project_root, "phase20 turn observation");
-    if enabled_tools.iter().any(|name| name == TodoWrite::NAME) {
-        base_envelope = base_envelope.with_session_state();
-    }
-    if enabled_tools.iter().any(|name| name == Fetch::NAME) {
-        base_envelope = base_envelope.with_fetch_host("*");
-    }
-    base_envelope
-        .validate_no_write_or_command()
-        .map_err(|err| ApiError::Internal(format!("invalid base envelope: {err}")))?;
+    let phase21_policy = match cep {
+        Some(cep_section) => phase21_policy_from_profile(cep_section, Path::new(project_root))?,
+        None => Phase21PolicyConfig::defaults_for_project_root(project_root),
+    };
+    let base_envelope =
+        production_base_envelope_from_policy(project_root, enabled_tools, &phase21_policy)?;
 
     #[cfg(test)]
     let build_metrics = Phase20BuildMetrics {
@@ -237,23 +408,26 @@ pub(crate) fn build_production_turn_deps(
         )
     };
     let audit_context = Arc::new(RwLock::new(CepAuditContext::default()));
+    let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
     let server_config = ServerRunConfig {
         audit: Arc::clone(&audit),
         audit_context: Arc::clone(&audit_context),
         base_envelope: base_envelope.clone(),
+        phase21: Arc::clone(&phase21),
+        call_audit_metadata: CallAuditMetadata::bridge_defaults(),
+        production_audit_routing: true,
     };
 
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|err| ApiError::Internal(format!("http client setup: {err}")))?;
+
     let mut registry = MethodRegistry::new();
-    register_phase20_legacy_backend(
-        &mut registry,
-        project_root,
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|err| ApiError::Internal(format!("http client setup: {err}")))?,
-    )
-    .map_err(|err| ApiError::Internal(format!("legacy backend registration: {err:?}")))?;
+    register_production_method_registry(&mut registry, project_root, http_client).map_err(
+        |err| ApiError::Internal(format!("production method registry registration: {err:?}")),
+    )?;
 
     let server_shutdown = server.shutdown_handle();
     let server_task = tokio::spawn(async move {
@@ -384,4 +558,71 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod phase21_profile_policy {
+    use super::*;
+    use lattice_profile::CepSection;
+    use tempfile::TempDir;
+
+    #[test]
+    fn phase21_profile_policy_defaults_when_cep_absent() {
+        let dir = TempDir::new().unwrap();
+        let policy =
+            phase21_policy_from_profile(&CepSection::default(), dir.path()).expect("defaults");
+        assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
+        assert_eq!(
+            policy.budget.max_turn_observation_bytes,
+            policy.observation.max_turn_observation_bytes
+        );
+    }
+
+    #[test]
+    fn phase21_profile_policy_canonicalizes_observation_roots() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        let cep = CepSection {
+            observation: Some(CepObservationSection {
+                allowed_roots: vec!["src".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        assert_eq!(
+            policy.observation.allowed_roots,
+            vec![sub.canonicalize().unwrap()]
+        );
+    }
+
+    #[test]
+    fn phase21_profile_policy_rejects_roots_outside_project() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let cep = CepSection {
+            observation: Some(CepObservationSection {
+                allowed_roots: vec![outside.path().to_string_lossy().into_owned()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = phase21_policy_from_profile(&cep, dir.path()).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+    }
+
+    #[test]
+    fn phase21_profile_policy_network_max_web_response_bytes() {
+        let dir = TempDir::new().unwrap();
+        let cep = CepSection {
+            network: Some(CepNetworkSection {
+                max_web_response_bytes: Some(2048),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        assert_eq!(policy.network.max_web_response_bytes, 2048);
+    }
 }

@@ -3,7 +3,6 @@
 use crate::edit::PatchResultEnvelope;
 use crate::executor::DefaultToolExecutor;
 use crate::registry::{HandlerContext, MethodRegistry};
-use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData};
 use lancet_protocol::methods::command::{Run, RunParams, RunResult};
 use lancet_protocol::methods::envelope::{Declare, DeclareParams, DeclareResult};
@@ -18,6 +17,26 @@ use lancet_protocol::methods::workspace::{
 use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+macro_rules! bridge_method {
+    ($registry:expr, $exec:expr, $Method:ty, $handler:ident) => {
+        $registry.register_method::<$Method, _, _>({
+            let executor = std::sync::Arc::clone(&$exec);
+            move |params, ctx| {
+                let executor = std::sync::Arc::clone(&executor);
+                async move { $handler(&executor, params, ctx).await }
+            }
+        })
+    };
+}
+
+macro_rules! bridge_method_noexec {
+    ($registry:expr, $Method:ty, $handler:ident) => {
+        $registry.register_method::<$Method, _, _>(move |params, ctx| async move {
+            $handler(params, ctx).await
+        })
+    };
+}
 
 const SEMANTIC_STAGE: &str = "phase20_legacy_bridge";
 const SEMANTIC_STATUS_BRIDGED: &str = "bridged_legacy_body";
@@ -37,86 +56,54 @@ impl LegacyToolBackend {
         })
     }
 
+    /// Phase 22-pending catalog methods only (`command.run`, mutations, `envelope.declare`).
+    fn register_phase22_pending(&self, registry: &mut MethodRegistry) -> Result<(), CepError> {
+        let executor = Arc::clone(&self.executor);
+
+        bridge_method!(registry, executor, Run, handle_run)?;
+        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
+        bridge_method!(registry, executor, Patch, handle_patch)?;
+        bridge_method_noexec!(registry, Declare, handle_declare)?;
+
+        Ok(())
+    }
+
+    /// Full catalog bridge for Phase 20 compatibility tests and migration helpers.
+    ///
+    /// Production turns must use [`register_phase22_pending_legacy_methods`] plus
+    /// [`crate::register_phase21_native_methods`] instead. Delete this path in Phase 28
+    /// legacy shutdown when bridge parsers are removed.
     fn register_all(&self, registry: &mut MethodRegistry) -> Result<(), CepError> {
         let executor = Arc::clone(&self.executor);
 
-        registry.register_method::<ReadFile, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_read_file(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<Grep, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_grep(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<ListDirectory, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_list_directory(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<FindFiles, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_find_files(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<Fetch, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_fetch(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<TodoWrite, _, _>(move |params, ctx| async move {
-            handle_todo_write(params, ctx).await
-        })?;
-
-        registry.register_method::<Run, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_run(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<WriteFile, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_write_file(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<Patch, _, _>({
-            let executor = Arc::clone(&executor);
-            move |params, ctx| {
-                let executor = Arc::clone(&executor);
-                async move { handle_patch(&executor, params, ctx).await }
-            }
-        })?;
-
-        registry.register_method::<Declare, _, _>(move |params, ctx| async move {
-            handle_declare(params, ctx).await
-        })?;
+        bridge_method!(registry, executor, ReadFile, handle_read_file)?;
+        bridge_method!(registry, executor, Grep, handle_grep)?;
+        bridge_method!(registry, executor, ListDirectory, handle_list_directory)?;
+        bridge_method!(registry, executor, FindFiles, handle_find_files)?;
+        bridge_method!(registry, executor, Fetch, handle_fetch)?;
+        bridge_method_noexec!(registry, TodoWrite, handle_todo_write)?;
+        bridge_method!(registry, executor, Run, handle_run)?;
+        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
+        bridge_method!(registry, executor, Patch, handle_patch)?;
+        bridge_method_noexec!(registry, Declare, handle_declare)?;
 
         Ok(())
     }
 }
 
+/// Register Phase 22-pending catalog methods through the private legacy bridge.
+pub fn register_phase22_pending_legacy_methods(
+    registry: &mut MethodRegistry,
+    project_root: &str,
+    http_client: reqwest::Client,
+) -> Result<(), CepError> {
+    LegacyToolBackend::new(project_root, http_client)?.register_phase22_pending(registry)
+}
+
 /// Register every catalog method through the private legacy bridge.
+///
+/// Retained for Phase 20 compatibility tests only. Production uses the split
+/// native + Phase 22-pending registration helpers.
 pub fn register_phase20_legacy_backend(
     registry: &mut MethodRegistry,
     project_root: &str,
@@ -353,6 +340,7 @@ async fn handle_fetch(
         status: 200,
         body,
         content_type: None,
+        truncated: None,
     })
 }
 
@@ -446,6 +434,7 @@ mod tests {
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::methods::session::{TodoItem, TodoStatus};
     use lancet_protocol::CepMethod;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
 
@@ -465,6 +454,10 @@ mod tests {
                 events: EventSink::new(event_tx, 42),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "legacy bridge test"),
+                phase21: Arc::new(
+                    crate::policy::Phase21TurnContext::defaults_for_project_root("."),
+                ),
+                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
             },
             event_rx,
         )

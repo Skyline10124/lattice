@@ -10,28 +10,34 @@
 //! end of Phase 19.
 
 pub mod audit;
-pub mod edit;
+pub(crate) mod call_durable_metadata;
+pub(crate) mod edit;
 pub(crate) mod executor;
+mod handlers;
 mod legacy_backend;
+mod native_registry;
+pub mod policy;
 pub mod registry;
 pub mod tool_definitions;
 pub mod transport;
 
 pub use audit::{
-    impact_kind_for_method, impact_kind_label, AuditError, AuditOutcome, AuditRow, AuditStart,
-    CepAuditContext, CepAuditStore, GUARD_STAGE, POLICY_ENFORCED, SEMANTIC_STAGE,
+    impact_kind_for_method, impact_kind_label, CallAuditMetadata, CepAuditContext, CepAuditStore,
+    SEMANTIC_STAGE_NATIVE,
 };
-pub use edit::{
-    AttemptedOperation, ChangedFile, FileOperationKind, PatchDiagnostic, PatchDocument,
-    PatchErrorCode, PatchHunk, PatchHunkLine, PatchOperation, PatchResultEnvelope,
-};
+#[cfg(feature = "inspect-scaffold")]
+pub use handlers::register_inspect_scaffold_methods;
 pub use legacy_backend::register_phase20_legacy_backend;
-pub use registry::{
-    call_cancelled, duplicate_registration, wire_code_for_error, Cancellation, EventSink,
-    HandlerContext, MethodRegistry,
+pub use native_registry::register_production_method_registry;
+pub use policy::{
+    BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig,
+    Phase21TurnContext,
 };
+pub use registry::{wire_code_for_error, HandlerContext, MethodRegistry};
+#[cfg(feature = "inspect-scaffold")]
+pub use tool_definitions::scaffold_tool_definitions;
 pub use tool_definitions::to_tool_definitions;
-pub use transport::{CallControl, LancetClient, LancetServer, LancetTransport, ServerRunConfig};
+pub use transport::{LancetClient, LancetTransport, ServerRunConfig};
 
 #[cfg(test)]
 mod public_api_tests {

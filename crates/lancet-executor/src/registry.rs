@@ -1,5 +1,7 @@
 //! Typed method registry for CEP catalog dispatch.
 
+use crate::call_durable_metadata::CallDurableMetadata;
+use crate::policy::Phase21TurnContext;
 use lancet_protocol::{
     envelope::BaseExecutionEnvelope,
     error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData},
@@ -84,6 +86,17 @@ pub struct HandlerContext {
     pub cancellation: Cancellation,
     /// Turn-scoped base envelope injected by the composition layer.
     pub base_envelope: BaseExecutionEnvelope,
+    /// Phase 21 policy limits and turn-scoped budget tracker.
+    pub phase21: Arc<Phase21TurnContext>,
+    /// Compact per-call metadata persisted into `cep_audit_entries.metadata_json`.
+    pub(crate) durable_metadata: CallDurableMetadata,
+}
+
+impl HandlerContext {
+    /// Add compact metadata that will be persisted to the call's durable audit row.
+    pub fn record_durable_metadata(&self, metadata: Value) {
+        self.durable_metadata.record(metadata);
+    }
 }
 
 /// Typed registry of catalog method handlers.
@@ -233,6 +246,8 @@ mod tests {
             events: EventSink::new(event_tx, call_id),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "registry test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(".")),
+            durable_metadata: CallDurableMetadata::default(),
         }
     }
 

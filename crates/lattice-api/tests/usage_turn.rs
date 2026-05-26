@@ -398,3 +398,160 @@ async fn usage_resume_session_includes_previous_turn_context() {
         "HEAD should be on main branch"
     );
 }
+
+// ── Phase 21: network policy without FetchUrl("*") ──────────────────────────
+
+fn setup_workspace_with_cep_network(
+    src_content: &str,
+    enabled_tools: &[&str],
+    network_toml: &str,
+) -> Workspace {
+    let ws = tempfile::tempdir().unwrap();
+    let root = ws.path().to_path_buf();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
+
+    let profile_dir = root.join(".lattice/agents/default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    let enabled: Vec<String> = enabled_tools.iter().map(|s| s.to_string()).collect();
+    let toml_content = format!(
+        r#"schema_version = 1
+[agent]
+name = "default"
+model = "sonnet"
+[prompt]
+system = "You are a test agent."
+[tools]
+enabled = {enabled:?}
+{network_toml}
+"#
+    );
+    std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
+
+    let global_agents = tempfile::tempdir().unwrap();
+    let paths = DiscoveryPaths {
+        project_root: root.clone(),
+        global_agents_dir: global_agents.path().to_path_buf(),
+    };
+    let loaded = lattice_profile::resolve_agent_profile(ProfileSource::Default, &paths)
+        .expect("profile must load");
+
+    Workspace {
+        _dir: ws,
+        _global_agents: global_agents,
+        root,
+        loaded,
+    }
+}
+
+#[tokio::test]
+async fn public_https_policy_without_fetch_wildcard() {
+    let ws = setup_workspace_with_cep_network(
+        "fn main() {}",
+        &["web.fetch"],
+        "[cep.network]\nallow_public_https = true\nallow_localhost = false\n",
+    );
+
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_1",
+                "web.fetch",
+                r#"{"url":"https://example.com/"}"#,
+            ))
+            .push_events(final_response_events("Fetched public HTTPS."))
+            .build(),
+    );
+
+    let session_dir = tempfile::tempdir().unwrap();
+    let sessions_path = session_dir.path().join("sessions");
+
+    let events: Vec<TurnEvent> = lattice_api::stream_turn(
+        lattice_api::SessionApi::sqlite(&sessions_path),
+        make_request(&ws, "Fetch example.com", fake_llm),
+    )
+    .await
+    .expect("stream_turn must start")
+    .collect()
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::TurnCommitted { status, .. } if *status == RunTurnStatus::Completed)),
+        "turn must complete"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            TurnEvent::ToolCallFinished {
+                name,
+                ok: true,
+                ..
+            } if name == "web.fetch"
+        )),
+        "web.fetch must succeed without ambient FetchUrl(\"*\")"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            TurnEvent::CepCallStarted {
+                method,
+                impact_kind,
+                semantic_stage,
+                ..
+            } if method == "web.fetch"
+                && impact_kind == "external_observation"
+                && semantic_stage == "phase21_native"
+        )),
+        "native web.fetch must emit CEP lifecycle with external_observation impact"
+    );
+}
+
+#[tokio::test]
+async fn rejects_profile_disabled_web_fetch() {
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+
+    let fake_llm: Arc<dyn LlmClient> = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_1",
+                "web.fetch",
+                r#"{"url":"https://example.com/"}"#,
+            ))
+            .push_events(final_response_events("Should not fetch."))
+            .build(),
+    );
+
+    let session_dir = tempfile::tempdir().unwrap();
+    let sessions_path = session_dir.path().join("sessions");
+
+    let events: Vec<TurnEvent> = lattice_api::stream_turn(
+        lattice_api::SessionApi::sqlite(&sessions_path),
+        make_request(&ws, "Try web.fetch", fake_llm),
+    )
+    .await
+    .expect("stream_turn must start")
+    .collect()
+    .await;
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            TurnEvent::ToolCallFinished {
+                name,
+                ok: false,
+                ..
+            } if name == "web.fetch"
+        )),
+        "disabled web.fetch must surface as failed ToolCallFinished"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            TurnEvent::CepCallStarted { method, .. } if method == "web.fetch"
+        )),
+        "disabled web.fetch must not emit CepCallStarted"
+    );
+}

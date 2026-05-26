@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use lancet_executor::{
-    register_phase20_legacy_backend, to_tool_definitions, LancetTransport, MethodRegistry,
-    ServerRunConfig,
+    register_phase20_legacy_backend, register_production_method_registry, to_tool_definitions,
+    CepAuditStore, LancetTransport, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::ImpactKind;
@@ -64,6 +64,7 @@ async fn fetch_only_adapter() -> LancetExecutorAdapter {
                 status: 200,
                 body: "external observation body".into(),
                 content_type: Some("text/plain".into()),
+                truncated: None,
             })
         })
         .expect("fetch handler");
@@ -279,4 +280,119 @@ fn cep_round_trip_catalog_names_match_tool_definitions() {
         assert_eq!(tool.name, descriptor.name);
         assert!(tool.name.contains('.'));
     }
+}
+
+async fn spawn_echo_server(status_line: &str, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind localhost");
+    let addr = listener.local_addr().expect("local addr");
+    let body_owned = body.to_string();
+    let status_owned = status_line.to_string();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status_owned}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body_owned}",
+                body_owned.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    });
+    format!("http://127.0.0.1:{}/", addr.port())
+}
+
+async fn production_adapter(
+    root: &str,
+    enabled: &[&str],
+    allow_localhost: bool,
+) -> (LancetExecutorAdapter, Arc<CepAuditStore>) {
+    use lancet_executor::{CallAuditMetadata, Phase21PolicyConfig, Phase21TurnContext};
+    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::methods::session::TodoWrite;
+
+    let mut registry = MethodRegistry::new();
+    register_production_method_registry(&mut registry, root, test_http_client())
+        .expect("production registry");
+
+    let mut policy = Phase21PolicyConfig::defaults_for_project_root(root);
+    policy.network.allow_localhost = allow_localhost;
+    if allow_localhost {
+        policy.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
+    }
+
+    let mut base_envelope = BaseExecutionEnvelope::for_workspace_root(
+        root,
+        "phase21 round-trip without workspace tools",
+    );
+    if enabled.contains(&TodoWrite::NAME) {
+        base_envelope = base_envelope.with_session_state();
+    }
+
+    let (client, server) = LancetTransport::pair(16);
+    let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
+    let mut config = ServerRunConfig::in_memory_for_tests();
+    config.audit = Arc::clone(&audit);
+    config.base_envelope = base_envelope;
+    config.phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+    config.production_audit_routing = true;
+    config.call_audit_metadata = CallAuditMetadata::bridge_defaults();
+
+    let server_task = tokio::spawn(async move {
+        let _ = server.run(registry, config).await;
+    });
+    let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
+    let adapter = LancetExecutorAdapter::new(client, enabled_names);
+    tokio::task::yield_now().await;
+    std::mem::forget(server_task);
+    (adapter, audit)
+}
+
+#[tokio::test]
+async fn phase21_web_fetch_and_todo_write_audit_without_workspace_envelope() {
+    let dir = TempDir::new().expect("temp workspace");
+    let root = dir.path();
+    let fetch_url = spawn_echo_server("200 OK", "phase21-body").await;
+
+    let (adapter, audit) = production_adapter(
+        root.to_str().unwrap(),
+        &[Fetch::NAME, TodoWrite::NAME],
+        true,
+    )
+    .await;
+
+    let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
+    let fetch_result = adapter.execute(&fetch_call).await.expect("web.fetch");
+    let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch json");
+    assert_eq!(fetch_parsed["body"].as_str(), Some("phase21-body"));
+
+    let todo_call = llm_tool_call(
+        TodoWrite::NAME,
+        serde_json::json!({
+            "todos": [{ "content": "secret todo text", "status": "in_progress" }]
+        }),
+    );
+    adapter.execute(&todo_call).await.expect("todo_write");
+
+    let fetch_row = audit.row_by_audit_id(1).expect("web.fetch audit row");
+    assert_eq!(fetch_row.method, Fetch::NAME);
+    assert_eq!(fetch_row.impact_kind, "external_observation");
+    assert_eq!(fetch_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+    assert!(fetch_row.policy_enforced);
+    let fetch_metadata = fetch_row.metadata_json.expect("fetch metadata");
+    assert!(fetch_metadata.contains("response_size"));
+    assert!(!fetch_metadata.contains("phase21-body"));
+    assert!(!fetch_metadata.contains("secret todo"));
+
+    let todo_row = audit.row_by_audit_id(2).expect("todo audit row");
+    assert_eq!(todo_row.method, TodoWrite::NAME);
+    assert_eq!(todo_row.impact_kind, "session_state_mutation");
+    assert_eq!(todo_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+    let todo_metadata = todo_row.metadata_json.expect("todo metadata");
+    assert!(todo_metadata.contains("op_count"));
+    assert!(!todo_metadata.contains("secret todo"));
 }

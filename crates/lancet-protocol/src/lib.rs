@@ -20,6 +20,8 @@ pub mod methods;
 
 // Public re-exports of common types
 pub use catalog::{catalog, CATALOG};
+#[cfg(feature = "inspect-scaffold")]
+pub use catalog::{scaffold_catalog, SCAFFOLD_CATALOG};
 pub use envelope::{
     BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, GuardVerdict,
     Impact, ImpactKind, Intent, OnFailure, Scope, VerifyCommand,

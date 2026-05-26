@@ -6,6 +6,10 @@ edition.workspace = true
 authors.workspace = true
 description = "CEP (Controlled Execution Protocol) wire types: JSON-RPC 2.0 frames, envelopes, and typed errors"
 
+[features]
+default = []
+inspect-scaffold = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

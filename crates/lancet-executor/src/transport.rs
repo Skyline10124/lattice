@@ -1,9 +1,10 @@
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
 use crate::audit::{
-    impact_kind_for_method, impact_kind_label, AuditOutcome, AuditStart, CepAuditContext,
-    CepAuditStore, GUARD_STAGE, SEMANTIC_STAGE,
+    impact_kind_for_method, impact_kind_label, AuditOutcome, AuditStart, CallAuditMetadata,
+    CepAuditContext, CepAuditStore,
 };
+use crate::policy::Phase21TurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_protocol::{
     envelope::BaseExecutionEnvelope, error::to_jsonrpc_error, CatalogMethod, CepError, Id,
@@ -29,18 +30,28 @@ pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub base_envelope: BaseExecutionEnvelope,
+    pub phase21: Arc<Phase21TurnContext>,
+    /// Per-call audit metadata (bridge vs native); defaults to Phase 20 bridge.
+    pub call_audit_metadata: CallAuditMetadata,
+    /// When true, resolve audit metadata per method (Phase 21 native vs Phase 22 bridge).
+    pub production_audit_routing: bool,
 }
 
 impl ServerRunConfig {
-    /// In-memory audit store with stable test identifiers.
+    /// In-memory audit store with stable test identifiers and safe Phase 21 policy/budget defaults.
     pub fn in_memory_for_tests() -> Self {
+        let base_envelope = BaseExecutionEnvelope::for_workspace_root(".", "test turn observation");
+        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root("."));
         Self {
             audit: Arc::new(CepAuditStore::in_memory().expect("in-memory audit store")),
             audit_context: Arc::new(RwLock::new(CepAuditContext {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "test turn observation"),
+            base_envelope,
+            phase21,
+            call_audit_metadata: CallAuditMetadata::bridge_defaults(),
+            production_audit_routing: false,
         }
     }
 }
@@ -362,6 +373,9 @@ async fn handle_request(
         audit,
         audit_context,
         base_envelope,
+        phase21,
+        call_audit_metadata,
+        production_audit_routing,
     } = config;
 
     let ServerRequest {
@@ -372,8 +386,14 @@ async fn handle_request(
         cancel_tx,
     } = request;
 
+    let call_audit_metadata = if production_audit_routing {
+        CallAuditMetadata::for_production_dispatch(&method)
+    } else {
+        call_audit_metadata
+    };
+
     let ctx_snapshot = audit_context.read().await.clone();
-    let audit_start = match audit.start_call(&ctx_snapshot, id, &method, Some("started")) {
+    let audit_start = match audit.start_call(&ctx_snapshot, id, &method, &call_audit_metadata) {
         Ok(start) => start,
         Err(_) => {
             let _ = response_tx.send(Err(CepError::internal_error("audit start failed")));
@@ -381,19 +401,37 @@ async fn handle_request(
         }
     };
 
-    emit_cep_call_started(&event_tx, id, &method, audit_start.audit_id).await;
+    emit_cep_call_started(
+        &event_tx,
+        id,
+        &method,
+        audit_start.audit_id,
+        &call_audit_metadata,
+    )
+    .await;
 
     let cancel_rx = cancel_tx.subscribe();
+    let durable_metadata = crate::call_durable_metadata::CallDurableMetadata::default();
     let ctx = HandlerContext {
         call_id: id,
         events: EventSink::new(event_tx.clone(), id),
         cancellation: Cancellation::new(cancel_rx),
         base_envelope,
+        phase21: Arc::clone(&phase21),
+        durable_metadata: durable_metadata.clone(),
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;
+    let durable_metadata_json = durable_metadata.take_json();
 
-    finalize_audit_for_dispatch(&audit, audit_start, &method, &dispatch_result);
+    finalize_audit_for_dispatch(
+        &audit,
+        audit_start,
+        &method,
+        &dispatch_result,
+        &call_audit_metadata,
+        durable_metadata_json.as_deref(),
+    );
     let ok = dispatch_result.is_ok();
     let error_code = dispatch_result
         .as_ref()
@@ -425,6 +463,7 @@ async fn handle_request(
         audit_start.audit_id,
         ok,
         error_code.as_deref(),
+        &call_audit_metadata,
     )
     .await;
 
@@ -438,15 +477,26 @@ fn finalize_audit_for_dispatch(
     audit_start: AuditStart,
     method: &str,
     dispatch_result: &Result<Value, CepError>,
+    call_metadata: &CallAuditMetadata,
+    durable_metadata_json: Option<&str>,
 ) {
+    let semantic_status = if call_metadata.semantic_stage == crate::audit::SEMANTIC_STAGE_SCAFFOLD {
+        "scaffold_stub"
+    } else if call_metadata.policy_enforced {
+        "native_handler"
+    } else {
+        "bridged_legacy_body"
+    };
     match dispatch_result {
         Ok(value) => {
             let summary = compact_success_summary(method, value);
-            let metadata = compact_success_metadata(method, value);
+            let metadata = durable_metadata_json
+                .map(str::to_string)
+                .or_else(|| compact_success_metadata(method, value, call_metadata));
             let _ = audit.finalize_call(
                 audit_start,
                 AuditOutcome::Success { summary },
-                Some("bridged_legacy_body"),
+                Some(semantic_status),
                 metadata.as_deref(),
             );
         }
@@ -459,8 +509,8 @@ fn finalize_audit_for_dispatch(
             let _ = audit.finalize_call(
                 audit_start,
                 AuditOutcome::Error { code, summary },
-                None,
-                None,
+                Some("native_handler_denied"),
+                durable_metadata_json,
             );
         }
     }
@@ -481,7 +531,14 @@ fn compact_success_summary(method: &str, value: &Value) -> String {
     }
 }
 
-fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
+fn compact_success_metadata(
+    method: &str,
+    value: &Value,
+    call_metadata: &CallAuditMetadata,
+) -> Option<String> {
+    let backend_invoked = call_metadata
+        .backend_invoked
+        .unwrap_or(!call_metadata.policy_enforced);
     match method {
         "session.todo_write" => {
             let count = value
@@ -489,9 +546,40 @@ fn compact_success_metadata(method: &str, value: &Value) -> Option<String> {
                 .and_then(|v| v.as_array())
                 .map(|a| a.len())
                 .unwrap_or(0);
-            Some(format!(r#"{{"outcome":"todo_write","count":{count}}}"#))
+            Some(format!(
+                r#"{{"outcome":"todo_write","op_count":{count},"backend_invoked":{backend_invoked}}}"#
+            ))
         }
-        _ => Some(format!(r#"{{"method":"{method}"}}"#)),
+        "web.fetch" => {
+            let response_size = value
+                .get("body")
+                .and_then(|v| v.as_str())
+                .map(|s| s.len())
+                .unwrap_or(0);
+            let truncated = value
+                .get("truncated")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Some(format!(
+                r#"{{"outcome":"web_fetch","response_size":{response_size},"truncated":{truncated},"backend_invoked":{backend_invoked}}}"#
+            ))
+        }
+        "workspace.inspect" | "workspace.navigate" => {
+            let status = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let routed = value
+                .get("routed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Some(format!(
+                r#"{{"outcome":"scaffold","status":"{status}","routed":{routed},"observation_payload_bytes":0,"budget_charged":0,"backend_invoked":{backend_invoked}}}"#
+            ))
+        }
+        _ => Some(format!(
+            r#"{{"method":"{method}","backend_invoked":{backend_invoked}}}"#
+        )),
     }
 }
 
@@ -508,6 +596,7 @@ async fn emit_cep_call_started(
     call_id: u64,
     method: &str,
     audit_id: i64,
+    metadata: &CallAuditMetadata,
 ) {
     let impact_kind = impact_kind_for_method(method)
         .map(impact_kind_label)
@@ -519,8 +608,9 @@ async fn emit_cep_call_started(
             "method": method,
             "impact_kind": impact_kind,
             "audit_id": audit_id,
-            "semantic_stage": SEMANTIC_STAGE,
-            "guard_stage": GUARD_STAGE,
+            "semantic_stage": metadata.semantic_stage,
+            "guard_stage": metadata.guard_stage,
+            "policy_enforced": metadata.policy_enforced,
         }),
     );
     let _ = event_tx.try_send(event);
@@ -533,14 +623,16 @@ async fn emit_cep_call_finished(
     audit_id: i64,
     ok: bool,
     error_code: Option<&str>,
+    metadata: &CallAuditMetadata,
 ) {
     let mut payload = json!({
         "call_id": call_id,
         "method": method,
         "audit_id": audit_id,
         "ok": ok,
-        "semantic_stage": SEMANTIC_STAGE,
-        "guard_stage": GUARD_STAGE,
+        "semantic_stage": metadata.semantic_stage,
+        "guard_stage": metadata.guard_stage,
+        "policy_enforced": metadata.policy_enforced,
     });
     if let Some(code) = error_code {
         if let Some(obj) = payload.as_object_mut() {
@@ -554,6 +646,7 @@ async fn emit_cep_call_finished(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{GUARD_STAGE, SEMANTIC_STAGE};
     use crate::registry::wire_code_for_error;
     use crate::registry::MethodRegistry;
     use lancet_protocol::error::{jsonrpc, method_not_found};
@@ -889,6 +982,8 @@ mod tests {
     }
 
     static ACTIVE_HANDLERS: AtomicUsize = AtomicUsize::new(0);
+    /// Prevents parallel stress tests from sharing `ACTIVE_HANDLERS` (crate tests run concurrently).
+    static ACTIVE_HANDLERS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test]
     async fn shutdown_cancels_in_flight_handler_and_joins() {
@@ -1009,6 +1104,8 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_stress_leaves_no_tracked_handler_tasks() {
+        let _guard = ACTIVE_HANDLERS_TEST_LOCK.lock().await;
+        ACTIVE_HANDLERS.store(0, Ordering::SeqCst);
         for _ in 0..50 {
             let (client, server) = LancetTransport::pair(8);
             let registry = todo_registry(|params, _ctx| async move {
@@ -1062,6 +1159,49 @@ mod tests {
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE);
         assert_eq!(row.guard_stage, GUARD_STAGE);
         assert!(!row.policy_enforced);
+    }
+
+    #[tokio::test]
+    async fn cep_audit_transport_native_policy_denial_persists_metadata() {
+        use crate::handlers::observation::register_workspace_observation_methods;
+        use lancet_protocol::methods::workspace::{ReadFile, ReadFileParams};
+        use lancet_protocol::CepErrorCode;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let mut registry = MethodRegistry::new();
+        register_workspace_observation_methods(&mut registry).unwrap();
+
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.production_audit_routing = true;
+        config.phase21 =
+            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root));
+        config.base_envelope =
+            BaseExecutionEnvelope::for_workspace_root(root, "native audit denial test");
+        let audit = Arc::clone(&config.audit);
+
+        let (client, server) = LancetTransport::pair(8);
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let err = client
+            .call::<ReadFile>(ReadFileParams {
+                path: "../outside".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::PathContainment);
+        drop(client);
+        server_task.await.unwrap();
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        let metadata = row.metadata_json.expect("policy denial metadata");
+        assert!(metadata.contains("cep_policy"));
+        assert!(metadata.contains("denial_source"));
+        assert!(row.policy_enforced);
     }
 
     #[tokio::test]
@@ -1123,6 +1263,7 @@ mod tests {
 
         #[tokio::test]
         async fn cancellation_stress_kills_child_and_reclaims_resources() {
+            let _guard = ACTIVE_HANDLERS_TEST_LOCK.lock().await;
             let initial_fds = open_fd_count();
 
             for _ in 0..20 {

@@ -305,7 +305,7 @@ async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
             .build(),
     );
 
-    let deps = build_production_turn_deps(dir.path().to_str().unwrap(), &[], llm, true)
+    let deps = build_production_turn_deps(dir.path().to_str().unwrap(), &[], llm, true, None)
         .expect("production runtime should build");
 
     assert_eq!(deps.build_metrics.adapter_instances, 1);
@@ -316,8 +316,101 @@ async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
         &["workspace.read_file".to_string()],
         Arc::new(RealLlmClient),
         false,
+        None,
     )
     .expect("second runtime build");
     assert_eq!(deps2.build_metrics.adapter_instances, 1);
     assert_eq!(deps2.build_metrics.transport_pairs, 1);
+}
+
+#[cfg(test)]
+mod phase21_native_registry {
+    use super::*;
+    use lancet_executor::SEMANTIC_STAGE_NATIVE;
+    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::methods::external::Fetch;
+    use lancet_protocol::methods::session::TodoWrite;
+    use lancet_protocol::methods::workspace::ReadFile;
+    use lattice_profile::CepNetworkSection;
+    use tempfile::TempDir;
+
+    use crate::turn::lancet::production_base_envelope;
+
+    #[test]
+    fn phase21_native_registry_production_envelope_has_no_fetch_wildcard() {
+        let dir = TempDir::new().unwrap();
+        let enabled = vec![Fetch::NAME.to_string(), TodoWrite::NAME.to_string()];
+        let envelope =
+            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
+        assert!(
+            envelope.inner.capabilities.iter().all(
+                |cap| !matches!(cap, Capability::FetchUrl { host_pattern } if host_pattern == "*")
+            ),
+            "production envelope must not grant FetchUrl(\"*\")"
+        );
+    }
+
+    #[test]
+    fn phase21_native_registry_allowed_hosts_become_fetch_capabilities() {
+        let dir = TempDir::new().unwrap();
+        let cep = lattice_profile::CepSection {
+            network: Some(CepNetworkSection {
+                allowed_hosts: vec!["api.example.com".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let enabled = vec![Fetch::NAME.to_string()];
+        let envelope =
+            production_base_envelope(dir.path().to_str().unwrap(), &enabled, Some(&cep)).unwrap();
+        assert!(envelope.inner.capabilities.iter().any(|cap| matches!(
+            cap,
+            Capability::FetchUrl { host_pattern } if host_pattern == "api.example.com"
+        )));
+    }
+
+    #[tokio::test]
+    async fn phase21_native_registry_production_runtime_uses_native_audit_stage() {
+        use lancet_protocol::methods::workspace::ReadFileParams;
+        use lattice_agent::testing::FakeStreamingLlmClient;
+        use lattice_agent::LlmClient;
+
+        use crate::turn::lancet::build_production_turn_deps;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "native audit").unwrap();
+
+        let llm: Arc<dyn LlmClient> = Arc::new(
+            FakeStreamingLlmClient::builder()
+                .push_events(vec![lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                }])
+                .build(),
+        );
+
+        let deps = build_production_turn_deps(
+            dir.path().to_str().unwrap(),
+            &[ReadFile::NAME.to_string()],
+            llm,
+            true,
+            None,
+        )
+        .expect("production deps");
+
+        deps.lancet_client
+            .call::<ReadFile>(ReadFileParams {
+                path: "hello.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            })
+            .await
+            .expect("native read_file");
+
+        let row = deps.audit.row_by_audit_id(1).unwrap();
+        assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+        assert!(row.policy_enforced);
+        assert_eq!(row.impact_kind, "workspace_observation");
+    }
 }

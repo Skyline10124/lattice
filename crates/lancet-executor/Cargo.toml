@@ -11,7 +11,6 @@ lattice-llm = { workspace = true }
 lattice-tooling = { workspace = true }
 lancet-protocol = { workspace = true }
 schemars = { workspace = true }
-async-trait = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }
 indexmap = { workspace = true }
@@ -25,12 +24,10 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 uuid = { workspace = true }
 
 [features]
 default = []
+inspect-scaffold = ["lancet-protocol/inspect-scaffold"]
