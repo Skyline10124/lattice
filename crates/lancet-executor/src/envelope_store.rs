@@ -5,6 +5,7 @@
 //! into `ServerRunConfig`, and cloned into every `HandlerContext`. The store is
 //! dropped when the turn ends, enforcing turn-scoped lifetime (D-13).
 
+use crate::guard::normalize_write_path_pattern;
 use lancet_protocol::envelope::{Capability, ExecutionEnvelope};
 use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -77,8 +78,6 @@ impl ActiveEnvelopeStore {
         call_id: u64,
         turn_id: &str,
     ) -> Result<DeclareOutcome, CepError> {
-        validate_envelope(&envelope)?;
-
         let mut state = self.inner.write().await;
         if state.active.is_some() {
             return Err(CepError::new(
@@ -91,6 +90,7 @@ impl ActiveEnvelopeStore {
                 Retriability::Permanent,
             ));
         }
+        validate_envelope(&envelope)?;
 
         let envelope_hash = compute_envelope_hash(&envelope);
         let envelope_id = format!("env-{}-{}", turn_id, state.next_seq);
@@ -158,6 +158,12 @@ impl ActiveEnvelopeStore {
             .active
             .as_ref()
             .map(|r| (r.envelope_id.clone(), r.envelope.clone()))
+    }
+
+    /// Get a clone of the active envelope record, if any.
+    pub async fn active_record(&self) -> Option<EnvelopeRecord> {
+        let state = self.inner.read().await;
+        state.active.clone()
     }
 
     /// Get just the active envelope id, if any.
@@ -257,33 +263,7 @@ fn validate_envelope(envelope: &ExecutionEnvelope) -> Result<(), CepError> {
 
 /// Validate a WritePath pattern (D-08, D-35).
 fn validate_write_path_pattern(pattern: &str) -> Result<(), CepError> {
-    // Reject NUL bytes
-    if pattern.contains('\0') {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            "WritePath pattern contains NUL byte",
-            CepErrorData::Validation(ValidationErrorData {
-                field: "capabilities.WritePath.path_pattern".into(),
-                reason: "contains NUL byte".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    // Reject explicit `..` traversal
-    if pattern.contains("..") {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            "WritePath pattern contains '..' traversal",
-            CepErrorData::Validation(ValidationErrorData {
-                field: "capabilities.WritePath.path_pattern".into(),
-                reason: "contains '..' traversal".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    Ok(())
+    normalize_write_path_pattern(pattern).map(|_| ())
 }
 
 #[cfg(test)]
@@ -368,6 +348,18 @@ mod tests {
         store.declare(env1, 1, "turn-1").await.unwrap();
 
         let env2 = sample_envelope("second declare");
+        let err = store.declare(env2, 2, "turn-1").await.unwrap_err();
+        assert_eq!(err.code, CepErrorCode::EnvelopeAlreadyActive);
+    }
+
+    #[tokio::test]
+    async fn store_declare_returns_already_active_before_validating_second_envelope() {
+        let store = ActiveEnvelopeStore::new();
+        let env1 = sample_envelope("first declare");
+        store.declare(env1, 1, "turn-1").await.unwrap();
+
+        let mut env2 = sample_envelope("invalid second declare");
+        env2.intent.description = String::new();
         let err = store.declare(env2, 2, "turn-1").await.unwrap_err();
         assert_eq!(err.code, CepErrorCode::EnvelopeAlreadyActive);
     }
@@ -472,6 +464,32 @@ mod tests {
         };
         let err = store.declare(env, 1, "turn-1").await.unwrap_err();
         assert_eq!(err.code, CepErrorCode::PathContainment);
+    }
+
+    #[tokio::test]
+    async fn store_rejects_absolute_write_path_pattern() {
+        let store = ActiveEnvelopeStore::new();
+        let mut env = sample_envelope("absolute pattern");
+        env.capabilities = BTreeSet::new();
+        env.capabilities.insert(Capability::WritePath {
+            path_pattern: "/etc/passwd".into(),
+        });
+
+        let err = store.declare(env, 1, "turn-1").await.unwrap_err();
+        assert_eq!(err.code, CepErrorCode::PathContainment);
+    }
+
+    #[tokio::test]
+    async fn store_rejects_unsupported_write_path_glob() {
+        let store = ActiveEnvelopeStore::new();
+        let mut env = sample_envelope("unsupported glob");
+        env.capabilities = BTreeSet::new();
+        env.capabilities.insert(Capability::WritePath {
+            path_pattern: "**/*.rs".into(),
+        });
+
+        let err = store.declare(env, 1, "turn-1").await.unwrap_err();
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
     }
 
     #[tokio::test]

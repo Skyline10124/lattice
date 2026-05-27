@@ -38,10 +38,14 @@ impl Cancellation {
 
     /// Waits until cancellation is requested.
     pub async fn cancelled(&mut self) {
-        if self.is_cancelled() {
-            return;
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            if self.rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
         }
-        let _ = self.rx.changed().await;
     }
 }
 

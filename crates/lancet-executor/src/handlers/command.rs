@@ -8,12 +8,14 @@
 //! D-43..D-45: Verify flow after successful WorkspaceMutation commands.
 
 use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
-use crate::guard::{check_write_scope, extract_write_path_patterns};
+use crate::guard::{check_write_scope, extract_write_path_patterns, has_run_command_capability};
 use crate::policy::command::{
     build_effective_env, classify_command, validate_timeout, EffectiveImpact,
 };
 use crate::registry::{HandlerContext, MethodRegistry};
-use crate::verify::{extract_verify_command, run_verify, validate_verify_command};
+use crate::verify::{
+    extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
+};
 use lancet_protocol::envelope::Capability;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
 use lancet_protocol::methods::command::{Run, RunParams, RunResult};
@@ -54,12 +56,13 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     }
 
     // 5. WorkspaceMutation requires active envelope with RunCommand capability
-    let envelope_id = if effective_impact == EffectiveImpact::WorkspaceMutation {
-        let active = ctx.active_envelope.active_envelope().await;
+    let active_record = if effective_impact == EffectiveImpact::WorkspaceMutation {
+        let active = ctx.active_envelope.active_record().await;
         match active {
-            Some((id, envelope)) => {
+            Some(record) => {
                 // Check RunCommand capability
-                let has_run_command = envelope
+                let has_run_command = record
+                    .envelope
                     .capabilities
                     .iter()
                     .any(|cap| matches!(cap, Capability::RunCommand { .. }));
@@ -70,8 +73,9 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                         "Active envelope does not grant RunCommand capability",
                         CepErrorData::Permission(PermissionErrorData {
                             required_capability: "run_command".into(),
-                            active_envelope_id: Some(id),
-                            granted_capabilities: envelope
+                            active_envelope_id: Some(record.envelope_id.clone()),
+                            granted_capabilities: record
+                                .envelope
                                 .capabilities
                                 .iter()
                                 .map(|c| format!("{c:?}"))
@@ -81,27 +85,19 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                     ));
                 }
                 // Check argv against allowlist
-                if let Some(Capability::RunCommand { argv_allowlist }) = envelope
-                    .capabilities
-                    .iter()
-                    .find(|c| matches!(c, Capability::RunCommand { .. }))
-                {
-                    if !argv_allowlist.is_empty()
-                        && !matches_argv_allowlist(&params.argv, argv_allowlist)
-                    {
-                        emit_denial_metadata(&ctx, "argv_not_in_allowlist", false).await;
-                        return Err(CepError::new(
-                            CepErrorCode::GuardDenied,
-                            "Command argv does not match RunCommand allowlist",
-                            CepErrorData::Guard(GuardErrorData {
-                                method: Run::NAME.into(),
-                                reason: "argv not in envelope RunCommand allowlist".into(),
-                            }),
-                            Retriability::Permanent,
-                        ));
-                    }
+                if !has_run_command_capability(&record.envelope.capabilities, &params.argv) {
+                    emit_denial_metadata(&ctx, "argv_not_in_allowlist", false).await;
+                    return Err(CepError::new(
+                        CepErrorCode::GuardDenied,
+                        "Command argv does not match RunCommand allowlist",
+                        CepErrorData::Guard(GuardErrorData {
+                            method: Run::NAME.into(),
+                            reason: "argv not in envelope RunCommand allowlist".into(),
+                        }),
+                        Retriability::Permanent,
+                    ));
                 }
-                Some(id)
+                Some(record)
             }
             None => {
                 emit_denial_metadata(&ctx, "active_envelope", false).await;
@@ -120,6 +116,9 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     } else {
         None
     };
+    let envelope_id = active_record
+        .as_ref()
+        .map(|record| record.envelope_id.clone());
 
     // 6. Diagnostic: no envelope required, but still enforce policy
 
@@ -165,9 +164,9 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
 
             // 12. Post-execution diff check for WorkspaceMutation (D-30, D-38)
             if effective_impact == EffectiveImpact::WorkspaceMutation {
-                if let Some((ref env_id, ref envelope)) =
-                    ctx.active_envelope.active_envelope().await
-                {
+                if let Some(ref record) = active_record {
+                    let env_id = &record.envelope_id;
+                    let envelope = &record.envelope;
                     let write_patterns = extract_write_path_patterns(&envelope.capabilities);
 
                     // Capture post-execution snapshot and compute changed paths
@@ -229,57 +228,43 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                 Retriability::RequiresReplan,
                             ));
                         }
+                    }
 
-                        // D-43..D-45: Run verify if configured
-                        if let Some(verify_cmd) = extract_verify_command(envelope) {
-                            validate_verify_command(&verify_cmd, policy, &project_root)?;
-                            let mut verify_cancel = ctx.cancellation.clone();
-                            match run_verify(&verify_cmd, &project_root, policy, &mut verify_cancel)
-                                .await
-                            {
-                                Ok(outcome) if !outcome.success => {
-                                    ctx.events
-                                        .emit(
-                                            "cep.verify_failed",
-                                            json!({
-                                                "method": Run::NAME,
-                                                "envelope_id": env_id,
-                                                "verify_exit_code": outcome.exit_code,
-                                                "diff_retained": true,
-                                            }),
-                                        )
-                                        .await;
-                                    return Err(CepError::new(
-                                        CepErrorCode::ExecutionFailed,
-                                        format!(
-                                            "verify command failed with exit code {}; diff retained",
-                                            outcome.exit_code
-                                        ),
-                                        CepErrorData::Execution(
-                                            lancet_protocol::error::ExecutionErrorData {
-                                                command: verify_cmd.argv.join(" "),
-                                                exit_code: Some(outcome.exit_code),
-                                                stderr: outcome.stderr_summary,
-                                            },
-                                        ),
-                                        Retriability::RequiresReplan,
-                                    ));
-                                }
-                                Ok(_) => {} // verify succeeded
-                                Err(err) => {
-                                    ctx.events
-                                        .emit(
-                                            "cep.verify_failed",
-                                            json!({
-                                                "method": Run::NAME,
-                                                "envelope_id": env_id,
-                                                "verify_exit_code": -1,
-                                                "diff_retained": true,
-                                            }),
-                                        )
-                                        .await;
-                                    return Err(err);
-                                }
+                    // D-43..D-45: Run verify after every successful WorkspaceMutation call.
+                    if let Some(verify_cmd) = extract_verify_command(envelope) {
+                        validate_verify_command(&verify_cmd, policy, &project_root)?;
+                        let mut verify_cancel = ctx.cancellation.clone();
+                        match run_verify(&verify_cmd, &project_root, policy, &mut verify_cancel)
+                            .await
+                        {
+                            Ok(outcome) if !outcome.success => {
+                                ctx.events
+                                    .emit(
+                                        "cep.verify_failed",
+                                        json!({
+                                            "method": Run::NAME,
+                                            "envelope_id": env_id,
+                                            "verify_exit_code": outcome.exit_code,
+                                            "diff_retained": true,
+                                        }),
+                                    )
+                                    .await;
+                                return Err(verify_failed_error(&verify_cmd, &outcome));
+                            }
+                            Ok(_) => {} // verify succeeded
+                            Err(err) => {
+                                ctx.events
+                                    .emit(
+                                        "cep.verify_failed",
+                                        json!({
+                                            "method": Run::NAME,
+                                            "envelope_id": env_id,
+                                            "verify_exit_code": -1,
+                                            "diff_retained": true,
+                                        }),
+                                    )
+                                    .await;
+                                return Err(err);
                             }
                         }
                     }
@@ -382,8 +367,8 @@ fn capture_recursive(
             .to_string_lossy()
             .to_string();
 
-        // Skip hidden directories and common build artifacts
-        if relative.starts_with('.') || relative.starts_with("target/") {
+        // Skip runtime/build internals, but keep hidden project files like .github or .cargo.
+        if is_snapshot_skipped_path(&relative) {
             continue;
         }
 
@@ -428,6 +413,13 @@ fn capture_recursive(
     }
 
     Ok(())
+}
+
+fn is_snapshot_skipped_path(relative: &str) -> bool {
+    relative == ".git"
+        || relative.starts_with(".git/")
+        || relative == "target"
+        || relative.starts_with("target/")
 }
 
 /// Compute changed paths between pre and post snapshots.
@@ -531,6 +523,7 @@ fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
 }
 
 /// Check if argv matches the RunCommand allowlist.
+#[cfg(test)]
 fn matches_argv_allowlist(argv: &[String], allowlist: &[String]) -> bool {
     for entry in allowlist {
         let tokens: Vec<&str> = entry.split_whitespace().collect();
@@ -832,6 +825,244 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
         assert!(err.message.contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_allows_matching_later_run_command_capability() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["cargo test".into()],
+        });
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["touch".into()],
+        });
+        capabilities.insert(Capability::WritePath {
+            path_pattern: ".".into(),
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "multiple run command capabilities".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "multi run cap test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["touch".into(), "new.txt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let result = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_hidden_project_path_outside_scope_replans() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        let registry = native_command_registry(root);
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["touch".into()],
+        });
+        capabilities.insert(Capability::WritePath {
+            path_pattern: "src/**".into(),
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "hidden path guard".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "hidden path test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec![
+                "touch".into(),
+                ".github/workflows/phase22-hidden.yml".into(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_mutation_post_check_uses_authorizing_envelope_after_supersede() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let script = dir.path().join("mutate.sh");
+        std::fs::write(&script, "#!/bin/sh\nsleep 0.2\ntouch outside.txt\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let registry = native_command_registry(root);
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let envelope = {
+            let mut capabilities = BTreeSet::new();
+            capabilities.insert(Capability::RunCommand {
+                argv_allowlist: vec!["./mutate.sh".into()],
+            });
+            capabilities.insert(Capability::WritePath {
+                path_pattern: "src/**".into(),
+            });
+            ExecutionEnvelope {
+                intent: Intent {
+                    description: "initial narrow envelope".into(),
+                },
+                capabilities,
+                scope: Scope {
+                    workspace_root: Some(root.into()),
+                    extensions: serde_json::Map::new(),
+                },
+                impact: vec![EnvImpact {
+                    kind: ImpactKind::WorkspaceMutation,
+                    target: root.into(),
+                }],
+                constraints: Constraints::default(),
+                verify: None,
+                on_failure: None,
+                extensions: serde_json::Map::new(),
+            }
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "supersede race test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::clone(&store),
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["./mutate.sh".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let command_task = tokio::spawn(async move {
+            registry
+                .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let replacement = {
+            let mut capabilities = BTreeSet::new();
+            capabilities.insert(Capability::RunCommand {
+                argv_allowlist: vec!["./mutate.sh".into()],
+            });
+            capabilities.insert(Capability::WritePath {
+                path_pattern: ".".into(),
+            });
+            ExecutionEnvelope {
+                intent: Intent {
+                    description: "replacement wider envelope".into(),
+                },
+                capabilities,
+                scope: Scope {
+                    workspace_root: Some(root.into()),
+                    extensions: serde_json::Map::new(),
+                },
+                impact: vec![EnvImpact {
+                    kind: ImpactKind::WorkspaceMutation,
+                    target: root.into(),
+                }],
+                constraints: Constraints::default(),
+                verify: None,
+                on_failure: None,
+                extensions: serde_json::Map::new(),
+            }
+        };
+        store
+            .declare_with_supersede(replacement, 2, "test-turn", Some("race".into()))
+            .await
+            .unwrap();
+
+        let err = command_task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
     }
 
     #[tokio::test]
@@ -1149,8 +1380,25 @@ mod tests {
     }
 
     #[test]
+    fn capture_snapshot_includes_hidden_project_files_but_skips_git_and_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join(".github/workflows/ci.yml"), "name: ci").unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]").unwrap();
+        std::fs::write(dir.path().join("target/debug/out"), "build").unwrap();
+
+        let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
+
+        assert!(snapshot.contains_key(".github/workflows/ci.yml"));
+        assert!(!snapshot.contains_key(".git/config"));
+        assert!(!snapshot.contains_key("target/debug/out"));
+    }
+
+    #[test]
     fn compute_changed_paths_detects_new_file() {
-        let mut pre = HashMap::new();
+        let pre = HashMap::new();
         let mut post = HashMap::new();
         post.insert(
             "new.txt".into(),

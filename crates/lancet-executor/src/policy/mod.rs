@@ -11,7 +11,9 @@ use std::sync::Arc;
 pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
-pub use command::{classify_command, build_effective_env, validate_timeout, CommandPolicy, EffectiveImpact};
+pub use command::{
+    build_effective_env, classify_command, validate_timeout, CommandPolicy, EffectiveImpact,
+};
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 

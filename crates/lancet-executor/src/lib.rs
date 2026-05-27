@@ -37,8 +37,8 @@ pub use legacy_backend::register_phase22_pending_legacy_methods_minus_declare;
 pub use legacy_backend::register_phase22_pending_legacy_methods_minus_declare_and_run;
 pub use native_registry::register_production_method_registry;
 pub use policy::{
-    BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig,
-    Phase21TurnContext,
+    command::CommandPolicy, BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig,
+    Phase21PolicyConfig, Phase21TurnContext,
 };
 pub use registry::{wire_code_for_error, HandlerContext, MethodRegistry};
 #[cfg(feature = "inspect-scaffold")]

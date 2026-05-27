@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use lancet_executor::{
     impact_kind_for_method, impact_kind_label, register_production_method_registry,
     to_tool_definitions, wire_code_for_error, ActiveEnvelopeStore, BudgetLimits, CallAuditMetadata,
-    CepAuditContext, CepAuditStore, LancetClient, LancetTransport, MethodRegistry,
+    CepAuditContext, CepAuditStore, CommandPolicy, LancetClient, LancetTransport, MethodRegistry,
     NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext,
     ServerRunConfig,
 };
@@ -248,6 +248,7 @@ pub(crate) fn phase21_policy_from_profile(
         observation,
         network,
         budget,
+        command: command_policy_from_profile(cep),
     })
 }
 
@@ -304,6 +305,42 @@ fn apply_network_profile(section: &CepNetworkSection, network: &mut NetworkPolic
     }
     if let Some(value) = section.max_web_response_bytes {
         network.max_web_response_bytes = value;
+    }
+}
+
+/// Build `CommandPolicy` from the profile `[cep.command]` section.
+///
+/// Missing `[cep.command]` falls back to `CommandPolicy::defaults()`.
+/// Partial fields use defaults for the unspecified ones (D-23).
+fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
+    let defaults = CommandPolicy::defaults();
+    match cep.command.as_ref() {
+        Some(section) => CommandPolicy {
+            default_timeout_ms: section
+                .default_timeout_ms
+                .unwrap_or(defaults.default_timeout_ms),
+            max_timeout_ms: section.max_timeout_ms.unwrap_or(defaults.max_timeout_ms),
+            max_output_bytes: section
+                .max_output_bytes
+                .unwrap_or(defaults.max_output_bytes),
+            allow_inline_shell: section
+                .allow_inline_shell
+                .unwrap_or(defaults.allow_inline_shell),
+            allowed_diagnostic_commands: section
+                .allowed_diagnostic_commands
+                .clone()
+                .unwrap_or(defaults.allowed_diagnostic_commands),
+            denied_commands: section
+                .denied_commands
+                .clone()
+                .unwrap_or(defaults.denied_commands),
+            allowed_env: section.allowed_env.clone().unwrap_or(defaults.allowed_env),
+            inherited_env: section
+                .inherited_env
+                .clone()
+                .unwrap_or(defaults.inherited_env),
+        },
+        None => defaults,
     }
 }
 
@@ -466,50 +503,96 @@ pub(crate) fn build_production_turn_deps(
 /// Map a CEP transport notification into an internal agent turn event.
 pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
     let params = event.params;
-    let call_id = params.get("call_id").and_then(|v| v.as_u64())?;
+    // Envelope lifecycle events don't carry call_id; others do.
     match event.method.as_str() {
-        "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
-            call_id,
-            method: string_param(&params, "method")?,
-            impact_kind: string_param(&params, "impact_kind").unwrap_or_else(|| "unknown".into()),
-            audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
-            semantic_stage: string_param(&params, "semantic_stage")?,
-            guard_stage: string_param(&params, "guard_stage")?,
+        "cep.envelope_declared" => Some(AgentTurnEvent::CepEnvelopeDeclared {
+            envelope_id: string_param(&params, "envelope_id")?,
+            envelope_hash: string_param(&params, "envelope_hash")?,
         }),
-        "cep.call_finished" => {
-            let method = string_param(&params, "method")?;
-            Some(AgentTurnEvent::CepCallFinished {
-                call_id,
-                method: method.clone(),
-                impact_kind: impact_kind_for_method(&method)
-                    .map(impact_kind_label)
-                    .unwrap_or("unknown")
-                    .to_string(),
-                audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
-                ok: params.get("ok").and_then(|v| v.as_bool())?,
-                semantic_stage: string_param(&params, "semantic_stage")?,
-                guard_stage: string_param(&params, "guard_stage")?,
-                error_code: params
-                    .get("error_code")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-            })
-        }
-        "cep.bridge_metadata" => Some(AgentTurnEvent::CepGuardVerdict {
-            call_id,
+        "cep.envelope_superseded" => Some(AgentTurnEvent::CepEnvelopeSuperseded {
+            old_envelope_id: string_param(&params, "old_envelope_id")?,
+            new_envelope_id: string_param(&params, "new_envelope_id")?,
+            reason: string_param(&params, "reason"),
+        }),
+        "cep.envelope_missing" => Some(AgentTurnEvent::CepEnvelopeMissing {
+            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
             method: string_param(&params, "method")?,
-            semantic_stage: string_param(&params, "semantic_stage")?,
-            guard_stage: string_param(&params, "guard_stage")?,
-            policy_enforced: params
-                .get("policy_enforced")
+            required_for: string_param(&params, "required_for")
+                .unwrap_or_else(|| "workspace_mutation".into()),
+        }),
+        "cep.verify_failed" => Some(AgentTurnEvent::CepVerifyFailed {
+            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
+            envelope_id: string_param(&params, "envelope_id").unwrap_or_else(|| "unknown".into()),
+            verify_exit_code: params
+                .get("verify_exit_code")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32),
+            diff_retained: params
+                .get("diff_retained")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            semantic_status: params
-                .get("semantic_status")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
+                .unwrap_or(true),
         }),
-        _ => None,
+        "cep.replan_required" => Some(AgentTurnEvent::CepReplanRequired {
+            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
+            method: string_param(&params, "method")?,
+            out_of_scope_paths: params
+                .get("out_of_scope_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        _ => {
+            let call_id = params.get("call_id").and_then(|v| v.as_u64())?;
+            match event.method.as_str() {
+                "cep.call_started" => Some(AgentTurnEvent::CepCallStarted {
+                    call_id,
+                    method: string_param(&params, "method")?,
+                    impact_kind: string_param(&params, "impact_kind")
+                        .unwrap_or_else(|| "unknown".into()),
+                    audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
+                    semantic_stage: string_param(&params, "semantic_stage")?,
+                    guard_stage: string_param(&params, "guard_stage")?,
+                }),
+                "cep.call_finished" => {
+                    let method = string_param(&params, "method")?;
+                    Some(AgentTurnEvent::CepCallFinished {
+                        call_id,
+                        method: method.clone(),
+                        impact_kind: impact_kind_for_method(&method)
+                            .map(impact_kind_label)
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        audit_id: params.get("audit_id").and_then(|v| v.as_i64())?,
+                        ok: params.get("ok").and_then(|v| v.as_bool())?,
+                        semantic_stage: string_param(&params, "semantic_stage")?,
+                        guard_stage: string_param(&params, "guard_stage")?,
+                        error_code: params
+                            .get("error_code")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                    })
+                }
+                "cep.bridge_metadata" => Some(AgentTurnEvent::CepGuardVerdict {
+                    call_id,
+                    method: string_param(&params, "method")?,
+                    semantic_stage: string_param(&params, "semantic_stage")?,
+                    guard_stage: string_param(&params, "guard_stage")?,
+                    policy_enforced: params
+                        .get("policy_enforced")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    semantic_status: params
+                        .get("semantic_status")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                }),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -627,5 +710,92 @@ mod phase21_profile_policy {
         };
         let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.network.max_web_response_bytes, 2048);
+    }
+
+    #[test]
+    fn command_policy_from_profile_defaults_when_absent() {
+        let cep = CepSection::default();
+        let policy = command_policy_from_profile(&cep);
+        let defaults = CommandPolicy::defaults();
+        assert_eq!(policy.default_timeout_ms, defaults.default_timeout_ms);
+        assert_eq!(policy.max_timeout_ms, defaults.max_timeout_ms);
+        assert_eq!(policy.allow_inline_shell, defaults.allow_inline_shell);
+    }
+
+    #[test]
+    fn command_policy_from_profile_applies_custom_values() {
+        let cep = CepSection {
+            command: Some(lattice_profile::CepCommandSection {
+                default_timeout_ms: Some(30_000),
+                max_timeout_ms: Some(60_000),
+                max_output_bytes: Some(50_000),
+                allow_inline_shell: Some(true),
+                allowed_diagnostic_commands: Some(vec![vec!["mytool".into(), "info".into()]]),
+                denied_commands: Some(vec![vec!["rm".into(), "-rf".into()]]),
+                allowed_env: Some(vec!["MY_VAR".into()]),
+                inherited_env: Some(vec!["PATH".into(), "HOME".into()]),
+            }),
+            ..Default::default()
+        };
+        let policy = command_policy_from_profile(&cep);
+        assert_eq!(policy.default_timeout_ms, 30_000);
+        assert_eq!(policy.max_timeout_ms, 60_000);
+        assert_eq!(policy.max_output_bytes, 50_000);
+        assert!(policy.allow_inline_shell);
+        assert_eq!(
+            policy.allowed_diagnostic_commands,
+            vec![vec!["mytool".to_string(), "info".to_string()]]
+        );
+        assert_eq!(
+            policy.denied_commands,
+            vec![vec!["rm".to_string(), "-rf".to_string()]]
+        );
+        assert_eq!(policy.allowed_env, vec!["MY_VAR".to_string()]);
+        assert_eq!(
+            policy.inherited_env,
+            vec!["PATH".to_string(), "HOME".to_string()]
+        );
+    }
+
+    #[test]
+    fn command_policy_from_profile_partial_uses_defaults_for_missing() {
+        let cep = CepSection {
+            command: Some(lattice_profile::CepCommandSection {
+                default_timeout_ms: Some(10_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let policy = command_policy_from_profile(&cep);
+        let defaults = CommandPolicy::defaults();
+        assert_eq!(policy.default_timeout_ms, 10_000);
+        assert_eq!(policy.max_timeout_ms, defaults.max_timeout_ms);
+        assert_eq!(policy.allow_inline_shell, defaults.allow_inline_shell);
+        assert_eq!(
+            policy.allowed_diagnostic_commands,
+            defaults.allowed_diagnostic_commands
+        );
+    }
+
+    #[test]
+    fn phase21_policy_from_profile_uses_command_policy_from_profile() {
+        let dir = TempDir::new().unwrap();
+        let cep = CepSection {
+            command: Some(lattice_profile::CepCommandSection {
+                default_timeout_ms: Some(45_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        assert_eq!(policy.command.default_timeout_ms, 45_000);
+    }
+
+    #[test]
+    fn phase21_policy_from_profile_older_profile_uses_command_defaults() {
+        let dir = TempDir::new().unwrap();
+        let cep = CepSection::default();
+        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        assert_eq!(policy.command, CommandPolicy::defaults());
     }
 }

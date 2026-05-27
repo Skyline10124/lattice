@@ -11,7 +11,9 @@
 use crate::edit::parser::parse_patch_document;
 use crate::guard::{check_write_scope, extract_write_path_patterns};
 use crate::registry::{HandlerContext, MethodRegistry};
-use crate::verify::{extract_verify_command, run_verify, validate_verify_command};
+use crate::verify::{
+    extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
+};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::methods::workspace::{
     Patch, PatchParams, PatchResult, WriteFile, WriteFileParams, WriteFileResult,
@@ -113,19 +115,7 @@ async fn handle_write_file(
         match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
             Ok(outcome) if !outcome.success => {
                 emit_verify_failed(&ctx, WriteFile::NAME, &envelope_id, outcome.exit_code).await;
-                return Err(CepError::new(
-                    CepErrorCode::ExecutionFailed,
-                    format!(
-                        "verify command failed with exit code {}; diff retained",
-                        outcome.exit_code
-                    ),
-                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                        command: verify_cmd.argv.join(" "),
-                        exit_code: Some(outcome.exit_code),
-                        stderr: outcome.stderr_summary,
-                    }),
-                    Retriability::RequiresReplan,
-                ));
+                return Err(verify_failed_error(&verify_cmd, &outcome));
             }
             Ok(_) => {} // verify succeeded
             Err(err) => {
@@ -274,19 +264,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
             Ok(outcome) if !outcome.success => {
                 emit_verify_failed(&ctx, Patch::NAME, &envelope_id, outcome.exit_code).await;
-                return Err(CepError::new(
-                    CepErrorCode::ExecutionFailed,
-                    format!(
-                        "verify command failed with exit code {}; diff retained",
-                        outcome.exit_code
-                    ),
-                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                        command: verify_cmd.argv.join(" "),
-                        exit_code: Some(outcome.exit_code),
-                        stderr: outcome.stderr_summary,
-                    }),
-                    Retriability::RequiresReplan,
-                ));
+                return Err(verify_failed_error(&verify_cmd, &outcome));
             }
             Ok(_) => {} // verify succeeded
             Err(err) => {
@@ -458,7 +436,7 @@ mod write_file_tests {
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind,
-        Intent, OnFailure, Scope, VerifyCommand,
+        Intent, OnFailure, Scope,
     };
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -582,6 +560,33 @@ mod write_file_tests {
             std::fs::read_to_string(dir.path().join("test.txt")).unwrap(),
             "hello world"
         );
+    }
+
+    #[tokio::test]
+    async fn write_file_verify_failure_returns_verify_failed_not_replan() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let mut envelope = envelope_with_write_path(".");
+        envelope.verify = Some(lancet_protocol::envelope::VerifyCommand {
+            command: "echo ok".into(),
+            expected_exit_code: Some(1),
+        });
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (ctx, _events) = test_ctx_with_store(root, store);
+        let params = WriteFileParams {
+            path: "test.txt".into(),
+            content: "hello".into(),
+        };
+        let err = registry
+            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::VerifyFailed, "err: {err:?}");
+        assert_ne!(err.retriability, Retriability::RequiresReplan);
     }
 
     #[tokio::test]

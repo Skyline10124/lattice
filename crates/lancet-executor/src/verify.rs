@@ -41,6 +41,24 @@ pub struct VerifyOutcome {
     pub stderr_summary: Option<String>,
 }
 
+/// Build the typed Phase 22 error returned when verify executes but fails.
+pub fn verify_failed_error(spec: &VerifyCommandSpec, outcome: &VerifyOutcome) -> CepError {
+    CepError::new(
+        CepErrorCode::VerifyFailed,
+        format!(
+            "verify command failed with exit code {}; diff retained",
+            outcome.exit_code
+        ),
+        CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+            command: spec.argv.join(" "),
+            exit_code: Some(outcome.exit_code),
+            stderr: outcome.stderr_summary.clone(),
+        }),
+        // Not RequiresReplan: the active envelope remains valid for same-scope repair.
+        Retriability::Unknown,
+    )
+}
+
 /// Extract verify command from envelope, if configured.
 pub fn extract_verify_command(envelope: &ExecutionEnvelope) -> Option<VerifyCommandSpec> {
     envelope.verify.as_ref().map(|vc| VerifyCommandSpec {
@@ -238,54 +256,6 @@ mod verify_tests {
             constraints: Constraints::default(),
             verify: Some(VerifyCommand {
                 command: "echo ok".into(),
-                expected_exit_code: Some(0),
-            }),
-            on_failure: Some(OnFailure::RetainDiff),
-            extensions: serde_json::Map::new(),
-        }
-    }
-
-    fn mutation_envelope() -> ExecutionEnvelope {
-        use lancet_protocol::envelope::*;
-        use std::collections::BTreeSet;
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-        ExecutionEnvelope {
-            intent: Intent {
-                description: "test".into(),
-            },
-            capabilities: caps,
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: Some(VerifyCommand {
-                command: "cargo fmt".into(),
-                expected_exit_code: Some(0),
-            }),
-            on_failure: Some(OnFailure::RetainDiff),
-            extensions: serde_json::Map::new(),
-        }
-    }
-
-    fn denied_envelope() -> ExecutionEnvelope {
-        use lancet_protocol::envelope::*;
-        use std::collections::BTreeSet;
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-        ExecutionEnvelope {
-            intent: Intent {
-                description: "test".into(),
-            },
-            capabilities: caps,
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: Some(VerifyCommand {
-                command: "sh -c 'echo bad'".into(),
                 expected_exit_code: Some(0),
             }),
             on_failure: Some(OnFailure::RetainDiff),

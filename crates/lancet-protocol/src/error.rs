@@ -54,6 +54,7 @@ pub enum CepErrorCode {
     ExecutionFailed,
     CommandTimeout,
     ChildKillFailed,
+    VerifyFailed,
     // State (-32030..-32039)
     StaleContext,
     ResourceConflict,
@@ -82,6 +83,7 @@ impl CepErrorCode {
             Self::ExecutionFailed => -32020,
             Self::CommandTimeout => -32021,
             Self::ChildKillFailed => -32022,
+            Self::VerifyFailed => -32023,
             Self::StaleContext => -32030,
             Self::ResourceConflict => -32031,
             Self::EnvelopeAlreadyActive => -32032,
@@ -103,9 +105,10 @@ impl CepErrorCode {
             Self::CapabilityNotGranted
             | Self::ProjectRootViolation
             | Self::AmbientAuthorityDenied => CepErrorFamily::Permission,
-            Self::ExecutionFailed | Self::CommandTimeout | Self::ChildKillFailed => {
-                CepErrorFamily::Execution
-            }
+            Self::ExecutionFailed
+            | Self::CommandTimeout
+            | Self::ChildKillFailed
+            | Self::VerifyFailed => CepErrorFamily::Execution,
             Self::StaleContext
             | Self::ResourceConflict
             | Self::EnvelopeAlreadyActive
@@ -130,6 +133,7 @@ impl CepErrorCode {
             -32020 => Self::ExecutionFailed,
             -32021 => Self::CommandTimeout,
             -32022 => Self::ChildKillFailed,
+            -32023 => Self::VerifyFailed,
             -32030 => Self::StaleContext,
             -32031 => Self::ResourceConflict,
             -32032 => Self::EnvelopeAlreadyActive,
@@ -356,6 +360,7 @@ mod tests {
             CepErrorCode::SchemaMismatch,
             CepErrorCode::CapabilityNotGranted,
             CepErrorCode::ExecutionFailed,
+            CepErrorCode::VerifyFailed,
             CepErrorCode::StaleContext,
             CepErrorCode::EnvelopeMissing,
             CepErrorCode::EffectViolation,

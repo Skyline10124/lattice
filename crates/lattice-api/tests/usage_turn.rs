@@ -4,9 +4,13 @@
 //! `AgentLoop` CEP adapter pipeline with a fake streaming LLM.
 //! No network, no real API keys.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use lancet_protocol::envelope::{
+    Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, Intent, OnFailure, Scope,
+};
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
@@ -266,7 +270,7 @@ async fn rejects_profile_disabled_command_run() {
 async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     let ws = setup_workspace(
         "pub fn answer() -> i32 { 1 }",
-        &["workspace.read_file", "workspace.patch"],
+        &["workspace.read_file", "envelope.declare", "workspace.patch"],
     );
 
     let original = "pub fn answer() -> i32 { 1 }";
@@ -283,9 +287,37 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 *** End Patch
 "
     );
+    let mut capabilities = BTreeSet::new();
+    capabilities.insert(Capability::WritePath {
+        path_pattern: "src/**".into(),
+    });
+    let envelope = ExecutionEnvelope {
+        intent: Intent {
+            description: "update answer implementation".into(),
+        },
+        capabilities,
+        scope: Scope::default(),
+        impact: vec![Impact {
+            kind: ImpactKind::WorkspaceMutation,
+            target: "src/lib.rs".into(),
+        }],
+        constraints: Constraints::default(),
+        verify: None,
+        on_failure: Some(OnFailure::RetainDiff),
+        extensions: serde_json::Map::new(),
+    };
+    let declare_args = serde_json::json!({
+        "envelope": envelope,
+        "reason": "authorize usage test patch"
+    });
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
+            .push_events(tool_call_events(
+                "call_0",
+                "envelope.declare",
+                &declare_args.to_string(),
+            ))
             .push_events(tool_call_events(
                 "call_1",
                 "workspace.patch",

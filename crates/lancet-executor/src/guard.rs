@@ -88,7 +88,19 @@ pub fn normalize_write_path_pattern(pattern: &str) -> Result<WritePathPattern, C
         ));
     }
 
-    // Check for directory glob suffix FIRST, then normalize the base
+    if pattern.starts_with('!') {
+        return Err(CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "WritePath pattern negation is not supported in Phase 22",
+            CepErrorData::Validation(ValidationErrorData {
+                field: "capabilities.WritePath.path_pattern".into(),
+                reason: "negation is not supported".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    // Check for directory glob suffix FIRST, then normalize the base.
     if let Some(base) = pattern.strip_suffix("/**") {
         if base.is_empty() {
             return Err(CepError::new(
@@ -104,6 +116,39 @@ pub fn normalize_write_path_pattern(pattern: &str) -> Result<WritePathPattern, C
         let normalized = normalize_lexical(base)?;
         Ok(WritePathPattern::DirectoryGlob(normalized))
     } else {
+        if pattern.contains('*')
+            || pattern.contains('?')
+            || pattern.contains('[')
+            || pattern.contains(']')
+            || pattern.contains('{')
+            || pattern.contains('}')
+        {
+            return Err(CepError::new(
+                CepErrorCode::SchemaMismatch,
+                "WritePath pattern uses unsupported glob syntax",
+                CepErrorData::Validation(ValidationErrorData {
+                    field: "capabilities.WritePath.path_pattern".into(),
+                    reason: "unsupported glob syntax".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+
+        if let Some(base) = pattern.strip_suffix('/') {
+            if base.is_empty() {
+                return Err(CepError::new(
+                    CepErrorCode::SchemaMismatch,
+                    "WritePath directory prefix must not be empty",
+                    CepErrorData::Validation(ValidationErrorData {
+                        field: "capabilities.WritePath.path_pattern".into(),
+                        reason: "empty directory prefix".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+            return Ok(WritePathPattern::DirectoryGlob(normalize_lexical(base)?));
+        }
+
         // Normalize lexical path (resolve ".", reject "..")
         let normalized = normalize_lexical(pattern)?;
 
@@ -486,6 +531,27 @@ mod guard_l1_tests {
             pattern,
             WritePathPattern::DirectoryGlob(PathBuf::from("src/lib"))
         );
+    }
+
+    #[test]
+    fn trailing_slash_directory_prefix_normalized_to_dir_glob() {
+        let pattern = normalize_write_path_pattern("crates/lancet-executor/").unwrap();
+        assert_eq!(
+            pattern,
+            WritePathPattern::DirectoryGlob(PathBuf::from("crates/lancet-executor"))
+        );
+    }
+
+    #[test]
+    fn reject_unsupported_glob_syntax() {
+        let err = normalize_write_path_pattern("**/*.rs").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
+    }
+
+    #[test]
+    fn reject_negation_syntax() {
+        let err = normalize_write_path_pattern("!src/**").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
     }
 
     // --- check_write_scope tests ---

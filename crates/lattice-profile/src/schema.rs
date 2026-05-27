@@ -33,6 +33,8 @@ pub struct CepSection {
     pub observation: Option<CepObservationSection>,
     #[serde(default)]
     pub network: Option<CepNetworkSection>,
+    #[serde(default)]
+    pub command: Option<CepCommandSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -70,6 +72,32 @@ pub struct CepNetworkSection {
     pub max_web_response_bytes: Option<usize>,
 }
 
+/// `[cep.command]` — command execution policy overrides (Phase 22, PROF-03).
+///
+/// All fields are `Option<T>` with `#[serde(default)]` so missing fields
+/// fall back to `CommandPolicy::defaults()`. Missing `[cep.command]` entirely
+/// uses all defaults. Older profiles without `[cep.command]` still parse.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepCommandSection {
+    #[serde(default)]
+    pub default_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
+    #[serde(default)]
+    pub allow_inline_shell: Option<bool>,
+    #[serde(default)]
+    pub allowed_diagnostic_commands: Option<Vec<Vec<String>>>,
+    #[serde(default)]
+    pub denied_commands: Option<Vec<Vec<String>>>,
+    #[serde(default)]
+    pub allowed_env: Option<Vec<String>>,
+    #[serde(default)]
+    pub inherited_env: Option<Vec<String>>,
+}
+
 fn default_cep_mode() -> CepMode {
     CepMode::Enforce
 }
@@ -81,6 +109,7 @@ impl Default for CepSection {
             project_root: None,
             observation: None,
             network: None,
+            command: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -117,12 +146,17 @@ impl<'de> Deserialize<'de> for CepSection {
             .remove("network")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let command = raw
+            .remove("command")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
 
         Ok(Self {
             mode,
             project_root,
             observation,
             network,
+            command,
             extensions: raw,
         })
     }
@@ -604,17 +638,18 @@ max_web_response_bytes = 2048
 [cep]
 mode = "enforce"
 
-[cep.command]
-allow_shell = true
+[cep.future_table]
+some_field = true
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
         assert_eq!(profile.cep.mode, CepMode::Enforce);
-        assert!(profile.cep.extensions.contains_key("command"));
+        assert!(profile.cep.extensions.contains_key("future_table"));
         assert!(profile.cep.project_root.is_none());
         assert!(profile.cep.observation.is_none());
         assert!(profile.cep.network.is_none());
+        assert!(profile.cep.command.is_none());
     }
 
     #[test]
@@ -651,24 +686,158 @@ max_web_response_bytes = 1024
         );
     }
 
+    // ── CepCommandSection ────────────────────────────────────────────
+
     #[test]
-    fn cep_serializes_future_sub_tables_flattened() {
-        let mut command = toml::map::Map::new();
-        command.insert("allow_shell".into(), toml::Value::Boolean(true));
+    fn cep_command_section_parses_all_fields() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.command]
+default_timeout_ms = 60000
+max_timeout_ms = 180000
+max_output_bytes = 100000
+allow_inline_shell = true
+allowed_diagnostic_commands = [["cargo", "test"], ["git", "diff"]]
+denied_commands = [["rm", "-rf"]]
+allowed_env = ["RUST_LOG"]
+inherited_env = ["PATH", "HOME"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let cmd = profile.cep.command.as_ref().unwrap();
+        assert_eq!(cmd.default_timeout_ms, Some(60000));
+        assert_eq!(cmd.max_timeout_ms, Some(180000));
+        assert_eq!(cmd.max_output_bytes, Some(100000));
+        assert_eq!(cmd.allow_inline_shell, Some(true));
+        assert_eq!(
+            cmd.allowed_diagnostic_commands.as_ref().unwrap(),
+            &vec![
+                vec!["cargo".to_string(), "test".to_string()],
+                vec!["git".to_string(), "diff".to_string()]
+            ]
+        );
+        assert_eq!(
+            cmd.denied_commands.as_ref().unwrap(),
+            &vec![vec!["rm".to_string(), "-rf".to_string()]]
+        );
+        assert_eq!(
+            cmd.allowed_env.as_ref().unwrap(),
+            &vec!["RUST_LOG".to_string()]
+        );
+        assert_eq!(
+            cmd.inherited_env.as_ref().unwrap(),
+            &vec!["PATH".to_string(), "HOME".to_string()]
+        );
+    }
+
+    #[test]
+    fn cep_command_section_defaults_when_absent() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(profile.cep.command.is_none());
+    }
+
+    #[test]
+    fn cep_command_section_partial_fields_use_defaults() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.command]
+default_timeout_ms = 30000
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let cmd = profile.cep.command.as_ref().unwrap();
+        assert_eq!(cmd.default_timeout_ms, Some(30000));
+        assert!(cmd.max_timeout_ms.is_none());
+        assert!(cmd.allow_inline_shell.is_none());
+        assert!(cmd.allowed_diagnostic_commands.is_none());
+    }
+
+    #[test]
+    fn cep_command_section_rejects_unknown_fields() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.command]
+unknown_field = true
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown_field"),
+            "should reject unknown field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_command_section_old_profile_without_command_still_parses() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.observation]
+allowed_roots = ["."]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert!(profile.cep.command.is_none());
+        assert!(profile.cep.observation.is_some());
+    }
+
+    #[test]
+    fn cep_command_section_moved_from_extensions_to_typed() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.command]
+default_timeout_ms = 60000
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        // Should be in typed field, NOT in extensions
+        assert!(profile.cep.command.is_some());
+        assert!(!profile.cep.extensions.contains_key("command"));
+    }
+
+    #[test]
+    fn cep_serializes_extensions_flattened() {
+        let mut future = toml::map::Map::new();
+        future.insert("some_field".into(), toml::Value::Boolean(true));
 
         let mut extensions = BTreeMap::new();
-        extensions.insert("command".into(), toml::Value::Table(command));
+        extensions.insert("future_table".into(), toml::Value::Table(future));
 
         let section = CepSection {
             mode: CepMode::Warn,
             project_root: None,
             observation: None,
             network: None,
+            command: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
         assert!(serialized.contains("mode = \"warn\""), "got: {serialized}");
-        assert!(serialized.contains("[command]"), "got: {serialized}");
+        assert!(serialized.contains("[future_table]"), "got: {serialized}");
         assert!(!serialized.contains("extensions"), "got: {serialized}");
     }
 

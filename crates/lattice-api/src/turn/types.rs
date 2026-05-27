@@ -216,6 +216,36 @@ pub enum TurnEvent {
         policy_enforced: bool,
         semantic_status: Option<String>,
     },
+    /// An envelope was declared for the current turn (Phase 22).
+    CepEnvelopeDeclared {
+        envelope_id: String,
+        envelope_hash: String,
+    },
+    /// An existing envelope was superseded by a new one (Phase 22).
+    CepEnvelopeSuperseded {
+        old_envelope_id: String,
+        new_envelope_id: String,
+        reason: Option<String>,
+    },
+    /// A mutation was attempted without an active envelope (Phase 22).
+    CepEnvelopeMissing {
+        call_id: u64,
+        method: String,
+        required_for: String,
+    },
+    /// A verify command failed after a successful mutation (Phase 22).
+    CepVerifyFailed {
+        call_id: u64,
+        envelope_id: String,
+        verify_exit_code: Option<i32>,
+        diff_retained: bool,
+    },
+    /// A mutation landed outside the active envelope's scope (Phase 22).
+    CepReplanRequired {
+        call_id: u64,
+        method: String,
+        out_of_scope_paths: Vec<String>,
+    },
 }
 
 /// Boxed stream of TurnEvent values.

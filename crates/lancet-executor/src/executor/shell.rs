@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use lattice_tooling::ToolLimits;
+use tokio::process::Child;
 
 use super::DefaultToolExecutor;
 use crate::registry::Cancellation;
@@ -241,6 +243,10 @@ pub(crate) async fn execute_argv(
     cmd.current_dir(cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     // NOTE: NO kill_on_drop(true) — we handle cleanup explicitly
 
     // Build the effective env: clear inherited, then set only what we want
@@ -312,41 +318,96 @@ pub(crate) async fn execute_argv(
         }
         _ = cancellation.cancelled() => {
             // Cancellation — explicit kill + reap
-            let _ = child.kill().await;
-            let _ = child.wait().await; // reap the child
+            let cleanup = kill_and_reap_child(&mut child).await;
+            stdout_handle.abort();
+            stderr_handle.abort();
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
-            Err(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "command cancelled",
-                CepErrorData::Execution(ExecutionErrorData {
-                    command: argv[0].clone(),
-                    exit_code: None,
-                    stderr: Some("cancelled".into()),
-                }),
-                Retriability::Permanent,
-            ))
+            match cleanup {
+                Ok(()) => Err(CepError::new(
+                    CepErrorCode::ExecutionFailed,
+                    "command cancelled",
+                    CepErrorData::Execution(ExecutionErrorData {
+                        command: argv[0].clone(),
+                        exit_code: None,
+                        stderr: Some("cancelled".into()),
+                    }),
+                    Retriability::Permanent,
+                )),
+                Err(err) => Err(child_kill_failed(&argv[0], err)),
+            }
         }
         _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
             // Timeout — explicit kill + reap
-            let _ = child.kill().await;
-            let _ = child.wait().await; // reap the child
+            let cleanup = kill_and_reap_child(&mut child).await;
+            stdout_handle.abort();
+            stderr_handle.abort();
             let _ = stdout_handle.await;
             let _ = stderr_handle.await;
-            Err(CepError::new(
-                CepErrorCode::CommandTimeout,
-                format!("command timed out after {timeout_ms}ms"),
-                CepErrorData::Execution(ExecutionErrorData {
-                    command: argv[0].clone(),
-                    exit_code: None,
-                    stderr: Some(format!("timed out after {timeout_ms}ms")),
-                }),
-                Retriability::Transient,
-            ))
+            match cleanup {
+                Ok(()) => Err(CepError::new(
+                    CepErrorCode::CommandTimeout,
+                    format!("command timed out after {timeout_ms}ms"),
+                    CepErrorData::Execution(ExecutionErrorData {
+                        command: argv[0].clone(),
+                        exit_code: None,
+                        stderr: Some(format!("timed out after {timeout_ms}ms")),
+                    }),
+                    Retriability::Transient,
+                )),
+                Err(err) => Err(child_kill_failed(&argv[0], err)),
+            }
         }
     };
 
     result
+}
+
+async fn kill_and_reap_child(child: &mut Child) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    if let Err(err) = kill_child_process_group(child) {
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            child.kill().await?;
+        }
+    }
+
+    #[cfg(not(unix))]
+    child.kill().await?;
+
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out waiting for killed child to exit",
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn kill_child_process_group(child: &Child) -> Result<(), std::io::Error> {
+    let pid = child.id().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "child has no process id")
+    })? as libc::pid_t;
+    let rc = unsafe { libc::kill(-pid, libc::SIGKILL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn child_kill_failed(command: &str, err: std::io::Error) -> CepError {
+    CepError::new(
+        CepErrorCode::ChildKillFailed,
+        format!("failed to kill/reap command: {err}"),
+        CepErrorData::Execution(ExecutionErrorData {
+            command: command.to_string(),
+            exit_code: None,
+            stderr: Some(err.to_string()),
+        }),
+        Retriability::Transient,
+    )
 }
 
 // Legacy bridge compatibility function — called from DefaultToolExecutor in mod.rs

@@ -178,10 +178,7 @@ pub fn build_effective_env(
 ///
 /// Returns the effective timeout, or a typed CEP error if it exceeds max.
 /// Does NOT silently clamp.
-pub fn validate_timeout(
-    requested: Option<u64>,
-    policy: &CommandPolicy,
-) -> Result<u64, CepError> {
+pub fn validate_timeout(requested: Option<u64>, policy: &CommandPolicy) -> Result<u64, CepError> {
     let effective = requested.unwrap_or(policy.default_timeout_ms);
     if effective > policy.max_timeout_ms {
         return Err(timeout_exceeded(effective, policy.max_timeout_ms));
@@ -192,9 +189,7 @@ pub fn validate_timeout(
 /// Check if argv matches any prefix in the given list.
 fn matches_prefix(argv: &[String], prefixes: &[Vec<String>]) -> bool {
     for prefix in prefixes {
-        if argv.len() >= prefix.len()
-            && argv[..prefix.len()] == *prefix
-        {
+        if argv.len() >= prefix.len() && argv[..prefix.len()] == *prefix {
             return true;
         }
     }
@@ -222,10 +217,7 @@ fn is_risky_pattern(argv: &[String], allow_inline_shell: bool) -> bool {
 
     // If inline shell is disabled, block common shells with -c/-e
     if !allow_inline_shell {
-        return matches!(
-            (prog, flag),
-            ("ruby", "-e") | ("perl", "-e")
-        );
+        return matches!((prog, flag), ("ruby", "-e") | ("perl", "-e"));
     }
 
     false
@@ -241,9 +233,7 @@ fn impact_required(argv: &[String]) -> CepError {
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
             method: "command.run".into(),
-            reason: format!(
-                "ImpactRequired: unknown command '{cmd}' requires declared_impact"
-            ),
+            reason: format!("ImpactRequired: unknown command '{cmd}' requires declared_impact"),
         }),
         Retriability::Permanent,
     )
@@ -288,9 +278,7 @@ fn timeout_exceeded(requested: u64, max: u64) -> CepError {
         ),
         CepErrorData::Validation(ValidationErrorData {
             field: "timeout_ms".into(),
-            reason: format!(
-                "requested {requested}ms > max {max}ms; timeout rejected, not clamped"
-            ),
+            reason: format!("requested {requested}ms > max {max}ms; timeout rejected, not clamped"),
         }),
         Retriability::Permanent,
     )
@@ -309,11 +297,7 @@ mod tests {
     #[test]
     fn diagnostic_cargo_test() {
         let policy = default_policy();
-        let result = classify_command(
-            &["cargo".into(), "test".into()],
-            None,
-            &policy,
-        ).unwrap();
+        let result = classify_command(&["cargo".into(), "test".into()], None, &policy).unwrap();
         assert_eq!(result, EffectiveImpact::Diagnostic);
     }
 
@@ -338,7 +322,8 @@ mod tests {
             &["git".into(), "status".into(), "--short".into()],
             None,
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::Diagnostic);
     }
 
@@ -349,7 +334,8 @@ mod tests {
             &["sh".into(), "-c".into(), "rm -rf /".into()],
             None,
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::HardDenied);
     }
 
@@ -360,7 +346,8 @@ mod tests {
             &["bash".into(), "-c".into(), "echo hi".into()],
             None,
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::HardDenied);
     }
 
@@ -371,7 +358,8 @@ mod tests {
             &["python".into(), "-c".into(), "print('hi')".into()],
             None,
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::HardDenied);
     }
 
@@ -385,11 +373,7 @@ mod tests {
     #[test]
     fn unknown_cargo_fmt_no_impact_errors() {
         let policy = default_policy();
-        let err = classify_command(
-            &["cargo".into(), "fmt".into()],
-            None,
-            &policy,
-        ).unwrap_err();
+        let err = classify_command(&["cargo".into(), "fmt".into()], None, &policy).unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
         assert!(err.message.contains("declared_impact"));
     }
@@ -401,7 +385,8 @@ mod tests {
             &["cargo".into(), "fmt".into()],
             Some(ImpactKind::WorkspaceMutation),
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::WorkspaceMutation);
     }
 
@@ -412,7 +397,8 @@ mod tests {
             &["cargo".into(), "fmt".into()],
             Some(ImpactKind::CommandExecution),
             &policy,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
         assert!(err.message.contains("too weak"));
     }
@@ -424,7 +410,8 @@ mod tests {
             &["cargo".into(), "test".into()],
             Some(ImpactKind::WorkspaceMutation),
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::WorkspaceMutation);
     }
 
@@ -435,7 +422,8 @@ mod tests {
             &["cargo".into(), "test".into()],
             Some(ImpactKind::CommandExecution),
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::Diagnostic);
     }
 
@@ -443,12 +431,10 @@ mod tests {
     fn denied_commands_prefix_has_highest_precedence() {
         let mut policy = default_policy();
         // Add cargo test to denied list
-        policy.denied_commands.push(vec!["cargo".into(), "test".into()]);
-        let result = classify_command(
-            &["cargo".into(), "test".into()],
-            None,
-            &policy,
-        ).unwrap();
+        policy
+            .denied_commands
+            .push(vec!["cargo".into(), "test".into()]);
+        let result = classify_command(&["cargo".into(), "test".into()], None, &policy).unwrap();
         assert_eq!(result, EffectiveImpact::HardDenied);
     }
 
@@ -463,23 +449,22 @@ mod tests {
     fn custom_denied_command() {
         let mut policy = default_policy();
         policy.denied_commands.push(vec!["dangerous".into()]);
-        let result = classify_command(
-            &["dangerous".into(), "arg".into()],
-            None,
-            &policy,
-        ).unwrap();
+        let result = classify_command(&["dangerous".into(), "arg".into()], None, &policy).unwrap();
         assert_eq!(result, EffectiveImpact::HardDenied);
     }
 
     #[test]
     fn custom_diagnostic_command() {
         let mut policy = default_policy();
-        policy.allowed_diagnostic_commands.push(vec!["mytool".into(), "info".into()]);
+        policy
+            .allowed_diagnostic_commands
+            .push(vec!["mytool".into(), "info".into()]);
         let result = classify_command(
             &["mytool".into(), "info".into(), "--verbose".into()],
             None,
             &policy,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result, EffectiveImpact::Diagnostic);
     }
 

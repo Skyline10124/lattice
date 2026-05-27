@@ -5,11 +5,15 @@
 //!
 //! D-46: Validates verify commands at declaration time.
 
+use crate::guard::{normalize_write_path_pattern, WritePathPattern};
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{extract_verify_command, validate_verify_command};
+use lancet_protocol::envelope::{Capability, ExecutionEnvelope};
+use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lancet_protocol::methods::envelope::{Declare, DeclareParams, DeclareResult};
-use lancet_protocol::CepError;
+use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
 /// Register the native `envelope.declare` handler.
 pub fn register_envelope_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -24,15 +28,21 @@ async fn handle_declare(
 ) -> Result<DeclareResult, CepError> {
     // Use turn_id from HandlerContext (injected from audit_context.turn_id per D-07)
     let turn_id = &ctx.turn_id;
+    let project_root = ctx
+        .phase21
+        .policy
+        .project_root
+        .to_string_lossy()
+        .to_string();
+
+    if !params.supersede && ctx.active_envelope.active_envelope_id().await.is_some() {
+        return Err(envelope_already_active_error());
+    }
+
+    validate_envelope_boundaries(&params.envelope, &project_root)?;
 
     // D-46: Validate verify command at declare-time if present
     if let Some(verify_cmd) = extract_verify_command(&params.envelope) {
-        let project_root = ctx
-            .phase21
-            .policy
-            .project_root
-            .to_string_lossy()
-            .to_string();
         let policy = &ctx.phase21.policy.command;
         validate_verify_command(&verify_cmd, policy, &project_root)?;
     }
@@ -125,6 +135,91 @@ async fn handle_declare(
             accepted: outcome.accepted,
             superseded_envelope_id: None,
         })
+    }
+}
+
+fn envelope_already_active_error() -> CepError {
+    CepError::new(
+        CepErrorCode::EnvelopeAlreadyActive,
+        "an active envelope already exists; use supersede=true to replace it",
+        CepErrorData::Guard(GuardErrorData {
+            method: "envelope.declare".into(),
+            reason: "envelope already active".into(),
+        }),
+        Retriability::Permanent,
+    )
+}
+
+fn validate_envelope_boundaries(
+    envelope: &ExecutionEnvelope,
+    project_root: &str,
+) -> Result<(), CepError> {
+    let root_canonical = std::fs::canonicalize(project_root).map_err(|err| {
+        CepError::new(
+            CepErrorCode::ProjectRootViolation,
+            format!("cannot canonicalize project root '{project_root}': {err}"),
+            CepErrorData::Validation(ValidationErrorData {
+                field: "project_root".into(),
+                reason: err.to_string(),
+            }),
+            Retriability::Permanent,
+        )
+    })?;
+
+    for cap in &envelope.capabilities {
+        if let Capability::WritePath { path_pattern } = cap {
+            validate_write_path_boundary(path_pattern, &root_canonical)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_write_path_boundary(pattern: &str, root_canonical: &Path) -> Result<(), CepError> {
+    let normalized = normalize_write_path_pattern(pattern)?;
+    let base = match normalized {
+        WritePathPattern::ExactFile(path) => path,
+        WritePathPattern::DirectoryGlob(path) => path,
+    };
+    let base_resolved = root_canonical.join(base);
+    let existing_prefix = canonicalize_existing_prefix(&base_resolved)?;
+    if existing_prefix != root_canonical && !existing_prefix.starts_with(root_canonical) {
+        return Err(CepError::new(
+            CepErrorCode::ProjectRootViolation,
+            format!(
+                "WritePath pattern '{}' escapes project root via '{}'",
+                pattern,
+                existing_prefix.display()
+            ),
+            CepErrorData::Guard(GuardErrorData {
+                method: "envelope.declare".into(),
+                reason: "WritePath scope escapes project root".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+    Ok(())
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, CepError> {
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            return Ok(canonical);
+        }
+        if !current.pop() {
+            return Err(CepError::new(
+                CepErrorCode::PathContainment,
+                format!(
+                    "cannot resolve any existing prefix for '{}'",
+                    path.display()
+                ),
+                CepErrorData::Validation(ValidationErrorData {
+                    field: "capabilities.WritePath.path_pattern".into(),
+                    reason: "no existing path prefix".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
     }
 }
 
@@ -246,6 +341,42 @@ mod tests {
         let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
         let params2 = DeclareParams {
             envelope: sample_envelope("second"),
+            supersede: false,
+            reason: None,
+        };
+        let err = registry
+            .dispatch(Declare::NAME, serde_json::to_value(&params2).unwrap(), ctx2)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            lancet_protocol::CepErrorCode::EnvelopeAlreadyActive
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_declare_second_invalid_payload_still_returns_already_active() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = test_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
+        let params1 = DeclareParams {
+            envelope: sample_envelope("first"),
+            supersede: false,
+            reason: None,
+        };
+        registry
+            .dispatch(Declare::NAME, serde_json::to_value(&params1).unwrap(), ctx1)
+            .await
+            .unwrap();
+
+        let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
+        let mut invalid = sample_envelope("invalid second");
+        invalid.intent.description = String::new();
+        let params2 = DeclareParams {
+            envelope: invalid,
             supersede: false,
             reason: None,
         };
