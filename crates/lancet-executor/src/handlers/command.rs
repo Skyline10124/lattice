@@ -2,17 +2,25 @@
 //!
 //! Replaces the legacy bridge's handle_run with a policy-aware native handler.
 //! This is the only shell execution path from the agent after Phase 22.
+//!
+//! D-30, D-38: WorkspaceMutation commands capture pre-execution workspace snapshot,
+//! compute changed paths after execution, and check against WritePath scope.
+//! D-43..D-45: Verify flow after successful WorkspaceMutation commands.
 
 use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
+use crate::guard::{check_write_scope, extract_write_path_patterns};
 use crate::policy::command::{
     build_effective_env, classify_command, validate_timeout, EffectiveImpact,
 };
 use crate::registry::{HandlerContext, MethodRegistry};
+use crate::verify::{extract_verify_command, run_verify, validate_verify_command};
 use lancet_protocol::envelope::Capability;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
 use lancet_protocol::methods::command::{Run, RunParams, RunResult};
 use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use serde_json::json;
+use std::collections::HashMap;
+use std::path::Path;
 
 /// Register native `command.run` handler.
 pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -130,6 +138,13 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
         .to_string();
     let mut cancellation = ctx.cancellation.clone();
 
+    // 9a. Pre-execution baseline for WorkspaceMutation commands (D-38)
+    let pre_snapshot = if effective_impact == EffectiveImpact::WorkspaceMutation {
+        capture_workspace_snapshot(&project_root)?
+    } else {
+        HashMap::new()
+    };
+
     let result = execute_argv(ExecuteConfig {
         project_root: &project_root,
         limits: &lattice_tooling::ToolLimits::default(),
@@ -148,7 +163,130 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             // 11. Build RunResult with truncation metadata
             let exit_code = output.status.code().unwrap_or(-1);
 
-            // 12. Record durable metadata
+            // 12. Post-execution diff check for WorkspaceMutation (D-30, D-38)
+            if effective_impact == EffectiveImpact::WorkspaceMutation {
+                if let Some((ref env_id, ref envelope)) =
+                    ctx.active_envelope.active_envelope().await
+                {
+                    let write_patterns = extract_write_path_patterns(&envelope.capabilities);
+
+                    // Capture post-execution snapshot and compute changed paths
+                    let post_snapshot = capture_workspace_snapshot(&project_root)?;
+                    let changed_paths = compute_changed_paths(&pre_snapshot, &post_snapshot);
+
+                    if !changed_paths.is_empty() {
+                        // Check each changed path against WritePath scope
+                        let mut out_of_scope = Vec::new();
+                        for path in &changed_paths {
+                            if let Err(err) =
+                                check_write_scope(path, &project_root, &write_patterns)
+                            {
+                                if err.code == CepErrorCode::ReplanRequired {
+                                    out_of_scope.push(path.clone());
+                                } else {
+                                    return Err(err);
+                                }
+                            }
+                        }
+
+                        if !out_of_scope.is_empty() {
+                            // D-38: Out-of-scope changed paths -> ReplanRequired
+                            ctx.events
+                                .emit(
+                                    "cep.replan_required",
+                                    json!({
+                                        "method": Run::NAME,
+                                        "active_envelope_id": env_id,
+                                        "out_of_scope_paths": out_of_scope,
+                                        "changed_paths": changed_paths,
+                                    }),
+                                )
+                                .await;
+
+                            ctx.record_durable_metadata(json!({
+                                "classification": "workspace_mutation",
+                                "envelope_id": env_id,
+                                "denial_source": "guard_l1_scope",
+                                "out_of_scope_paths": out_of_scope,
+                                "changed_paths": changed_paths,
+                                "backend_invoked": true,
+                                "policy_enforced": true,
+                            }));
+
+                            return Err(CepError::new(
+                                CepErrorCode::ReplanRequired,
+                                format!(
+                                    "command changed out-of-scope paths: {:?}",
+                                    out_of_scope
+                                ),
+                                CepErrorData::Guard(GuardErrorData {
+                                    method: Run::NAME.into(),
+                                    reason: format!(
+                                        "ReplanRequired: changed paths {:?} outside WritePath scope",
+                                        out_of_scope
+                                    ),
+                                }),
+                                Retriability::RequiresReplan,
+                            ));
+                        }
+
+                        // D-43..D-45: Run verify if configured
+                        if let Some(verify_cmd) = extract_verify_command(envelope) {
+                            validate_verify_command(&verify_cmd, policy, &project_root)?;
+                            let mut verify_cancel = ctx.cancellation.clone();
+                            match run_verify(&verify_cmd, &project_root, policy, &mut verify_cancel)
+                                .await
+                            {
+                                Ok(outcome) if !outcome.success => {
+                                    ctx.events
+                                        .emit(
+                                            "cep.verify_failed",
+                                            json!({
+                                                "method": Run::NAME,
+                                                "envelope_id": env_id,
+                                                "verify_exit_code": outcome.exit_code,
+                                                "diff_retained": true,
+                                            }),
+                                        )
+                                        .await;
+                                    return Err(CepError::new(
+                                        CepErrorCode::ExecutionFailed,
+                                        format!(
+                                            "verify command failed with exit code {}; diff retained",
+                                            outcome.exit_code
+                                        ),
+                                        CepErrorData::Execution(
+                                            lancet_protocol::error::ExecutionErrorData {
+                                                command: verify_cmd.argv.join(" "),
+                                                exit_code: Some(outcome.exit_code),
+                                                stderr: outcome.stderr_summary,
+                                            },
+                                        ),
+                                        Retriability::RequiresReplan,
+                                    ));
+                                }
+                                Ok(_) => {} // verify succeeded
+                                Err(err) => {
+                                    ctx.events
+                                        .emit(
+                                            "cep.verify_failed",
+                                            json!({
+                                                "method": Run::NAME,
+                                                "envelope_id": env_id,
+                                                "verify_exit_code": -1,
+                                                "diff_retained": true,
+                                            }),
+                                        )
+                                        .await;
+                                    return Err(err);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 13. Record durable metadata
             ctx.record_durable_metadata(json!({
                 "classification": format!("{:?}", effective_impact),
                 "envelope_id": envelope_id,
@@ -196,6 +334,137 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             Err(err)
         }
     }
+}
+
+/// A file snapshot for pre/post-execution diff comparison.
+#[derive(Clone, Debug)]
+struct FileSnapshot {
+    /// Content hash (blake3) for regular files.
+    content_hash: Option<String>,
+    /// File type indicator.
+    file_type: String,
+}
+
+/// Capture a workspace snapshot under project_root.
+///
+/// For each regular file: record (relative_path, FileSnapshot with blake3 hash).
+/// For symlinks/dirs: record (relative_path, FileSnapshot with type only).
+/// Uses a recursive helper built on `std::fs::read_dir` (no new dependencies).
+fn capture_workspace_snapshot(
+    project_root: &str,
+) -> Result<HashMap<String, FileSnapshot>, CepError> {
+    let root = Path::new(project_root);
+    let mut snapshot = HashMap::new();
+    capture_recursive(root, root, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+fn capture_recursive(
+    base: &Path,
+    current: &Path,
+    snapshot: &mut HashMap<String, FileSnapshot>,
+) -> Result<(), CepError> {
+    let entries = std::fs::read_dir(current).map_err(|e| {
+        CepError::internal_error(format!(
+            "failed to read directory '{}': {e}",
+            current.display()
+        ))
+    })?;
+
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| CepError::internal_error(format!("failed to read entry: {e}")))?;
+
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .to_string();
+
+        // Skip hidden directories and common build artifacts
+        if relative.starts_with('.') || relative.starts_with("target/") {
+            continue;
+        }
+
+        let metadata = entry.file_type().map_err(|e| {
+            CepError::internal_error(format!(
+                "failed to read file type for '{}': {e}",
+                path.display()
+            ))
+        })?;
+
+        if metadata.is_symlink() {
+            snapshot.insert(
+                relative,
+                FileSnapshot {
+                    content_hash: None,
+                    file_type: "symlink".into(),
+                },
+            );
+        } else if metadata.is_dir() {
+            snapshot.insert(
+                relative,
+                FileSnapshot {
+                    content_hash: None,
+                    file_type: "dir".into(),
+                },
+            );
+            capture_recursive(base, &path, snapshot)?;
+        } else {
+            // Regular file — compute blake3 hash
+            let content = std::fs::read(&path).map_err(|e| {
+                CepError::internal_error(format!("failed to read file '{}': {e}", path.display()))
+            })?;
+            let hash = format!("blake3:{}", blake3::hash(&content).to_hex());
+            snapshot.insert(
+                relative,
+                FileSnapshot {
+                    content_hash: Some(hash),
+                    file_type: "file".into(),
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Compute changed paths between pre and post snapshots.
+///
+/// Returns relative paths of files that were added, deleted, or had content changes.
+fn compute_changed_paths(
+    pre: &HashMap<String, FileSnapshot>,
+    post: &HashMap<String, FileSnapshot>,
+) -> Vec<String> {
+    let mut changed = Vec::new();
+
+    // Check for new or modified files
+    for (path, post_snap) in post {
+        match pre.get(path) {
+            Some(pre_snap) => {
+                // File existed before — check if content changed
+                if pre_snap.file_type != post_snap.file_type
+                    || pre_snap.content_hash != post_snap.content_hash
+                {
+                    changed.push(path.clone());
+                }
+            }
+            None => {
+                // New file
+                changed.push(path.clone());
+            }
+        }
+    }
+
+    // Check for deleted files
+    for path in pre.keys() {
+        if !post.contains_key(path) {
+            changed.push(path.clone());
+        }
+    }
+
+    changed
 }
 
 fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
@@ -779,5 +1048,177 @@ mod tests {
             &["git".into(), "status".into()],
             &allowlist
         ));
+    }
+
+    // --- Post-execution diff check tests (D-30, D-38) ---
+
+    #[tokio::test]
+    async fn workspace_mutation_inside_scope_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["touch".into()],
+        });
+        capabilities.insert(Capability::WritePath {
+            path_pattern: ".".into(),
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "test mutation".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: Some(OnFailure::RetainDiff),
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["touch".into(), "new_file.txt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let result = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn diagnostic_skips_post_exec_diff_check() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (ctx, _events, _cancel_tx) = test_ctx(root);
+
+        let params = RunParams {
+            argv: vec!["echo".into(), "hello".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: None,
+        };
+        let result = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+    }
+
+    // --- Workspace snapshot tests ---
+
+    #[test]
+    fn capture_snapshot_returns_file_hashes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("file.txt"), "content").unwrap();
+        let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
+        assert!(snapshot.contains_key("file.txt"));
+        assert!(snapshot["file.txt"].content_hash.is_some());
+        assert_eq!(snapshot["file.txt"].file_type, "file");
+    }
+
+    #[test]
+    fn compute_changed_paths_detects_new_file() {
+        let mut pre = HashMap::new();
+        let mut post = HashMap::new();
+        post.insert(
+            "new.txt".into(),
+            FileSnapshot {
+                content_hash: Some("hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let changed = compute_changed_paths(&pre, &post);
+        assert_eq!(changed, vec!["new.txt"]);
+    }
+
+    #[test]
+    fn compute_changed_paths_detects_modified_file() {
+        let mut pre = HashMap::new();
+        pre.insert(
+            "file.txt".into(),
+            FileSnapshot {
+                content_hash: Some("old_hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let mut post = HashMap::new();
+        post.insert(
+            "file.txt".into(),
+            FileSnapshot {
+                content_hash: Some("new_hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let changed = compute_changed_paths(&pre, &post);
+        assert_eq!(changed, vec!["file.txt"]);
+    }
+
+    #[test]
+    fn compute_changed_paths_detects_deleted_file() {
+        let mut pre = HashMap::new();
+        pre.insert(
+            "deleted.txt".into(),
+            FileSnapshot {
+                content_hash: Some("hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let post = HashMap::new();
+        let changed = compute_changed_paths(&pre, &post);
+        assert_eq!(changed, vec!["deleted.txt"]);
+    }
+
+    #[test]
+    fn compute_changed_paths_ignores_unchanged() {
+        let mut pre = HashMap::new();
+        pre.insert(
+            "file.txt".into(),
+            FileSnapshot {
+                content_hash: Some("same_hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let mut post = HashMap::new();
+        post.insert(
+            "file.txt".into(),
+            FileSnapshot {
+                content_hash: Some("same_hash".into()),
+                file_type: "file".into(),
+            },
+        );
+        let changed = compute_changed_paths(&pre, &post);
+        assert!(changed.is_empty());
     }
 }

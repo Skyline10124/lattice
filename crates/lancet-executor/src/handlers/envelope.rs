@@ -2,8 +2,11 @@
 //!
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
 //! Replaces the legacy bridge stub for `envelope.declare`.
+//!
+//! D-46: Validates verify commands at declaration time.
 
 use crate::registry::{HandlerContext, MethodRegistry};
+use crate::verify::{extract_verify_command, validate_verify_command};
 use lancet_protocol::methods::envelope::{Declare, DeclareParams, DeclareResult};
 use lancet_protocol::CepError;
 use serde_json::json;
@@ -21,6 +24,18 @@ async fn handle_declare(
 ) -> Result<DeclareResult, CepError> {
     // Use turn_id from HandlerContext (injected from audit_context.turn_id per D-07)
     let turn_id = &ctx.turn_id;
+
+    // D-46: Validate verify command at declare-time if present
+    if let Some(verify_cmd) = extract_verify_command(&params.envelope) {
+        let project_root = ctx
+            .phase21
+            .policy
+            .project_root
+            .to_string_lossy()
+            .to_string();
+        let policy = &ctx.phase21.policy.command;
+        validate_verify_command(&verify_cmd, policy, &project_root)?;
+    }
 
     if params.supersede {
         let outcome = ctx
@@ -345,5 +360,58 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
+    }
+
+    #[tokio::test]
+    async fn handle_declare_rejects_mutation_verify_command_at_declare_time() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = test_registry();
+        let (ctx, _events) = test_ctx(root);
+
+        let mut envelope = sample_envelope("bad verify");
+        // cargo fmt is classified as WorkspaceMutation by command policy
+        envelope.verify = Some(lancet_protocol::envelope::VerifyCommand {
+            command: "cargo fmt".into(),
+            expected_exit_code: Some(0),
+        });
+
+        let params = DeclareParams {
+            envelope,
+            supersede: false,
+            reason: None,
+        };
+        let err = registry
+            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
+    }
+
+    #[tokio::test]
+    async fn handle_declare_accepts_diagnostic_verify_command() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = test_registry();
+        let (ctx, _events) = test_ctx(root);
+
+        let mut envelope = sample_envelope("good verify");
+        // echo is classified as Diagnostic by command policy
+        envelope.verify = Some(lancet_protocol::envelope::VerifyCommand {
+            command: "echo ok".into(),
+            expected_exit_code: Some(0),
+        });
+
+        let params = DeclareParams {
+            envelope,
+            supersede: false,
+            reason: None,
+        };
+        let result = registry
+            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: DeclareResult = serde_json::from_value(result).unwrap();
+        assert!(parsed.accepted);
     }
 }

@@ -100,6 +100,18 @@ impl LegacyToolBackend {
         Ok(())
     }
 
+    /// Phase 22-pending catalog methods minus all Phase 22 native methods.
+    ///
+    /// All Phase 22 methods (`envelope.declare`, `command.run`, `workspace.write_file`,
+    /// `workspace.patch`) are now native. This function registers nothing.
+    fn register_phase22_pending_minus_all_phase22(
+        &self,
+        _registry: &mut MethodRegistry,
+    ) -> Result<(), CepError> {
+        // All Phase 22 methods are now native — nothing to register via bridge.
+        Ok(())
+    }
+
     /// Full catalog bridge for Phase 20 compatibility tests and migration helpers.
     ///
     /// Production turns must use [`register_phase22_pending_legacy_methods`] plus
@@ -157,6 +169,19 @@ pub fn register_phase22_pending_legacy_methods_minus_declare_and_run(
 ) -> Result<(), CepError> {
     LegacyToolBackend::new(project_root, http_client)?
         .register_phase22_pending_minus_declare_and_run(registry)
+}
+
+/// Register Phase 22-pending catalog methods minus all Phase 22 native methods.
+///
+/// All Phase 22 methods (`envelope.declare`, `command.run`, `workspace.write_file`,
+/// `workspace.patch`) are now native. This registers nothing.
+pub fn register_phase22_pending_legacy_methods_minus_all_phase22(
+    registry: &mut MethodRegistry,
+    project_root: &str,
+    http_client: reqwest::Client,
+) -> Result<(), CepError> {
+    LegacyToolBackend::new(project_root, http_client)?
+        .register_phase22_pending_minus_all_phase22(registry)
 }
 
 /// Register every catalog method through the private legacy bridge.

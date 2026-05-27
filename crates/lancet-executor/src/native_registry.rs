@@ -2,9 +2,10 @@
 
 use crate::handlers::{
     register_command_methods, register_envelope_methods, register_external_methods,
-    register_session_state_methods, register_workspace_observation_methods,
+    register_mutation_methods, register_session_state_methods,
+    register_workspace_observation_methods,
 };
-use crate::legacy_backend::register_phase22_pending_legacy_methods_minus_declare_and_run;
+use crate::legacy_backend::register_phase22_pending_legacy_methods_minus_all_phase22;
 use crate::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
@@ -43,10 +44,15 @@ pub fn register_phase22_native_command(registry: &mut MethodRegistry) -> Result<
     register_command_methods(registry)
 }
 
+/// Register native Phase 22 `workspace.write_file` and `workspace.patch` handlers.
+pub fn register_phase22_native_mutation(registry: &mut MethodRegistry) -> Result<(), CepError> {
+    register_mutation_methods(registry)
+}
+
 /// Production registry: Phase 21/22 native handlers plus remaining Phase 22-pending legacy bridge.
 ///
-/// Phase 22 native: `envelope.declare`, `command.run`.
-/// Phase 22-pending bridge: `workspace.write_file`, `workspace.patch`.
+/// Phase 22 native: `envelope.declare`, `command.run`, `workspace.write_file`, `workspace.patch`.
+/// Phase 22-pending bridge: (none — all Phase 22 methods are now native).
 pub fn register_production_method_registry(
     registry: &mut MethodRegistry,
     project_root: &str,
@@ -55,11 +61,8 @@ pub fn register_production_method_registry(
     register_phase21_native_methods(registry)?;
     register_phase22_native_envelope(registry)?;
     register_phase22_native_command(registry)?;
-    register_phase22_pending_legacy_methods_minus_declare_and_run(
-        registry,
-        project_root,
-        http_client,
-    )
+    register_phase22_native_mutation(registry)?;
+    register_phase22_pending_legacy_methods_minus_all_phase22(registry, project_root, http_client)
 }
 
 #[cfg(test)]
