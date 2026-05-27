@@ -85,6 +85,21 @@ impl LegacyToolBackend {
         Ok(())
     }
 
+    /// Phase 22-pending catalog methods minus `envelope.declare` and `command.run`.
+    ///
+    /// Used when both native `envelope.declare` and `command.run` handlers are registered.
+    fn register_phase22_pending_minus_declare_and_run(
+        &self,
+        registry: &mut MethodRegistry,
+    ) -> Result<(), CepError> {
+        let executor = Arc::clone(&self.executor);
+
+        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
+        bridge_method!(registry, executor, Patch, handle_patch)?;
+
+        Ok(())
+    }
+
     /// Full catalog bridge for Phase 20 compatibility tests and migration helpers.
     ///
     /// Production turns must use [`register_phase22_pending_legacy_methods`] plus
@@ -130,6 +145,18 @@ pub fn register_phase22_pending_legacy_methods_minus_declare(
 ) -> Result<(), CepError> {
     LegacyToolBackend::new(project_root, http_client)?
         .register_phase22_pending_minus_declare(registry)
+}
+
+/// Register Phase 22-pending catalog methods minus `envelope.declare` and `command.run`.
+///
+/// Used in production when native `envelope.declare` and `command.run` handlers are registered separately.
+pub fn register_phase22_pending_legacy_methods_minus_declare_and_run(
+    registry: &mut MethodRegistry,
+    project_root: &str,
+    http_client: reqwest::Client,
+) -> Result<(), CepError> {
+    LegacyToolBackend::new(project_root, http_client)?
+        .register_phase22_pending_minus_declare_and_run(registry)
 }
 
 /// Register every catalog method through the private legacy bridge.
@@ -412,6 +439,10 @@ async fn handle_run(
         exit_code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout_truncated: None,
+        stderr_truncated: None,
+        stdout_bytes: None,
+        stderr_bytes: None,
     })
 }
 

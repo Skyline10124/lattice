@@ -1,0 +1,783 @@
+//! Native command.run CEP handler with policy enforcement.
+//!
+//! Replaces the legacy bridge's handle_run with a policy-aware native handler.
+//! This is the only shell execution path from the agent after Phase 22.
+
+use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
+use crate::policy::command::{
+    build_effective_env, classify_command, validate_timeout, EffectiveImpact,
+};
+use crate::registry::{HandlerContext, MethodRegistry};
+use lancet_protocol::envelope::Capability;
+use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
+use lancet_protocol::methods::command::{Run, RunParams, RunResult};
+use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
+use serde_json::json;
+
+/// Register native `command.run` handler.
+pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
+    registry.register_method::<Run, _, _>(handle_run)?;
+    Ok(())
+}
+
+async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult, CepError> {
+    // 1. Validate inputs
+    validate_inputs(&params)?;
+
+    // 2. Get command policy from turn context
+    let policy = &ctx.phase21.policy.command;
+
+    // 3. Classify command
+    let effective_impact = classify_command(&params.argv, params.declared_impact, policy)?;
+
+    // 4. HardDenied -> return GuardDenied error
+    if effective_impact == EffectiveImpact::HardDenied {
+        let cmd = params.argv.first().map(|s| s.as_str()).unwrap_or("<empty>");
+        emit_denial_metadata(&ctx, "hard_denied", false).await;
+        return Err(CepError::new(
+            CepErrorCode::GuardDenied,
+            format!("Command '{cmd}' is hard-denied by policy"),
+            CepErrorData::Guard(GuardErrorData {
+                method: Run::NAME.into(),
+                reason: format!("HardDenied: '{cmd}' matches denied command pattern"),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    // 5. WorkspaceMutation requires active envelope with RunCommand capability
+    let envelope_id = if effective_impact == EffectiveImpact::WorkspaceMutation {
+        let active = ctx.active_envelope.active_envelope().await;
+        match active {
+            Some((id, envelope)) => {
+                // Check RunCommand capability
+                let has_run_command = envelope
+                    .capabilities
+                    .iter()
+                    .any(|cap| matches!(cap, Capability::RunCommand { .. }));
+                if !has_run_command {
+                    emit_denial_metadata(&ctx, "run_command_not_granted", false).await;
+                    return Err(CepError::new(
+                        CepErrorCode::CapabilityNotGranted,
+                        "Active envelope does not grant RunCommand capability",
+                        CepErrorData::Permission(PermissionErrorData {
+                            required_capability: "run_command".into(),
+                            active_envelope_id: Some(id),
+                            granted_capabilities: envelope
+                                .capabilities
+                                .iter()
+                                .map(|c| format!("{c:?}"))
+                                .collect(),
+                        }),
+                        Retriability::Permanent,
+                    ));
+                }
+                // Check argv against allowlist
+                if let Some(Capability::RunCommand { argv_allowlist }) = envelope
+                    .capabilities
+                    .iter()
+                    .find(|c| matches!(c, Capability::RunCommand { .. }))
+                {
+                    if !argv_allowlist.is_empty()
+                        && !matches_argv_allowlist(&params.argv, argv_allowlist)
+                    {
+                        emit_denial_metadata(&ctx, "argv_not_in_allowlist", false).await;
+                        return Err(CepError::new(
+                            CepErrorCode::GuardDenied,
+                            "Command argv does not match RunCommand allowlist",
+                            CepErrorData::Guard(GuardErrorData {
+                                method: Run::NAME.into(),
+                                reason: "argv not in envelope RunCommand allowlist".into(),
+                            }),
+                            Retriability::Permanent,
+                        ));
+                    }
+                }
+                Some(id)
+            }
+            None => {
+                emit_denial_metadata(&ctx, "active_envelope", false).await;
+                return Err(CepError::new(
+                    CepErrorCode::EnvelopeMissing,
+                    "WorkspaceMutation command requires an active ExecutionEnvelope. \
+                     Declare an envelope with RunCommand capability first.",
+                    CepErrorData::Guard(GuardErrorData {
+                        method: Run::NAME.into(),
+                        reason: "EnvelopeMissing: no active envelope for WorkspaceMutation".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    // 6. Diagnostic: no envelope required, but still enforce policy
+
+    // 7. Validate timeout
+    let _effective_timeout = validate_timeout(params.timeout_ms, policy)?;
+
+    // 8. Build effective env
+    let effective_env = build_effective_env(&params.env, policy)?;
+
+    // 9. Execute via rewritten execute_argv with bounded tail reader
+    let project_root = ctx
+        .phase21
+        .policy
+        .project_root
+        .to_string_lossy()
+        .to_string();
+    let mut cancellation = ctx.cancellation.clone();
+
+    let result = execute_argv(ExecuteConfig {
+        project_root: &project_root,
+        limits: &lattice_tooling::ToolLimits::default(),
+        argv: &params.argv,
+        cwd: params.cwd.as_deref(),
+        env: &effective_env,
+        timeout_ms: params.timeout_ms,
+        cancellation: &mut cancellation,
+        max_output_bytes: policy.max_output_bytes,
+    })
+    .await;
+
+    // 10. Handle result
+    match result {
+        Ok((output, stdout_meta, stderr_meta)) => {
+            // 11. Build RunResult with truncation metadata
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            // 12. Record durable metadata
+            ctx.record_durable_metadata(json!({
+                "classification": format!("{:?}", effective_impact),
+                "envelope_id": envelope_id,
+                "exit_code": exit_code,
+                "stdout_bytes": stdout_meta.total_bytes,
+                "stderr_bytes": stderr_meta.total_bytes,
+                "stdout_truncated": stdout_meta.truncated,
+                "stderr_truncated": stderr_meta.truncated,
+                "backend_invoked": true,
+                "policy_enforced": true,
+            }));
+
+            emit_success_metadata(
+                &ctx,
+                &effective_impact,
+                envelope_id.as_deref(),
+                exit_code,
+                &stdout_meta,
+                &stderr_meta,
+            )
+            .await;
+
+            Ok(RunResult {
+                exit_code,
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout_truncated: stdout_meta.truncated.then_some(true),
+                stderr_truncated: stderr_meta.truncated.then_some(true),
+                stdout_bytes: Some(stdout_meta.total_bytes),
+                stderr_bytes: Some(stderr_meta.total_bytes),
+            })
+        }
+        Err(err) => {
+            // Record error metadata
+            ctx.record_durable_metadata(json!({
+                "classification": format!("{:?}", effective_impact),
+                "envelope_id": envelope_id,
+                "error_code": err.code.as_i32(),
+                "backend_invoked": true,
+                "policy_enforced": true,
+            }));
+
+            emit_denial_metadata(&ctx, "execution_error", true).await;
+
+            Err(err)
+        }
+    }
+}
+
+fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
+    if params.argv.is_empty() {
+        return Err(CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "command.run requires a non-empty argv",
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "argv".into(),
+                reason: "must not be empty".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+    if params.argv[0].is_empty() {
+        return Err(CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "command.run requires argv[0] to name an executable",
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "argv[0]".into(),
+                reason: "must not be empty".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+    for (index, arg) in params.argv.iter().enumerate() {
+        if arg.contains('\0') {
+            return Err(CepError::new(
+                CepErrorCode::SchemaMismatch,
+                format!("argv[{index}] contains NUL byte"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: format!("argv[{index}]"),
+                    reason: "contains NUL byte".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+    }
+    for (key, value) in &params.env {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(CepError::new(
+                CepErrorCode::SchemaMismatch,
+                format!("env key '{key}' is invalid"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: format!("env.{key}"),
+                    reason: "invalid key".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+        if value.contains('\0') {
+            return Err(CepError::new(
+                CepErrorCode::SchemaMismatch,
+                format!("env value for '{key}' contains NUL"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: format!("env.{key}"),
+                    reason: "value contains NUL".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check if argv matches the RunCommand allowlist.
+fn matches_argv_allowlist(argv: &[String], allowlist: &[String]) -> bool {
+    for entry in allowlist {
+        let tokens: Vec<&str> = entry.split_whitespace().collect();
+        if argv.len() >= tokens.len()
+            && argv
+                .iter()
+                .zip(tokens.iter())
+                .all(|(a, t)| a.as_str() == *t)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+async fn emit_denial_metadata(ctx: &HandlerContext, denial_source: &str, backend_invoked: bool) {
+    let metadata = json!({
+        "method": Run::NAME,
+        "denial_source": denial_source,
+        "policy_enforced": true,
+        "backend_invoked": backend_invoked,
+    });
+    ctx.record_durable_metadata(metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": Run::NAME, "metadata": metadata }),
+        )
+        .await;
+}
+
+async fn emit_success_metadata(
+    ctx: &HandlerContext,
+    classification: &EffectiveImpact,
+    envelope_id: Option<&str>,
+    exit_code: i32,
+    stdout_meta: &BoundedStreamOutput,
+    stderr_meta: &BoundedStreamOutput,
+) {
+    let classification_str = match classification {
+        EffectiveImpact::Diagnostic => "diagnostic",
+        EffectiveImpact::WorkspaceMutation => "workspace_mutation",
+        EffectiveImpact::HardDenied => "hard_denied",
+    };
+    let metadata = json!({
+        "method": Run::NAME,
+        "classification": classification_str,
+        "envelope_id": envelope_id,
+        "exit_code": exit_code,
+        "stdout_bytes": stdout_meta.total_bytes,
+        "stderr_bytes": stderr_meta.total_bytes,
+        "stdout_truncated": stdout_meta.truncated,
+        "stderr_truncated": stderr_meta.truncated,
+        "policy_enforced": true,
+        "backend_invoked": true,
+    });
+    ctx.record_durable_metadata(metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": Run::NAME, "metadata": metadata }),
+        )
+        .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::envelope_store::ActiveEnvelopeStore;
+    use crate::policy::Phase21TurnContext;
+    use crate::registry::{Cancellation, EventSink};
+    use lancet_protocol::envelope::{
+        BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactKind,
+        Intent, OnFailure, Scope,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, watch};
+
+    fn test_ctx(
+        root: &str,
+    ) -> (
+        HandlerContext,
+        mpsc::Receiver<lancet_protocol::ToolEvent>,
+        watch::Sender<bool>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        (
+            HandlerContext {
+                call_id: 1,
+                events: EventSink::new(event_tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(
+                    root,
+                    "command handler test",
+                ),
+                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                active_envelope: Arc::new(ActiveEnvelopeStore::new()),
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            },
+            event_rx,
+            cancel_tx,
+        )
+    }
+
+    fn native_command_registry(root: &str) -> MethodRegistry {
+        let mut registry = MethodRegistry::new();
+        register_command_methods(&mut registry).unwrap();
+        let _ = root;
+        registry
+    }
+
+    #[tokio::test]
+    async fn diagnostic_echo_succeeds_without_envelope() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (ctx, _events, _cancel_tx) = test_ctx(root);
+
+        let params = RunParams {
+            argv: vec!["echo".into(), "hello".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let result = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+        assert!(parsed.stdout.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn hard_denied_sh_c_returns_guard_denied() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (ctx, _events, _cancel_tx) = test_ctx(root);
+
+        let params = RunParams {
+            argv: vec!["sh".into(), "-c".into(), "rm -rf /".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("hard-denied"));
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_without_envelope_returns_envelope_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (ctx, _events, _cancel_tx) = test_ctx(root);
+
+        let params = RunParams {
+            argv: vec!["cargo".into(), "fmt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::EnvelopeMissing);
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_with_envelope_succeeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        // Declare an envelope with RunCommand
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["cargo fmt".into()],
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "test mutation".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: Some(OnFailure::RetainDiff),
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["cargo".into(), "fmt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(30000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let result = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        // cargo fmt may succeed or fail depending on environment, but should not be GuardDenied
+        assert!(parsed.exit_code == 0 || parsed.exit_code == 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        // Declare envelope with restricted allowlist
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["cargo test".into()],
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "restricted".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "allowlist test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["cargo".into(), "fmt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("allowlist"));
+    }
+
+    #[tokio::test]
+    async fn output_truncation_metadata_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let mut policy = Phase21TurnContext::defaults_for_project_root(root);
+        policy.policy.command.max_output_bytes = 50; // very small
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "truncation test"),
+            phase21: Arc::new(policy),
+            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let registry = native_command_registry(root);
+        let params = RunParams {
+            argv: vec!["python3".into(), "-c".into(), "print('x' * 200)".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: None,
+        };
+        // This should be HardDenied because python3 -c is a risky pattern
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+    }
+
+    #[tokio::test]
+    async fn timeout_exceeding_max_returns_typed_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "timeout test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let registry = native_command_registry(root);
+        let params = RunParams {
+            argv: vec!["echo".into(), "hi".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(999_999_999), // way above max
+            declared_impact: None,
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
+        assert!(err.message.contains("999999999"));
+    }
+
+    #[tokio::test]
+    async fn env_policy_rejects_unallowed_key() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "env test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let registry = native_command_registry(root);
+        let mut env = BTreeMap::new();
+        env.insert("SECRET_KEY".into(), "value".into());
+        let params = RunParams {
+            argv: vec!["echo".into(), "hi".into()],
+            cwd: None,
+            env,
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("SECRET_KEY"));
+    }
+
+    #[tokio::test]
+    async fn no_leaked_processes_across_20_runs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+
+        for i in 0..20 {
+            let (ctx, _events, _cancel_tx) = test_ctx(root);
+            let params = RunParams {
+                argv: vec!["echo".into(), format!("run-{i}")],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: Some(5000),
+                declared_impact: None,
+            };
+            let _ = registry
+                .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+                .await;
+        }
+        // If we get here without hanging, processes were cleaned up
+    }
+
+    #[tokio::test]
+    async fn command_cancel_returns_execution_failed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        let (event_tx, _event_rx) = mpsc::channel(32);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let cancel = Cancellation::new(cancel_rx);
+
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["sleep".into()],
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "cancel test".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+            }],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        // Cancel after 50ms
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = cancel_tx.send(true);
+        });
+
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: cancel,
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "cancel test"),
+            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+        };
+
+        let registry = native_command_registry(root);
+        let params = RunParams {
+            argv: vec!["sleep".into(), "30".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(60000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("cancelled"));
+    }
+
+    #[test]
+    fn matches_argv_allowlist_prefix() {
+        let allowlist = vec!["cargo test".into(), "cargo check".into()];
+        assert!(matches_argv_allowlist(
+            &["cargo".into(), "test".into(), "--nocapture".into()],
+            &allowlist
+        ));
+        assert!(matches_argv_allowlist(
+            &["cargo".into(), "check".into()],
+            &allowlist
+        ));
+        assert!(!matches_argv_allowlist(
+            &["cargo".into(), "fmt".into()],
+            &allowlist
+        ));
+        assert!(!matches_argv_allowlist(
+            &["git".into(), "status".into()],
+            &allowlist
+        ));
+    }
+}

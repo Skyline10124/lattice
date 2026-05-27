@@ -1,6 +1,7 @@
 //! Phase 21 CEP policy and budget configuration (immutable per turn).
 
 pub mod budget;
+pub mod command;
 pub mod network;
 pub mod observation;
 
@@ -10,6 +11,7 @@ use std::sync::Arc;
 pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
+pub use command::{classify_command, build_effective_env, validate_timeout, CommandPolicy, EffectiveImpact};
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 
@@ -20,6 +22,7 @@ pub struct Phase21PolicyConfig {
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
+    pub command: CommandPolicy,
 }
 
 impl Phase21PolicyConfig {
@@ -40,6 +43,7 @@ impl Phase21PolicyConfig {
             observation,
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
+            command: CommandPolicy::defaults(),
         }
     }
 

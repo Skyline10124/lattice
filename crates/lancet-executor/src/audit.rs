@@ -36,12 +36,10 @@ pub const PHASE21_NATIVE_METHODS: [&str; 6] = [
 ];
 
 /// Phase 22-pending methods that remain on the Phase 20 legacy bridge in production.
-pub const PHASE22_PENDING_BRIDGE_METHODS: [&str; 4] = [
-    "command.run",
-    "workspace.write_file",
-    "workspace.patch",
-    "envelope.declare",
-];
+///
+/// After Plan 02: `command.run` and `envelope.declare` are native.
+/// Only `workspace.write_file` and `workspace.patch` remain on the bridge.
+pub const PHASE22_PENDING_BRIDGE_METHODS: [&str; 2] = ["workspace.write_file", "workspace.patch"];
 
 /// Returns true when `method` is registered as a Phase 21 native handler in production.
 pub fn is_phase21_native_method(method: &str) -> bool {

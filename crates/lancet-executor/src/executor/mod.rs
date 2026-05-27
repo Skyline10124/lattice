@@ -8,7 +8,7 @@ mod fs;
 mod path_guard;
 pub(crate) mod render;
 mod search;
-mod shell;
+pub(crate) mod shell;
 pub(crate) mod web;
 
 use std::path::Path;
@@ -110,7 +110,15 @@ impl DefaultToolExecutor {
         env: &std::collections::BTreeMap<String, String>,
         timeout_ms: Option<u64>,
     ) -> Result<std::process::Output, String> {
-        shell::execute_argv(&self.project_root, &self.limits, argv, cwd, env, timeout_ms).await
+        shell::bridge_execute_argv_compat(
+            &self.project_root,
+            &self.limits,
+            argv,
+            cwd,
+            env,
+            timeout_ms,
+        )
+        .await
     }
 
     pub(crate) async fn bridge_write_file(
