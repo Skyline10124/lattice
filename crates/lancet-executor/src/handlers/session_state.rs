@@ -133,6 +133,8 @@ mod tests {
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "todo test")
                     .with_session_state(),
                 phase21,
+                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
             },
             event_rx,

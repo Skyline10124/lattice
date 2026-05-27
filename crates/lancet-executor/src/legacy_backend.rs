@@ -57,6 +57,9 @@ impl LegacyToolBackend {
     }
 
     /// Phase 22-pending catalog methods only (`command.run`, mutations, `envelope.declare`).
+    ///
+    /// Retained for backward compatibility; production uses `register_phase22_pending_minus_declare`.
+    #[allow(dead_code)]
     fn register_phase22_pending(&self, registry: &mut MethodRegistry) -> Result<(), CepError> {
         let executor = Arc::clone(&self.executor);
 
@@ -64,6 +67,20 @@ impl LegacyToolBackend {
         bridge_method!(registry, executor, WriteFile, handle_write_file)?;
         bridge_method!(registry, executor, Patch, handle_patch)?;
         bridge_method_noexec!(registry, Declare, handle_declare)?;
+
+        Ok(())
+    }
+
+    /// Phase 22-pending catalog methods minus `envelope.declare` (native handler replaces it).
+    fn register_phase22_pending_minus_declare(
+        &self,
+        registry: &mut MethodRegistry,
+    ) -> Result<(), CepError> {
+        let executor = Arc::clone(&self.executor);
+
+        bridge_method!(registry, executor, Run, handle_run)?;
+        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
+        bridge_method!(registry, executor, Patch, handle_patch)?;
 
         Ok(())
     }
@@ -92,12 +109,27 @@ impl LegacyToolBackend {
 }
 
 /// Register Phase 22-pending catalog methods through the private legacy bridge.
+///
+/// Retained for backward compatibility; production uses `register_phase22_pending_legacy_methods_minus_declare`.
+#[allow(dead_code)]
 pub fn register_phase22_pending_legacy_methods(
     registry: &mut MethodRegistry,
     project_root: &str,
     http_client: reqwest::Client,
 ) -> Result<(), CepError> {
     LegacyToolBackend::new(project_root, http_client)?.register_phase22_pending(registry)
+}
+
+/// Register Phase 22-pending catalog methods minus `envelope.declare` through the private legacy bridge.
+///
+/// Used in production when the native `envelope.declare` handler is registered separately.
+pub fn register_phase22_pending_legacy_methods_minus_declare(
+    registry: &mut MethodRegistry,
+    project_root: &str,
+    http_client: reqwest::Client,
+) -> Result<(), CepError> {
+    LegacyToolBackend::new(project_root, http_client)?
+        .register_phase22_pending_minus_declare(registry)
 }
 
 /// Register every catalog method through the private legacy bridge.
@@ -422,7 +454,9 @@ async fn handle_declare(
 
     Ok(DeclareResult {
         envelope_id,
+        envelope_hash: blake3::hash(envelope_json.as_bytes()).to_hex().to_string(),
         accepted: true,
+        superseded_envelope_id: None,
     })
 }
 
@@ -457,6 +491,8 @@ mod tests {
                 phase21: Arc::new(
                     crate::policy::Phase21TurnContext::defaults_for_project_root("."),
                 ),
+                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
             },
             event_rx,
@@ -597,6 +633,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_backend_command_run_rejects_invalid_exec_inputs() {
+        let dir = TempDir::new().unwrap();
+        let registry = sample_registry(dir.path().to_str().unwrap());
+
+        let empty_exe = RunParams {
+            argv: vec!["".into()],
+            cwd: None,
+            env: Default::default(),
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let (ctx, _) = test_ctx();
+        let err = registry
+            .dispatch(Run::NAME, params_to_value(&empty_exe), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("argv[0]"));
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("BAD=KEY".into(), "value".into());
+        let invalid_env = RunParams {
+            argv: vec!["printf".into(), "ok".into()],
+            cwd: None,
+            env,
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let (ctx, _) = test_ctx();
+        let err = registry
+            .dispatch(Run::NAME, params_to_value(&invalid_env), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("env key"));
+    }
+
+    #[tokio::test]
     async fn legacy_backend_command_run_applies_env() {
         let dir = TempDir::new().unwrap();
         let registry = sample_registry(dir.path().to_str().unwrap());
@@ -724,6 +798,56 @@ mod tests {
             .any(|p| p.contains("patched.txt")));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_backend_write_file_rejects_symlink_leaf_at_open_time() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside_file, dir.path().join("link.txt")).unwrap();
+
+        let registry = sample_registry(dir.path().to_str().unwrap());
+        let (ctx, _) = test_ctx();
+        let params = WriteFileParams {
+            path: "link.txt".into(),
+            content: "overwrite".into(),
+        };
+
+        let err = registry
+            .dispatch(WriteFile::NAME, params_to_value(&params), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("symlink"));
+        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "outside");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_backend_write_file_rejects_symlink_parent_at_open_time() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+
+        let registry = sample_registry(dir.path().to_str().unwrap());
+        let (ctx, _) = test_ctx();
+        let params = WriteFileParams {
+            path: "linked-dir/created.txt".into(),
+            content: "escape".into(),
+        };
+
+        let err = registry
+            .dispatch(WriteFile::NAME, params_to_value(&params), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("symlink"));
+        assert!(!outside.path().join("created.txt").exists());
+    }
+
     #[tokio::test]
     async fn legacy_backend_envelope_declare_records_bridge_metadata_only() {
         const FORBIDDEN_BRIDGE_EVENTS: [&str; 3] =
@@ -739,6 +863,8 @@ mod tests {
         );
         let params = DeclareParams {
             envelope: base.inner,
+            supersede: false,
+            reason: None,
         };
 
         let result = registry

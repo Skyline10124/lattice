@@ -12,6 +12,7 @@
 pub mod audit;
 pub(crate) mod call_durable_metadata;
 pub(crate) mod edit;
+pub mod envelope_store;
 pub(crate) mod executor;
 mod handlers;
 mod legacy_backend;
@@ -25,9 +26,11 @@ pub use audit::{
     impact_kind_for_method, impact_kind_label, CallAuditMetadata, CepAuditContext, CepAuditStore,
     SEMANTIC_STAGE_NATIVE,
 };
+pub use envelope_store::ActiveEnvelopeStore;
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use legacy_backend::register_phase20_legacy_backend;
+pub use legacy_backend::register_phase22_pending_legacy_methods_minus_declare;
 pub use native_registry::register_production_method_registry;
 pub use policy::{
     BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig,

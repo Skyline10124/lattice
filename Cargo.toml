@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/lattice-hooks",
     "crates/lattice-llm",
     "crates/lattice-api",
     "crates/lattice-session",
@@ -16,7 +17,7 @@ members = [
 version = "0.1.0"
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["LATTICE Contributors"]
 
 [workspace.dependencies]

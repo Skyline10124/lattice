@@ -7,9 +7,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lancet_executor::{
     impact_kind_for_method, impact_kind_label, register_production_method_registry,
-    to_tool_definitions, wire_code_for_error, BudgetLimits, CallAuditMetadata, CepAuditContext,
-    CepAuditStore, LancetClient, LancetTransport, MethodRegistry, NetworkPolicyConfig,
-    ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext, ServerRunConfig,
+    to_tool_definitions, wire_code_for_error, ActiveEnvelopeStore, BudgetLimits, CallAuditMetadata,
+    CepAuditContext, CepAuditStore, LancetClient, LancetTransport, MethodRegistry,
+    NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext,
+    ServerRunConfig,
 };
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
@@ -409,11 +410,13 @@ pub(crate) fn build_production_turn_deps(
     };
     let audit_context = Arc::new(RwLock::new(CepAuditContext::default()));
     let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
+    let active_envelope = Arc::new(ActiveEnvelopeStore::new());
     let server_config = ServerRunConfig {
         audit: Arc::clone(&audit),
         audit_context: Arc::clone(&audit_context),
         base_envelope: base_envelope.clone(),
         phase21: Arc::clone(&phase21),
+        active_envelope,
         call_audit_metadata: CallAuditMetadata::bridge_defaults(),
         production_audit_routing: true,
     };

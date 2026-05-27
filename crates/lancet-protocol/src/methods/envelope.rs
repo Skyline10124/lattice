@@ -15,12 +15,23 @@ pub struct Declare;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeclareParams {
     pub envelope: ExecutionEnvelope,
+    /// When true, atomically replaces the active envelope if one exists.
+    #[serde(default)]
+    pub supersede: bool,
+    /// Optional reason for superseding the active envelope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeclareResult {
     pub envelope_id: String,
+    /// Hash of the canonical envelope JSON content.
+    pub envelope_hash: String,
     pub accepted: bool,
+    /// The envelope_id of the superseded envelope, if supersede was true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_envelope_id: Option<String>,
 }
 
 impl CepMethod for Declare {

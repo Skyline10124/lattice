@@ -106,6 +106,8 @@ mod scaffold_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold off"),
             phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
         let err = registry
@@ -130,6 +132,8 @@ mod scaffold_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold on"),
             phase21: Arc::clone(&phase21),
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
         let value = registry

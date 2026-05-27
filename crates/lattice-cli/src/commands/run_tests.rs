@@ -70,6 +70,33 @@ fn run_missing_default_message_references_profile_path() {
 }
 
 #[test]
+fn run_validate_agents_dir_rejects_parent_components() {
+    let err = validate_agents_dir(Path::new(".lattice/../agents")).unwrap_err();
+    assert!(err.contains("path traversal"));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_validate_agents_dir_resolves_symlink_prefix_before_safety_check() {
+    let scratch_root = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join("tmp")
+        .join("agents-dir-tests");
+    std::fs::create_dir_all(&scratch_root).unwrap();
+    let safe_parent = tempfile::Builder::new()
+        .prefix("safe-agents-")
+        .tempdir_in(&scratch_root)
+        .unwrap();
+    let link = safe_parent.path().join("link-to-tmp");
+    std::os::unix::fs::symlink("/tmp", &link).unwrap();
+
+    let err = validate_agents_dir(&link.join("missing")).unwrap_err();
+
+    assert!(err.contains("/tmp"));
+}
+
+#[test]
 fn run_default_session_dir_under_lattice_sessions() {
     let dir = default_session_dir();
     assert!(dir.to_string_lossy().contains("lattice"));

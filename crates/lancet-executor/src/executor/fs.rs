@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use super::DefaultToolExecutor;
 use crate::edit::content_hash;
@@ -103,31 +103,6 @@ pub(crate) async fn write_file(
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
     DefaultToolExecutor::reject_parent_traversal(path)?;
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let abs = PathBuf::from(&executor.project_root).join(path.trim_start_matches('/'));
-    let write_path = if let Some(parent) = abs.parent() {
-        let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|_| {
-            format!(
-                "cannot write to '{}' because parent directory does not exist or cannot be resolved",
-                path
-            )
-        })?;
-        let canonical = canonical_parent.join(abs.file_name().unwrap());
-        executor.ensure_under_project_root(&canonical)?;
-        // Reject symlinks to prevent writes escaping project root (H-03)
-        if tokio::fs::symlink_metadata(&canonical)
-            .await
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(format!(
-                "write denied: '{}' is a symlink (potential path escape)",
-                path
-            ));
-        }
-        canonical
-    } else {
-        return Err(format!("cannot write to '{}': invalid path", path));
-    };
     if content.len() > executor.limits.max_write_size {
         return Err(ToolError::SizeLimit {
             limit: executor.limits.max_write_size,
@@ -135,15 +110,210 @@ pub(crate) async fn write_file(
         }
         .to_string());
     }
-    let path_str = write_path.to_string_lossy().to_string();
-    tokio::fs::write(&write_path, content).await.map_err(|e| {
+    let relative_path = sanitize_write_path(path)?;
+    write_file_no_symlink(
+        PathBuf::from(&executor.project_root),
+        relative_path,
+        content.to_string(),
+        path.to_string(),
+    )
+    .await?;
+    Ok(format!("Wrote {} bytes to {}", content.len(), path))
+}
+
+fn sanitize_write_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim_start_matches('/');
+    let mut relative = PathBuf::new();
+    for component in Path::new(trimmed).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(format!(
+                    "path traversal denied: '{}' contains '..' component",
+                    path
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("cannot write to '{}': invalid path", path));
+            }
+        }
+    }
+
+    if relative.as_os_str().is_empty() {
+        return Err(format!("cannot write to '{}': invalid path", path));
+    }
+
+    Ok(relative)
+}
+
+#[cfg(unix)]
+async fn write_file_no_symlink(
+    project_root: PathBuf,
+    relative_path: PathBuf,
+    content: String,
+    display_path: String,
+) -> Result<PathBuf, String> {
+    let write_path = project_root.join(&relative_path);
+    tokio::task::spawn_blocking(move || {
+        secure_write_file_unix(
+            &project_root,
+            &relative_path,
+            content.as_bytes(),
+            &display_path,
+        )?;
+        Ok(write_path)
+    })
+    .await
+    .map_err(|error| format!("write task failed: {error}"))?
+}
+
+#[cfg(unix)]
+fn secure_write_file_unix(
+    project_root: &Path,
+    relative_path: &Path,
+    content: &[u8],
+    display_path: &str,
+) -> Result<(), String> {
+    use std::ffi::{CString, OsStr};
+    use std::io::Write as _;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    fn component_cstring(component: &OsStr, display_path: &str) -> Result<CString, String> {
+        CString::new(component.as_bytes()).map_err(|_| {
+            format!(
+                "cannot write to '{}': path component contains NUL byte",
+                display_path
+            )
+        })
+    }
+
+    let components: Vec<_> = relative_path.components().collect();
+    let (file_name, parent_components) = components
+        .split_last()
+        .ok_or_else(|| format!("cannot write to '{}': invalid path", display_path))?;
+
+    let mut dir = std::fs::File::open(project_root).map_err(|error| {
         ToolError::IoError {
-            path: path_str,
-            error: e,
+            path: project_root.display().to_string(),
+            error,
         }
         .to_string()
     })?;
-    Ok(format!("Wrote {} bytes to {}", content.len(), path))
+
+    for component in parent_components {
+        let Component::Normal(name) = component else {
+            return Err(format!("cannot write to '{}': invalid path", display_path));
+        };
+        let name = component_cstring(name, display_path)?;
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if matches!(
+                error.raw_os_error(),
+                Some(code) if code == libc::ELOOP || code == libc::ENOTDIR
+            ) {
+                return Err(format!(
+                    "write denied: '{}' contains a symlink parent directory or non-directory component",
+                    display_path
+                ));
+            }
+            return Err(format!(
+                "cannot write to '{}' because parent directory does not exist or cannot be resolved: {}",
+                display_path, error
+            ));
+        }
+        dir = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+
+    let Component::Normal(name) = file_name else {
+        return Err(format!("cannot write to '{}': invalid path", display_path));
+    };
+    let name = component_cstring(name, display_path)?;
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o666 as libc::mode_t,
+        )
+    };
+    if fd < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return Err(format!(
+                "write denied: '{}' is a symlink (potential path escape)",
+                display_path
+            ));
+        }
+        return Err(ToolError::IoError {
+            path: display_path.to_string(),
+            error,
+        }
+        .to_string());
+    }
+
+    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    file.write_all(content).map_err(|error| {
+        ToolError::IoError {
+            path: display_path.to_string(),
+            error,
+        }
+        .to_string()
+    })
+}
+
+#[cfg(not(unix))]
+async fn write_file_no_symlink(
+    project_root: PathBuf,
+    relative_path: PathBuf,
+    content: String,
+    display_path: String,
+) -> Result<PathBuf, String> {
+    let write_path = project_root.join(&relative_path);
+    let Some(parent) = write_path.parent() else {
+        return Err(format!("cannot write to '{}': invalid path", display_path));
+    };
+    let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|_| {
+        format!(
+            "cannot write to '{}' because parent directory does not exist or cannot be resolved",
+            display_path
+        )
+    })?;
+    if canonical_parent != project_root && !canonical_parent.starts_with(&project_root) {
+        return Err(format!(
+            "path '{}' is outside the project root '{}'",
+            canonical_parent.display(),
+            project_root.display()
+        ));
+    }
+    if tokio::fs::symlink_metadata(&write_path)
+        .await
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "write denied: '{}' is a symlink (potential path escape)",
+            display_path
+        ));
+    }
+    tokio::fs::write(&write_path, content)
+        .await
+        .map_err(|error| {
+            ToolError::IoError {
+                path: display_path,
+                error,
+            }
+            .to_string()
+        })?;
+    Ok(write_path)
 }
 
 pub(crate) async fn list_directory(

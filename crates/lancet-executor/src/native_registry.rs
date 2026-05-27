@@ -1,10 +1,10 @@
 //! Phase 21 native catalog method registration.
 
 use crate::handlers::{
-    register_external_methods, register_session_state_methods,
+    register_envelope_methods, register_external_methods, register_session_state_methods,
     register_workspace_observation_methods,
 };
-use crate::legacy_backend::register_phase22_pending_legacy_methods;
+use crate::legacy_backend::register_phase22_pending_legacy_methods_minus_declare;
 use crate::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
@@ -33,14 +33,23 @@ pub fn register_phase21_session_state(registry: &mut MethodRegistry) -> Result<(
     register_session_state_methods(registry)
 }
 
-/// Production registry: Phase 21 native handlers plus Phase 22-pending legacy bridge.
+/// Register native Phase 22 `envelope.declare` handler.
+pub fn register_phase22_native_envelope(registry: &mut MethodRegistry) -> Result<(), CepError> {
+    register_envelope_methods(registry)
+}
+
+/// Production registry: Phase 21/22 native handlers plus remaining Phase 22-pending legacy bridge.
+///
+/// Phase 22 native: `envelope.declare`.
+/// Phase 22-pending bridge: `command.run`, `workspace.write_file`, `workspace.patch`.
 pub fn register_production_method_registry(
     registry: &mut MethodRegistry,
     project_root: &str,
     http_client: reqwest::Client,
 ) -> Result<(), CepError> {
     register_phase21_native_methods(registry)?;
-    register_phase22_pending_legacy_methods(registry, project_root, http_client)
+    register_phase22_native_envelope(registry)?;
+    register_phase22_pending_legacy_methods_minus_declare(registry, project_root, http_client)
 }
 
 #[cfg(test)]
@@ -114,6 +123,8 @@ mod phase21_native_registry_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "native error test"),
             phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
 
@@ -233,6 +244,8 @@ mod phase21_native_registry_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "safety net"),
             phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
 

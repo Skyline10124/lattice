@@ -36,6 +36,35 @@ fn command_timeout_ms(limits: &ToolLimits, timeout_ms: Option<u64>) -> u64 {
     }
 }
 
+fn validate_command_inputs(argv: &[String], env: &BTreeMap<String, String>) -> Result<(), String> {
+    if argv.is_empty() {
+        return Err("command.run requires a non-empty argv".to_string());
+    }
+    if argv[0].is_empty() {
+        return Err("command.run requires argv[0] to name an executable".to_string());
+    }
+    for (index, arg) in argv.iter().enumerate() {
+        if arg.contains('\0') {
+            return Err(format!(
+                "command.run argv[{index}] contains a NUL byte, which cannot be passed to exec"
+            ));
+        }
+    }
+    for (key, value) in env {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(format!(
+                "command.run env key '{key}' is invalid; keys must be non-empty and cannot contain '=' or NUL"
+            ));
+        }
+        if value.contains('\0') {
+            return Err(format!(
+                "command.run env value for '{key}' contains a NUL byte"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Execute `argv[0]` with `argv[1..]` as arguments without shell interpolation.
 pub(crate) async fn execute_argv(
     project_root: &str,
@@ -45,9 +74,7 @@ pub(crate) async fn execute_argv(
     env: &BTreeMap<String, String>,
     timeout_ms: Option<u64>,
 ) -> Result<std::process::Output, String> {
-    if argv.is_empty() {
-        return Err("command.run requires a non-empty argv".to_string());
-    }
+    validate_command_inputs(argv, env)?;
 
     let cwd = resolve_command_cwd(project_root, cwd)?;
     let timeout_ms = command_timeout_ms(limits, timeout_ms);

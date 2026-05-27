@@ -7,7 +7,7 @@ This file provides guidance to coding agents when working with code in this repo
 ```sh
 cargo build
 cargo test
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 cargo test <test_name>          # single test
 cargo bench                     # benchmarks
@@ -38,7 +38,8 @@ hooks -> llm -> session/profile/tools -> agent -> api -> cli
 | `lattice-llm` | Transport adapters, streaming, model resolution, tool types, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent profile specification, discovery, and defaults |
-| `lattice-tools` | Tool schemas, edit operations, executor trait, project-root containment |
+| `lattice-tooling` | Tool schema and executor-facing shared types |
+| `lancet-executor` | CEP/LANCET tool execution, edit operations, project-root containment |
 | `lattice-agent` | Multi-turn async agent loop (AgentLoop), state machine, memory |
 | `lattice-api` | Thin public facade for create/open/run/stream/session operations |
 | `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor) |
@@ -71,10 +72,10 @@ Use this table to skip the "which crate owns this?" exploration step.
 
 | If you're changing… | Go to | Key files |
 |---|---|---|
-| Tool implementations (fs, shell, web, search) | `lattice-tools/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs` |
-| Path containment / project-root checks | `lattice-tools/src/executor/` | `path_guard.rs`, `workspace.rs` |
-| Edit/diff application logic | `lattice-tools/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs` |
-| Tool schemas / definitions exposed to LLM | `lattice-tools/src/` | `tool_definitions.rs`, `enabled_tools.rs` |
+| Tool implementations (fs, shell, web, search) | `lancet-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs` |
+| Path containment / project-root checks | `lancet-executor/src/executor/` | `path_guard.rs` |
+| Edit/diff application logic | `lancet-executor/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs` |
+| Tool schemas / definitions exposed to LLM | `lattice-tooling/src/`, `lancet-executor/src/` | `enabled_tools.rs`, `tool_definitions.rs` |
 | Provider protocol adapters | `lattice-llm/src/providers/` | `anthropic.rs`, `openai.rs`, `gemini.rs` |
 | SSE streaming parser | `lattice-llm/src/` | `sse.rs`, `client.rs` |
 | Model resolution / aliases | `lattice-llm/src/` | `router.rs`, `endpoints.rs` |
@@ -106,11 +107,11 @@ The following capabilities are deferred beyond the current release:
 
 ## Cursor Cloud specific instructions
 
-- **Rust version**: The declared MSRV is 1.85 but locked transitive dependencies (e.g. `icu_*`, `time`) require Rust 1.88+. Use `rustup default stable` (currently 1.95) to satisfy all deps.
+- **Rust version**: The declared MSRV is 1.88 to match locked transitive dependencies (e.g. `icu_*`, `time`). Use `rustup default stable` (currently 1.95) to satisfy all deps.
 - **Build dirs**: `.cargo/config.toml` pins `target-dir = "target"` and `TMPDIR = build/tmp` so agent/sandbox builds avoid `/tmp/cursor-sandbox-cache` disk quota errors. No manual `CARGO_TARGET_DIR`/`TMPDIR` exports needed for normal `cargo build` / `cargo test`.
 - **System dependency**: `libssl-dev` (and `pkg-config`) must be installed for the `openssl-sys` transitive dependency (pulled in via `reqwest`'s native-tls feature in the dependency graph).
 - **No external services needed**: All tests use mock/fake LLM clients. `cargo test` passes without any API keys or network access.
-- **Lint note**: `cargo clippy -- -D warnings` may flag new lints as Rust stable advances (e.g. `clippy::io_other_error` on 1.95). `cargo fmt --all --check` may also report diffs if rustfmt formatting rules have evolved since the code was last formatted.
+- **Lint note**: `cargo clippy --all-targets -- -D warnings` may flag new lints as Rust stable advances (e.g. `clippy::io_other_error` on 1.95). `cargo fmt --all --check` may also report diffs if rustfmt formatting rules have evolved since the code was last formatted.
 - **CLI demo commands** (no API key required): `cargo run -p lattice-cli -- doctor`, `resolve <alias>`, `models`, `session status`.
 - **Running the `run` subcommand** requires: (1) an agent profile at `.lattice/agents/default/agent.toml` in the working directory, and (2) the relevant provider API key env var (e.g. `ANTHROPIC_API_KEY`).
 

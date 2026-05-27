@@ -30,9 +30,21 @@
 - **升级条件**: 若 v1.3-alpha 引入 verification runner / long-running command workflow，**升为 Medium**。
 - **计划**: `select!` cancel + 工具 future；对可中断工具传 cancel 或子进程 kill（按工具类型分级）。
 
+### L-22: `ChatRequest` 每轮 clone 完整 provider message Vec — `performance` / `api-shape`
+- **位置**: `crates/lattice-agent/src/agent_loop/mod.rs`
+- **问题**: M-21 已消除每轮 GraphMessage→LLM Message 全量转换，但 `ChatRequest` 仍拥有 `Vec<Message>`，每轮 LLM 调用要 clone 当前完整 provider message buffer。
+- **当前状态**: 本地 CLI 和短工具链路可接受；属于 API ownership 形状问题，非行为 bug。
+- **计划**: 将 LLM 请求改为 borrowed/`Arc<[Message]>`/builder 复用一类设计，避免为性能小修破坏 provider adapter contract。
+
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security`
+- **当前状态**: 2026-05-27 fixed。Unix 写入改为逐级 `openat` + `O_NOFOLLOW`，拒绝 symlink parent/leaf，关闭 `symlink_metadata`→`write` 的 TOCTOU 窗口。
+
+### H-10: `validate_agents_dir` canonicalize 失败时回退原始路径 — `security`
+- **当前状态**: 2026-05-27 fixed。不存在的 agents dir 先 canonicalize 最深存在前缀，解析其中 symlink，再拼接缺失后缀做危险路径判断。
 
 ### M-21: `AgentLoop` 每轮全量 `convert_to_llm_message` — `performance`
 - **当前状态**: 消除每轮 GraphMessage→LLM Message 全量转换；tool round 仅 append。**残留**: 每轮 `ChatRequest` 仍 clone 全量 `Vec<Message>`，仍存在 `O(rounds × messages)`（见 FIX.md **M-21** Residual）。
@@ -51,11 +63,3 @@
 ### M-05: `web_fetch` DNS rebinding / 黑名单 — `security`
 - **已做**: 与 M-04 共享 request-time 钉 IP；已知 rebinding 后缀硬拒绝（`DNS_REBINDING_DOMAIN_SUFFIXES`，`security.rs` + `web.rs`）。
 - **残留**: 黑名单不可穷尽（新 wildcard→IP 服务、非列表域名）；需持续维护或改为启发式（主机名编码 IP 模式）+ 仍依赖钉 IP 作为主防线。
-
-### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security`
-- **已做**: 写入前 `symlink_metadata` 检测 symlink 并拒绝。
-- **残留**: 检测到 `tokio::fs::write` 之间存在 TOCTOU 窗口。完整修复需 Unix `O_NOFOLLOW`。
-
-### H-10: `validate_agents_dir` canonicalize 失败时回退原始路径 — `security`
-- **已做**: canonicalize 失败时手动按 `Component` 规范化，`..` 越过根直接报错。
-- **残留**: 手动规范化不解析路径中已存在的 symlink。完整修复需锚点回溯算法。

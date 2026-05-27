@@ -707,6 +707,8 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "native obs test"),
                 phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
             },
             event_rx,
@@ -786,6 +788,8 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "budget test"),
             phase21,
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
         let params = ReadFileParams {
@@ -817,6 +821,8 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "turn budget"),
             phase21,
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
         let params = ReadFileParams {
@@ -1001,6 +1007,8 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "grep cap"),
             phase21: Arc::new(Phase21TurnContext::from_policy(policy)),
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
         };
         let params = GrepParams {

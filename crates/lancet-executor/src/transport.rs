@@ -4,6 +4,7 @@ use crate::audit::{
     impact_kind_for_method, impact_kind_label, AuditOutcome, AuditStart, CallAuditMetadata,
     CepAuditContext, CepAuditStore,
 };
+use crate::envelope_store::ActiveEnvelopeStore;
 use crate::policy::Phase21TurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_protocol::{
@@ -31,6 +32,8 @@ pub struct ServerRunConfig {
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub base_envelope: BaseExecutionEnvelope,
     pub phase21: Arc<Phase21TurnContext>,
+    /// Turn-scoped active envelope store for Phase 22 envelope lifecycle.
+    pub active_envelope: Arc<ActiveEnvelopeStore>,
     /// Per-call audit metadata (bridge vs native); defaults to Phase 20 bridge.
     pub call_audit_metadata: CallAuditMetadata,
     /// When true, resolve audit metadata per method (Phase 21 native vs Phase 22 bridge).
@@ -50,6 +53,7 @@ impl ServerRunConfig {
             })),
             base_envelope,
             phase21,
+            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             call_audit_metadata: CallAuditMetadata::bridge_defaults(),
             production_audit_routing: false,
         }
@@ -374,6 +378,7 @@ async fn handle_request(
         audit_context,
         base_envelope,
         phase21,
+        active_envelope,
         call_audit_metadata,
         production_audit_routing,
     } = config;
@@ -412,12 +417,15 @@ async fn handle_request(
 
     let cancel_rx = cancel_tx.subscribe();
     let durable_metadata = crate::call_durable_metadata::CallDurableMetadata::default();
+    let turn_id = ctx_snapshot.turn_id.clone();
     let ctx = HandlerContext {
         call_id: id,
         events: EventSink::new(event_tx.clone(), id),
         cancellation: Cancellation::new(cancel_rx),
         base_envelope,
         phase21: Arc::clone(&phase21),
+        active_envelope: Arc::clone(&active_envelope),
+        turn_id,
         durable_metadata: durable_metadata.clone(),
     };
 

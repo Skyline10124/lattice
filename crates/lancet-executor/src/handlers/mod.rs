@@ -1,11 +1,13 @@
 //! Phase 21 native CEP method handlers.
 
+pub mod envelope;
 pub mod external;
 pub mod observation;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
 pub mod session_state;
 
+pub use envelope::register_envelope_methods;
 pub use external::register_external_methods;
 pub use observation::register_workspace_observation_methods;
 #[cfg(feature = "inspect-scaffold")]

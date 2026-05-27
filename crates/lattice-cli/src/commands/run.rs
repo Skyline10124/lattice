@@ -581,45 +581,29 @@ fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
 }
 
 fn validate_agents_dir(path: &Path) -> Result<(), String> {
-    // Try canonicalize; if path doesn't exist yet, normalize manually to
-    // prevent traversal attacks while still allowing non-existent directories.
-    let canonical = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            use std::path::Component;
-            let mut normalized = PathBuf::new();
-            for component in path.components() {
-                match component {
-                    Component::ParentDir => {
-                        if !normalized.pop() {
-                            return Err(format!(
-                                "Agents directory '{}' contains path traversal that escapes root.",
-                                path.display()
-                            ));
-                        }
-                    }
-                    Component::CurDir => {}
-                    other => normalized.push(other),
-                }
-            }
-            normalized
-        }
-    };
-    let path_str = canonical.to_string_lossy();
+    let canonical = canonicalize_agents_dir_prefix(path)?;
 
-    let dangerous_prefixes = ["/etc", "/usr", "/var", "/sys", "/proc", "/dev", "/boot"];
+    let dangerous_prefixes = [
+        Path::new("/etc"),
+        Path::new("/usr"),
+        Path::new("/var"),
+        Path::new("/sys"),
+        Path::new("/proc"),
+        Path::new("/dev"),
+        Path::new("/boot"),
+    ];
     for prefix in &dangerous_prefixes {
-        if path_str.starts_with(prefix) {
+        if canonical.starts_with(prefix) {
             return Err(format!(
                 "Agents directory '{}' is inside a system path ({}). \
                  Set LATTICE_AGENTS_DIR to a safe location (e.g., under $HOME or your project).",
                 path.display(),
-                prefix
+                prefix.display()
             ));
         }
     }
 
-    if path_str.starts_with("/tmp") {
+    if canonical.starts_with(Path::new("/tmp")) {
         return Err(format!(
             "Agents directory '{}' is inside /tmp which is world-writable and unsafe. \
              Set LATTICE_AGENTS_DIR to a safe location.",
@@ -628,6 +612,60 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn canonicalize_agents_dir_prefix(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Ok(PathBuf::new());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "Agents directory '{}' contains path traversal.",
+            path.display()
+        ));
+    }
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| format!("cannot resolve current directory: {error}"))?
+            .join(path)
+    };
+
+    let mut cursor = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut canonical) => {
+                for component in missing.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) => {
+                let Some(file_name) = cursor.file_name() else {
+                    return Err(format!(
+                        "cannot resolve agents directory '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                };
+                missing.push(file_name.to_os_string());
+                let Some(parent) = cursor.parent() else {
+                    return Err(format!(
+                        "cannot resolve agents directory '{}': {}",
+                        path.display(),
+                        error
+                    ));
+                };
+                cursor = parent;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

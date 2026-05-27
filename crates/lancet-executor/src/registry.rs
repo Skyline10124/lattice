@@ -1,6 +1,7 @@
 //! Typed method registry for CEP catalog dispatch.
 
 use crate::call_durable_metadata::CallDurableMetadata;
+use crate::envelope_store::ActiveEnvelopeStore;
 use crate::policy::Phase21TurnContext;
 use lancet_protocol::{
     envelope::BaseExecutionEnvelope,
@@ -88,6 +89,10 @@ pub struct HandlerContext {
     pub base_envelope: BaseExecutionEnvelope,
     /// Phase 21 policy limits and turn-scoped budget tracker.
     pub phase21: Arc<Phase21TurnContext>,
+    /// Turn-scoped active envelope store for Phase 22 envelope lifecycle.
+    pub active_envelope: Arc<ActiveEnvelopeStore>,
+    /// Turn identifier for envelope ID generation (env-{turn_id}-{seq}).
+    pub turn_id: String,
     /// Compact per-call metadata persisted into `cep_audit_entries.metadata_json`.
     pub(crate) durable_metadata: CallDurableMetadata,
 }
@@ -247,6 +252,8 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "registry test"),
             phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(".")),
+            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
             durable_metadata: CallDurableMetadata::default(),
         }
     }
