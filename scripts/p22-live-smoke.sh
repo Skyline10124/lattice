@@ -7,7 +7,8 @@
 #
 # Optional:
 #   P22_SMOKE_MODEL   (default: compat:deepseek-v4-pro)
-#   P22_SMOKE_BIN     (default: cargo run -p lattice-cli --quiet --)
+#   P22_SMOKE_BIN     (default: build lattice-cli, run target/debug/lattice)
+#   P22_KEEP_SMOKE_HOME (default: unset — delete temp workspace on exit)
 #
 set -euo pipefail
 
@@ -49,12 +50,12 @@ echo "Workspace: ${SMOKE_HOME}"
 mkdir -p "${SMOKE_HOME}/smoke" "${SMOKE_HOME}/.lattice/agents/default"
 printf 'version: 1\n' >"${SMOKE_HOME}/smoke/fixture.txt"
 
-cat >"${SMOKE_HOME}/.lattice/agents/default/agent.toml" <<'EOF'
+cat >"${SMOKE_HOME}/.lattice/agents/default/agent.toml" <<EOF
 schema_version = 1
 
 [agent]
 name = "p22-smoke"
-model = "compat:deepseek-v4-pro"
+model = "${MODEL}"
 
 [prompt]
 system = """
@@ -82,6 +83,7 @@ enabled = [
   "command.run",
 ]
 EOF
+# heredoc above is unquoted so \${MODEL} is expanded; prompt/system text has no shell expansions.
 
 PROMPT='Execute the Phase 22 smoke sequence from your system prompt now.'
 

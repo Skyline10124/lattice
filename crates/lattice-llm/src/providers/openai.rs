@@ -9,13 +9,20 @@ use std::collections::BTreeMap;
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
 
-/// OpenAI Chat Completions tool names must match `^[a-zA-Z0-9_-]+$`.
-/// CEP catalog names use dots (`workspace.read_file`); map on the wire only.
+/// Encode a CEP catalog tool name for OpenAI Chat Completions wire transport.
+///
+/// Many compatible endpoints require `tools[].function.name` to match
+/// `^[a-zA-Z0-9_-]+$` (no `.`). CEP canonical names are dotted (`workspace.read_file`);
+/// only this adapter performs `.__` encoding — the catalog and executor keep dots.
 pub(crate) fn wire_tool_name(canonical: &str) -> String {
     canonical.replace('.', "__")
 }
 
-/// Restore a canonical dotted tool name from the OpenAI wire form.
+/// Decode a wire tool name back to the CEP catalog form.
+///
+/// Assumes `__` substrings are dot encodings produced by [`wire_tool_name`].
+/// CEP catalog names use a single dot between namespace and method and never
+/// contain literal `__`, so this round-trip is safe for all current methods.
 pub(crate) fn canonical_tool_name(wire: &str) -> String {
     wire.replace("__", ".")
 }

@@ -10,6 +10,7 @@
 #
 # Optional:
 #   P22_REAL_MODEL          (default: compat:deepseek-v4-pro)
+#   P22_REAL_BIN            (default: build lattice-cli, run target/debug/lattice)
 #   P22_REAL_SCENARIO       (run one scenario slug, e.g. 01-bugfix)
 #   P22_REAL_KEEP=1         (retain workspaces under build/tmp/p22-real-scenarios/)
 #   P22_REAL_REPORT         (default: build/tmp/p22-real-scenarios/report.md)

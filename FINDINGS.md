@@ -43,14 +43,14 @@ Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces un
 | Scenario | Result | Notes |
 |----------|--------|-------|
 | 01-bugfix | PASS | Rust fixture; `cargo test` verify; fix `src/lib.rs` only |
-| 02-verify-repair | PASS | `cep_verify_failed` may be absent if model one-shots; no auto-`ReplanRequired` on verify |
+| 02-verify-repair | PASS | Requires `cep_verify_failed` then same-envelope repair (41→42); no auto-`ReplanRequired` on verify |
 | 03-scope-replan | PASS | Requires `serde` in `Cargo.toml` + `cep_replan_required` or supersede path |
 | 04-hard-denial | PASS | `GuardDenied` on `..` write; secret file unchanged |
 | 05-docs-code | PASS | README + `src/greeting.rs` bounded diff |
 
-**Harness fixes during bring-up:** fixture `Cargo.toml` needs `[workspace]` so `cargo test`/`check` under `build/tmp/` do not join the lattice repo workspace. OpenAI-compatible providers need dotted→`__` tool wire names (see PR #8 / `lattice-llm` openai adapter). Scenario 04 judge checks the exact prompt path `../p22-escape-outside.txt` (no pre-check `rm`).
+**Harness fixes during bring-up:** fixture `Cargo.toml` needs `[workspace]` so `cargo test`/`check` under `build/tmp/` do not join the lattice repo workspace. Strict OpenAI-compatible gateways may reject dotted tool names — `lattice-llm` maps `a.b` ↔ `a__b` on the wire only (CEP catalog stays dotted). Some gateways (e.g. MiMo token-plan) accept dots without encoding. Scenario 04 judge checks the exact prompt path `../p22-escape-outside.txt` (no pre-check `rm`).
 
-**Residual (non-blocking):** scenario 02 requires `cep_verify_failed` in JSONL (41→42 sequence in prompt); scenario 03 requires `cep_replan_required` or `cep_envelope_superseded` before Cargo.toml gains `serde`. Report artifact: `build/tmp/p22-real-scenarios/report.md`.
+**Harness pass criteria:** scenario 02 fails if `cep_verify_failed` is absent; scenario 03 requires `cep_replan_required` or `cep_envelope_superseded` before `Cargo.toml` gains `serde`. Report artifact: `build/tmp/p22-real-scenarios/report.md`.
 
 ---
 
