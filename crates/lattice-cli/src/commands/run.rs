@@ -25,7 +25,6 @@ use lattice_profile::{ProfileError, ProfileSource};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-pub(crate) use crate::commands::session::default_session_dir;
 use std::time::Duration;
 use tokio::time;
 

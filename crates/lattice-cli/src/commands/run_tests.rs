@@ -98,7 +98,7 @@ fn run_validate_agents_dir_resolves_symlink_prefix_before_safety_check() {
 
 #[test]
 fn run_default_session_dir_under_lattice_sessions() {
-    let dir = default_session_dir();
+    let dir = crate::commands::session::default_session_dir();
     assert!(dir.to_string_lossy().contains("lattice"));
     assert!(dir.to_string_lossy().contains("sessions"));
 }
