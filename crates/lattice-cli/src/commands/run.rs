@@ -670,7 +670,10 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
         }
     }
 
-    if canonical.starts_with(Path::new("/tmp")) {
+    let tmp_root = Path::new("/tmp")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    if canonical.starts_with(&tmp_root) {
         return Err(format!(
             "Agents directory '{}' is inside /tmp which is world-writable and unsafe. \
              Set LATTICE_AGENTS_DIR to a safe location.",
