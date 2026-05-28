@@ -9,6 +9,24 @@ use std::collections::BTreeMap;
 use crate::router::ResolvedModel;
 use crate::types::{ChatRequest, LlmEvent, Role};
 
+/// Encode a CEP catalog tool name for OpenAI Chat Completions wire transport.
+///
+/// Many compatible endpoints require `tools[].function.name` to match
+/// `^[a-zA-Z0-9_-]+$` (no `.`). CEP canonical names are dotted (`workspace.read_file`);
+/// only this adapter performs `.__` encoding — the catalog and executor keep dots.
+pub(crate) fn wire_tool_name(canonical: &str) -> String {
+    canonical.replace('.', "__")
+}
+
+/// Decode a wire tool name back to the CEP catalog form.
+///
+/// Assumes `__` substrings are dot encodings produced by [`wire_tool_name`].
+/// CEP catalog names use a single dot between namespace and method and never
+/// contain literal `__`, so this round-trip is safe for all current methods.
+pub(crate) fn canonical_tool_name(wire: &str) -> String {
+    wire.replace("__", ".")
+}
+
 /// Build the JSON body for an OpenAI Chat Completions request.
 ///
 /// LATTICE's provider response path is SSE-only — `dispatch_stream` parses
@@ -47,7 +65,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
                         "id": tc.id,
                         "type": "function",
                         "function": {
-                            "name": tc.function.name,
+                            "name": wire_tool_name(&tc.function.name),
                             "arguments": tc.function.arguments,
                         }
                     })
@@ -79,7 +97,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": tool.name,
+                        "name": wire_tool_name(&tool.name),
                         "description": tool.description,
                         "parameters": tool.parameters,
                     }
@@ -170,7 +188,7 @@ impl OpenAiSseParser {
                             self.tool_call_ids.insert(idx, id.to_string());
                             events.push(LlmEvent::ToolCallStart {
                                 id: id.to_string(),
-                                name: name.to_string(),
+                                name: canonical_tool_name(name),
                             });
                         }
 
@@ -283,6 +301,40 @@ mod tests {
             json["stream_options"]["include_usage"], true,
             "stream_options.include_usage must always be set so the final \
              SSE chunk carries usage data"
+        );
+    }
+
+    #[test]
+    fn wire_tool_name_maps_dotted_cep_names() {
+        assert_eq!(
+            wire_tool_name("envelope.declare"),
+            "envelope__declare"
+        );
+        assert_eq!(
+            canonical_tool_name("workspace__read_file"),
+            "workspace.read_file"
+        );
+        assert_eq!(wire_tool_name("get_weather"), "get_weather");
+    }
+
+    #[test]
+    fn build_request_maps_dotted_tool_names_for_openai_wire() {
+        let req = ChatRequest {
+            messages: vec![Message::user("go")],
+            tools: vec![ToolDefinition::new(
+                "workspace.read_file",
+                "Read a file",
+                serde_json::json!({"type": "object"}),
+            )],
+            target: ModelTarget::new("gpt-4o"),
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+        };
+        let json = build_request_json(&req, &make_resolved());
+        assert_eq!(
+            json["tools"][0]["function"]["name"],
+            "workspace__read_file"
         );
     }
 
