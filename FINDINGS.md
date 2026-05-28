@@ -36,6 +36,24 @@
 - **当前状态**: 本地 CLI 和短工具链路可接受；属于 API ownership 形状问题，非行为 bug。
 - **计划**: 将 LLM 请求改为 borrowed/`Arc<[Message]>`/builder 复用一类设计，避免为性能小修破坏 provider adapter contract。
 
+## P22.5 supervision verification (2026-05-28)
+
+Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).
+
+| Scenario | Result | Notes |
+|----------|--------|-------|
+| 01-bugfix | PASS | Rust fixture; `cargo test` verify; fix `src/lib.rs` only |
+| 02-verify-repair | PASS | `cep_verify_failed` may be absent if model one-shots; no auto-`ReplanRequired` on verify |
+| 03-scope-replan | PASS | Requires `serde` in `Cargo.toml` + `cep_replan_required` or supersede path |
+| 04-hard-denial | PASS | `GuardDenied` on `..` write; secret file unchanged |
+| 05-docs-code | PASS | README + `src/greeting.rs` bounded diff |
+
+**Harness fixes during bring-up:** fixture `Cargo.toml` needs `[workspace]` so `cargo test`/`check` under `build/tmp/` does not join the lattice repo workspace. OpenAI-compatible providers need dotted→`__` tool wire names (see PR #8 / `lattice-llm` openai adapter).
+
+**Residual (non-blocking):** scenario 02 does not force an incomplete first patch; scenario 03 model may supersede declare without a visible `cep_replan_required` event if it declares both scopes on retry. Report artifact: `build/tmp/p22-real-scenarios/report.md`.
+
+---
+
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
