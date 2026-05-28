@@ -348,19 +348,35 @@ checkout_clone_ref() {
   )
 }
 
+is_harness_artifact_path() {
+  case "$1" in
+    events.jsonl | run.stderr | .lattice | .lattice/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 assert_only_doc_note_changed() {
   local ws="$1"
   [[ -d "${ws}/.git" ]] || return 0
   local path line
   while IFS= read -r path; do
     [[ -z "${path}" ]] && continue
-    [[ "${path}" == "${DOC_NOTE}" ]] || fail "task-a diff outside doc note: ${path}"
+    is_harness_artifact_path "${path}" && continue
+    [[ "${path}" == "${DOC_NOTE}" ]] || {
+      fail "task-a diff outside doc note: ${path}"
+      return 1
+    }
   done < <(git -C "${ws}" diff --name-only 2>/dev/null)
   while IFS= read -r line; do
     [[ -z "${line}" ]] && continue
     path="${line:3}"
-    [[ "${path}" == "${DOC_NOTE}" ]] || fail "task-a working tree change outside doc note: ${path}"
+    is_harness_artifact_path "${path}" && continue
+    [[ "${path}" == "${DOC_NOTE}" ]] || {
+      fail "task-a working tree change outside doc note: ${path}"
+      return 1
+    }
   done < <(git -C "${ws}" status --porcelain 2>/dev/null)
+  return 0
 }
 
 # ── clone + baseline ──────────────────────────────────────────────────────────
@@ -495,7 +511,9 @@ judge_task_a() {
     fail "doc note not updated"
   fi
 
-  assert_only_doc_note_changed "${TASK_WS}" && pass "only ${DOC_NOTE} changed in git"
+  if assert_only_doc_note_changed "${TASK_WS}"; then
+    pass "only ${DOC_NOTE} changed in git (harness artifacts excluded)"
+  fi
   if [[ -d "${TASK_WS}/.git" ]]; then
     local stat_lines
     stat_lines="$(git -C "${TASK_WS}" diff --stat 2>/dev/null | wc -l || echo 0)"
