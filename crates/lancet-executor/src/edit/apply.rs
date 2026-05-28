@@ -562,7 +562,8 @@ async fn write_new_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
         .create_new(true)
         .open(path)
         .await?;
-    file.write_all(content).await
+    file.write_all(content).await?;
+    file.sync_all().await
 }
 
 struct CompletedWrite {

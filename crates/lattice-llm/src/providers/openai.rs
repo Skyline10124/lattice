@@ -306,10 +306,7 @@ mod tests {
 
     #[test]
     fn wire_tool_name_maps_dotted_cep_names() {
-        assert_eq!(
-            wire_tool_name("envelope.declare"),
-            "envelope__declare"
-        );
+        assert_eq!(wire_tool_name("envelope.declare"), "envelope__declare");
         assert_eq!(
             canonical_tool_name("workspace__read_file"),
             "workspace.read_file"
@@ -332,10 +329,7 @@ mod tests {
             max_completion_tokens: None,
         };
         let json = build_request_json(&req, &make_resolved());
-        assert_eq!(
-            json["tools"][0]["function"]["name"],
-            "workspace__read_file"
-        );
+        assert_eq!(json["tools"][0]["function"]["name"], "workspace__read_file");
     }
 
     #[test]

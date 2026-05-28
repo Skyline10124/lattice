@@ -11,11 +11,21 @@ use colored::Colorize;
 use lattice_api::SessionApi;
 use lattice_session::GraphHead;
 
-pub(crate) fn default_session_dir() -> PathBuf {
+/// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
+pub(crate) fn lattice_config_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let xdg = xdg.trim();
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg);
+        }
+    }
     dirs::config_dir()
+        .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("lattice")
-        .join("sessions")
+}
+
+pub(crate) fn default_session_dir() -> PathBuf {
+    lattice_config_dir().join("lattice").join("sessions")
 }
 
 fn session_api() -> SessionApi {

@@ -24,6 +24,7 @@ use colored::Colorize;
 use lattice_profile::{ProfileError, ProfileSource};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+
 use std::time::Duration;
 use tokio::time;
 
@@ -452,7 +453,7 @@ async fn run_inner(
     }
 
     // Build SessionApi backed by SQLite
-    let session_dir = default_session_dir();
+    let session_dir = crate::commands::session::default_session_dir();
     let session_api = lattice_api::SessionApi::sqlite(session_dir);
 
     let request = RunTurnRequest {
@@ -535,14 +536,6 @@ async fn run_inner(
     }
 
     Ok(exit_code_from_state(&state))
-}
-
-fn default_session_dir() -> PathBuf {
-    dirs::config_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .expect("cannot determine config directory: neither XDG_CONFIG_HOME, config_dir, nor HOME is set")
-        .join("lattice")
-        .join("sessions")
 }
 
 fn profile_source_from_profile_arg(profile: Option<&str>) -> ProfileSource {
@@ -670,7 +663,10 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
         }
     }
 
-    if canonical.starts_with(Path::new("/tmp")) {
+    let tmp_root = Path::new("/tmp")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    if canonical.starts_with(&tmp_root) {
         return Err(format!(
             "Agents directory '{}' is inside /tmp which is world-writable and unsafe. \
              Set LATTICE_AGENTS_DIR to a safe location.",

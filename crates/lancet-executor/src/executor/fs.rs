@@ -237,12 +237,24 @@ fn secure_write_file_unix(
         return Err(format!("cannot write to '{}': invalid path", display_path));
     };
     let name = component_cstring(name, display_path)?;
+    #[cfg_attr(target_os = "macos", allow(clippy::useless_conversion))]
+    let create_mode = {
+        #[cfg(target_os = "macos")]
+        {
+            // macOS variadic openat expects mode promoted to c_uint, not mode_t.
+            0o666 as libc::mode_t as libc::c_uint
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0o666 as libc::mode_t
+        }
+    };
     let fd = unsafe {
         libc::openat(
             dir.as_raw_fd(),
             name.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o666 as libc::mode_t,
+            create_mode,
         )
     };
     if fd < 0 {
