@@ -24,6 +24,8 @@ use colored::Colorize;
 use lattice_profile::{ProfileError, ProfileSource};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
+
+pub(crate) use crate::commands::session::default_session_dir;
 use std::time::Duration;
 use tokio::time;
 
@@ -452,7 +454,7 @@ async fn run_inner(
     }
 
     // Build SessionApi backed by SQLite
-    let session_dir = default_session_dir();
+    let session_dir = crate::commands::session::default_session_dir();
     let session_api = lattice_api::SessionApi::sqlite(session_dir);
 
     let request = RunTurnRequest {
@@ -535,14 +537,6 @@ async fn run_inner(
     }
 
     Ok(exit_code_from_state(&state))
-}
-
-fn default_session_dir() -> PathBuf {
-    dirs::config_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .expect("cannot determine config directory: neither XDG_CONFIG_HOME, config_dir, nor HOME is set")
-        .join("lattice")
-        .join("sessions")
 }
 
 fn profile_source_from_profile_arg(profile: Option<&str>) -> ProfileSource {
