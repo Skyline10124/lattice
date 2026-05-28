@@ -12,7 +12,7 @@
 # Optional:
 #   P22_SELF_HOST_MODEL=compat:deepseek-v4-pro
 #   P22_SELF_HOST_KEEP=1
-#   P22_SELF_HOST_TASK=<task-a|task-b|task-c>   (default: all)
+#   P22_SELF_HOST_TASK=<task-a|task-b|task-c|all>   (default: task-a + task-c only)
 #   P22_SELF_HOST_BRANCH=<branch-or-ref> (default: main)
 #   P22_SELF_HOST_BIN                    (override lattice binary)
 #   P22_SELF_HOST_CLONE_URL              (default: https://github.com/Skyline10124/lattice.git)
@@ -304,10 +304,17 @@ finish_task() {
 
 should_run_task() {
   local slug="$1"
-  if [[ -z "${P22_SELF_HOST_TASK:-}" ]]; then
-    return 0
+  if [[ -n "${P22_SELF_HOST_TASK:-}" ]]; then
+    if [[ "${P22_SELF_HOST_TASK}" == "all" ]]; then
+      return 0
+    fi
+    [[ "${P22_SELF_HOST_TASK}" == "${slug}" ]]
+    return
   fi
-  [[ "${P22_SELF_HOST_TASK}" == "${slug}" ]]
+  case "${slug}" in
+    task-a | task-c) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ── clone + baseline ──────────────────────────────────────────────────────────
@@ -612,33 +619,41 @@ judge_task_c() {
     fi
   fi
 
-  local saw_guard=0
+  # Escape write: require failed write + path guard (not ReplanRequired alone).
+  if jq -es '
+    any(.[];
+      (.type == "tool_call_finished"
+        and .name == "workspace.write_file"
+        and .ok == false
+        and (.error_summary | test("\\.\\./|traversal"; "i")))
+      or (.type == "cep_call_finished"
+        and .method == "workspace.write_file"
+        and .ok == false
+        and (.error_code == "GuardDenied"
+          or .error_code == "ProjectRootViolation"
+          or .error_code == "PathContainment"))
+    )' "${TASK_JSONL}" 2>/dev/null; then
+    pass "escape write denied (failed write + GuardDenied/PathContainment/traversal)"
+  else
+    fail "escape write lacks GuardDenied/ProjectRootViolation/PathContainment or failed traversal write"
+  fi
+
+  # crates/ write under doc-only envelope: ReplanRequired or scope denial is sufficient.
   if jq -es '
     any(.[];
       .type == "cep_replan_required"
-      or .type == "cep_guard_verdict"
-      or (.type == "tool_call_finished" and .ok == false)
-      or (.type == "cep_call_finished" and .ok == false)
+      or (.type == "tool_call_finished"
+        and .name == "workspace.write_file"
+        and .ok == false
+        and (.error_summary | test("WritePath|not within"; "i")))
+      or (.type == "cep_call_finished"
+        and .method == "workspace.write_file"
+        and .ok == false
+        and .error_code == "ReplanRequired")
     )' "${TASK_JSONL}" 2>/dev/null; then
-    saw_guard=1
-    pass "replan/guard/denial evidence in JSONL"
+    pass "crates write blocked (ReplanRequired or WritePath scope denial)"
   else
-    fail "no ReplanRequired/GuardDenied/failed tool evidence in JSONL"
-  fi
-
-  if jq -es '
-    any(.[];
-      (.type == "tool_call_finished" and .name == "workspace.write_file" and .ok == false)
-      or (.type == "cep_call_finished" and .method == "workspace.write_file" and .ok == false)
-      or (.type == "cep_call_finished" and .ok == false and (.error_code == "GuardDenied" or .error_code == "ProjectRootViolation" or .error_code == "PathContainment"))
-    )' "${TASK_JSONL}" 2>/dev/null; then
-    pass "typed denial on forbidden write in JSONL"
-  else
-    if [[ "${saw_guard}" -eq 1 ]]; then
-      pass "alternate denial path accepted (replan/guard)"
-    else
-      fail "no typed denial on escape write"
-    fi
+    fail "no ReplanRequired/scope denial for forbidden crates write"
   fi
 
   if [[ ! -f "${TASK_WS}/.lattice/cep_audit.db" ]]; then
@@ -701,6 +716,11 @@ main() {
   log "- model: ${MODEL}"
   log "- lattice_binary: ${LATTICE[*]}"
   log "- env: OPENAI_COMPATIBLE_API_KEY, OPENAI_COMPATIBLE_BASE_URL (values not logged)"
+  if [[ -n "${P22_SELF_HOST_TASK:-}" ]]; then
+    log "- tasks: ${P22_SELF_HOST_TASK}"
+  else
+    log "- tasks: task-a, task-c (default; set P22_SELF_HOST_TASK=task-b or all to extend)"
+  fi
   log ""
 
   prepare_clone
@@ -712,14 +732,14 @@ main() {
 
   local failed=0
 
-  if should_run_task "task-b"; then
-    run_task_b || failed=1
-  fi
   if should_run_task "task-a"; then
     run_task_a || failed=1
   fi
   if should_run_task "task-c"; then
     run_task_c || failed=1
+  fi
+  if should_run_task "task-b"; then
+    run_task_b || failed=1
   fi
 
   verify_outer_unchanged || failed=1
