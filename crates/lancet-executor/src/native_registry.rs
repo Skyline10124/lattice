@@ -5,7 +5,6 @@ use crate::handlers::{
     register_mutation_methods, register_session_state_methods,
     register_workspace_observation_methods,
 };
-use crate::legacy_backend::register_phase22_pending_legacy_methods_minus_all_phase22;
 use crate::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
@@ -49,20 +48,16 @@ pub fn register_phase22_native_mutation(registry: &mut MethodRegistry) -> Result
     register_mutation_methods(registry)
 }
 
-/// Production registry: Phase 21/22 native handlers plus remaining Phase 22-pending legacy bridge.
+/// Production registry: all catalog methods served by Phase 21/22 native handlers.
 ///
+/// Phase 21 native: `workspace.*` observation, `web.fetch`, `session.todo_write`.
 /// Phase 22 native: `envelope.declare`, `command.run`, `workspace.write_file`, `workspace.patch`.
-/// Phase 22-pending bridge: (none — all Phase 22 methods are now native).
-pub fn register_production_method_registry(
-    registry: &mut MethodRegistry,
-    project_root: &str,
-    http_client: reqwest::Client,
-) -> Result<(), CepError> {
+/// The legacy CEP bridge is no longer part of the production registry.
+pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_phase21_native_methods(registry)?;
     register_phase22_native_envelope(registry)?;
     register_phase22_native_command(registry)?;
-    register_phase22_native_mutation(registry)?;
-    register_phase22_pending_legacy_methods_minus_all_phase22(registry, project_root, http_client)
+    register_phase22_native_mutation(registry)
 }
 
 #[cfg(test)]
@@ -85,23 +80,15 @@ mod phase21_native_registry_tests {
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
 
-    fn test_http_client() -> reqwest::Client {
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("http client")
-    }
-
-    fn production_registry(root: &str) -> MethodRegistry {
+    fn production_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
-        register_production_method_registry(&mut registry, root, test_http_client()).unwrap();
+        register_production_method_registry(&mut registry).unwrap();
         registry
     }
 
     #[test]
     fn phase21_native_registry_registers_full_catalog_once() {
-        let dir = TempDir::new().unwrap();
-        let registry = production_registry(dir.path().to_str().unwrap());
+        let registry = production_registry();
         for descriptor in catalog() {
             assert!(
                 registry.contains(descriptor.name),
@@ -113,10 +100,8 @@ mod phase21_native_registry_tests {
 
     #[test]
     fn phase21_native_registry_double_registration_fails() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
         let mut registry = MethodRegistry::new();
-        register_production_method_registry(&mut registry, root, test_http_client()).unwrap();
+        register_production_method_registry(&mut registry).unwrap();
         let err =
             register_phase21_native_methods(&mut registry).expect_err("double native registration");
         assert_eq!(err.code, CepErrorCode::DuplicateRegistration);
@@ -127,7 +112,7 @@ mod phase21_native_registry_tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("probe.txt"), "x").unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = production_registry(root);
+        let registry = production_registry();
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let ctx = HandlerContext {
@@ -176,7 +161,7 @@ mod phase21_native_registry_tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "hi").unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = production_registry(root);
+        let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "audit routing");
         config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
@@ -227,7 +212,7 @@ mod phase21_native_registry_tests {
     async fn phase21_native_registry_bridge_methods_retain_bridge_metadata() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = production_registry(root);
+        let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "bridge audit");
         config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
@@ -265,7 +250,7 @@ mod phase21_native_registry_tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(BACKEND_SAFETY_NET_TEST_PATH), "probe").unwrap();
         let root = dir.path().to_str().unwrap();
-        let registry = production_registry(root);
+        let registry = production_registry();
         let (event_tx, _event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let ctx = HandlerContext {

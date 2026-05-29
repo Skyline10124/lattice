@@ -316,8 +316,7 @@ async fn production_adapter(
     use lancet_protocol::methods::session::TodoWrite;
 
     let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry, root, test_http_client())
-        .expect("production registry");
+    register_production_method_registry(&mut registry).expect("production registry");
 
     let mut policy = Phase21PolicyConfig::defaults_for_project_root(root);
     policy.network.allow_localhost = allow_localhost;

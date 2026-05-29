@@ -564,16 +564,10 @@ pub(crate) fn build_production_turn_deps(
         default_policy_hook: Some(default_hook),
     };
 
-    let http_client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|err| ApiError::Internal(format!("http client setup: {err}")))?;
-
     let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry, project_root, http_client).map_err(
-        |err| ApiError::Internal(format!("production method registry registration: {err:?}")),
-    )?;
+    register_production_method_registry(&mut registry).map_err(|err| {
+        ApiError::Internal(format!("production method registry registration: {err:?}"))
+    })?;
 
     let server_shutdown = server.shutdown_handle();
     let server_task = tokio::spawn(async move {
