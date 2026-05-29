@@ -355,7 +355,9 @@ fn parse_source_classes(strings: &[String]) -> Result<Vec<CapabilitySourceClass>
     Ok(result)
 }
 
-fn parse_required_capability(s: &str) -> Result<lancet_protocol::method::RequiredCapability, String> {
+fn parse_required_capability(
+    s: &str,
+) -> Result<lancet_protocol::method::RequiredCapability, String> {
     use lancet_protocol::method::RequiredCapability;
     match s {
         "Inspect" => Ok(RequiredCapability::Inspect),
@@ -373,16 +375,26 @@ fn parse_required_capability(s: &str) -> Result<lancet_protocol::method::Require
 
 // ── Rich outcome and evidence (executor-owned) ─────────────────────────
 
-fn capability_kind_matches(cap: &lancet_protocol::envelope::Capability, kind: &str) -> bool {
+fn capability_kind_matches(
+    cap: &lancet_protocol::envelope::Capability,
+    kind: lancet_protocol::method::RequiredCapability,
+) -> bool {
     use lancet_protocol::envelope::Capability;
+    use lancet_protocol::method::RequiredCapability;
     matches!(
         (cap, kind),
-        (Capability::ReadPath { .. }, "ReadPath")
-            | (Capability::WritePath { .. }, "WritePath")
-            | (Capability::RunCommand { .. }, "RunCommand")
-            | (Capability::FetchUrl { .. }, "FetchUrl")
-            | (Capability::MutateSessionState, "MutateSessionState")
-            | (Capability::Inspect, "Inspect")
+        (Capability::ReadPath { .. }, RequiredCapability::ReadPath)
+            | (Capability::WritePath { .. }, RequiredCapability::WritePath)
+            | (
+                Capability::RunCommand { .. },
+                RequiredCapability::RunCommand
+            )
+            | (Capability::FetchUrl { .. }, RequiredCapability::FetchUrl)
+            | (
+                Capability::MutateSessionState,
+                RequiredCapability::MutateSessionState
+            )
+            | (Capability::Inspect, RequiredCapability::Inspect)
     )
 }
 
@@ -464,7 +476,7 @@ impl DefaultPolicyHook {
                     evidence: PolicyEvidence::default(),
                 };
             }
-            if let Some(ref req_cap) = mp.required_capability {
+            if let Some(req_cap) = mp.required_capability {
                 let has_matching_cap = resolved
                     .envelope_snapshot
                     .capabilities
@@ -475,7 +487,7 @@ impl DefaultPolicyHook {
                         decision: PolicyDecision::Denied {
                             reason_code: PolicyReasonCode::MissingCapability,
                             message: format!(
-                                "method '{}' requires capability '{}' per policy config",
+                                "method '{}' requires capability '{:?}' per policy config",
                                 resolved.method, req_cap
                             ),
                             action_required: Some(PolicyActionRequired::DeclareEnvelope),

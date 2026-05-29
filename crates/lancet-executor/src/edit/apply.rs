@@ -818,6 +818,15 @@ mod tests {
     async fn apply_patch_engine_write_stage_failure_rolls_back_already_written_files() {
         use std::os::unix::fs::PermissionsExt;
 
+        // This test forces a write failure via a read-only (0o444) file. Root
+        // bypasses DAC permission checks, so the write would succeed and the
+        // rollback path under test would never trigger — skip when running as
+        // root (e.g. inside containerized CI).
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: read-only write-failure path is not exercised as root");
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let first = dir.path().join("first.txt");
         let second = dir.path().join("second.txt");
