@@ -5,8 +5,10 @@ use crate::audit::{
     CepAuditContext, CepAuditStore,
 };
 use crate::envelope_store::ActiveEnvelopeStore;
+use crate::policy::default::DefaultPolicyHook;
 use crate::policy::Phase21TurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
+use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     envelope::BaseExecutionEnvelope, error::to_jsonrpc_error, CatalogMethod, CepError, Id,
     ToolEvent, ToolResult,
@@ -38,6 +40,10 @@ pub struct ServerRunConfig {
     pub call_audit_metadata: CallAuditMetadata,
     /// When true, resolve audit metadata per method (Phase 21 native vs Phase 22 bridge).
     pub production_audit_routing: bool,
+    /// Pluggable policy hook for capability/command/network/budget decisions.
+    pub policy_hook: Arc<dyn PolicyHook>,
+    /// Executor-owned default hook for evidence capture when the default implementation is installed.
+    pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
 }
 
 impl ServerRunConfig {
@@ -45,6 +51,11 @@ impl ServerRunConfig {
     pub fn in_memory_for_tests() -> Self {
         let base_envelope = BaseExecutionEnvelope::for_workspace_root(".", "test turn observation");
         let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root("."));
+        let default_hook = Arc::new(DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from("."),
+            ),
+        ));
         Self {
             audit: Arc::new(CepAuditStore::in_memory().expect("in-memory audit store")),
             audit_context: Arc::new(RwLock::new(CepAuditContext {
@@ -56,6 +67,8 @@ impl ServerRunConfig {
             active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             call_audit_metadata: CallAuditMetadata::bridge_defaults(),
             production_audit_routing: false,
+            policy_hook: default_hook.clone(),
+            default_policy_hook: Some(default_hook),
         }
     }
 }
@@ -381,6 +394,8 @@ async fn handle_request(
         active_envelope,
         call_audit_metadata,
         production_audit_routing,
+        policy_hook,
+        default_policy_hook,
     } = config;
 
     let ServerRequest {
@@ -427,6 +442,9 @@ async fn handle_request(
         active_envelope: Arc::clone(&active_envelope),
         turn_id,
         durable_metadata: durable_metadata.clone(),
+        policy_hook: Arc::clone(&policy_hook),
+        default_policy_hook: default_policy_hook.clone(),
+        audit_context: Arc::clone(&audit_context),
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;
@@ -1201,7 +1219,7 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
         drop(client);
         server_task.await.unwrap();
 

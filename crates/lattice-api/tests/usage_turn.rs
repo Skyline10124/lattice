@@ -478,7 +478,7 @@ enabled = {enabled:?}
 }
 
 #[tokio::test]
-async fn public_https_policy_without_fetch_wildcard() {
+async fn public_https_policy_requires_fetch_capability() {
     let ws = setup_workspace_with_cep_network(
         "fn main() {}",
         &["web.fetch"],
@@ -519,11 +519,11 @@ async fn public_https_policy_without_fetch_wildcard() {
             event,
             TurnEvent::ToolCallFinished {
                 name,
-                ok: true,
+                ok: false,
                 ..
             } if name == "web.fetch"
         )),
-        "web.fetch must succeed without ambient FetchUrl(\"*\")"
+        "web.fetch must be denied without FetchUrl capability even with allow_public_https"
     );
     assert!(
         events.iter().any(|event| matches!(

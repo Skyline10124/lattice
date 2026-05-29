@@ -18,5 +18,5 @@ pub use error::ProfileError;
 pub use load::{load_agent_profile, LoadedAgentProfile};
 pub use schema::{
     AgentProfile, AgentSection, CepCommandSection, CepNetworkSection, CepObservationSection,
-    CepProjectRootSection, CepSection, PromptSection, ToolsSection,
+    CepPolicySection, CepProjectRootSection, CepSection, PromptSection, ToolsSection,
 };

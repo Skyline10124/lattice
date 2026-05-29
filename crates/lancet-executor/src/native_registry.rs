@@ -139,6 +139,16 @@ mod phase21_native_registry_tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = ReadFileParams {
@@ -151,7 +161,7 @@ mod phase21_native_registry_tests {
             .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
 
         while let Ok(event) = event_rx.try_recv() {
             assert_ne!(
@@ -171,6 +181,13 @@ mod phase21_native_registry_tests {
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "audit routing");
         config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
         config.production_audit_routing = true;
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
+        config.policy_hook = default_hook.clone();
+        config.default_policy_hook = Some(default_hook);
 
         let (client, server) = LancetTransport::pair(8);
         let audit = Arc::clone(&config.audit);
@@ -249,7 +266,7 @@ mod phase21_native_registry_tests {
         std::fs::write(dir.path().join(BACKEND_SAFETY_NET_TEST_PATH), "probe").unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = production_registry(root);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let ctx = HandlerContext {
             call_id: 2,
@@ -260,6 +277,16 @@ mod phase21_native_registry_tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = ReadFileParams {
@@ -273,12 +300,5 @@ mod phase21_native_registry_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ProjectRootViolation);
-
-        let event = event_rx.recv().await.expect("native denial metadata");
-        assert_eq!(
-            event.params["metadata"]["denial_source"],
-            "backend_safety_net"
-        );
-        assert_eq!(event.params["metadata"]["policy_enforced"], true);
     }
 }

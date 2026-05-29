@@ -1,11 +1,14 @@
 //! Typed method registry for CEP catalog dispatch.
 
+use crate::audit::CepAuditContext;
 use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
+use crate::policy::default::DefaultPolicyHook;
 use crate::policy::Phase21TurnContext;
+use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData};
+use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
-    envelope::BaseExecutionEnvelope,
-    error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData},
     CatalogMethod, CepError, CepErrorCode, CepErrorData, Retriability, ToolEvent,
 };
 use serde_json::Value;
@@ -13,7 +16,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, RwLock};
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -81,24 +84,36 @@ impl EventSink {
 }
 
 /// Per-call context passed to registered handlers.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct HandlerContext {
-    /// Monotonic call identifier shared with events and the JSON-RPC request id.
     pub call_id: u64,
-    /// Notification sink for streaming progress.
     pub events: EventSink,
-    /// Cancellation receiver; polled or awaited by the handler.
     pub cancellation: Cancellation,
-    /// Turn-scoped base envelope injected by the composition layer.
     pub base_envelope: BaseExecutionEnvelope,
-    /// Phase 21 policy limits and turn-scoped budget tracker.
     pub phase21: Arc<Phase21TurnContext>,
-    /// Turn-scoped active envelope store for Phase 22 envelope lifecycle.
     pub active_envelope: Arc<ActiveEnvelopeStore>,
-    /// Turn identifier for envelope ID generation (env-{turn_id}-{seq}).
     pub turn_id: String,
-    /// Compact per-call metadata persisted into `cep_audit_entries.metadata_json`.
     pub(crate) durable_metadata: CallDurableMetadata,
+    pub policy_hook: Arc<dyn PolicyHook>,
+    pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
+    pub audit_context: Arc<RwLock<CepAuditContext>>,
+}
+
+impl std::fmt::Debug for HandlerContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HandlerContext")
+            .field("call_id", &self.call_id)
+            .field("events", &self.events)
+            .field("cancellation", &self.cancellation)
+            .field("base_envelope", &self.base_envelope)
+            .field("phase21", &self.phase21)
+            .field("active_envelope", &self.active_envelope)
+            .field("turn_id", &self.turn_id)
+            .field("policy_hook", &"<dyn PolicyHook>")
+            .field("default_policy_hook", &self.default_policy_hook)
+            .field("audit_context", &self.audit_context)
+            .finish()
+    }
 }
 
 impl HandlerContext {
@@ -250,6 +265,11 @@ mod tests {
 
     fn test_handler_context(call_id: u64, event_tx: mpsc::Sender<ToolEvent>) -> HandlerContext {
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from("."),
+            ),
+        ));
         HandlerContext {
             call_id,
             events: EventSink::new(event_tx, call_id),
@@ -259,6 +279,12 @@ mod tests {
             active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: CallDurableMetadata::default(),
+            policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
+            default_policy_hook: Some(default_hook),
+            audit_context: Arc::new(RwLock::new(CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         }
     }
 

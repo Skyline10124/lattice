@@ -1,9 +1,12 @@
 //! Phase 21 CEP policy and budget configuration (immutable per turn).
 
 pub mod budget;
+pub mod capability;
 pub mod command;
+pub mod default;
 pub mod network;
 pub mod observation;
+pub mod resolved;
 
 use std::path::PathBuf;
 use std::sync::Arc;

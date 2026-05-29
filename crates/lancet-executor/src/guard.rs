@@ -8,10 +8,20 @@
 //! - `GuardDenied`: target escapes project root or violates hard security boundary
 //! - `EnvelopeMissing`: no active envelope authority exists
 
-use lancet_protocol::envelope::Capability;
-use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
+use crate::envelope_store::EnvelopeRecord;
+use crate::policy::default::{DefaultPolicyHook, PolicyEvidence};
+use crate::registry::HandlerContext;
+use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability, GuardVerdict};
+use lancet_protocol::error::{
+    CepErrorData, GuardErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
+};
+use lancet_protocol::policy::{
+    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyBudgetSnapshot,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, SourcedCapability,
+};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use std::collections::BTreeSet;
+use serde::Serialize;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 /// Normalized write path pattern for scope matching.
@@ -469,6 +479,299 @@ fn replan_required(target: &str, patterns: &[String]) -> CepError {
     )
 }
 
+/// Build a layered effective envelope snapshot from base + declared envelopes.
+///
+/// Per D-10, D-11: base is the turn-level observation floor; declared is the
+/// task-level authority extension. Capabilities present in both get `Both` source.
+pub fn build_effective_envelope_snapshot(
+    base: &BaseExecutionEnvelope,
+    active: Option<&EnvelopeRecord>,
+) -> EffectiveEnvelopeSnapshot {
+    let base_envelope_id = "base".to_string();
+    let declared_envelope_id = active.map(|r| r.envelope_id.clone());
+    let base_caps: &BTreeSet<Capability> = &base.inner.capabilities;
+    let declared_caps: Option<&BTreeSet<Capability>> = active.map(|r| &r.envelope.capabilities);
+
+    let mut capabilities = Vec::new();
+    let mut matched_declared: HashSet<usize> = HashSet::new();
+
+    for base_cap in base_caps {
+        let source = if let Some(d_caps) = declared_caps {
+            let matching_idx = d_caps.iter().enumerate().find_map(|(idx, d_cap)| {
+                if d_cap == base_cap && !matched_declared.contains(&idx) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            });
+            match matching_idx {
+                Some(idx) => {
+                    matched_declared.insert(idx);
+                    CapabilitySource::Both {
+                        envelope_id: declared_envelope_id.clone().unwrap_or_default(),
+                    }
+                }
+                None => CapabilitySource::Base,
+            }
+        } else {
+            CapabilitySource::Base
+        };
+        capabilities.push(SourcedCapability {
+            capability: base_cap.clone(),
+            source,
+        });
+    }
+
+    if let Some(d_caps) = declared_caps {
+        for (idx, d_cap) in d_caps.iter().enumerate() {
+            if !matched_declared.contains(&idx) {
+                capabilities.push(SourcedCapability {
+                    capability: d_cap.clone(),
+                    source: CapabilitySource::Declared {
+                        envelope_id: declared_envelope_id.clone().unwrap_or_default(),
+                    },
+                });
+            }
+        }
+    }
+
+    EffectiveEnvelopeSnapshot {
+        base_envelope_id,
+        declared_envelope_id,
+        capabilities,
+    }
+}
+
+/// Build a `PolicyInput` from handler context, method name, and params.
+///
+/// Assembles the effective envelope snapshot, audit context (including budget snapshot),
+/// and serialized params into the public policy input contract.
+pub async fn build_policy_input(
+    ctx: &HandlerContext,
+    method: &str,
+    params: &impl Serialize,
+) -> Result<PolicyInput, CepError> {
+    let active_record = ctx.active_envelope.active_record().await;
+    let envelope_snapshot =
+        build_effective_envelope_snapshot(&ctx.base_envelope, active_record.as_ref());
+
+    let audit_snapshot = ctx.audit_context.read().await;
+    let budget = ctx.phase21.budget.snapshot();
+    let budget_snapshot = PolicyBudgetSnapshot {
+        turn_observation_bytes_used: budget.turn_observation_bytes_used as u64,
+        turn_observation_bytes_limit: budget.max_turn_observation_bytes as u64,
+        todo_ops_used: budget.todo_ops_used as u64,
+        todo_ops_limit: budget.max_todo_ops as u64,
+    };
+
+    let audit_context = PolicyAuditContext {
+        turn_id: audit_snapshot.turn_id.clone(),
+        session_id: audit_snapshot.session_id.clone(),
+        call_id: Some(ctx.call_id),
+        budget_snapshot,
+    };
+
+    Ok(PolicyInput {
+        method: method.to_string(),
+        params: serde_json::to_value(params).map_err(|e| {
+            CepError::internal_error(format!("failed to serialize policy input params: {e}"))
+        })?,
+        envelope_snapshot,
+        audit_context,
+    })
+}
+
+/// Result of evaluating a policy hook.
+pub struct PolicyEvaluation {
+    pub decision: PolicyDecision,
+    pub evidence: Option<PolicyEvidence>,
+}
+
+/// Evaluate the policy hook, returning a stable decision and optional evidence.
+///
+/// If the default hook is installed, calls `decide_with_evidence` to capture
+/// rich executor-owned evidence for audit. Otherwise calls the public
+/// `PolicyHook::decide` and returns `evidence: None`.
+pub fn evaluate_policy(
+    hook: &dyn PolicyHook,
+    default_hook: Option<&DefaultPolicyHook>,
+    input: &PolicyInput,
+) -> Result<PolicyEvaluation, CepError> {
+    if let Some(default) = default_hook {
+        let outcome = default.decide_with_evidence(input);
+        Ok(PolicyEvaluation {
+            decision: outcome.decision,
+            evidence: Some(outcome.evidence),
+        })
+    } else {
+        let decision = hook.decide(input);
+        Ok(PolicyEvaluation {
+            decision,
+            evidence: None,
+        })
+    }
+}
+
+/// Map a `PolicyDecision` to a CEP error if denied/human-review, or `Ok(())` if allowed.
+///
+/// Every `PolicyReasonCode` maps to an existing `CepErrorCode`. This is the single
+/// mapping path: PolicyDecision → CEP typed error → event → audit (D-43).
+pub fn map_decision_to_cep_error(decision: &PolicyDecision, method: &str) -> Result<(), CepError> {
+    match decision {
+        PolicyDecision::Allowed => Ok(()),
+        PolicyDecision::Denied {
+            reason_code,
+            message,
+            action_required: _,
+        } => {
+            let (code, data, retriability) = match reason_code {
+                PolicyReasonCode::MissingCapability | PolicyReasonCode::EnvelopeRequired => (
+                    CepErrorCode::CapabilityNotGranted,
+                    CepErrorData::Permission(PermissionErrorData {
+                        required_capability: method.into(),
+                        active_envelope_id: None,
+                        granted_capabilities: vec![],
+                    }),
+                    Retriability::Permanent,
+                ),
+                PolicyReasonCode::CapabilitySourceNotAllowed => (
+                    CepErrorCode::CapabilityNotGranted,
+                    CepErrorData::Permission(PermissionErrorData {
+                        required_capability: method.into(),
+                        active_envelope_id: None,
+                        granted_capabilities: vec![],
+                    }),
+                    Retriability::Permanent,
+                ),
+                PolicyReasonCode::PathOutsideScope | PolicyReasonCode::ReplanRequired => (
+                    CepErrorCode::ReplanRequired,
+                    CepErrorData::Guard(GuardErrorData {
+                        method: method.into(),
+                        reason: message.clone(),
+                    }),
+                    Retriability::RequiresReplan,
+                ),
+                PolicyReasonCode::CommandDenied | PolicyReasonCode::NetworkDenied => (
+                    CepErrorCode::GuardDenied,
+                    CepErrorData::Guard(GuardErrorData {
+                        method: method.into(),
+                        reason: message.clone(),
+                    }),
+                    Retriability::Permanent,
+                ),
+                PolicyReasonCode::BudgetExceeded => (
+                    CepErrorCode::Reserved,
+                    CepErrorData::Reserved(ReservedErrorData {
+                        code: "budget_exceeded".into(),
+                        detail: message.clone(),
+                    }),
+                    Retriability::RequiresReplan,
+                ),
+                PolicyReasonCode::PolicyConfigInvalid => (
+                    CepErrorCode::Reserved,
+                    CepErrorData::Reserved(ReservedErrorData {
+                        code: "policy_config_invalid".into(),
+                        detail: message.clone(),
+                    }),
+                    Retriability::Permanent,
+                ),
+                PolicyReasonCode::NonDeterminable => (
+                    CepErrorCode::GuardDenied,
+                    CepErrorData::Guard(GuardErrorData {
+                        method: method.into(),
+                        reason: message.clone(),
+                    }),
+                    Retriability::Unknown,
+                ),
+            };
+            Err(CepError::new(code, message.clone(), data, retriability))
+        }
+        PolicyDecision::HumanReview {
+            reason_code: _,
+            message,
+        } => Err(CepError::new(
+            CepErrorCode::GuardDenied,
+            message.clone(),
+            CepErrorData::Guard(GuardErrorData {
+                method: method.into(),
+                reason: message.clone(),
+            }),
+            Retriability::Unknown,
+        )),
+    }
+}
+
+/// Map a `PolicyDecision` to a `GuardVerdict` for event compatibility (D-45).
+///
+/// This is a projection for event emission only — `PolicyDecision` and
+/// `GuardVerdict` remain distinct types (D-45).
+pub fn decision_to_guard_verdict(decision: &PolicyDecision) -> GuardVerdict {
+    match decision {
+        PolicyDecision::Allowed => GuardVerdict::Allowed,
+        PolicyDecision::Denied { message, .. } => GuardVerdict::Denied {
+            reason: message.clone(),
+        },
+        PolicyDecision::HumanReview { message, .. } => GuardVerdict::HumanReview {
+            reason: message.clone(),
+        },
+    }
+}
+
+/// Evaluate policy, emit guard verdict event, record metadata, and enforce decision.
+///
+/// This is the single entry point for handlers to route through the policy system.
+/// It handles:
+/// 1. Policy evaluation via `evaluate_policy`
+/// 2. Guard verdict event emission
+/// 3. Evidence metadata recording on success
+/// 4. Denial metadata recording on failure
+/// 5. CEP error mapping via `map_decision_to_cep_error`
+pub async fn evaluate_and_enforce_policy(
+    ctx: &HandlerContext,
+    method: &str,
+    params: &impl Serialize,
+) -> Result<PolicyEvaluation, CepError> {
+    let input = build_policy_input(ctx, method, params).await?;
+    let evaluation = evaluate_policy(
+        &*ctx.policy_hook,
+        ctx.default_policy_hook.as_deref(),
+        &input,
+    )?;
+    let verdict = decision_to_guard_verdict(&evaluation.decision);
+    ctx.events
+        .emit(
+            "cep.guard_verdict",
+            serde_json::json!({ "method": method, "verdict": verdict }),
+        )
+        .await;
+
+    match &evaluation.decision {
+        PolicyDecision::Allowed => {
+            if let Some(evidence) = &evaluation.evidence {
+                ctx.record_durable_metadata(serde_json::json!({
+                    "cep_policy": {
+                        "capability_match": evidence.capability_match.is_some(),
+                        "budget_remaining": evidence.budget_remaining,
+                    }
+                }));
+            }
+        }
+        PolicyDecision::Denied { reason_code, .. }
+        | PolicyDecision::HumanReview { reason_code, .. } => {
+            ctx.record_durable_metadata(serde_json::json!({
+                "method": method,
+                "denial_source": "cep_policy",
+                "policy_enforced": true,
+                "backend_invoked": false,
+                "reason_code": format!("{:?}", reason_code),
+            }));
+        }
+    }
+
+    map_decision_to_cep_error(&evaluation.decision, method)?;
+    Ok(evaluation)
+}
+
 #[cfg(test)]
 mod guard_l1_tests {
     use super::*;
@@ -729,5 +1032,374 @@ mod guard_l1_tests {
             &caps,
             &["cargo".into(), "test".into()]
         ));
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::audit::CepAuditContext;
+    use crate::policy::default::PolicyConfig;
+    use crate::policy::Phase21TurnContext;
+    use crate::registry::{Cancellation, EventSink};
+    use lancet_protocol::envelope::{BaseExecutionEnvelope, ExecutionEnvelope, Intent, Scope};
+    use lancet_protocol::policy::PolicyBudgetSnapshot;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::{mpsc, watch};
+
+    fn test_handler_context(
+        root: &str,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(DefaultPolicyHook::new(
+            PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(root)),
+        ));
+        (
+            HandlerContext {
+                call_id: 1,
+                events: EventSink::new(event_tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "policy test"),
+                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
+            },
+            event_rx,
+        )
+    }
+
+    fn base_only_envelope() -> BaseExecutionEnvelope {
+        BaseExecutionEnvelope::for_workspace_root(".", "test")
+    }
+
+    fn envelope_record(envelope_id: &str) -> EnvelopeRecord {
+        EnvelopeRecord {
+            envelope_id: envelope_id.into(),
+            envelope_hash: "hash".into(),
+            envelope: ExecutionEnvelope {
+                intent: Intent {
+                    description: "test".into(),
+                },
+                capabilities: BTreeSet::from([Capability::WritePath {
+                    path_pattern: "src/**".into(),
+                }]),
+                scope: Scope::default(),
+                impact: vec![],
+                constraints: Default::default(),
+                verify: None,
+                on_failure: None,
+                extensions: Default::default(),
+            },
+            declared_at_call_id: 0,
+            supersedes: None,
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_base_only() {
+        let base = base_only_envelope();
+        let snapshot = build_effective_envelope_snapshot(&base, None);
+        assert_eq!(snapshot.base_envelope_id, "base");
+        assert!(snapshot.declared_envelope_id.is_none());
+        for sc in &snapshot.capabilities {
+            assert_eq!(sc.source, CapabilitySource::Base);
+        }
+    }
+
+    #[test]
+    fn snapshot_base_plus_declared_no_overlap() {
+        let base = base_only_envelope();
+        let record = envelope_record("declared-1");
+        let snapshot = build_effective_envelope_snapshot(&base, Some(&record));
+        assert_eq!(snapshot.declared_envelope_id, Some("declared-1".into()));
+        let has_declared = snapshot
+            .capabilities
+            .iter()
+            .any(|sc| matches!(sc.source, CapabilitySource::Declared { .. }));
+        assert!(has_declared, "should have declared-only capability");
+    }
+
+    #[test]
+    fn snapshot_both_overlap() {
+        let mut base = base_only_envelope();
+        base.inner.capabilities.insert(Capability::WritePath {
+            path_pattern: "src/**".into(),
+        });
+        let record = envelope_record("declared-1");
+        let snapshot = build_effective_envelope_snapshot(&base, Some(&record));
+        let has_both = snapshot
+            .capabilities
+            .iter()
+            .any(|sc| matches!(sc.source, CapabilitySource::Both { .. }));
+        assert!(has_both, "overlapping capability should have Both source");
+    }
+
+    #[tokio::test]
+    async fn build_policy_input_includes_session_id_and_budget() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (ctx, _events) = test_handler_context(root);
+        let input = build_policy_input(&ctx, "workspace.read_file", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(input.method, "workspace.read_file");
+        assert_eq!(input.audit_context.turn_id, "test-turn");
+        assert_eq!(input.audit_context.session_id, "test-session");
+        assert!(
+            input
+                .audit_context
+                .budget_snapshot
+                .turn_observation_bytes_limit
+                > 0
+        );
+    }
+
+    #[test]
+    fn evaluate_with_default_hook_returns_evidence() {
+        let hook = DefaultPolicyHook::new(PolicyConfig::defaults_for_project_root(
+            std::path::PathBuf::from("."),
+        ));
+        let input = PolicyInput {
+            method: "workspace.read_file".into(),
+            params: serde_json::json!({}),
+            envelope_snapshot: EffectiveEnvelopeSnapshot {
+                base_envelope_id: "base".into(),
+                declared_envelope_id: None,
+                capabilities: vec![],
+            },
+            audit_context: PolicyAuditContext {
+                turn_id: "t".into(),
+                session_id: "s".into(),
+                call_id: Some(1),
+                budget_snapshot: PolicyBudgetSnapshot {
+                    turn_observation_bytes_used: 0,
+                    turn_observation_bytes_limit: 65536,
+                    todo_ops_used: 0,
+                    todo_ops_limit: 10,
+                },
+            },
+        };
+        let eval = evaluate_policy(&hook, Some(&hook), &input).unwrap();
+        assert!(
+            eval.evidence.is_some(),
+            "default hook should return evidence"
+        );
+    }
+
+    #[test]
+    fn evaluate_with_external_hook_returns_no_evidence() {
+        struct AlwaysAllowed;
+        impl PolicyHook for AlwaysAllowed {
+            fn decide(&self, _input: &PolicyInput) -> PolicyDecision {
+                PolicyDecision::Allowed
+            }
+        }
+        let hook = AlwaysAllowed;
+        let input = PolicyInput {
+            method: "test".into(),
+            params: serde_json::json!({}),
+            envelope_snapshot: EffectiveEnvelopeSnapshot {
+                base_envelope_id: "base".into(),
+                declared_envelope_id: None,
+                capabilities: vec![],
+            },
+            audit_context: PolicyAuditContext {
+                turn_id: "t".into(),
+                session_id: "s".into(),
+                call_id: None,
+                budget_snapshot: PolicyBudgetSnapshot {
+                    turn_observation_bytes_used: 0,
+                    turn_observation_bytes_limit: 0,
+                    todo_ops_used: 0,
+                    todo_ops_limit: 0,
+                },
+            },
+        };
+        let eval = evaluate_policy(&hook, None, &input).unwrap();
+        assert!(
+            eval.evidence.is_none(),
+            "external hook should return no evidence"
+        );
+        assert_eq!(eval.decision, PolicyDecision::Allowed);
+    }
+
+    #[test]
+    fn map_allowed_returns_ok() {
+        assert!(map_decision_to_cep_error(&PolicyDecision::Allowed, "test").is_ok());
+    }
+
+    #[test]
+    fn map_missing_capability_to_capability_not_granted() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::MissingCapability,
+            message: "no cap".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+        assert_eq!(err.retriability, Retriability::Permanent);
+    }
+
+    #[test]
+    fn map_replan_required_to_replan_required() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::ReplanRequired,
+            message: "replan".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert_eq!(err.retriability, Retriability::RequiresReplan);
+    }
+
+    #[test]
+    fn map_command_denied_to_guard_denied() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::CommandDenied,
+            message: "denied".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert_eq!(err.retriability, Retriability::Permanent);
+    }
+
+    #[test]
+    fn map_budget_exceeded_to_reserved_with_replan() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::BudgetExceeded,
+            message: "budget".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::Reserved);
+        assert_eq!(err.retriability, Retriability::RequiresReplan);
+    }
+
+    #[test]
+    fn map_non_determinable_to_guard_denied_unknown() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::NonDeterminable,
+            message: "unknown".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert_eq!(err.retriability, Retriability::Unknown);
+    }
+
+    #[test]
+    fn map_human_review_to_guard_denied_unknown() {
+        let decision = PolicyDecision::HumanReview {
+            reason_code: PolicyReasonCode::NonDeterminable,
+            message: "review".into(),
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert_eq!(err.retriability, Retriability::Unknown);
+    }
+
+    #[test]
+    fn map_network_denied_to_guard_denied() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::NetworkDenied,
+            message: "blocked".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "web.fetch").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+    }
+
+    #[test]
+    fn map_path_outside_scope_to_replan_required() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::PathOutsideScope,
+            message: "outside".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert_eq!(err.retriability, Retriability::RequiresReplan);
+    }
+
+    #[test]
+    fn map_capability_source_not_allowed_to_capability_not_granted() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::CapabilitySourceNotAllowed,
+            message: "source".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+    }
+
+    #[test]
+    fn map_policy_config_invalid_to_reserved() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::PolicyConfigInvalid,
+            message: "bad config".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::Reserved);
+        assert_eq!(err.retriability, Retriability::Permanent);
+    }
+
+    #[test]
+    fn map_envelope_required_to_capability_not_granted() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::EnvelopeRequired,
+            message: "need envelope".into(),
+            action_required: None,
+        };
+        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+    }
+
+    #[test]
+    fn verdict_allowed() {
+        assert_eq!(
+            decision_to_guard_verdict(&PolicyDecision::Allowed),
+            GuardVerdict::Allowed
+        );
+    }
+
+    #[test]
+    fn verdict_denied() {
+        let decision = PolicyDecision::Denied {
+            reason_code: PolicyReasonCode::MissingCapability,
+            message: "no cap".into(),
+            action_required: None,
+        };
+        assert_eq!(
+            decision_to_guard_verdict(&decision),
+            GuardVerdict::Denied {
+                reason: "no cap".into()
+            }
+        );
+    }
+
+    #[test]
+    fn verdict_human_review() {
+        let decision = PolicyDecision::HumanReview {
+            reason_code: PolicyReasonCode::NonDeterminable,
+            message: "review needed".into(),
+        };
+        assert_eq!(
+            decision_to_guard_verdict(&decision),
+            GuardVerdict::HumanReview {
+                reason: "review needed".into()
+            }
+        );
     }
 }

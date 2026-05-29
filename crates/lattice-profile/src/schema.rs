@@ -35,6 +35,8 @@ pub struct CepSection {
     pub network: Option<CepNetworkSection>,
     #[serde(default)]
     pub command: Option<CepCommandSection>,
+    #[serde(default)]
+    pub policy: Option<CepPolicySection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -98,6 +100,14 @@ pub struct CepCommandSection {
     pub inherited_env: Option<Vec<String>>,
 }
 
+/// `[cep.policy]` — pointer to external structured TOML policy file (Phase 23, PROF-04).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepPolicySection {
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 fn default_cep_mode() -> CepMode {
     CepMode::Enforce
 }
@@ -110,6 +120,7 @@ impl Default for CepSection {
             observation: None,
             network: None,
             command: None,
+            policy: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -150,6 +161,10 @@ impl<'de> Deserialize<'de> for CepSection {
             .remove("command")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let policy = raw
+            .remove("policy")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
 
         Ok(Self {
             mode,
@@ -157,6 +172,7 @@ impl<'de> Deserialize<'de> for CepSection {
             observation,
             network,
             command,
+            policy,
             extensions: raw,
         })
     }
@@ -833,6 +849,7 @@ default_timeout_ms = 60000
             observation: None,
             network: None,
             command: None,
+            policy: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
@@ -888,5 +905,45 @@ system = "hi"
                 panic!("schema.rs production code must not contain '{pattern}'");
             }
         }
+    }
+
+    // ── CepPolicySection ────────────────────────────────────────────────
+
+    #[test]
+    fn cep_policy_section_parses_path() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep.policy]
+path = "policy.toml"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let policy = profile.cep.policy.as_ref().unwrap();
+        assert_eq!(policy.path.as_deref(), Some("policy.toml"));
+    }
+
+    #[test]
+    fn cep_section_without_policy_defaults_to_none() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(profile.cep.policy.is_none());
+    }
+
+    #[test]
+    fn cep_policy_section_rejects_unknown_fields() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep.policy]
+unknown = true
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown"),
+            "should reject unknown field, got: {err}"
+        );
     }
 }

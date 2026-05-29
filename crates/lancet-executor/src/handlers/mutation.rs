@@ -9,7 +9,7 @@
 //! D-43..D-52: Verify flow after successful mutations.
 
 use crate::edit::parser::parse_patch_document;
-use crate::guard::{check_write_scope, extract_write_path_patterns};
+use crate::guard::{check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns};
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
@@ -43,6 +43,8 @@ async fn handle_write_file(
     params: WriteFileParams,
     ctx: HandlerContext,
 ) -> Result<WriteFileResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, WriteFile::NAME, &params).await?;
+
     // 1. Check active envelope
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
@@ -153,6 +155,8 @@ async fn handle_write_file(
 /// 7. If verify fails -> VerifyFailed, retain diff
 /// 8. Return PatchResult with changed_files
 async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Patch::NAME, &params).await?;
+
     // 1. Check active envelope
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
@@ -446,6 +450,11 @@ mod write_file_tests {
     fn test_ctx(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
         (
             HandlerContext {
                 call_id: 1,
@@ -458,6 +467,12 @@ mod write_file_tests {
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -469,6 +484,11 @@ mod write_file_tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
         (
             HandlerContext {
                 call_id: 1,
@@ -481,6 +501,12 @@ mod write_file_tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -515,7 +541,7 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_no_envelope_returns_envelope_missing() {
+    async fn write_file_no_envelope_returns_capability_not_granted() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -529,7 +555,7 @@ mod write_file_tests {
             .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::EnvelopeMissing);
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
     }
 
     #[tokio::test]
@@ -638,7 +664,7 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_emits_envelope_missing_event() {
+    async fn write_file_emits_guard_verdict_event() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -653,7 +679,7 @@ mod write_file_tests {
             .await;
 
         let event = events.recv().await.unwrap();
-        assert_eq!(event.method, "cep.envelope_missing");
+        assert_eq!(event.method, "cep.guard_verdict");
     }
 }
 
@@ -677,6 +703,11 @@ mod patch_tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
         (
             HandlerContext {
                 call_id: 1,
@@ -689,6 +720,12 @@ mod patch_tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -723,7 +760,7 @@ mod patch_tests {
     }
 
     #[tokio::test]
-    async fn patch_no_envelope_returns_envelope_missing() {
+    async fn patch_no_envelope_returns_capability_not_granted() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -737,7 +774,7 @@ mod patch_tests {
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::EnvelopeMissing);
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
     }
 
     #[tokio::test]
@@ -793,7 +830,7 @@ mod patch_tests {
     }
 
     #[tokio::test]
-    async fn patch_emits_replan_required_event() {
+    async fn patch_emits_guard_verdict_event() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -812,6 +849,6 @@ mod patch_tests {
             .await;
 
         let event = events.recv().await.unwrap();
-        assert_eq!(event.method, "cep.replan_required");
+        assert_eq!(event.method, "cep.guard_verdict");
     }
 }

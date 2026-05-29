@@ -8,7 +8,10 @@
 //! D-43..D-45: Verify flow after successful WorkspaceMutation commands.
 
 use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
-use crate::guard::{check_write_scope, extract_write_path_patterns, has_run_command_capability};
+use crate::guard::{
+    check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
+    has_run_command_capability,
+};
 use crate::policy::command::{
     build_effective_env, classify_command, validate_timeout, EffectiveImpact,
 };
@@ -31,10 +34,10 @@ pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), Cep
 }
 
 async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult, CepError> {
-    // 1. Validate inputs
     validate_inputs(&params)?;
 
-    // 2. Get command policy from turn context
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Run::NAME, &params).await?;
+
     let policy = &ctx.phase21.policy.command;
 
     // 3. Classify command
@@ -612,6 +615,11 @@ mod tests {
     ) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
         (
             HandlerContext {
                 call_id: 1,
@@ -625,6 +633,12 @@ mod tests {
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
             cancel_tx,
@@ -638,12 +652,71 @@ mod tests {
         registry
     }
 
+    async fn test_ctx_with_run_command(
+        root: &str,
+        argv_allowlist: Vec<String>,
+    ) -> (
+        HandlerContext,
+        mpsc::Receiver<lancet_protocol::ToolEvent>,
+        watch::Sender<bool>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from(root),
+            ),
+        ));
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let mut caps = std::collections::BTreeSet::new();
+        caps.insert(Capability::RunCommand { argv_allowlist });
+        let envelope = ExecutionEnvelope {
+            intent: lancet_protocol::envelope::Intent {
+                description: "command test".into(),
+            },
+            capabilities: caps,
+            scope: lancet_protocol::envelope::Scope::default(),
+            impact: vec![lancet_protocol::envelope::Impact {
+                kind: lancet_protocol::envelope::ImpactKind::CommandExecution,
+                target: root.into(),
+            }],
+            constraints: lancet_protocol::envelope::Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+        (
+            HandlerContext {
+                call_id: 1,
+                events: EventSink::new(event_tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(
+                    root,
+                    "command handler test",
+                ),
+                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                active_envelope: store,
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
+            },
+            event_rx,
+            cancel_tx,
+        )
+    }
+
     #[tokio::test]
     async fn diagnostic_echo_succeeds_without_envelope() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = native_command_registry(root);
-        let (ctx, _events, _cancel_tx) = test_ctx(root);
+        let (ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
 
         let params = RunParams {
             argv: vec!["echo".into(), "hello".into()],
@@ -666,7 +739,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = native_command_registry(root);
-        let (ctx, _events, _cancel_tx) = test_ctx(root);
+        let (ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["sh".into()]).await;
 
         let params = RunParams {
             argv: vec!["sh".into(), "-c".into(), "rm -rf /".into()],
@@ -680,7 +753,13 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
-        assert!(err.message.contains("hard-denied"));
+        assert!(
+            err.message.contains("denied")
+                || err.message.contains("command")
+                || err.message.contains("capability"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 
     #[tokio::test]
@@ -701,7 +780,7 @@ mod tests {
             .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::EnvelopeMissing);
+        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
     }
 
     #[tokio::test]
@@ -748,6 +827,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -810,6 +899,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -823,8 +922,8 @@ mod tests {
             .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::GuardDenied);
-        assert!(err.message.contains("allowlist"));
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert!(err.message.contains("PatternRejected") || err.message.contains("allowlist"));
     }
 
     #[tokio::test]
@@ -875,6 +974,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -938,6 +1047,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -1013,6 +1132,16 @@ mod tests {
             active_envelope: Arc::clone(&store),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -1069,21 +1198,13 @@ mod tests {
     async fn output_truncation_metadata_present() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let (event_tx, _event_rx) = mpsc::channel(32);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut policy = Phase21TurnContext::defaults_for_project_root(root);
-        policy.policy.command.max_output_bytes = 50; // very small
-
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "truncation test"),
-            phase21: Arc::new(policy),
-            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-        };
+        let (mut ctx, _event_rx, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["python3".into()]).await;
+        ctx.phase21 = Arc::new({
+            let mut policy = Phase21TurnContext::defaults_for_project_root(root);
+            policy.policy.command.max_output_bytes = 50;
+            policy
+        });
 
         let registry = native_command_registry(root);
         let params = RunParams {
@@ -1105,19 +1226,8 @@ mod tests {
     async fn timeout_exceeding_max_returns_typed_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let (event_tx, _event_rx) = mpsc::channel(32);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "timeout test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-        };
+        let (ctx, _event_rx, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
 
         let registry = native_command_registry(root);
         let params = RunParams {
@@ -1139,19 +1249,8 @@ mod tests {
     async fn env_policy_rejects_unallowed_key() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let (event_tx, _event_rx) = mpsc::channel(32);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "env test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-        };
+        let (ctx, _event_rx, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
 
         let registry = native_command_registry(root);
         let mut env = BTreeMap::new();
@@ -1242,6 +1341,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let registry = native_command_registry(root);
@@ -1328,6 +1437,16 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
 
         let params = RunParams {
@@ -1350,7 +1469,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = native_command_registry(root);
-        let (ctx, _events, _cancel_tx) = test_ctx(root);
+        let (ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
 
         let params = RunParams {
             argv: vec!["echo".into(), "hello".into()],

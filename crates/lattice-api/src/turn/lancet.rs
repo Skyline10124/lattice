@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use lancet_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
 use lancet_executor::{
     impact_kind_for_method, impact_kind_label, register_production_method_registry,
     to_tool_definitions, wire_code_for_error, ActiveEnvelopeStore, BudgetLimits, CallAuditMetadata,
@@ -344,6 +345,102 @@ fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
     }
 }
 
+/// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
+///
+/// Merge precedence: compiled defaults < profile inline `[cep.*]` < external policy file (D-32).
+pub(crate) fn load_policy_config(
+    cep: &CepSection,
+    runtime_project_root: &Path,
+) -> Result<PolicyConfig, ApiError> {
+    let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot canonicalize project root '{}': {err}",
+            runtime_project_root.display()
+        ))
+    })?;
+
+    let effective_root = match cep.project_root.as_ref().and_then(|s| s.root.as_deref()) {
+        Some(profile_root) => {
+            let resolved = resolve_profile_path(&runtime_root, profile_root)?;
+            canonicalize_existing(&resolved, "cep.project_root.root")?
+        }
+        None => runtime_root.clone(),
+    };
+
+    if !effective_root.starts_with(&runtime_root) {
+        return Err(ApiError::BadRequest(format!(
+            "cep.project_root.root '{}' resolves outside runtime project root",
+            effective_root.display()
+        )));
+    }
+
+    let phase21 = phase21_policy_from_profile(cep, runtime_project_root)?;
+    let mut config = PolicyConfig {
+        capability_sources: Default::default(),
+        methods: Default::default(),
+        command: phase21.command,
+        network: phase21.network,
+        budget: phase21.budget,
+        observation: phase21.observation,
+        project_root: phase21.project_root,
+    };
+
+    if let Some(policy_section) = &cep.policy {
+        if let Some(path) = &policy_section.path {
+            if path.contains('\0') {
+                return Err(ApiError::BadRequest(
+                    "cep.policy.path must not contain NUL bytes".into(),
+                ));
+            }
+            if Path::new(path).is_absolute() {
+                return Err(ApiError::BadRequest(format!(
+                    "cep.policy.path must be relative, got absolute path: '{path}'"
+                )));
+            }
+            if path.contains("..") {
+                return Err(ApiError::BadRequest(format!(
+                    "cep.policy.path must not contain '..' components: '{path}'"
+                )));
+            }
+            let resolved = runtime_root.join(path);
+            let canonical = std::fs::canonicalize(&resolved).map_err(|err| {
+                ApiError::BadRequest(format!(
+                    "cannot canonicalize cep.policy.path '{}': {err}",
+                    resolved.display()
+                ))
+            })?;
+            if !canonical.starts_with(&runtime_root) {
+                return Err(ApiError::BadRequest(format!(
+                    "cep.policy.path '{}' resolves outside runtime project root",
+                    canonical.display()
+                )));
+            }
+            let external = load_external_policy(&canonical)?;
+            config
+                .merge_external(&external)
+                .map_err(ApiError::BadRequest)?;
+        }
+    }
+
+    Ok(config)
+}
+
+/// Load and deserialize an external TOML policy file.
+fn load_external_policy(path: &Path) -> Result<ExternalPolicyFile, ApiError> {
+    let contents = std::fs::read_to_string(path).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot read external policy file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    toml::from_str(&contents).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot parse external policy file '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
 fn resolve_profile_path(base: &Path, path: &str) -> Result<PathBuf, ApiError> {
     let candidate = PathBuf::from(path);
     let resolved = if candidate.is_absolute() {
@@ -448,6 +545,13 @@ pub(crate) fn build_production_turn_deps(
     let audit_context = Arc::new(RwLock::new(CepAuditContext::default()));
     let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
     let active_envelope = Arc::new(ActiveEnvelopeStore::new());
+
+    let policy_config = match cep {
+        Some(cep_section) => load_policy_config(cep_section, Path::new(project_root))?,
+        None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
+    };
+    let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
+
     let server_config = ServerRunConfig {
         audit: Arc::clone(&audit),
         audit_context: Arc::clone(&audit_context),
@@ -456,6 +560,8 @@ pub(crate) fn build_production_turn_deps(
         active_envelope,
         call_audit_metadata: CallAuditMetadata::bridge_defaults(),
         production_audit_routing: true,
+        policy_hook: default_hook.clone(),
+        default_policy_hook: Some(default_hook),
     };
 
     let http_client = reqwest::Client::builder()

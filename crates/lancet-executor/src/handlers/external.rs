@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use crate::executor::web::fetch_url;
+use crate::guard::evaluate_and_enforce_policy;
 use crate::policy::budget::BudgetExhausted;
 use crate::policy::network::validate_fetch_url;
 use crate::registry::{HandlerContext, MethodRegistry};
@@ -32,6 +33,8 @@ async fn handle_web_fetch(
     params: FetchParams,
     ctx: HandlerContext,
 ) -> Result<FetchResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Fetch::NAME, &params).await?;
+
     let policy = &ctx.phase21.policy.network;
     let validated = match validate_fetch_url(&params.url, policy) {
         Ok(v) => v,
@@ -189,17 +192,33 @@ mod tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let policy_cfg = crate::policy::default::PolicyConfig {
+            capability_sources: Default::default(),
+            methods: Default::default(),
+            command: phase21.policy.command.clone(),
+            network: phase21.policy.network.clone(),
+            budget: phase21.policy.budget.clone(),
+            observation: phase21.policy.observation.clone(),
+            project_root: phase21.policy.project_root.clone(),
+        };
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
         (
             HandlerContext {
                 call_id: 7,
                 events: EventSink::new(event_tx, 7),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "web.fetch test")
-                    .with_fetch_host("example.com"),
+                    .with_fetch_host("*"),
                 phase21,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -289,6 +308,8 @@ mod tests {
         assert_eq!(parsed.body.len(), 100);
         assert_eq!(parsed.truncated, Some(true));
 
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
         let event = events.recv().await.unwrap();
         assert_eq!(event.method, "cep.native_external_metadata");
         assert_eq!(event.params["metadata"]["truncated"], true);
@@ -320,6 +341,8 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::AmbientAuthorityDenied);
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
         let event = events.recv().await.unwrap();
         assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
         assert_eq!(event.params["metadata"]["backend_invoked"], false);

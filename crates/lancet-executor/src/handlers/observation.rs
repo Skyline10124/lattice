@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::content_hash;
 use crate::executor::render::render_file_slice;
+use crate::guard::evaluate_and_enforce_policy;
 use crate::policy::budget::BudgetExhausted;
 use crate::policy::observation::{resolve_observation_target, ResolvedObservationTarget};
 use crate::policy::Phase21PolicyConfig;
@@ -38,6 +39,8 @@ async fn handle_read_file(
     params: ReadFileParams,
     ctx: HandlerContext,
 ) -> Result<ReadFileResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, ReadFile::NAME, &params).await?;
+
     let policy = &ctx.phase21.policy;
     let target = match resolve_observation_target(policy, &params.path).await {
         Ok(t) => t,
@@ -111,6 +114,8 @@ async fn handle_read_file(
 }
 
 async fn handle_grep(params: GrepParams, ctx: HandlerContext) -> Result<GrepResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Grep::NAME, &params).await?;
+
     let path = params.path.clone().unwrap_or_else(|| ".".into());
     run_grep(params, ctx, &path).await
 }
@@ -119,6 +124,8 @@ async fn handle_list_directory(
     params: ListDirectoryParams,
     ctx: HandlerContext,
 ) -> Result<ListDirectoryResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, ListDirectory::NAME, &params).await?;
+
     let policy = &ctx.phase21.policy;
     let target = resolve_target_or_deny(policy, &params.path, ListDirectory::NAME, &ctx).await?;
     backend_or_continue(&params.path, ListDirectory::NAME, &ctx).await?;
@@ -169,6 +176,8 @@ async fn handle_find_files(
     ctx: HandlerContext,
 ) -> Result<FindFilesResult, CepError> {
     let path = params.path.as_deref().unwrap_or(".");
+    let _evaluation = evaluate_and_enforce_policy(&ctx, FindFiles::NAME, &params).await?;
+
     let policy = &ctx.phase21.policy;
     let target = resolve_target_or_deny(policy, path, FindFiles::NAME, &ctx).await?;
     backend_or_continue(path, FindFiles::NAME, &ctx).await?;
@@ -700,16 +709,47 @@ mod tests {
     fn ctx_for(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
+        let policy_cfg = crate::policy::default::PolicyConfig {
+            capability_sources: Default::default(),
+            methods: Default::default(),
+            command: phase21.policy.command.clone(),
+            network: phase21.policy.network.clone(),
+            budget: phase21.policy.budget.clone(),
+            observation: phase21.policy.observation.clone(),
+            project_root: phase21.policy.project_root.clone(),
+        };
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
+        let mut base = BaseExecutionEnvelope::for_workspace_root(root, "native obs test");
+        base.inner.capabilities = base
+            .inner
+            .capabilities
+            .into_iter()
+            .map(|cap| match cap {
+                lancet_protocol::envelope::Capability::ReadPath { .. } => {
+                    lancet_protocol::envelope::Capability::ReadPath {
+                        path_pattern: ".".into(),
+                    }
+                }
+                other => other,
+            })
+            .collect();
         (
             HandlerContext {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "native obs test"),
-                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                base_envelope: base,
+                phase21,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -764,12 +804,10 @@ mod tests {
             .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
 
         let event = events.recv().await.unwrap();
-        assert_eq!(event.method, "cep.native_observation_metadata");
-        assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
-        assert_eq!(event.params["metadata"]["backend_invoked"], false);
+        assert_eq!(event.method, "cep.guard_verdict");
     }
 
     #[tokio::test]
@@ -791,6 +829,16 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
         let params = ReadFileParams {
             path: "big.txt".into(),
@@ -824,6 +872,16 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
         let params = ReadFileParams {
             path: "a.txt".into(),
@@ -858,6 +916,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ProjectRootViolation);
 
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
         let event = events.recv().await.unwrap();
         assert_eq!(
             event.params["metadata"]["denial_source"],
@@ -882,10 +942,9 @@ mod tests {
             .dispatch(Grep::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
         let event = events.recv().await.unwrap();
-        assert_eq!(event.params["metadata"]["denial_source"], "cep_policy");
-        assert_eq!(event.params["metadata"]["backend_invoked"], false);
+        assert_eq!(event.method, "cep.guard_verdict");
     }
 
     #[tokio::test]
@@ -984,7 +1043,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
     }
 
     #[tokio::test]
@@ -1010,6 +1069,16 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+            })),
         };
         let params = GrepParams {
             pattern: "match".into(),

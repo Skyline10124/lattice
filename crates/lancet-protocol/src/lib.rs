@@ -17,6 +17,7 @@ pub mod frame;
 pub mod jsonrpc;
 pub mod method;
 pub mod methods;
+pub mod policy;
 
 // Public re-exports of common types
 pub use catalog::{catalog, CATALOG};
@@ -30,3 +31,8 @@ pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriabili
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use method::{CatalogMethod, CepMethod, MethodDescriptor, RequiredCapability};
+pub use policy::{
+    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyActionRequired, PolicyAuditContext,
+    PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
+    SourcedCapability,
+};

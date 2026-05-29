@@ -1,5 +1,6 @@
 //! Native Phase 21 `session.todo_write` CEP handler.
 
+use crate::guard::evaluate_and_enforce_policy;
 use crate::registry::{HandlerContext, MethodRegistry};
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::methods::session::{
@@ -17,6 +18,8 @@ async fn handle_todo_write(
     params: TodoWriteParams,
     ctx: HandlerContext,
 ) -> Result<TodoWriteResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, TodoWrite::NAME, &params).await?;
+
     if let Err(err) = validate_todos(&params.todos) {
         emit_denial_metadata(&ctx, 0, "validation").await;
         return Err(err);
@@ -125,6 +128,11 @@ mod tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
+            crate::policy::default::PolicyConfig::defaults_for_project_root(
+                std::path::PathBuf::from("."),
+            ),
+        ));
         (
             HandlerContext {
                 call_id: 9,
@@ -136,6 +144,12 @@ mod tests {
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                })),
             },
             event_rx,
         )
@@ -167,6 +181,9 @@ mod tests {
             .unwrap();
         let parsed: TodoWriteResult = serde_json::from_value(result).unwrap();
         assert_eq!(parsed.todos.len(), 2);
+
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
 
         let event = events.recv().await.unwrap();
         assert_eq!(event.method, "cep.native_session_metadata");
@@ -213,9 +230,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
 
-        let event = events.recv().await.unwrap();
-        assert_eq!(event.params["metadata"]["denial_source"], "cep_budget");
-        assert_eq!(event.params["metadata"]["op_count"], 1);
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
     }
 
     #[tokio::test]
@@ -246,9 +262,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
-        let event = events.recv().await.unwrap();
-        assert_eq!(event.params["metadata"]["denial_source"], "cep_budget");
-        assert_eq!(event.params["metadata"]["op_count"], 2);
+
+        let guard_event = events.recv().await.unwrap();
+        assert_eq!(guard_event.method, "cep.guard_verdict");
     }
 
     #[tokio::test]

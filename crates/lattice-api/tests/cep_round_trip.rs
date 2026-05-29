@@ -329,6 +329,9 @@ async fn production_adapter(
         root,
         "phase21 round-trip without workspace tools",
     );
+    if enabled.contains(&Fetch::NAME) {
+        base_envelope = base_envelope.with_fetch_host("*");
+    }
     if enabled.contains(&TodoWrite::NAME) {
         base_envelope = base_envelope.with_session_state();
     }
