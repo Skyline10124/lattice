@@ -514,6 +514,18 @@ pub(crate) fn build_production_turn_deps(
 ) -> Result<ProductionTurnDeps, ApiError> {
     let tool_definitions = resolve_catalog_tool_definitions(enabled_tools)?;
 
+    // Canonicalize the project root up front so the base envelope's ReadPath /
+    // WritePath capability patterns are built from the same canonical path the
+    // guard compares targets against. Otherwise a symlinked root (e.g. macOS
+    // `/var` -> `/private/var` temp dirs) yields a raw pattern that fails to
+    // prefix-match the canonicalized target, denying legitimate reads. Best
+    // effort: fall back to the raw path if canonicalization fails, matching the
+    // tolerance in `Phase21PolicyConfig::defaults_for_project_root`.
+    let canonical_root = std::fs::canonicalize(project_root)
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned));
+    let project_root = canonical_root.as_deref().unwrap_or(project_root);
+
     let phase21_policy = match cep {
         Some(cep_section) => phase21_policy_from_profile(cep_section, Path::new(project_root))?,
         None => Phase21PolicyConfig::defaults_for_project_root(project_root),
