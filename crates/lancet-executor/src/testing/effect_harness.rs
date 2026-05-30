@@ -182,6 +182,12 @@ pub fn assert_effect_violation(outcome: &HarnessOutcome) {
 /// capabilities, and all internal fields initialized.
 ///
 /// Returns the context and the event receiver (for draining notifications).
+/// Build a test context, returning `(ctx, event_rx, canonical_root)`.
+///
+/// The canonical root is the `fs::canonicalize`d form of `root` (matches what
+/// `defaults_for_project_root` stores in `Phase21PolicyConfig::project_root`).
+/// Callers should use this canonical root when building `AuthorizedEffectRegion`
+/// paths so that region containment checks match the paths handlers record.
 pub fn build_test_context(
     root: &str,
     caps: Vec<SourcedCapability>,
@@ -189,18 +195,21 @@ pub fn build_test_context(
 ) -> (
     HandlerContext,
     tokio::sync::mpsc::Receiver<lancet_protocol::ToolEvent>,
+    String,
 ) {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     let root_path = std::path::Path::new(root);
     let policy_cfg = PolicyConfig::defaults_for_project_root(root_path.to_path_buf());
+    let canonical_root = policy_cfg.project_root.to_string_lossy().to_string();
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
     let mut phase21_policy = Phase21PolicyConfig::defaults_for_project_root(root_path);
     phase21_policy.network = network;
     let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
 
-    let mut base = BaseExecutionEnvelope::for_workspace_root(root, "effect-contract-test");
+    let mut base =
+        BaseExecutionEnvelope::for_workspace_root(&canonical_root, "effect-contract-test");
     base.inner.capabilities = caps.iter().map(|sc| sc.capability.clone()).collect();
 
     let ctx = HandlerContext {
@@ -221,5 +230,5 @@ pub fn build_test_context(
             session_id: "test-session".into(),
         })),
     };
-    (ctx, event_rx)
+    (ctx, event_rx, canonical_root)
 }

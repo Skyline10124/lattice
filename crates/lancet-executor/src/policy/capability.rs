@@ -314,9 +314,9 @@ fn check_pattern_coverage(
             }
             None
         }
-        Capability::FetchUrl { host_pattern } => {
+        Capability::FetchUrl { host: allowed_host } => {
             if let Some(host) = &invocation.host {
-                if !matches_host_pattern(host_pattern, host) {
+                if !matches_host(allowed_host, host) {
                     return Some(CapabilityFailureReason::HostNotAllowed);
                 }
             }
@@ -528,7 +528,7 @@ fn matches_argv_allowlist(allowlist: &[String], argv: &[String]) -> bool {
 /// Check if a host matches the host pattern.
 ///
 /// Supports exact match and wildcard `*`.
-fn matches_host_pattern(pattern: &str, host: &str) -> bool {
+fn matches_host(pattern: &str, host: &str) -> bool {
     if pattern == "*" {
         return true;
     }
@@ -885,7 +885,7 @@ mod tests {
     fn fetch_url_base_source_satisfies_web_fetch() {
         let caps = vec![SourcedCapability {
             capability: Capability::FetchUrl {
-                host_pattern: "example.com".into(),
+                host: "example.com".into(),
             },
             source: base_source(),
         }];
@@ -910,7 +910,7 @@ mod tests {
     fn fetch_url_declared_source_satisfies_web_fetch() {
         let caps = vec![SourcedCapability {
             capability: Capability::FetchUrl {
-                host_pattern: "api.github.com".into(),
+                host: "api.github.com".into(),
             },
             source: declared_source(),
         }];
@@ -931,10 +931,10 @@ mod tests {
     // ── Test 13: FetchUrl with non-matching host is PatternRejected ──
 
     #[test]
-    fn fetch_url_non_matching_host_pattern_rejected() {
+    fn fetch_url_non_matching_host_rejected() {
         let caps = vec![SourcedCapability {
             capability: Capability::FetchUrl {
-                host_pattern: "api.github.com".into(),
+                host: "api.github.com".into(),
             },
             source: declared_source(),
         }];

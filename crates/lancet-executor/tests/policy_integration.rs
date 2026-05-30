@@ -184,9 +184,7 @@ fn integration_web_fetch_denied_by_network_policy() {
         method: "web.fetch".into(),
         params: json!({"url": "https://evil.example.com/page"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::FetchUrl {
-                host_pattern: "*".into(),
-            },
+            capability: Capability::FetchUrl { host: "*".into() },
             source: base_source(),
         }]),
         audit_context: audit_ctx(default_budget()),
@@ -213,7 +211,7 @@ fn integration_web_fetch_allowed_for_allowed_host() {
         params: json!({"url": "https://example.com/page"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::FetchUrl {
-                host_pattern: "example.com".into(),
+                host: "example.com".into(),
             },
             source: base_source(),
         }]),

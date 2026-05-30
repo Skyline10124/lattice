@@ -3,7 +3,7 @@
 //! Error codes live in JSON-RPC reserved range `-32000..-32099`, segmented by
 //! family. Every error carries typed `data` and a mandatory `Retriability` hint.
 
-use crate::envelope::{EffectKindSet, ImpactKind};
+use crate::envelope::ImpactKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -185,7 +185,7 @@ pub struct GuardErrorData {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EffectErrorData {
     pub method: String,
-    pub declared_effect: EffectKindSet,
+    pub declared_effect: Vec<ImpactKind>,
     pub authorized_effect: Vec<ImpactKind>,
     pub observed_effects: Vec<ImpactKind>,
     pub violations: Vec<String>,
@@ -425,9 +425,7 @@ mod tests {
                 CepErrorCode::EffectViolation,
                 CepErrorData::Effect(Box::new(EffectErrorData {
                     method: "workspace.read_file".into(),
-                    declared_effect: EffectKindSet::from_static(&[
-                        ImpactKind::WorkspaceObservation,
-                    ]),
+                    declared_effect: vec![ImpactKind::WorkspaceObservation],
                     authorized_effect: vec![ImpactKind::WorkspaceObservation],
                     observed_effects: vec![
                         ImpactKind::WorkspaceObservation,
@@ -586,11 +584,11 @@ mod tests {
 
     #[test]
     fn effect_error_data_carries_rich_violation_evidence() {
-        use crate::envelope::{EffectKindSet, ImpactKind};
+        use crate::envelope::ImpactKind;
 
         let data = EffectErrorData {
             method: "workspace.read_file".into(),
-            declared_effect: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+            declared_effect: vec![ImpactKind::WorkspaceObservation],
             authorized_effect: vec![ImpactKind::WorkspaceObservation],
             observed_effects: vec![
                 ImpactKind::WorkspaceObservation,

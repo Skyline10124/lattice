@@ -168,7 +168,7 @@ fn sourced_cap_for(required: RequiredCapability, source: CapabilitySource) -> So
             argv_allowlist: vec!["cargo test".into()],
         },
         RequiredCapability::FetchUrl => Capability::FetchUrl {
-            host_pattern: "example.com".into(),
+            host: "example.com".into(),
         },
         RequiredCapability::MutateSessionState => Capability::MutateSessionState,
     };

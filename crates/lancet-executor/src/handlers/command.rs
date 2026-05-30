@@ -211,6 +211,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                         }
 
                         if !out_of_scope.is_empty() {
+                            // D-17: out-of-scope paths recorded to ledger; Plan 06 checker enforces
                             ctx.events
                                 .emit(
                                     "cep.effect_observed_out_of_scope",
@@ -1139,7 +1140,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        let root = canonical.to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         let script = dir.path().join("mutate.sh");
         std::fs::write(&script, "#!/bin/sh\nsleep 0.2\ntouch outside.txt\n").unwrap();

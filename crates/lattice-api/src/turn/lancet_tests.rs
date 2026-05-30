@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use lancet_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::catalog;
-use lancet_protocol::envelope::{EffectKindSet, ImpactKind};
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{
     jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
     PermissionErrorData, StateErrorData, ValidationErrorData,
@@ -279,7 +279,7 @@ cep_family_test!(
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
         method: "workspace.read_file".into(),
-        declared_effect: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        declared_effect: vec![ImpactKind::WorkspaceObservation],
         authorized_effect: vec![ImpactKind::WorkspaceObservation],
         observed_effects: vec![
             ImpactKind::WorkspaceObservation,
@@ -350,9 +350,11 @@ mod phase21_native_registry {
         let envelope =
             production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
         assert!(
-            envelope.inner.capabilities.iter().all(
-                |cap| !matches!(cap, Capability::FetchUrl { host_pattern } if host_pattern == "*")
-            ),
+            envelope
+                .inner
+                .capabilities
+                .iter()
+                .all(|cap| !matches!(cap, Capability::FetchUrl { host } if host == "*")),
             "production envelope must not grant FetchUrl(\"*\")"
         );
     }
@@ -372,7 +374,7 @@ mod phase21_native_registry {
             production_base_envelope(dir.path().to_str().unwrap(), &enabled, Some(&cep)).unwrap();
         assert!(envelope.inner.capabilities.iter().any(|cap| matches!(
             cap,
-            Capability::FetchUrl { host_pattern } if host_pattern == "api.example.com"
+            Capability::FetchUrl { host } if host == "api.example.com"
         )));
     }
 

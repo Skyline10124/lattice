@@ -570,62 +570,24 @@ fn apply_effect_check(
 
     match region {
         Some(ref authorized) => {
-            let mut violations: Vec<String> = Vec::new();
-            let mut charged_kinds: Vec<lancet_protocol::envelope::ImpactKind> = Vec::new();
-
-            for effect in observed_effects {
-                match effect.source {
-                    crate::effect::ledger::EffectSource::HandlerBackend => {
-                        charged_kinds.push(effect.kind.clone());
-                        if !authorized.contains(effect) {
-                            violations.push(format!(
-                                "{:?}@{:?} exceeds authorized region",
-                                effect.kind, effect.scope
-                            ));
-                        }
+            match crate::effect::checker::check_effects_against_region(
+                method,
+                observed_effects,
+                authorized,
+                effect_decl,
+            ) {
+                Ok(()) => Ok(dispatch_value),
+                Err(violation_err) => match cep_mode {
+                    CepMode::Enforce => Err(violation_err),
+                    CepMode::Warn => {
+                        durable_metadata.record(serde_json::json!({
+                            "effect_warning": true,
+                            "violation": violation_err.message,
+                        }));
+                        Ok(dispatch_value)
                     }
-                    crate::effect::ledger::EffectSource::EffectProbe
-                    | crate::effect::ledger::EffectSource::GuardProbe => {}
-                    crate::effect::ledger::EffectSource::Verify => {}
-                }
-            }
-
-            if violations.is_empty() {
-                return Ok(dispatch_value);
-            }
-
-            let authorized_kinds: Vec<lancet_protocol::envelope::ImpactKind> =
-                authorized.kinds.iter().cloned().collect();
-            let violation_err = CepError::new(
-                lancet_protocol::CepErrorCode::EffectViolation,
-                format!(
-                    "{}: observed effect exceeds authorized region ({} violation{})",
-                    method,
-                    violations.len(),
-                    if violations.len() == 1 { "" } else { "s" }
-                ),
-                lancet_protocol::CepErrorData::Effect(Box::new(
-                    lancet_protocol::error::EffectErrorData {
-                        method: method.to_string(),
-                        declared_effect: effect_decl.kinds,
-                        authorized_effect: authorized_kinds,
-                        observed_effects: charged_kinds,
-                        violations,
-                    },
-                )),
-                lancet_protocol::Retriability::Permanent,
-            );
-
-            match cep_mode {
-                CepMode::Enforce => Err(violation_err),
-                CepMode::Warn => {
-                    durable_metadata.record(serde_json::json!({
-                        "effect_warning": true,
-                        "violation": violation_err.message,
-                    }));
-                    Ok(dispatch_value)
-                }
-                CepMode::Off => Ok(dispatch_value),
+                    CepMode::Off => unreachable!("Off early-returned above"),
+                },
             }
         }
         None => match cep_mode {
@@ -635,7 +597,7 @@ fn apply_effect_check(
                 lancet_protocol::CepErrorData::Effect(Box::new(
                     lancet_protocol::error::EffectErrorData {
                         method: method.to_string(),
-                        declared_effect: effect_decl.kinds,
+                        declared_effect: effect_decl.kinds.0.to_vec(),
                         authorized_effect: vec![],
                         observed_effects: observed_effects.iter().map(|e| e.kind.clone()).collect(),
                         violations: vec![
@@ -656,7 +618,7 @@ fn apply_effect_check(
                 }));
                 Ok(dispatch_value)
             }
-            CepMode::Off => Ok(dispatch_value),
+            CepMode::Off => unreachable!("Off early-returned above"),
         },
     }
 }

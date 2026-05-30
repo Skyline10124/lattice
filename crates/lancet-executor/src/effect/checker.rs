@@ -14,28 +14,22 @@ use super::ledger::{EffectSource, ObservedEffect};
 use super::region::AuthorizedEffectRegion;
 use crate::policy::Phase21PolicyConfig;
 
-/// Check whether observed effects are within the authorized effect region.
+/// Check observed effects against a pre-built authorized region.
 ///
-/// Returns `Ok(())` when `observed ⊆ authorized`, or `Err(CepError)` with
-/// `EffectViolation` (-32050) and full `EffectErrorData` when any charged
-/// observed effect exceeds the authorized region.
+/// This is the core checking function — it returns the raw verdict
+/// (Ok or EffectViolation) without cep_mode gating. Callers apply
+/// enforce/warn/off decisions externally.
 ///
 /// Source filtering per D-11:
 /// - `HandlerBackend` — charged against the contract
 /// - `EffectProbe` / `GuardProbe` — skipped entirely
 /// - `Verify` — audited but not charged (envelope-internal constraint)
-///
-/// Does NOT perform cep_mode enforce/warn decision — returns the raw verdict.
-/// Does NOT mutate the ledger.
-pub fn check_effects(
+pub fn check_effects_against_region(
     method: &str,
     observed: &[ObservedEffect],
-    matched_cap: Option<&SourcedCapability>,
-    policy: &Phase21PolicyConfig,
+    authorized: &AuthorizedEffectRegion,
     effect_decl: &EffectDecl,
 ) -> Result<(), CepError> {
-    let authorized = AuthorizedEffectRegion::from_matched_capability(matched_cap, policy);
-
     let mut violations: Vec<String> = Vec::new();
     let mut charged_kinds: Vec<ImpactKind> = Vec::new();
 
@@ -59,7 +53,7 @@ pub fn check_effects(
         return Ok(());
     }
 
-    let authorized_kinds: Vec<ImpactKind> = authorized.kinds.into_iter().collect();
+    let authorized_kinds: Vec<ImpactKind> = authorized.kinds.iter().cloned().collect();
 
     Err(CepError::new(
         CepErrorCode::EffectViolation,
@@ -71,7 +65,7 @@ pub fn check_effects(
         ),
         CepErrorData::Effect(Box::new(EffectErrorData {
             method: method.to_string(),
-            declared_effect: effect_decl.kinds,
+            declared_effect: effect_decl.kinds.0.to_vec(),
             authorized_effect: authorized_kinds,
             observed_effects: charged_kinds,
             violations,
@@ -80,43 +74,30 @@ pub fn check_effects(
     ))
 }
 
+/// Check whether observed effects are within the authorized effect region,
+/// computing the region from the matched capability and policy config.
+///
+/// Convenience wrapper around [`check_effects_against_region`] for callers
+/// that hold a matched capability rather than a pre-built region.
+pub fn check_effects(
+    method: &str,
+    observed: &[ObservedEffect],
+    matched_cap: Option<&SourcedCapability>,
+    policy: &Phase21PolicyConfig,
+    effect_decl: &EffectDecl,
+) -> Result<(), CepError> {
+    let authorized = AuthorizedEffectRegion::from_matched_capability(matched_cap, policy);
+    check_effects_against_region(method, observed, &authorized, effect_decl)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::effect::ledger::{EffectSource, ObservedScope};
-    use crate::policy::command::CommandPolicy;
-    use crate::policy::network::NetworkPolicyConfig;
-    use crate::policy::observation::ObservationPolicyConfig;
-    use crate::policy::BudgetLimits;
     use lancet_protocol::envelope::{Capability, EffectKindSet, EffectScopeKind};
     use lancet_protocol::method::RequiredCapability;
     use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
     use std::path::PathBuf;
-
-    fn test_policy() -> Phase21PolicyConfig {
-        Phase21PolicyConfig {
-            project_root: PathBuf::from("/project"),
-            observation: ObservationPolicyConfig {
-                allowed_roots: vec![PathBuf::from("/project")],
-                max_single_read_bytes: 10_000_000,
-                max_turn_observation_bytes: 10_000_000,
-                max_grep_matches: 1000,
-                max_list_entries: 1000,
-                max_find_paths: 1000,
-                max_todo_ops: 100,
-            },
-            network: NetworkPolicyConfig::safe_defaults(),
-            budget: BudgetLimits {
-                max_single_read_bytes: 10_000_000,
-                max_turn_observation_bytes: 10_000_000,
-                max_grep_matches: 1000,
-                max_list_entries: 1000,
-                max_find_paths: 1000,
-                max_todo_ops: 100,
-            },
-            command: CommandPolicy::defaults(),
-        }
-    }
 
     fn observation_decl() -> EffectDecl {
         EffectDecl {
@@ -144,7 +125,7 @@ mod tests {
 
     #[test]
     fn observation_within_region_returns_ok() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
@@ -165,7 +146,7 @@ mod tests {
 
     #[test]
     fn mutation_in_observation_method_returns_effect_violation() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
@@ -196,7 +177,7 @@ mod tests {
 
     #[test]
     fn probe_and_guard_effects_are_not_charged() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![
             ObservedEffect {
@@ -225,7 +206,7 @@ mod tests {
 
     #[test]
     fn verify_effect_is_not_charged() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::CommandExecution,
@@ -246,7 +227,7 @@ mod tests {
 
     #[test]
     fn empty_region_with_any_handler_effect_returns_violation() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs")),
@@ -268,7 +249,7 @@ mod tests {
 
     #[test]
     fn read_within_readpath_region_returns_ok() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = read_cap("/project/src");
         let decl = EffectDecl {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
@@ -288,7 +269,7 @@ mod tests {
 
     #[test]
     fn read_outside_readpath_region_returns_violation() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = read_cap("/project/src");
         let decl = EffectDecl {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
@@ -308,7 +289,7 @@ mod tests {
 
     #[test]
     fn mixed_charged_and_uncharged_only_charged_matters() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![
             ObservedEffect {
@@ -337,7 +318,7 @@ mod tests {
 
     #[test]
     fn violation_populates_all_effect_error_data_fields() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,

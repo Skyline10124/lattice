@@ -152,9 +152,9 @@ proptest! {
     #[test]
     fn read_file_effect_contract_positive(offset in 0u64..100, limit in 1u64..50) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = ReadFileParams {
             path: "hello.txt".into(),
@@ -175,9 +175,9 @@ proptest! {
     #[test]
     fn grep_effect_contract_positive(pattern in "[a-z]{1,8}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = GrepParams {
             pattern,
@@ -197,9 +197,9 @@ proptest! {
     #[test]
     fn list_directory_effect_contract_positive(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = ListDirectoryParams {
             path: ".".into(),
@@ -218,9 +218,9 @@ proptest! {
     #[test]
     fn find_files_effect_contract_positive(pattern in "[a-z*]{1,8}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = FindFilesParams {
             pattern,
@@ -240,9 +240,9 @@ proptest! {
     #[test]
     fn write_file_effect_contract_positive(content in "[a-zA-Z0-9 ]{1,64}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let authority = mutation_region(&root);
         let params = WriteFileParams {
             path: "output.txt".into(),
@@ -261,9 +261,9 @@ proptest! {
     #[test]
     fn patch_effect_contract_positive(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let authority = mutation_region(&root);
         let patch_text = "--- a/hello.txt\n+++ b/hello.txt\n@@ -1,2 +1,2 @@\n hello\n-world\n+patched\n";
         let params = PatchParams { patch: patch_text.into() };
@@ -280,9 +280,9 @@ proptest! {
     #[test]
     fn run_effect_contract_positive(msg in "[a-z ]{1,32}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = command_region();
         let params = RunParams {
             argv: vec!["echo".into(), msg],
@@ -304,7 +304,7 @@ proptest! {
     #[test]
     fn fetch_effect_contract_positive(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
 
         let listener = rt().block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
@@ -320,7 +320,7 @@ proptest! {
         });
 
         let fetch_cap = SourcedCapability {
-            capability: Capability::FetchUrl { host_pattern: host.clone() },
+            capability: Capability::FetchUrl { host: host.clone() },
             source: CapabilitySource::Base,
         };
         let network = NetworkPolicyConfig {
@@ -329,7 +329,7 @@ proptest! {
             allowed_hosts: vec!["127.0.0.1".into()],
             max_web_response_bytes: 10 * 1024 * 1024,
         };
-        let (ctx, _rx) = build_test_context(&root, vec![fetch_cap], network);
+        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
 
         let mut kinds = std::collections::BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
@@ -359,9 +359,9 @@ proptest! {
     #[test]
     fn todo_write_effect_contract_positive(content in "[a-zA-Z ]{1,32}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = session_region();
         let params = TodoWriteParams {
             todos: vec![TodoItem {
@@ -382,9 +382,9 @@ proptest! {
     #[test]
     fn declare_effect_contract_positive(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = session_region();
         let envelope = ExecutionEnvelope {
             intent: Intent { description: "test intent".into() },
@@ -416,9 +416,9 @@ proptest! {
     #[test]
     fn read_file_effect_contract_negative(name in "[a-z]{1,16}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let params = ReadFileParams {
             path: format!("/outside-scope/{name}"),
             offset: None,
@@ -437,9 +437,9 @@ proptest! {
     #[test]
     fn grep_effect_contract_negative(pattern in "[a-z]{1,8}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let params = GrepParams {
             pattern,
             path: Some("/outside-scope".into()),
@@ -457,9 +457,9 @@ proptest! {
     #[test]
     fn list_directory_effect_contract_negative(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let params = ListDirectoryParams {
             path: "/outside-scope".into(),
             limit: Some(100),
@@ -476,9 +476,9 @@ proptest! {
     #[test]
     fn find_files_effect_contract_negative(pattern in "[a-z*]{1,8}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let params = FindFilesParams {
             pattern,
             path: Some("/outside-scope".into()),
@@ -496,9 +496,9 @@ proptest! {
     #[test]
     fn write_file_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let params = WriteFileParams {
             path: "/outside-scope/evil.txt".into(),
             content,
@@ -515,9 +515,9 @@ proptest! {
     #[test]
     fn patch_effect_contract_negative(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let patch_text = "--- a/../outside/evil.txt\n+++ b/../outside/evil.txt\n@@ -0,0 +1 @@\n+evil\n";
         let params = PatchParams { patch: patch_text.into() };
         let authority = mutation_region(&root);
@@ -532,9 +532,9 @@ proptest! {
     #[test]
     fn run_effect_contract_negative(msg in "[a-z]{1,16}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
         let params = RunParams {
             argv: vec!["echo".into(), msg],
             cwd: Some("/outside-scope".into()),
@@ -554,13 +554,13 @@ proptest! {
     #[test]
     fn fetch_effect_contract_negative(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let fetch_cap = SourcedCapability {
-            capability: Capability::FetchUrl { host_pattern: "allowed.com".into() },
+            capability: Capability::FetchUrl { host: "allowed.com".into() },
             source: CapabilitySource::Base,
         };
-        let (ctx, _rx) = build_test_context(&root, vec![fetch_cap], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], NetworkPolicyConfig::safe_defaults());
         let mut kinds = std::collections::BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
         let authority = AuthorizedEffectRegion {
@@ -587,9 +587,9 @@ proptest! {
     #[test]
     fn todo_write_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = TodoWriteParams {
             todos: vec![TodoItem {
                 content,
@@ -608,9 +608,9 @@ proptest! {
     #[test]
     fn declare_effect_contract_negative(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
-        let root = dir.path().to_str().unwrap().to_string();
+        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let envelope = ExecutionEnvelope {
             intent: Intent { description: "test".into() },
             capabilities: std::collections::BTreeSet::new(),
@@ -655,8 +655,16 @@ fn malicious_handler_caught() {
         .unwrap();
 
     let dir = setup_tempdir_with_files();
-    let root = dir.path().to_str().unwrap().to_string();
-    let (ctx, _rx) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![read_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
     let authority = observation_region(&root);
 
     let outcome = rt().block_on(effect_contract_harness::<ReadFile>(
@@ -693,9 +701,14 @@ fn malicious_handler_caught() {
 #[test]
 fn command_run_composite_effect() {
     let dir = setup_tempdir_with_files();
-    let root = dir.path().to_str().unwrap().to_string();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let registry = test_registry();
-    let (ctx, _rx) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+    let (ctx, _rx, _) =
+        build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
 
     let ledger = ctx.effect_ledger.clone();
     let params = RunParams {

@@ -206,7 +206,7 @@ impl AuthorizedEffectRegion {
                     command_allowed: true,
                 }
             }
-            Capability::FetchUrl { host_pattern } => {
+            Capability::FetchUrl { host } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::ExternalObservation);
                 Self {
@@ -214,7 +214,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
-                    hosts: vec![host_pattern.clone()],
+                    hosts: vec![host.clone()],
                     session_state_allowed: false,
                     command_allowed: false,
                 }
@@ -253,11 +253,11 @@ impl AuthorizedEffectRegion {
                 self.read_paths.iter().any(|rp| path.starts_with(rp))
             }
             (ImpactKind::WorkspaceObservation, ObservedScope::Root(root)) => {
-                // Check observation_roots (Inspect policy roots)
-                self.observation_roots.iter().any(|r| {
-                    r.to_string_lossy().as_ref() == root.as_str()
-                        || root.starts_with(&r.to_string_lossy().as_ref().to_string())
-                })
+                // Path-component-aware check (not string prefix — "/project-evil" must NOT match "/project")
+                let root_path = std::path::Path::new(root);
+                self.observation_roots
+                    .iter()
+                    .any(|r| root_path.starts_with(r))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Path(path)) => {
                 // Check write_paths (WritePath capability)
@@ -290,36 +290,6 @@ mod tests {
     use lancet_protocol::method::RequiredCapability;
     use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
     use std::path::PathBuf;
-
-    fn test_policy() -> Phase21PolicyConfig {
-        use crate::policy::command::CommandPolicy;
-        use crate::policy::network::NetworkPolicyConfig;
-        use crate::policy::observation::ObservationPolicyConfig;
-        use crate::policy::BudgetLimits;
-
-        Phase21PolicyConfig {
-            project_root: PathBuf::from("/project"),
-            observation: ObservationPolicyConfig {
-                allowed_roots: vec![PathBuf::from("/project")],
-                max_single_read_bytes: 10_000_000,
-                max_turn_observation_bytes: 10_000_000,
-                max_grep_matches: 1000,
-                max_list_entries: 1000,
-                max_find_paths: 1000,
-                max_todo_ops: 100,
-            },
-            network: NetworkPolicyConfig::safe_defaults(),
-            budget: BudgetLimits {
-                max_single_read_bytes: 10_000_000,
-                max_turn_observation_bytes: 10_000_000,
-                max_grep_matches: 1000,
-                max_list_entries: 1000,
-                max_find_paths: 1000,
-                max_todo_ops: 100,
-            },
-            command: CommandPolicy::defaults(),
-        }
-    }
 
     fn sourced_read_cap(pattern: &str) -> SourcedCapability {
         SourcedCapability {
@@ -390,14 +360,14 @@ mod tests {
     #[test]
     fn none_matched_capability_yields_empty_region() {
         // Review concern 5: None → empty region (fail-closed)
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let region = AuthorizedEffectRegion::from_matched_capability(None, &policy);
         assert_eq!(region, AuthorizedEffectRegion::empty());
     }
 
     #[test]
     fn read_path_capability_sets_read_region() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_read_cap("/project/src");
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
@@ -409,7 +379,7 @@ mod tests {
     #[test]
     fn inspect_capability_sets_observation_roots_from_policy() {
         // Inspect has NO path pattern — region comes from policy roots
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_inspect_cap();
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
@@ -420,7 +390,7 @@ mod tests {
 
     #[test]
     fn observation_only_region_rejects_workspace_mutation() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_inspect_cap();
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
@@ -435,7 +405,7 @@ mod tests {
 
     #[test]
     fn read_path_region_contains_in_scope_path() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_read_cap("/project/src");
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
@@ -450,7 +420,7 @@ mod tests {
 
     #[test]
     fn read_path_region_rejects_out_of_scope_path() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_read_cap("/project/src");
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
@@ -465,13 +435,44 @@ mod tests {
 
     #[test]
     fn inspect_region_contains_observation_at_policy_root() {
-        let policy = test_policy();
+        let policy = crate::effect::shared_test_policy();
         let cap = sourced_inspect_cap();
         let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
 
         let effect = ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Root("/project".to_string()),
+            required_capability: RequiredCapability::Inspect,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        };
+        assert!(region.contains(&effect));
+    }
+
+    #[test]
+    fn inspect_region_rejects_prefix_collision() {
+        let policy = crate::effect::shared_test_policy();
+        let cap = sourced_inspect_cap();
+        let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
+
+        // "/project-evil" must NOT pass just because "/project" is authorized
+        let effect = ObservedEffect {
+            kind: ImpactKind::WorkspaceObservation,
+            scope: ObservedScope::Root("/project-evil".to_string()),
+            required_capability: RequiredCapability::Inspect,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        };
+        assert!(!region.contains(&effect));
+    }
+
+    #[test]
+    fn inspect_region_allows_subdirectory() {
+        let policy = crate::effect::shared_test_policy();
+        let cap = sourced_inspect_cap();
+        let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
+
+        let effect = ObservedEffect {
+            kind: ImpactKind::WorkspaceObservation,
+            scope: ObservedScope::Root("/project/src".to_string()),
             required_capability: RequiredCapability::Inspect,
             source: crate::effect::ledger::EffectSource::HandlerBackend,
         };

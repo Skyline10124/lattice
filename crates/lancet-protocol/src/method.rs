@@ -37,7 +37,7 @@ pub enum RequiredCapability {
 pub struct CapabilityPatterns<'a> {
     pub path_pattern: Option<&'a str>,
     pub argv_allowlist: Option<&'a [String]>,
-    pub host_pattern: Option<&'a str>,
+    pub host: Option<&'a str>,
 }
 
 /// Reasons [`RequiredCapability::resolve`] cannot materialize a [`Capability`].
@@ -94,8 +94,8 @@ impl RequiredCapability {
                     .to_vec(),
             }),
             Self::FetchUrl => Ok(Capability::FetchUrl {
-                host_pattern: patterns
-                    .host_pattern
+                host: patterns
+                    .host
                     .ok_or(CapabilityResolveError::MissingPattern { kind: "FetchUrl" })?
                     .to_string(),
             }),
@@ -216,15 +216,15 @@ mod tests {
     }
 
     #[test]
-    fn fetch_url_resolves_with_host_pattern() {
+    fn fetch_url_resolves_with_host() {
         let patterns = CapabilityPatterns {
-            host_pattern: Some("api.github.com"),
+            host: Some("api.github.com"),
             ..Default::default()
         };
         assert_eq!(
             RequiredCapability::FetchUrl.resolve(&patterns).unwrap(),
             Capability::FetchUrl {
-                host_pattern: "api.github.com".into()
+                host: "api.github.com".into()
             }
         );
     }

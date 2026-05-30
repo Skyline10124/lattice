@@ -59,13 +59,6 @@ impl Serialize for EffectKindSet {
     }
 }
 
-impl<'de> Deserialize<'de> for EffectKindSet {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let v = Vec::<ImpactKind>::deserialize(deserializer)?;
-        Ok(EffectKindSet(Box::leak(v.into_boxed_slice())))
-    }
-}
-
 impl JsonSchema for EffectKindSet {
     fn schema_name() -> String {
         "EffectKindSet".to_owned()
@@ -100,14 +93,11 @@ pub enum EffectScopeKind {
 ///
 /// Every [`CepMethod`](crate::method::CepMethod) must carry one of these as
 /// `const EFFECT`. The `kinds` field is a set (not kind + also).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct EffectDecl {
     pub kinds: EffectKindSet,
     pub scope: EffectScopeKind,
-    #[serde(
-        serialize_with = "serialize_static_slice",
-        deserialize_with = "deserialize_static_slice"
-    )]
+    #[serde(serialize_with = "serialize_static_slice")]
     #[schemars(with = "Vec<RequiredCapability>")]
     pub capabilities: &'static [RequiredCapability],
 }
@@ -117,13 +107,6 @@ fn serialize_static_slice<T: Serialize, S: serde::Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     slice.serialize(serializer)
-}
-
-fn deserialize_static_slice<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<&'static [T], D::Error> {
-    let v = Vec::<T>::deserialize(deserializer)?;
-    Ok(Box::leak(v.into_boxed_slice()))
 }
 
 /// A closed enumeration of capabilities an envelope can grant.
@@ -136,7 +119,7 @@ pub enum Capability {
     ReadPath { path_pattern: String },
     WritePath { path_pattern: String },
     RunCommand { argv_allowlist: Vec<String> },
-    FetchUrl { host_pattern: String },
+    FetchUrl { host: String },
     MutateSessionState,
     Inspect,
 }
@@ -230,7 +213,7 @@ pub struct ExecutionEnvelope {
 ///
 /// Per CEP-08, `BaseExecutionEnvelope` is the runtime-injected default envelope
 /// every turn starts with. It may carry `ReadPath`, `Inspect`, and optionally
-/// `MutateSessionState` and `FetchUrl(host_pattern)` capabilities; it **never**
+/// `MutateSessionState` and `FetchUrl(host)` capabilities; it **never**
 /// grants `WritePath` or `RunCommand`. Those two capabilities require an
 /// explicitly declared envelope (Phase 22 `declare_envelope` / `submit_intent`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -281,15 +264,15 @@ impl BaseExecutionEnvelope {
         self
     }
 
-    /// Add a `FetchUrl(host_pattern)` capability to this base envelope.
+    /// Add a `FetchUrl(host)` capability to this base envelope.
     ///
     /// Per CEP-08, external observation is allowed in the base envelope when
-    /// a host pattern is configured (PROF-02 `[cep.network]`). One call adds
-    /// one host pattern; call repeatedly to allow more hosts.
-    pub fn with_fetch_host(mut self, host_pattern: impl Into<String>) -> Self {
-        self.inner.capabilities.insert(Capability::FetchUrl {
-            host_pattern: host_pattern.into(),
-        });
+    /// a host is configured (PROF-02 `[cep.network]`). One call adds
+    /// one host; call repeatedly to allow more hosts.
+    pub fn with_fetch_host(mut self, host: impl Into<String>) -> Self {
+        self.inner
+            .capabilities
+            .insert(Capability::FetchUrl { host: host.into() });
         self
     }
 
@@ -509,24 +492,20 @@ mod tests {
     }
 
     #[test]
-    fn effect_kind_set_serde_snake_case_array_round_trip() {
+    fn effect_kind_set_serializes_as_snake_case_array() {
         let set = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
         let json = serde_json::to_string(&set).unwrap();
         assert_eq!(json, r#"["workspace_mutation"]"#);
-        let back: EffectKindSet = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, set);
     }
 
     #[test]
-    fn effect_kind_set_serde_composite_round_trip() {
+    fn effect_kind_set_serializes_composite_as_snake_case_array() {
         let set = EffectKindSet::from_static(&[
             ImpactKind::WorkspaceMutation,
             ImpactKind::CommandExecution,
         ]);
         let json = serde_json::to_string(&set).unwrap();
         assert_eq!(json, r#"["workspace_mutation","command_execution"]"#);
-        let back: EffectKindSet = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, set);
     }
 
     #[test]
@@ -591,7 +570,7 @@ mod tests {
                 argv_allowlist: vec!["ls".into()],
             },
             Capability::FetchUrl {
-                host_pattern: "example.com".into(),
+                host: "example.com".into(),
             },
             Capability::MutateSessionState,
             Capability::Inspect,

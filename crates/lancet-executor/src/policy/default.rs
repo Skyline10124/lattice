@@ -880,9 +880,7 @@ mod tests {
             method: "web.fetch".into(),
             params: json!({"url": "https://evil.example.com/page"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-                capability: Capability::FetchUrl {
-                    host_pattern: "*".into(),
-                },
+                capability: Capability::FetchUrl { host: "*".into() },
                 source: base_source(),
             }]),
             audit_context: audit_ctx(default_budget()),
