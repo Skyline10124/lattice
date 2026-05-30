@@ -7,6 +7,7 @@
 //! compute changed paths after execution, and check against WritePath scope.
 //! D-43..D-45: Verify flow after successful WorkspaceMutation commands.
 
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
 use crate::guard::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
@@ -20,12 +21,14 @@ use crate::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
 use lancet_protocol::envelope::Capability;
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
+use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::command::{Run, RunParams, RunResult};
 use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Register native `command.run` handler.
 pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -165,6 +168,13 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             // 11. Build RunResult with truncation metadata
             let exit_code = output.status.code().unwrap_or(-1);
 
+            ctx.record_effect(ObservedEffect {
+                kind: ImpactKind::CommandExecution,
+                scope: ObservedScope::Root(project_root.clone()),
+                required_capability: RequiredCapability::RunCommand,
+                source: EffectSource::HandlerBackend,
+            });
+
             // 12. Post-execution diff check for WorkspaceMutation (D-30, D-38)
             if effective_impact == EffectiveImpact::WorkspaceMutation {
                 if let Some(ref record) = active_record {
@@ -177,6 +187,15 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                     let changed_paths = compute_changed_paths(&pre_snapshot, &post_snapshot);
 
                     if !changed_paths.is_empty() {
+                        for path in &changed_paths {
+                            ctx.record_effect(ObservedEffect {
+                                kind: ImpactKind::WorkspaceMutation,
+                                scope: ObservedScope::Path(PathBuf::from(path)),
+                                required_capability: RequiredCapability::WritePath,
+                                source: EffectSource::HandlerBackend,
+                            });
+                        }
+
                         // Check each changed path against WritePath scope
                         let mut out_of_scope = Vec::new();
                         for path in &changed_paths {
@@ -192,10 +211,9 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                         }
 
                         if !out_of_scope.is_empty() {
-                            // D-38: Out-of-scope changed paths -> ReplanRequired
                             ctx.events
                                 .emit(
-                                    "cep.replan_required",
+                                    "cep.effect_observed_out_of_scope",
                                     json!({
                                         "method": Run::NAME,
                                         "active_envelope_id": env_id,
@@ -208,28 +226,11 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                             ctx.record_durable_metadata(json!({
                                 "classification": "workspace_mutation",
                                 "envelope_id": env_id,
-                                "denial_source": "guard_l1_scope",
                                 "out_of_scope_paths": out_of_scope,
                                 "changed_paths": changed_paths,
                                 "backend_invoked": true,
                                 "policy_enforced": true,
                             }));
-
-                            return Err(CepError::new(
-                                CepErrorCode::ReplanRequired,
-                                format!(
-                                    "command changed out-of-scope paths: {:?}",
-                                    out_of_scope
-                                ),
-                                CepErrorData::Guard(GuardErrorData {
-                                    method: Run::NAME.into(),
-                                    reason: format!(
-                                        "ReplanRequired: changed paths {:?} outside WritePath scope",
-                                        out_of_scope
-                                    ),
-                                }),
-                                Retriability::RequiresReplan,
-                            ));
                         }
                     }
 
@@ -254,7 +255,14 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                     .await;
                                 return Err(verify_failed_error(&verify_cmd, &outcome));
                             }
-                            Ok(_) => {} // verify succeeded
+                            Ok(_) => {
+                                ctx.record_effect(ObservedEffect {
+                                    kind: ImpactKind::CommandExecution,
+                                    scope: ObservedScope::Root(project_root.clone()),
+                                    required_capability: RequiredCapability::RunCommand,
+                                    source: EffectSource::Verify,
+                                });
+                            }
                             Err(err) => {
                                 ctx.events
                                     .emit(
@@ -275,8 +283,22 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             }
 
             // 13. Record durable metadata
+            let effective_effect =
+                crate::effect::region::EffectiveEffect::from_command_impact(&effective_impact)
+                    .ok()
+                    .map(|ee| {
+                        ee.kinds
+                            .iter()
+                            .map(|k| format!("{:?}", k))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+
+            // EFF-03 composite: records both command_execution and workspace_mutation
+            // for WorkspaceMutation commands. Phase 26 PROV replay reads this field.
             ctx.record_durable_metadata(json!({
                 "classification": format!("{:?}", effective_impact),
+                "effective_effect": effective_effect,
                 "envelope_id": envelope_id,
                 "exit_code": exit_code,
                 "stdout_bytes": stdout_meta.total_bytes,
@@ -633,6 +655,8 @@ mod tests {
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -699,6 +723,8 @@ mod tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -827,6 +853,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -899,6 +927,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -974,6 +1004,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1002,7 +1034,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_mutation_hidden_project_path_outside_scope_replans() {
+    async fn workspace_mutation_hidden_project_path_outside_scope_records_effect_and_succeeds() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
@@ -1038,6 +1070,8 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let effect_ledger = crate::effect::ledger::EffectLedger::new();
+        let ledger_clone = effect_ledger.clone();
         let ctx = HandlerContext {
             call_id: 1,
             events: EventSink::new(event_tx, 1),
@@ -1047,6 +1081,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger,
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1069,16 +1105,37 @@ mod tests {
             timeout_ms: Some(5000),
             declared_impact: Some(ImpactKind::WorkspaceMutation),
         };
-        let err = registry
+        let result = registry
             .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+            .unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+
+        let effects = ledger_clone.snapshot();
+        let mutation_effects: Vec<_> = effects
+            .iter()
+            .filter(|e| {
+                e.kind == ImpactKind::WorkspaceMutation
+                    && e.source == crate::effect::ledger::EffectSource::HandlerBackend
+            })
+            .collect();
+        assert!(
+            !mutation_effects.is_empty(),
+            "ledger must contain WorkspaceMutation effect for out-of-scope path"
+        );
+        let has_out_of_scope = mutation_effects.iter().any(|e| {
+            matches!(&e.scope, crate::effect::ledger::ObservedScope::Path(p) if p.to_string_lossy().contains("phase22-hidden"))
+        });
+        assert!(
+            has_out_of_scope,
+            "ledger must contain the specific out-of-scope path"
+        );
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn workspace_mutation_post_check_uses_authorizing_envelope_after_supersede() {
+    async fn workspace_mutation_post_check_records_effects_and_succeeds_after_supersede() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -1123,6 +1180,8 @@ mod tests {
 
         let (event_tx, _event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let effect_ledger = crate::effect::ledger::EffectLedger::new();
+        let ledger_clone = effect_ledger.clone();
         let ctx = HandlerContext {
             call_id: 1,
             events: EventSink::new(event_tx, 1),
@@ -1132,6 +1191,8 @@ mod tests {
             active_envelope: Arc::clone(&store),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger,
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1190,8 +1251,35 @@ mod tests {
             .await
             .unwrap();
 
-        let err = command_task.await.unwrap().unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        let result = command_task.await.unwrap().unwrap();
+        let parsed: RunResult = serde_json::from_value(result).unwrap();
+        assert_eq!(parsed.exit_code, 0);
+
+        let effects = ledger_clone.snapshot();
+        let cmd_exec: Vec<_> = effects
+            .iter()
+            .filter(|e| {
+                e.kind == ImpactKind::CommandExecution
+                    && e.source == crate::effect::ledger::EffectSource::HandlerBackend
+            })
+            .collect();
+        assert_eq!(cmd_exec.len(), 1, "exactly one CommandExecution effect");
+        assert!(
+            matches!(&cmd_exec[0].scope, crate::effect::ledger::ObservedScope::Root(r) if r == root),
+            "CommandExecution scope must be Root(project_root)"
+        );
+
+        let mutations: Vec<_> = effects
+            .iter()
+            .filter(|e| {
+                e.kind == ImpactKind::WorkspaceMutation
+                    && e.source == crate::effect::ledger::EffectSource::HandlerBackend
+            })
+            .collect();
+        assert!(
+            !mutations.is_empty(),
+            "ledger must contain WorkspaceMutation effect for changed path"
+        );
     }
 
     #[tokio::test]
@@ -1341,6 +1429,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1437,6 +1527,8 @@ mod tests {
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1587,5 +1679,30 @@ mod tests {
         );
         let changed = compute_changed_paths(&pre, &post);
         assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn command_run_composite_effect_workspace_mutation() {
+        use crate::effect::region::EffectiveEffect;
+        use crate::policy::command::EffectiveImpact;
+
+        let effect =
+            EffectiveEffect::from_command_impact(&EffectiveImpact::WorkspaceMutation).unwrap();
+        let kinds: Vec<String> = effect.kinds.iter().map(|k| format!("{:?}", k)).collect();
+        assert!(kinds.contains(&"CommandExecution".to_string()));
+        assert!(kinds.contains(&"WorkspaceMutation".to_string()));
+        assert_eq!(kinds.len(), 2);
+    }
+
+    #[test]
+    fn command_run_composite_effect_diagnostic() {
+        use crate::effect::region::EffectiveEffect;
+        use crate::policy::command::EffectiveImpact;
+
+        let effect = EffectiveEffect::from_command_impact(&EffectiveImpact::Diagnostic).unwrap();
+        let kinds: Vec<String> = effect.kinds.iter().map(|k| format!("{:?}", k)).collect();
+        assert!(kinds.contains(&"CommandExecution".to_string()));
+        assert!(!kinds.contains(&"WorkspaceMutation".to_string()));
+        assert_eq!(kinds.len(), 1);
     }
 }

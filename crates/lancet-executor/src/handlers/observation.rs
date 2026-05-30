@@ -4,13 +4,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::edit::content_hash;
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::executor::render::render_file_slice;
 use crate::guard::evaluate_and_enforce_policy;
 use crate::policy::budget::BudgetExhausted;
 use crate::policy::observation::{resolve_observation_target, ResolvedObservationTarget};
 use crate::policy::Phase21PolicyConfig;
 use crate::registry::{HandlerContext, MethodRegistry};
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
+use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::workspace::{
     DirectoryEntry, DirectoryEntryKind, FindFiles, FindFilesParams, FindFilesResult, Grep,
     GrepMatch, GrepParams, GrepResult, ListDirectory, ListDirectoryParams, ListDirectoryResult,
@@ -91,6 +94,13 @@ async fn handle_read_file(
 
     charge_observation_bytes(&ctx, bytes_returned)?;
 
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceObservation,
+        scope: ObservedScope::Path(target.canonical_target.clone()),
+        required_capability: RequiredCapability::ReadPath,
+        source: EffectSource::HandlerBackend,
+    });
+
     emit_success_metadata(
         &ctx,
         ReadFile::NAME,
@@ -150,6 +160,13 @@ async fn handle_list_directory(
         .unwrap_or(0);
     charge_observation_bytes(&ctx, bytes_returned)?;
 
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceObservation,
+        scope: ObservedScope::Root(policy.project_root.to_string_lossy().to_string()),
+        required_capability: RequiredCapability::Inspect,
+        source: EffectSource::HandlerBackend,
+    });
+
     emit_success_metadata(
         &ctx,
         ListDirectory::NAME,
@@ -198,6 +215,13 @@ async fn handle_find_files(
 
     let bytes_returned = paths.iter().map(|p| p.len()).sum::<usize>();
     charge_observation_bytes(&ctx, bytes_returned)?;
+
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceObservation,
+        scope: ObservedScope::Root(policy.project_root.to_string_lossy().to_string()),
+        required_capability: RequiredCapability::Inspect,
+        source: EffectSource::HandlerBackend,
+    });
 
     emit_success_metadata(
         &ctx,
@@ -262,6 +286,13 @@ async fn run_grep(
         .map(|m| m.path.len() + m.text.len() + 16)
         .sum::<usize>();
     charge_observation_bytes(&ctx, bytes_returned)?;
+
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceObservation,
+        scope: ObservedScope::Root(policy.project_root.to_string_lossy().to_string()),
+        required_capability: RequiredCapability::Inspect,
+        source: EffectSource::HandlerBackend,
+    });
 
     emit_success_metadata(
         &ctx,
@@ -744,6 +775,8 @@ mod tests {
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -829,6 +862,8 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -872,6 +907,8 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
@@ -1069,6 +1106,8 @@ mod tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                 crate::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),

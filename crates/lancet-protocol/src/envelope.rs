@@ -3,6 +3,7 @@
 //! Defines the structured envelope that describes intent, capabilities,
 //! scope, impact, constraints, and guard verdicts for controlled execution.
 
+use crate::method::RequiredCapability;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -17,7 +18,9 @@ pub enum CepMode {
 }
 
 /// The kind of impact an operation can have.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
 pub enum ImpactKind {
@@ -26,6 +29,101 @@ pub enum ImpactKind {
     CommandExecution,
     ExternalObservation,
     SessionStateMutation,
+}
+
+/// A const-constructible, order-canonical set of [`ImpactKind`] values.
+///
+/// Used in [`EffectDecl`] to declare the static effect ceiling for a method.
+/// Always declare members in [`ImpactKind`] enum declaration order.
+/// Serializes as a JSON array of snake_case strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EffectKindSet(pub &'static [ImpactKind]);
+
+impl EffectKindSet {
+    pub const fn from_static(kinds: &'static [ImpactKind]) -> Self {
+        Self(kinds)
+    }
+
+    pub fn contains(&self, kind: &ImpactKind) -> bool {
+        self.0.iter().any(|k| k == kind)
+    }
+
+    pub fn is_subset_of(&self, other: &EffectKindSet) -> bool {
+        self.0.iter().all(|k| other.contains(k))
+    }
+}
+
+impl Serialize for EffectKindSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EffectKindSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = Vec::<ImpactKind>::deserialize(deserializer)?;
+        Ok(EffectKindSet(Box::leak(v.into_boxed_slice())))
+    }
+}
+
+impl JsonSchema for EffectKindSet {
+    fn schema_name() -> String {
+        "EffectKindSet".to_owned()
+    }
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        <Vec<ImpactKind>>::json_schema(gen)
+    }
+}
+
+impl From<EffectKindSet> for BTreeSet<ImpactKind> {
+    fn from(kinds: EffectKindSet) -> Self {
+        kinds.0.iter().cloned().collect()
+    }
+}
+
+/// Static scope-region kind descriptor for effect declarations.
+///
+/// Describes the *class* of scope a method operates in, not concrete
+/// per-invocation bounds (those are executor-owned).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectScopeKind {
+    PathRead,
+    ObservationRoot,
+    WorkspaceWrite,
+    CommandExecution,
+    ExternalHost,
+    SessionState,
+}
+
+/// Static method-level effect declaration (the permission ceiling).
+///
+/// Every [`CepMethod`](crate::method::CepMethod) must carry one of these as
+/// `const EFFECT`. The `kinds` field is a set (not kind + also).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectDecl {
+    pub kinds: EffectKindSet,
+    pub scope: EffectScopeKind,
+    #[serde(
+        serialize_with = "serialize_static_slice",
+        deserialize_with = "deserialize_static_slice"
+    )]
+    #[schemars(with = "Vec<RequiredCapability>")]
+    pub capabilities: &'static [RequiredCapability],
+}
+
+fn serialize_static_slice<T: Serialize, S: serde::Serializer>(
+    slice: &'static [T],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    slice.serialize(serializer)
+}
+
+fn deserialize_static_slice<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<&'static [T], D::Error> {
+    let v = Vec::<T>::deserialize(deserializer)?;
+    Ok(Box::leak(v.into_boxed_slice()))
 }
 
 /// A closed enumeration of capabilities an envelope can grant.
@@ -374,6 +472,61 @@ mod tests {
         // is deferred to v1.3-beta+. Make sure stale wire payloads fail loudly.
         let result: Result<OnFailure, _> = serde_json::from_str("\"rollback\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn effect_kind_set_const_construction() {
+        const _: EffectKindSet = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
+        let set = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
+        assert_eq!(set.0.len(), 1);
+    }
+
+    #[test]
+    fn effect_kind_set_subset_true() {
+        let small = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
+        let big = EffectKindSet::from_static(&[
+            ImpactKind::WorkspaceMutation,
+            ImpactKind::CommandExecution,
+        ]);
+        assert!(small.is_subset_of(&big));
+    }
+
+    #[test]
+    fn effect_kind_set_subset_false() {
+        let big = EffectKindSet::from_static(&[
+            ImpactKind::WorkspaceMutation,
+            ImpactKind::CommandExecution,
+        ]);
+        let small = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
+        assert!(!big.is_subset_of(&small));
+    }
+
+    #[test]
+    fn effect_kind_set_contains() {
+        let set = EffectKindSet::from_static(&[ImpactKind::CommandExecution]);
+        assert!(set.contains(&ImpactKind::CommandExecution));
+        assert!(!set.contains(&ImpactKind::WorkspaceMutation));
+    }
+
+    #[test]
+    fn effect_kind_set_serde_snake_case_array_round_trip() {
+        let set = EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]);
+        let json = serde_json::to_string(&set).unwrap();
+        assert_eq!(json, r#"["workspace_mutation"]"#);
+        let back: EffectKindSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, set);
+    }
+
+    #[test]
+    fn effect_kind_set_serde_composite_round_trip() {
+        let set = EffectKindSet::from_static(&[
+            ImpactKind::WorkspaceMutation,
+            ImpactKind::CommandExecution,
+        ]);
+        let json = serde_json::to_string(&set).unwrap();
+        assert_eq!(json, r#"["workspace_mutation","command_execution"]"#);
+        let back: EffectKindSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, set);
     }
 
     #[test]

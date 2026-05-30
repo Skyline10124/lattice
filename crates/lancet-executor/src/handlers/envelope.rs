@@ -256,6 +256,8 @@ mod tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
                     crate::policy::default::PolicyConfig::defaults_for_project_root(
                         std::path::PathBuf::from(root),

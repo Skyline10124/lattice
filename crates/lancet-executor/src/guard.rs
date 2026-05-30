@@ -754,6 +754,16 @@ pub async fn evaluate_and_enforce_policy(
                         "budget_remaining": evidence.budget_remaining,
                     }
                 }));
+
+                let matched_cap = evidence
+                    .capability_match
+                    .as_ref()
+                    .and_then(|cm| cm.matched.as_ref());
+                let region = crate::effect::region::AuthorizedEffectRegion::from_matched_capability(
+                    matched_cap,
+                    &ctx.phase21.policy,
+                );
+                ctx.authorized_region.set(region);
             }
         }
         PolicyDecision::Denied { reason_code, .. }
@@ -1066,6 +1076,8 @@ mod policy_tests {
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(CepAuditContext {

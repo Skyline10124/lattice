@@ -1,9 +1,9 @@
 //! CEP method trait and sealed catalog membership.
 
-use crate::envelope::{Capability, ImpactKind};
+use crate::envelope::{Capability, EffectDecl, ImpactKind};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -17,7 +17,8 @@ pub(crate) mod sealed {
 /// permissive default** — `resolve` requires explicit patterns for every
 /// pattern-bearing capability so that "no ambient authority" (CEP-07) is
 /// preserved at the type system level.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum RequiredCapability {
     Inspect,
     ReadPath,
@@ -110,6 +111,7 @@ pub trait CepMethod: 'static {
     type Result: Serialize + DeserializeOwned + JsonSchema;
     const IMPACT: ImpactKind;
     const CAPABILITY: RequiredCapability;
+    const EFFECT: EffectDecl;
 }
 
 /// Sealed catalog membership — only types in `crate::methods` may implement this.
@@ -122,6 +124,7 @@ pub struct MethodDescriptor {
     pub description: &'static str,
     pub impact: ImpactKind,
     pub capability: RequiredCapability,
+    pub effect: EffectDecl,
     pub params_schema: fn() -> serde_json::Value,
 }
 
@@ -133,6 +136,7 @@ impl MethodDescriptor {
             description: M::DESCRIPTION,
             impact: M::IMPACT,
             capability: M::CAPABILITY,
+            effect: M::EFFECT,
             params_schema: params_schema::<M>,
         }
     }

@@ -1,6 +1,6 @@
 //! Session state mutation methods.
 
-use crate::envelope::ImpactKind;
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
 use crate::method::{CatalogMethod, CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,11 @@ impl CepMethod for TodoWrite {
     type Result = TodoWriteResult;
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
+        scope: EffectScopeKind::SessionState,
+        capabilities: &[RequiredCapability::MutateSessionState],
+    };
 }
 
 impl CatalogMethod for TodoWrite {}

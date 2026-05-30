@@ -574,6 +574,9 @@ pub(crate) fn build_production_turn_deps(
         production_audit_routing: true,
         policy_hook: default_hook.clone(),
         default_policy_hook: Some(default_hook),
+        cep_mode: cep
+            .map(|c| c.mode.clone())
+            .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
     };
 
     let mut registry = MethodRegistry::new();

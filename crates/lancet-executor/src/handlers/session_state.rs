@@ -1,8 +1,11 @@
 //! Native Phase 21 `session.todo_write` CEP handler.
 
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::guard::evaluate_and_enforce_policy;
 use crate::registry::{HandlerContext, MethodRegistry};
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
+use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::session::{
     TodoItem, TodoStatus, TodoWrite, TodoWriteParams, TodoWriteResult,
 };
@@ -32,6 +35,13 @@ async fn handle_todo_write(
     }
 
     emit_success_metadata(&ctx, op_count).await;
+
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::SessionStateMutation,
+        scope: ObservedScope::SessionState,
+        required_capability: RequiredCapability::MutateSessionState,
+        source: EffectSource::HandlerBackend,
+    });
 
     Ok(TodoWriteResult {
         todos: params.todos,
@@ -144,6 +154,8 @@ mod tests {
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {

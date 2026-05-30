@@ -1,6 +1,6 @@
 //! External observation methods.
 
-use crate::envelope::ImpactKind;
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
 use crate::method::{CatalogMethod, CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,11 @@ impl CepMethod for Fetch {
     type Result = FetchResult;
     const IMPACT: ImpactKind = ImpactKind::ExternalObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::FetchUrl;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::ExternalObservation]),
+        scope: EffectScopeKind::ExternalHost,
+        capabilities: &[RequiredCapability::FetchUrl],
+    };
 }
 
 impl CatalogMethod for Fetch {}

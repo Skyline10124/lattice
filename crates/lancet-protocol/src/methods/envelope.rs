@@ -1,6 +1,6 @@
 //! Envelope declaration methods.
 
-use crate::envelope::{ExecutionEnvelope, ImpactKind};
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ExecutionEnvelope, ImpactKind};
 use crate::method::{CatalogMethod, CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,11 @@ impl CepMethod for Declare {
     // Full active-envelope storage lands in Phase 22.
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
+        scope: EffectScopeKind::SessionState,
+        capabilities: &[RequiredCapability::MutateSessionState],
+    };
 }
 
 impl CatalogMethod for Declare {}

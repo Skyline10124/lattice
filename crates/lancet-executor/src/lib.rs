@@ -12,6 +12,7 @@
 pub mod audit;
 pub(crate) mod call_durable_metadata;
 pub(crate) mod edit;
+pub mod effect;
 pub mod envelope_store;
 pub(crate) mod executor;
 pub mod guard;
@@ -20,6 +21,7 @@ mod legacy_backend;
 mod native_registry;
 pub mod policy;
 pub mod registry;
+pub mod testing;
 pub mod tool_definitions;
 pub mod transport;
 pub mod verify;

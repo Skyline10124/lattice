@@ -10,8 +10,9 @@ use crate::policy::Phase21TurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
-    envelope::BaseExecutionEnvelope, error::to_jsonrpc_error, CatalogMethod, CepError, Id,
-    ToolEvent, ToolResult,
+    envelope::{BaseExecutionEnvelope, CepMode},
+    error::to_jsonrpc_error,
+    CatalogMethod, CepError, Id, ToolEvent, ToolResult,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -44,6 +45,9 @@ pub struct ServerRunConfig {
     pub policy_hook: Arc<dyn PolicyHook>,
     /// Executor-owned default hook for evidence capture when the default implementation is installed.
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
+    /// CEP enforcement mode: Enforce overrides overreach with EffectViolation,
+    /// Warn records the violation durably but passes, Off passes through.
+    pub cep_mode: CepMode,
 }
 
 impl ServerRunConfig {
@@ -69,6 +73,7 @@ impl ServerRunConfig {
             production_audit_routing: false,
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
+            cep_mode: CepMode::Off,
         }
     }
 }
@@ -396,6 +401,7 @@ async fn handle_request(
         production_audit_routing,
         policy_hook,
         default_policy_hook,
+        cep_mode,
     } = config;
 
     let ServerRequest {
@@ -432,6 +438,8 @@ async fn handle_request(
 
     let cancel_rx = cancel_tx.subscribe();
     let durable_metadata = crate::call_durable_metadata::CallDurableMetadata::default();
+    let effect_ledger = crate::effect::ledger::EffectLedger::new();
+    let authorized_region_slot = crate::effect::ledger::AuthorizedRegionSlot::new();
     let turn_id = ctx_snapshot.turn_id.clone();
     let ctx = HandlerContext {
         call_id: id,
@@ -442,29 +450,42 @@ async fn handle_request(
         active_envelope: Arc::clone(&active_envelope),
         turn_id,
         durable_metadata: durable_metadata.clone(),
+        effect_ledger: effect_ledger.clone(),
+        authorized_region: authorized_region_slot.clone(),
         policy_hook: Arc::clone(&policy_hook),
         default_policy_hook: default_policy_hook.clone(),
         audit_context: Arc::clone(&audit_context),
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;
+    let observed_effects = effect_ledger.snapshot();
+
+    let final_result = apply_effect_check(
+        &method,
+        dispatch_result,
+        &observed_effects,
+        &authorized_region_slot,
+        cep_mode,
+        &durable_metadata,
+    );
+
     let durable_metadata_json = durable_metadata.take_json();
 
     finalize_audit_for_dispatch(
         &audit,
         audit_start,
         &method,
-        &dispatch_result,
+        &final_result,
         &call_audit_metadata,
         durable_metadata_json.as_deref(),
     );
-    let ok = dispatch_result.is_ok();
-    let error_code = dispatch_result
+    let ok = final_result.is_ok();
+    let error_code = final_result
         .as_ref()
         .err()
         .map(|err| format!("{:?}", err.code));
 
-    let response = match &dispatch_result {
+    let response = match &final_result {
         Ok(result) => ToolResult::Success {
             result: result.clone(),
             id: Id::Number(id as i64),
@@ -495,6 +516,148 @@ async fn handle_request(
 
     if response_tx.send(Ok(response)).is_err() {
         let _ = cancel_tx.send(true);
+    }
+}
+
+fn is_incomplete_dispatch(result: &Result<Value, CepError>) -> bool {
+    matches!(
+        result,
+        Err(err)
+            if err.code == lancet_protocol::CepErrorCode::ExecutionFailed
+                && err.message.contains("cancelled")
+    )
+}
+
+fn apply_effect_check(
+    method: &str,
+    dispatch_result: Result<Value, CepError>,
+    observed_effects: &[crate::effect::ledger::ObservedEffect],
+    authorized_region_slot: &crate::effect::ledger::AuthorizedRegionSlot,
+    cep_mode: CepMode,
+    durable_metadata: &crate::call_durable_metadata::CallDurableMetadata,
+) -> Result<Value, CepError> {
+    if is_incomplete_dispatch(&dispatch_result) {
+        if !observed_effects.is_empty() {
+            durable_metadata.record(serde_json::json!({
+                "partial_effects": observed_effects.iter().map(|e| serde_json::json!({
+                    "kind": format!("{:?}", e.kind),
+                    "scope": format!("{:?}", e.scope),
+                })).collect::<Vec<_>>(),
+                "incomplete_dispatch": true,
+            }));
+        }
+        return dispatch_result;
+    }
+
+    let Ok(dispatch_value) = dispatch_result else {
+        return dispatch_result;
+    };
+
+    if cep_mode == CepMode::Off {
+        return Ok(dispatch_value);
+    }
+
+    let effect_decl = lancet_protocol::catalog()
+        .iter()
+        .find(|d| d.name == method)
+        .map(|d| &d.effect);
+
+    let Some(effect_decl) = effect_decl else {
+        return Ok(dispatch_value);
+    };
+
+    let region = authorized_region_slot.get();
+
+    match region {
+        Some(ref authorized) => {
+            let mut violations: Vec<String> = Vec::new();
+            let mut charged_kinds: Vec<lancet_protocol::envelope::ImpactKind> = Vec::new();
+
+            for effect in observed_effects {
+                match effect.source {
+                    crate::effect::ledger::EffectSource::HandlerBackend => {
+                        charged_kinds.push(effect.kind.clone());
+                        if !authorized.contains(effect) {
+                            violations.push(format!(
+                                "{:?}@{:?} exceeds authorized region",
+                                effect.kind, effect.scope
+                            ));
+                        }
+                    }
+                    crate::effect::ledger::EffectSource::EffectProbe
+                    | crate::effect::ledger::EffectSource::GuardProbe => {}
+                    crate::effect::ledger::EffectSource::Verify => {}
+                }
+            }
+
+            if violations.is_empty() {
+                return Ok(dispatch_value);
+            }
+
+            let authorized_kinds: Vec<lancet_protocol::envelope::ImpactKind> =
+                authorized.kinds.iter().cloned().collect();
+            let violation_err = CepError::new(
+                lancet_protocol::CepErrorCode::EffectViolation,
+                format!(
+                    "{}: observed effect exceeds authorized region ({} violation{})",
+                    method,
+                    violations.len(),
+                    if violations.len() == 1 { "" } else { "s" }
+                ),
+                lancet_protocol::CepErrorData::Effect(Box::new(
+                    lancet_protocol::error::EffectErrorData {
+                        method: method.to_string(),
+                        declared_effect: effect_decl.kinds,
+                        authorized_effect: authorized_kinds,
+                        observed_effects: charged_kinds,
+                        violations,
+                    },
+                )),
+                lancet_protocol::Retriability::Permanent,
+            );
+
+            match cep_mode {
+                CepMode::Enforce => Err(violation_err),
+                CepMode::Warn => {
+                    durable_metadata.record(serde_json::json!({
+                        "effect_warning": true,
+                        "violation": violation_err.message,
+                    }));
+                    Ok(dispatch_value)
+                }
+                CepMode::Off => Ok(dispatch_value),
+            }
+        }
+        None => match cep_mode {
+            CepMode::Enforce => Err(CepError::new(
+                lancet_protocol::CepErrorCode::EffectViolation,
+                format!("authorized region missing after successful dispatch for {method}"),
+                lancet_protocol::CepErrorData::Effect(Box::new(
+                    lancet_protocol::error::EffectErrorData {
+                        method: method.to_string(),
+                        declared_effect: effect_decl.kinds,
+                        authorized_effect: vec![],
+                        observed_effects: observed_effects.iter().map(|e| e.kind.clone()).collect(),
+                        violations: vec![
+                            "handler completed without setting authorized region".to_string()
+                        ],
+                    },
+                )),
+                lancet_protocol::Retriability::Permanent,
+            )),
+            CepMode::Warn => {
+                tracing::warn!(
+                    method = %method,
+                    "authorized region missing after successful dispatch; warn mode"
+                );
+                durable_metadata.record(serde_json::json!({
+                    "effect_warning": true,
+                    "violation": "authorized region missing after successful dispatch",
+                }));
+                Ok(dispatch_value)
+            }
+            CepMode::Off => Ok(dispatch_value),
+        },
     }
 }
 
@@ -1359,5 +1522,186 @@ mod tests {
             );
             assert_eq!(ACTIVE_HANDLERS.load(Ordering::SeqCst), 0);
         }
+    }
+
+    // ── Effect check enforcement tests (Plan 24-06 Task 2) ─────────────
+
+    use lancet_protocol::envelope::{CepMode, ImpactKind};
+    use lancet_protocol::method::RequiredCapability;
+    use lancet_protocol::{CepError, CepErrorCode};
+
+    fn overreach_handler() -> MethodRegistry {
+        let mut registry = MethodRegistry::new();
+        registry
+            .register_method::<TodoWrite, _, _>(|params, ctx| async move {
+                ctx.authorized_region
+                    .set(crate::effect::region::AuthorizedEffectRegion::empty());
+                ctx.record_effect(crate::effect::ledger::ObservedEffect {
+                    kind: ImpactKind::WorkspaceMutation,
+                    scope: crate::effect::ledger::ObservedScope::Path(std::path::PathBuf::from(
+                        "/out/of/scope",
+                    )),
+                    required_capability: RequiredCapability::WritePath,
+                    source: crate::effect::ledger::EffectSource::HandlerBackend,
+                });
+                Ok(TodoWriteResult {
+                    todos: params.todos,
+                })
+            })
+            .unwrap();
+        registry
+    }
+
+    fn enforce_config() -> ServerRunConfig {
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.cep_mode = CepMode::Enforce;
+        config
+    }
+
+    fn warn_config() -> ServerRunConfig {
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.cep_mode = CepMode::Warn;
+        config
+    }
+
+    fn off_config() -> ServerRunConfig {
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.cep_mode = CepMode::Off;
+        config
+    }
+
+    #[tokio::test]
+    async fn effect_enforce_overrides_dispatch() {
+        let config = enforce_config();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = overreach_handler();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let err = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+
+        drop(client);
+        server_task.abort();
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        assert!(
+            row.result_or_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("EffectViolation")
+                || row
+                    .metadata_json
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("effect_violation")
+        );
+    }
+
+    #[tokio::test]
+    async fn effect_warn_records_and_passes() {
+        let config = warn_config();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = overreach_handler();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let result = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap();
+        assert!(result.todos.is_empty());
+
+        drop(client);
+        server_task.abort();
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        let metadata = row.metadata_json.as_deref().unwrap_or("");
+        assert!(
+            metadata.contains("effect_warning") || metadata.contains("effect_violation"),
+            "warn mode should record violation durably, got: {metadata}"
+        );
+    }
+
+    #[tokio::test]
+    async fn effect_off_passes_through() {
+        let config = off_config();
+        let (client, server) = LancetTransport::pair(8);
+        let registry = overreach_handler();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let result = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap();
+        assert!(result.todos.is_empty());
+
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn cancel_partial_flush() {
+        let config = ServerRunConfig::in_memory_for_tests();
+        let audit = Arc::clone(&config.audit);
+        let (client, server) = LancetTransport::pair(8);
+        let registry = todo_registry(|_params, mut ctx| async move {
+            ctx.record_effect(crate::effect::ledger::ObservedEffect {
+                kind: ImpactKind::WorkspaceMutation,
+                scope: crate::effect::ledger::ObservedScope::Path(std::path::PathBuf::from(
+                    "/partial/write",
+                )),
+                required_capability: RequiredCapability::WritePath,
+                source: crate::effect::ledger::EffectSource::HandlerBackend,
+            });
+            ctx.cancellation.cancelled().await;
+            Err(call_cancelled())
+        });
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let (call, control) = client.start_call::<TodoWrite>(TodoWriteParams { todos: vec![] });
+        sleep(Duration::from_millis(20)).await;
+        control.cancel();
+        let err = call.await.unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        assert!(err.message.contains("cancelled"));
+
+        drop(client);
+        let _ = server_task.await;
+
+        assert_eq!(audit.row_count().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn none_region_after_ok_fails_closed() {
+        let config = enforce_config();
+        let (client, server) = LancetTransport::pair(8);
+        let mut registry = MethodRegistry::new();
+        registry
+            .register_method::<TodoWrite, _, _>(|params, _ctx| async move {
+                Ok(TodoWriteResult {
+                    todos: params.todos,
+                })
+            })
+            .unwrap();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let err = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap_err();
+        assert!(
+            err.code == CepErrorCode::EffectViolation
+                || err.message.contains("authorized region missing"),
+            "None region after Ok should fail closed, got: {:?} / {}",
+            err.code,
+            err.message
+        );
+
+        drop(client);
+        server_task.abort();
     }
 }

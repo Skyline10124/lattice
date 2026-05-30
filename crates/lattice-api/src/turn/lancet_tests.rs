@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use lancet_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::catalog;
+use lancet_protocol::envelope::{EffectKindSet, ImpactKind};
 use lancet_protocol::error::{
     jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
     PermissionErrorData, StateErrorData, ValidationErrorData,
@@ -276,10 +277,16 @@ cep_family_test!(
 cep_family_test!(
     lancet_executor_adapter_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
-    CepErrorData::Effect(EffectErrorData {
-        declared_impact: "read".into(),
-        observed_impact: "write".into(),
-    }),
+    CepErrorData::Effect(Box::new(EffectErrorData {
+        method: "workspace.read_file".into(),
+        declared_effect: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        authorized_effect: vec![ImpactKind::WorkspaceObservation],
+        observed_effects: vec![
+            ImpactKind::WorkspaceObservation,
+            ImpactKind::WorkspaceMutation,
+        ],
+        violations: vec!["observed workspace_mutation not in declared effect ceiling".into(),],
+    })),
     Retriability::Permanent
 );
 

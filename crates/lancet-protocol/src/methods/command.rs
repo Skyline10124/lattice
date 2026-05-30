@@ -1,6 +1,6 @@
 //! Command execution methods.
 
-use crate::envelope::ImpactKind;
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
 use crate::method::{CatalogMethod, CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,15 @@ impl CepMethod for Run {
     type Result = RunResult;
     const IMPACT: ImpactKind = ImpactKind::CommandExecution;
     const CAPABILITY: RequiredCapability = RequiredCapability::RunCommand;
+    // EFF-03 / D-05: command.run composite ceiling
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[
+            ImpactKind::WorkspaceMutation,
+            ImpactKind::CommandExecution,
+        ]),
+        scope: EffectScopeKind::CommandExecution,
+        capabilities: &[RequiredCapability::RunCommand],
+    };
 }
 
 impl CatalogMethod for Run {}

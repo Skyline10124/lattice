@@ -1,6 +1,6 @@
 //! Workspace observation and mutation methods.
 
-use crate::envelope::ImpactKind;
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
 use crate::method::{CatalogMethod, CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,11 @@ impl CepMethod for ReadFile {
     type Result = ReadFileResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::ReadPath;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::PathRead,
+        capabilities: &[RequiredCapability::ReadPath],
+    };
 }
 
 impl CatalogMethod for ReadFile {}
@@ -72,6 +77,11 @@ impl CepMethod for Grep {
     type Result = GrepResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::ObservationRoot,
+        capabilities: &[RequiredCapability::Inspect],
+    };
 }
 
 impl CatalogMethod for Grep {}
@@ -116,6 +126,11 @@ impl CepMethod for ListDirectory {
     type Result = ListDirectoryResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::ObservationRoot,
+        capabilities: &[RequiredCapability::Inspect],
+    };
 }
 
 impl CatalogMethod for ListDirectory {}
@@ -147,6 +162,11 @@ impl CepMethod for FindFiles {
     type Result = FindFilesResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::ObservationRoot,
+        capabilities: &[RequiredCapability::Inspect],
+    };
 }
 
 impl CatalogMethod for FindFiles {}
@@ -173,6 +193,11 @@ impl CepMethod for WriteFile {
     type Result = WriteFileResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
+        scope: EffectScopeKind::WorkspaceWrite,
+        capabilities: &[RequiredCapability::WritePath],
+    };
 }
 
 impl CatalogMethod for WriteFile {}
@@ -198,6 +223,11 @@ impl CepMethod for Patch {
     type Result = PatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
+        scope: EffectScopeKind::WorkspaceWrite,
+        capabilities: &[RequiredCapability::WritePath],
+    };
 }
 
 impl CatalogMethod for Patch {}

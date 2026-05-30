@@ -105,6 +105,8 @@ mod scaffold_tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
         };
         let err = registry
             .dispatch(Inspect::NAME, serde_json::json!({ "path": "src" }), ctx)
@@ -131,6 +133,8 @@ mod scaffold_tests {
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
         };
         let value = registry
             .dispatch(Inspect::NAME, serde_json::json!({ "path": "src" }), ctx)

@@ -9,17 +9,21 @@
 //! D-43..D-52: Verify flow after successful mutations.
 
 use crate::edit::parser::parse_patch_document;
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::guard::{check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns};
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
+use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::workspace::{
     Patch, PatchParams, PatchResult, WriteFile, WriteFileParams, WriteFileResult,
 };
 use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use serde_json::json;
+use std::path::PathBuf;
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -108,6 +112,13 @@ async fn handle_write_file(
     let bytes_written = params.content.len() as u64;
     write_file_secure(&project_root, &params.path, &params.content).await?;
 
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceMutation,
+        scope: ObservedScope::Path(full_path.clone()),
+        required_capability: RequiredCapability::WritePath,
+        source: EffectSource::HandlerBackend,
+    });
+
     // 7. Run verify if configured
     if let Some(verify_cmd) = extract_verify_command(&envelope) {
         let policy = &ctx.phase21.policy.command;
@@ -119,7 +130,14 @@ async fn handle_write_file(
                 emit_verify_failed(&ctx, WriteFile::NAME, &envelope_id, outcome.exit_code).await;
                 return Err(verify_failed_error(&verify_cmd, &outcome));
             }
-            Ok(_) => {} // verify succeeded
+            Ok(_) => {
+                ctx.record_effect(ObservedEffect {
+                    kind: ImpactKind::CommandExecution,
+                    scope: ObservedScope::Root(project_root.clone()),
+                    required_capability: RequiredCapability::RunCommand,
+                    source: EffectSource::Verify,
+                });
+            }
             Err(err) => {
                 // Verify execution error (timeout, cancel, etc.)
                 emit_verify_failed(&ctx, WriteFile::NAME, &envelope_id, -1).await;
@@ -259,6 +277,15 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         .map(|f| f.path.clone())
         .collect();
 
+    for changed_path in &changed_files {
+        ctx.record_effect(ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(PathBuf::from(changed_path)),
+            required_capability: RequiredCapability::WritePath,
+            source: EffectSource::HandlerBackend,
+        });
+    }
+
     // 7. Run verify if configured
     if let Some(verify_cmd) = extract_verify_command(&envelope) {
         let policy = &ctx.phase21.policy.command;
@@ -270,7 +297,14 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
                 emit_verify_failed(&ctx, Patch::NAME, &envelope_id, outcome.exit_code).await;
                 return Err(verify_failed_error(&verify_cmd, &outcome));
             }
-            Ok(_) => {} // verify succeeded
+            Ok(_) => {
+                ctx.record_effect(ObservedEffect {
+                    kind: ImpactKind::CommandExecution,
+                    scope: ObservedScope::Root(project_root.clone()),
+                    required_capability: RequiredCapability::RunCommand,
+                    source: EffectSource::Verify,
+                });
+            }
             Err(err) => {
                 emit_verify_failed(&ctx, Patch::NAME, &envelope_id, -1).await;
                 return Err(err);
@@ -467,6 +501,8 @@ mod write_file_tests {
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -501,6 +537,8 @@ mod write_file_tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -720,6 +758,8 @@ mod patch_tests {
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {

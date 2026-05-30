@@ -94,6 +94,8 @@ pub struct HandlerContext {
     pub active_envelope: Arc<ActiveEnvelopeStore>,
     pub turn_id: String,
     pub(crate) durable_metadata: CallDurableMetadata,
+    pub effect_ledger: crate::effect::ledger::EffectLedger,
+    pub authorized_region: crate::effect::ledger::AuthorizedRegionSlot,
     pub policy_hook: Arc<dyn PolicyHook>,
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
@@ -109,6 +111,8 @@ impl std::fmt::Debug for HandlerContext {
             .field("phase21", &self.phase21)
             .field("active_envelope", &self.active_envelope)
             .field("turn_id", &self.turn_id)
+            .field("effect_ledger", &self.effect_ledger)
+            .field("authorized_region", &self.authorized_region)
             .field("policy_hook", &"<dyn PolicyHook>")
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
@@ -120,6 +124,11 @@ impl HandlerContext {
     /// Add compact metadata that will be persisted to the call's durable audit row.
     pub fn record_durable_metadata(&self, metadata: Value) {
         self.durable_metadata.record(metadata);
+    }
+
+    /// Record an observed effect into the per-call effect ledger.
+    pub fn record_effect(&self, effect: crate::effect::ledger::ObservedEffect) {
+        self.effect_ledger.record(effect);
     }
 }
 
@@ -279,6 +288,8 @@ mod tests {
             active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
             default_policy_hook: Some(default_hook),
             audit_context: Arc::new(RwLock::new(CepAuditContext {

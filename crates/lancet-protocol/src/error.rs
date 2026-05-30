@@ -3,6 +3,7 @@
 //! Error codes live in JSON-RPC reserved range `-32000..-32099`, segmented by
 //! family. Every error carries typed `data` and a mandatory `Retriability` hint.
 
+use crate::envelope::{EffectKindSet, ImpactKind};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -183,8 +184,11 @@ pub struct GuardErrorData {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EffectErrorData {
-    pub declared_impact: String,
-    pub observed_impact: String,
+    pub method: String,
+    pub declared_effect: EffectKindSet,
+    pub authorized_effect: Vec<ImpactKind>,
+    pub observed_effects: Vec<ImpactKind>,
+    pub violations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -202,7 +206,7 @@ pub enum CepErrorData {
     Execution(ExecutionErrorData),
     State(StateErrorData),
     Guard(GuardErrorData),
-    Effect(EffectErrorData),
+    Effect(Box<EffectErrorData>),
     Reserved(ReservedErrorData),
 }
 
@@ -419,10 +423,20 @@ mod tests {
             ),
             (
                 CepErrorCode::EffectViolation,
-                CepErrorData::Effect(EffectErrorData {
-                    declared_impact: "read".into(),
-                    observed_impact: "write".into(),
-                }),
+                CepErrorData::Effect(Box::new(EffectErrorData {
+                    method: "workspace.read_file".into(),
+                    declared_effect: EffectKindSet::from_static(&[
+                        ImpactKind::WorkspaceObservation,
+                    ]),
+                    authorized_effect: vec![ImpactKind::WorkspaceObservation],
+                    observed_effects: vec![
+                        ImpactKind::WorkspaceObservation,
+                        ImpactKind::WorkspaceMutation,
+                    ],
+                    violations: vec![
+                        "observed workspace_mutation not in declared effect ceiling".into()
+                    ],
+                })),
             ),
             (
                 CepErrorCode::Reserved,
@@ -568,5 +582,38 @@ mod tests {
             field: "x".into(),
             reason: "y".into(),
         }));
+    }
+
+    #[test]
+    fn effect_error_data_carries_rich_violation_evidence() {
+        use crate::envelope::{EffectKindSet, ImpactKind};
+
+        let data = EffectErrorData {
+            method: "workspace.read_file".into(),
+            declared_effect: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+            authorized_effect: vec![ImpactKind::WorkspaceObservation],
+            observed_effects: vec![
+                ImpactKind::WorkspaceObservation,
+                ImpactKind::WorkspaceMutation,
+            ],
+            violations: vec!["observed workspace_mutation not in declared effect ceiling".into()],
+        };
+
+        let wrapped = CepErrorData::Effect(Box::new(data.clone()));
+        let value = serde_json::to_value(&wrapped).unwrap();
+        assert_eq!(value["kind"], "effect");
+        assert_eq!(value["method"], "workspace.read_file");
+        assert!(value["declared_effect"].is_array());
+        assert!(value["authorized_effect"].is_array());
+        assert!(value["observed_effects"].is_array());
+        assert!(value["violations"].is_array());
+        assert_eq!(
+            value["violations"][0],
+            "observed workspace_mutation not in declared effect ceiling"
+        );
+
+        let serialized = serde_json::to_string(&wrapped).unwrap();
+        let deserialized: CepErrorData = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, wrapped);
     }
 }

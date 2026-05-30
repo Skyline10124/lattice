@@ -2,12 +2,15 @@
 
 use std::sync::OnceLock;
 
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::executor::web::fetch_url;
 use crate::guard::evaluate_and_enforce_policy;
 use crate::policy::budget::BudgetExhausted;
 use crate::policy::network::validate_fetch_url;
 use crate::registry::{HandlerContext, MethodRegistry};
+use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ExecutionErrorData;
+use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, CepMethod, Retriability};
 use reqwest::redirect::Policy;
@@ -67,6 +70,14 @@ async fn handle_web_fetch(
         emit_budget_denial_metadata(&ctx, &params.url, &budget_err).await;
         return Err(budget_err.to_cep_error());
     }
+
+    let host = validated.url.host_str().unwrap_or("unknown").to_string();
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::ExternalObservation,
+        scope: ObservedScope::Host(host),
+        required_capability: RequiredCapability::FetchUrl,
+        source: EffectSource::HandlerBackend,
+    });
 
     emit_success_metadata(
         &ctx,
@@ -213,6 +224,8 @@ mod tests {
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: crate::effect::ledger::EffectLedger::new(),
+                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
