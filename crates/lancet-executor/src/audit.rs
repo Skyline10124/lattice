@@ -10,9 +10,11 @@ use thiserror::Error;
 
 /// Audit stage labels for the legacy CEP bridge.
 ///
-/// Retained for the bridge harness (`register_phase20_legacy_backend`) and the
-/// `production_audit_routing = false` default; the production registry routes
-/// every method to native handlers and never emits these labels.
+/// The production registry is fully native, so the production audit-routing path
+/// (`production_audit_routing = true`) never emits these labels — it uses
+/// native / unrouted / scaffold metadata instead. They remain in use for the
+/// `production_audit_routing = false` default and the legacy bridge test harness
+/// (`register_phase20_legacy_backend`).
 pub const SEMANTIC_STAGE: &str = "phase20_legacy_bridge";
 pub const GUARD_STAGE: &str = "bridge_lifecycle_only";
 
@@ -20,6 +22,10 @@ pub const SEMANTIC_STAGE_NATIVE: &str = "phase21_native";
 pub const GUARD_STAGE_NATIVE: &str = "cep_policy_lifecycle";
 
 pub const SEMANTIC_STAGE_SCAFFOLD: &str = "scaffold";
+
+/// Audit stage for a production call whose method is not in the catalog; dispatch
+/// will return `MethodNotFound`, so no native handler or policy hook runs.
+pub const SEMANTIC_STAGE_UNROUTED: &str = "unrouted";
 
 /// Feature-gated scaffold methods (not in default `CATALOG` or production registry).
 pub const SCAFFOLD_METHODS: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
@@ -68,6 +74,21 @@ impl CallAuditMetadata {
         }
     }
 
+    /// Unknown production method (not in the catalog). Dispatch will reject it with
+    /// `MethodNotFound`; no handler or policy hook runs, so this must not claim
+    /// policy enforcement or backend invocation.
+    pub fn unrouted() -> Self {
+        Self {
+            semantic_stage: SEMANTIC_STAGE_UNROUTED.to_string(),
+            semantic_status: Some("method_not_found".to_string()),
+            guard_stage: GUARD_STAGE_NATIVE.to_string(),
+            policy_enforced: false,
+            denial_source: None,
+            backend_invoked: Some(false),
+            observation_source: None,
+        }
+    }
+
     /// Feature-gated inspect/navigate scaffold stub (no workspace access, no budget charge).
     pub fn scaffold_stub() -> Self {
         Self {
@@ -94,16 +115,25 @@ impl CallAuditMetadata {
 
     /// Per-method audit metadata for the production registry.
     ///
-    /// Every catalog method is served by a native, policy-enforced handler; only
-    /// the feature-gated inspect/navigate scaffolds are stubs. The legacy CEP
-    /// bridge is no longer part of the production registry.
+    /// Every catalog method is served by a native, policy-enforced handler. Feature-gated
+    /// inspect/navigate scaffolds are stubs. A method that is neither (an unknown / stale
+    /// tool name) will fail `MethodNotFound` without running a handler or policy hook, so it
+    /// is labeled `unrouted` and must not claim enforcement.
     pub fn for_production_dispatch(method: &str) -> Self {
         if is_scaffold_method(method) {
             Self::scaffold_stub()
-        } else {
+        } else if is_production_catalog_method(method) {
             Self::native_policy_enforced(Some("started"))
+        } else {
+            Self::unrouted()
         }
     }
+}
+
+/// Returns true when `method` is a method in the production catalog (the set the
+/// production registry registers native handlers for).
+fn is_production_catalog_method(method: &str) -> bool {
+    catalog().iter().any(|descriptor| descriptor.name == method)
 }
 
 /// Per-turn identifiers attached to every audit row.
@@ -405,6 +435,22 @@ mod tests {
             turn_id: "turn-1".into(),
             session_id: "session-1".into(),
         }
+    }
+
+    #[test]
+    fn for_production_dispatch_labels_known_native_and_unknown_unrouted() {
+        // Known catalog method -> native + policy-enforced.
+        let known = CallAuditMetadata::for_production_dispatch(TodoWriteMethod::NAME);
+        assert_eq!(known.semantic_stage, SEMANTIC_STAGE_NATIVE);
+        assert!(known.policy_enforced);
+
+        // Unknown method (will MethodNotFound) -> unrouted, never claims enforcement.
+        let unknown = CallAuditMetadata::for_production_dispatch("crafted.unknown");
+        assert_eq!(unknown.semantic_stage, SEMANTIC_STAGE_UNROUTED);
+        assert!(!unknown.policy_enforced);
+        assert_eq!(unknown.backend_invoked, Some(false));
+        // Must not be mislabeled as the legacy bridge.
+        assert_ne!(unknown.semantic_stage, SEMANTIC_STAGE);
     }
 
     #[test]
