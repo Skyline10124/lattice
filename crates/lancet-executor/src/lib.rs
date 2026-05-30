@@ -32,9 +32,6 @@ pub use envelope_store::ActiveEnvelopeStore;
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use legacy_backend::register_phase20_legacy_backend;
-pub use legacy_backend::register_phase22_pending_legacy_methods_minus_all_phase22;
-pub use legacy_backend::register_phase22_pending_legacy_methods_minus_declare;
-pub use legacy_backend::register_phase22_pending_legacy_methods_minus_declare_and_run;
 pub use native_registry::register_production_method_registry;
 pub use policy::{
     command::CommandPolicy, BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig,

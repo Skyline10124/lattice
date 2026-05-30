@@ -56,66 +56,10 @@ impl LegacyToolBackend {
         })
     }
 
-    /// Phase 22-pending catalog methods only (`command.run`, mutations, `envelope.declare`).
-    ///
-    /// Retained for backward compatibility; production uses `register_phase22_pending_minus_declare`.
-    #[allow(dead_code)]
-    fn register_phase22_pending(&self, registry: &mut MethodRegistry) -> Result<(), CepError> {
-        let executor = Arc::clone(&self.executor);
-
-        bridge_method!(registry, executor, Run, handle_run)?;
-        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
-        bridge_method!(registry, executor, Patch, handle_patch)?;
-        bridge_method_noexec!(registry, Declare, handle_declare)?;
-
-        Ok(())
-    }
-
-    /// Phase 22-pending catalog methods minus `envelope.declare` (native handler replaces it).
-    fn register_phase22_pending_minus_declare(
-        &self,
-        registry: &mut MethodRegistry,
-    ) -> Result<(), CepError> {
-        let executor = Arc::clone(&self.executor);
-
-        bridge_method!(registry, executor, Run, handle_run)?;
-        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
-        bridge_method!(registry, executor, Patch, handle_patch)?;
-
-        Ok(())
-    }
-
-    /// Phase 22-pending catalog methods minus `envelope.declare` and `command.run`.
-    ///
-    /// Used when both native `envelope.declare` and `command.run` handlers are registered.
-    fn register_phase22_pending_minus_declare_and_run(
-        &self,
-        registry: &mut MethodRegistry,
-    ) -> Result<(), CepError> {
-        let executor = Arc::clone(&self.executor);
-
-        bridge_method!(registry, executor, WriteFile, handle_write_file)?;
-        bridge_method!(registry, executor, Patch, handle_patch)?;
-
-        Ok(())
-    }
-
-    /// Phase 22-pending catalog methods minus all Phase 22 native methods.
-    ///
-    /// All Phase 22 methods (`envelope.declare`, `command.run`, `workspace.write_file`,
-    /// `workspace.patch`) are now native. This function registers nothing.
-    fn register_phase22_pending_minus_all_phase22(
-        &self,
-        _registry: &mut MethodRegistry,
-    ) -> Result<(), CepError> {
-        // All Phase 22 methods are now native — nothing to register via bridge.
-        Ok(())
-    }
-
     /// Full catalog bridge for Phase 20 compatibility tests and migration helpers.
     ///
-    /// Production turns must use [`register_phase22_pending_legacy_methods`] plus
-    /// [`crate::register_phase21_native_methods`] instead. Delete this path in Phase 28
+    /// Test-only: production builds the registry from native handlers via
+    /// [`crate::register_production_method_registry`]. Delete this path in Phase 28
     /// legacy shutdown when bridge parsers are removed.
     fn register_all(&self, registry: &mut MethodRegistry) -> Result<(), CepError> {
         let executor = Arc::clone(&self.executor);
@@ -133,55 +77,6 @@ impl LegacyToolBackend {
 
         Ok(())
     }
-}
-
-/// Register Phase 22-pending catalog methods through the private legacy bridge.
-///
-/// Retained for backward compatibility; production uses `register_phase22_pending_legacy_methods_minus_declare`.
-#[allow(dead_code)]
-pub fn register_phase22_pending_legacy_methods(
-    registry: &mut MethodRegistry,
-    project_root: &str,
-    http_client: reqwest::Client,
-) -> Result<(), CepError> {
-    LegacyToolBackend::new(project_root, http_client)?.register_phase22_pending(registry)
-}
-
-/// Register Phase 22-pending catalog methods minus `envelope.declare` through the private legacy bridge.
-///
-/// Used in production when the native `envelope.declare` handler is registered separately.
-pub fn register_phase22_pending_legacy_methods_minus_declare(
-    registry: &mut MethodRegistry,
-    project_root: &str,
-    http_client: reqwest::Client,
-) -> Result<(), CepError> {
-    LegacyToolBackend::new(project_root, http_client)?
-        .register_phase22_pending_minus_declare(registry)
-}
-
-/// Register Phase 22-pending catalog methods minus `envelope.declare` and `command.run`.
-///
-/// Used in production when native `envelope.declare` and `command.run` handlers are registered separately.
-pub fn register_phase22_pending_legacy_methods_minus_declare_and_run(
-    registry: &mut MethodRegistry,
-    project_root: &str,
-    http_client: reqwest::Client,
-) -> Result<(), CepError> {
-    LegacyToolBackend::new(project_root, http_client)?
-        .register_phase22_pending_minus_declare_and_run(registry)
-}
-
-/// Register Phase 22-pending catalog methods minus all Phase 22 native methods.
-///
-/// All Phase 22 methods (`envelope.declare`, `command.run`, `workspace.write_file`,
-/// `workspace.patch`) are now native. This registers nothing.
-pub fn register_phase22_pending_legacy_methods_minus_all_phase22(
-    registry: &mut MethodRegistry,
-    project_root: &str,
-    http_client: reqwest::Client,
-) -> Result<(), CepError> {
-    LegacyToolBackend::new(project_root, http_client)?
-        .register_phase22_pending_minus_all_phase22(registry)
 }
 
 /// Register every catalog method through the private legacy bridge.

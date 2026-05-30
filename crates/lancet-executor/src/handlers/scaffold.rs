@@ -82,11 +82,8 @@ mod scaffold_tests {
 
     #[test]
     fn production_registry_excludes_scaffold_methods() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
         let mut registry = MethodRegistry::new();
-        crate::register_production_method_registry(&mut registry, root, reqwest::Client::new())
-            .unwrap();
+        crate::register_production_method_registry(&mut registry).unwrap();
         assert!(!registry.contains("workspace.inspect"));
         assert!(!registry.contains("workspace.navigate"));
     }
@@ -96,8 +93,7 @@ mod scaffold_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let mut registry = MethodRegistry::new();
-        crate::register_production_method_registry(&mut registry, root, reqwest::Client::new())
-            .unwrap();
+        crate::register_production_method_registry(&mut registry).unwrap();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let ctx = HandlerContext {
