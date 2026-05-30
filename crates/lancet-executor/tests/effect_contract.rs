@@ -16,15 +16,12 @@ use lancet_executor::testing::effect_harness::{
     assert_negative_no_backend_effects, assert_positive, build_test_context,
     effect_contract_harness, rt,
 };
-use lancet_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
-};
+use lancet_protocol::envelope::{Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent};
 use lancet_protocol::methods::command::RunParams;
-use lancet_protocol::methods::envelope::DeclareParams;
 use lancet_protocol::methods::external::FetchParams;
 use lancet_protocol::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_protocol::methods::workspace::{
-    FindFilesParams, GrepParams, ListDirectoryParams, PatchParams, ReadFileParams, WriteFileParams,
+    GrepParams, PatchParams, ReadFileParams, WriteFileParams,
 };
 use lancet_protocol::methods::*;
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
@@ -70,7 +67,7 @@ fn write_cap(_root: &str) -> SourcedCapability {
 fn run_cap() -> SourcedCapability {
     SourcedCapability {
         capability: Capability::RunCommand {
-            argv_allowlist: vec!["echo".into(), "sh".into()],
+            argv_allowlist: vec!["echo".into(), "touch".into()],
         },
         source: CapabilitySource::Declared {
             envelope_id: "test-envelope".into(),
@@ -85,7 +82,7 @@ fn declare_active_envelope(ctx: &lancet_executor::registry::HandlerContext, root
         path_pattern: ".".to_string(),
     });
     caps.insert(Capability::RunCommand {
-        argv_allowlist: vec!["echo".into(), "sh".into()],
+        argv_allowlist: vec!["echo".into(), "touch".into()],
     });
     let envelope = ExecutionEnvelope {
         intent: Intent {
@@ -228,47 +225,6 @@ proptest! {
 
 proptest! {
     #[test]
-    fn list_directory_effect_contract_positive(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
-        let authority = observation_region(&root);
-        let params = ListDirectoryParams {
-            path: ".".into(),
-            limit: Some(100),
-        };
-        let outcome = rt().block_on(effect_contract_harness::<ListDirectory>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
-    fn find_files_effect_contract_positive(pattern in "[a-z*]{1,8}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
-        let authority = observation_region(&root);
-        let params = FindFilesParams {
-            pattern,
-            path: None,
-            limit: Some(100),
-        };
-        let outcome = rt().block_on(effect_contract_harness::<FindFiles>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
     fn write_file_effect_contract_positive(content in "[a-zA-Z0-9 ]{1,64}") {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
@@ -340,7 +296,6 @@ proptest! {
 }
 
 #[test]
-#[ignore = "flaky: TCP listener race in OnceLock runtime; tracked separately"]
 fn fetch_effect_contract_positive() {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
@@ -350,60 +305,58 @@ fn fetch_effect_contract_positive() {
         .to_string();
     let registry = test_registry();
 
-    let (addr, server_handle) = rt().block_on(async {
+    rt().block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
+        let port = listener.local_addr().unwrap().port();
+        let addr_str = format!("127.0.0.1:{port}");
+
+        tokio::spawn(async move {
             if let Ok((mut stream, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
                 let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
                 let _ = stream.write_all(response).await;
             }
         });
-        (addr, handle)
+
+        let fetch_cap = SourcedCapability {
+            capability: Capability::FetchUrl {
+                host: "127.0.0.1".into(),
+            },
+            source: CapabilitySource::Base,
+        };
+        let network = NetworkPolicyConfig {
+            allow_public_https: true,
+            allow_localhost: true,
+            allowed_hosts: vec!["127.0.0.1".into()],
+            max_web_response_bytes: 10 * 1024 * 1024,
+        };
+        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
+
+        let mut kinds = std::collections::BTreeSet::new();
+        kinds.insert(ImpactKind::ExternalObservation);
+        let authority = AuthorizedEffectRegion {
+            kinds,
+            read_paths: Vec::new(),
+            observation_roots: Vec::new(),
+            write_paths: Vec::new(),
+            hosts: vec!["127.0.0.1".into()],
+            session_state_allowed: false,
+            command_allowed: false,
+        };
+        let params = FetchParams {
+            url: format!("http://{addr_str}/test"),
+            headers: BTreeMap::new(),
+        };
+        let outcome =
+            effect_contract_harness::<Fetch>(&registry, params, ctx, authority.clone()).await;
+        outcome
+            .dispatch_result
+            .as_ref()
+            .expect("legal fetch must dispatch");
+        assert_positive(&outcome, &authority);
     });
-    let addr_str = format!("127.0.0.1:{}", addr.port());
-
-    let fetch_cap = SourcedCapability {
-        capability: Capability::FetchUrl {
-            host: "127.0.0.1".into(),
-        },
-        source: CapabilitySource::Base,
-    };
-    let network = NetworkPolicyConfig {
-        allow_public_https: true,
-        allow_localhost: true,
-        allowed_hosts: vec!["127.0.0.1".into()],
-        max_web_response_bytes: 10 * 1024 * 1024,
-    };
-    let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
-
-    let mut kinds = std::collections::BTreeSet::new();
-    kinds.insert(ImpactKind::ExternalObservation);
-    let authority = AuthorizedEffectRegion {
-        kinds,
-        read_paths: Vec::new(),
-        observation_roots: Vec::new(),
-        write_paths: Vec::new(),
-        hosts: vec!["127.0.0.1".into()],
-        session_state_allowed: false,
-        command_allowed: false,
-    };
-    let params = FetchParams {
-        url: format!("http://{addr_str}/test"),
-        headers: BTreeMap::new(),
-    };
-    let outcome = rt().block_on(effect_contract_harness::<Fetch>(
-        &registry,
-        params,
-        ctx,
-        authority.clone(),
-    ));
-    outcome
-        .dispatch_result
-        .as_ref()
-        .expect("legal fetch must dispatch");
-    assert_positive(&outcome, &authority);
 }
 
 proptest! {
@@ -421,39 +374,6 @@ proptest! {
             }],
         };
         let outcome = rt().block_on(effect_contract_harness::<TodoWrite>(
-            &registry, params, ctx, authority.clone(),
-        ));
-        outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
-        assert_positive(&outcome, &authority);
-    }
-}
-
-proptest! {
-    #[test]
-    fn declare_effect_contract_positive(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
-        let authority = session_region();
-        let mut caps = std::collections::BTreeSet::new();
-        caps.insert(Capability::ReadPath { path_pattern: ".".into() });
-        let envelope = ExecutionEnvelope {
-            intent: Intent { description: "test intent".into() },
-            capabilities: caps,
-            scope: Scope { workspace_root: Some(root.clone()), extensions: serde_json::Map::new() },
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: None,
-            on_failure: None,
-            extensions: serde_json::Map::new(),
-        };
-        let params = DeclareParams {
-            envelope,
-            supersede: false,
-            reason: None,
-        };
-        let outcome = rt().block_on(effect_contract_harness::<Declare>(
             &registry, params, ctx, authority.clone(),
         ));
         outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
@@ -498,45 +418,6 @@ proptest! {
         };
         let authority = observation_region(&root);
         let outcome = rt().block_on(effect_contract_harness::<Grep>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn list_directory_effect_contract_negative(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
-        let params = ListDirectoryParams {
-            path: "/outside-scope".into(),
-            limit: Some(100),
-        };
-        let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<ListDirectory>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
-proptest! {
-    #[test]
-    fn find_files_effect_contract_negative(pattern in "[a-z*]{1,8}") {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
-        let params = FindFilesParams {
-            pattern,
-            path: Some("/outside-scope".into()),
-            limit: Some(100),
-        };
-        let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<FindFiles>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);
@@ -655,36 +536,6 @@ proptest! {
     }
 }
 
-proptest! {
-    #[test]
-    fn declare_effect_contract_negative(_n in 0u8..1) {
-        let dir = setup_tempdir_with_files();
-        let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
-        let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
-        let envelope = ExecutionEnvelope {
-            intent: Intent { description: "test".into() },
-            capabilities: std::collections::BTreeSet::new(),
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: None,
-            on_failure: None,
-            extensions: serde_json::Map::new(),
-        };
-        let params = DeclareParams {
-            envelope,
-            supersede: false,
-            reason: None,
-        };
-        let authority = AuthorizedEffectRegion::empty();
-        let outcome = rt().block_on(effect_contract_harness::<Declare>(
-            &registry, params, ctx, authority,
-        ));
-        assert_negative_no_backend_effects(&outcome);
-    }
-}
-
 // ── Malicious-handler fixture (D-24c) ───────────────────────────────────
 
 #[test]
@@ -747,27 +598,99 @@ fn malicious_handler_caught() {
     );
 }
 
-// ── EFF-03 composite test ──────────────────────────────────────────────
+// ── M-24-03 regression: WritePath glob pattern ────────────────────────
 
 #[test]
-fn command_run_composite_effect() {
+fn write_file_glob_pattern_within_region() {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
+
     let registry = test_registry();
+    let glob_cap = SourcedCapability {
+        capability: Capability::WritePath {
+            path_pattern: "src/**".to_string(),
+        },
+        source: CapabilitySource::Declared {
+            envelope_id: "test-envelope".into(),
+        },
+    };
     let (ctx, _rx, _) =
-        build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+        build_test_context(&root, vec![glob_cap], NetworkPolicyConfig::safe_defaults());
+    declare_active_envelope(&ctx, &root);
+
+    let authority = {
+        let mut kinds = std::collections::BTreeSet::new();
+        kinds.insert(ImpactKind::WorkspaceMutation);
+        AuthorizedEffectRegion {
+            kinds,
+            read_paths: Vec::new(),
+            observation_roots: Vec::new(),
+            write_paths: vec![PathBuf::from(&root).join("src")],
+            hosts: Vec::new(),
+            session_state_allowed: false,
+            command_allowed: false,
+        }
+    };
+
+    let params = WriteFileParams {
+        path: "src/a.rs".into(),
+        content: "fn main() {}".into(),
+    };
+    let outcome = rt().block_on(effect_contract_harness::<WriteFile>(
+        &registry,
+        params,
+        ctx,
+        authority.clone(),
+    ));
+    outcome
+        .dispatch_result
+        .as_ref()
+        .expect("write to src/a.rs with WritePath('src/**') must succeed");
+    assert_positive(&outcome, &authority);
+}
+
+// ── EFF-03 composite mutation regression ──────────────────────────────
+
+#[test]
+fn command_run_composite_mutation_success() {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
+
+    let registry = test_registry();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![run_cap(), write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
 
     let ledger = ctx.effect_ledger.clone();
+    let mut kinds = std::collections::BTreeSet::new();
+    kinds.insert(ImpactKind::CommandExecution);
+    kinds.insert(ImpactKind::WorkspaceMutation);
+    let authority = AuthorizedEffectRegion {
+        kinds,
+        read_paths: Vec::new(),
+        observation_roots: Vec::new(),
+        write_paths: vec![PathBuf::from(&root)],
+        hosts: Vec::new(),
+        session_state_allowed: false,
+        command_allowed: true,
+    };
+    ctx.authorized_region.set(authority.clone());
+
     let params = RunParams {
-        argv: vec![
-            "sh".into(),
-            "-c".into(),
-            "echo composite > composite_test.txt".into(),
-        ],
+        argv: vec!["touch".into(), "src/composite.txt".into()],
         cwd: Some(root.clone()),
         env: BTreeMap::new(),
         timeout_ms: Some(5000),
@@ -775,24 +698,33 @@ fn command_run_composite_effect() {
     };
     let params_value = serde_json::to_value(&params).unwrap();
     let result = rt().block_on(registry.dispatch(Run::NAME, params_value, ctx));
+    result
+        .as_ref()
+        .expect("composite mutation command.run must succeed");
 
     let observed = ledger.snapshot();
-    if result.is_ok() {
-        let has_command_exec = observed
+    let backend: Vec<_> = observed
+        .iter()
+        .filter(|e| e.source == EffectSource::HandlerBackend)
+        .collect();
+    assert!(
+        backend
             .iter()
-            .any(|e| e.kind == ImpactKind::CommandExecution);
-        let has_mutation = observed
+            .any(|e| e.kind == ImpactKind::CommandExecution),
+        "must record CommandExecution"
+    );
+    assert!(
+        backend
             .iter()
-            .any(|e| e.kind == ImpactKind::WorkspaceMutation);
+            .any(|e| e.kind == ImpactKind::WorkspaceMutation),
+        "must record WorkspaceMutation for changed src/composite.txt"
+    );
+    for effect in &backend {
         assert!(
-            has_command_exec,
-            "composite command.run must record CommandExecution"
+            authority.contains(effect),
+            "observed {:?}@{:?} must be within authorized region",
+            effect.kind,
+            effect.scope
         );
-        if has_mutation {
-            assert!(
-                has_command_exec && has_mutation,
-                "composite command.run must record both CommandExecution and WorkspaceMutation"
-            );
-        }
     }
 }

@@ -1638,6 +1638,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effect_enforce_legal_production_handler_passes() {
+        let mut config = enforce_config();
+        let root = tempfile::TempDir::new().unwrap();
+        let canonical = std::fs::canonicalize(root.path()).unwrap();
+        let root_str = canonical.to_str().unwrap();
+        config.phase21 =
+            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root_str));
+        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root_str, "enforce test")
+            .with_session_state();
+        let policy_cfg =
+            crate::policy::default::PolicyConfig::defaults_for_project_root(canonical.clone());
+        let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
+        config.policy_hook = hook.clone();
+        config.default_policy_hook = Some(hook);
+
+        let (client, server) = LancetTransport::pair(8);
+        let mut registry = MethodRegistry::new();
+        crate::register_production_method_registry(&mut registry).unwrap();
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let result = client
+            .call::<TodoWrite>(TodoWriteParams {
+                todos: vec![lancet_protocol::methods::session::TodoItem {
+                    content: "test".into(),
+                    status: lancet_protocol::methods::session::TodoStatus::Pending,
+                }],
+            })
+            .await;
+        assert!(
+            result.is_ok(),
+            "legal todo_write in enforce mode must pass: {:?}",
+            result.err()
+        );
+
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn none_region_after_ok_fails_closed() {
         let config = enforce_config();
         let (client, server) = LancetTransport::pair(8);

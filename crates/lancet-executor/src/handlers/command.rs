@@ -127,36 +127,26 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     // CommandExecution. For composite invocations, union in WritePath regions
     // from the active envelope so WorkspaceMutation effects are also authorized.
     if let Some(ref record) = active_record {
-        let write_caps: Vec<_> = record
+        let write_paths: Vec<_> = record
             .envelope
             .capabilities
             .iter()
             .filter_map(|cap| match cap {
                 Capability::WritePath { path_pattern } => {
-                    let abs = if std::path::Path::new(path_pattern).is_relative() {
-                        ctx.phase21
-                            .policy
-                            .project_root
-                            .join(path_pattern)
-                            .to_string_lossy()
-                            .to_string()
-                    } else {
-                        path_pattern.clone()
-                    };
-                    Some(abs)
+                    Some(crate::effect::region::normalize_region_path(
+                        path_pattern,
+                        &ctx.phase21.policy.project_root,
+                    ))
                 }
                 _ => None,
             })
             .collect();
-        if !write_caps.is_empty() {
+        if !write_paths.is_empty() {
             let mut write_region = crate::effect::region::AuthorizedEffectRegion::empty();
             write_region
                 .kinds
                 .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
-            write_region.write_paths = write_caps
-                .into_iter()
-                .map(std::path::PathBuf::from)
-                .collect();
+            write_region.write_paths = write_paths;
             if let Some(existing) = ctx.authorized_region.get() {
                 let mut merged = existing.clone();
                 merged.union(&write_region);

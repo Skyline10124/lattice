@@ -13,6 +13,20 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use lancet_protocol::envelope::{EffectKindSet, ImpactKind};
+
+/// Normalize a path pattern for region containment, aligning with Guard L1 semantics.
+///
+/// Strips `/**` suffix (Guard L1 `DirectoryGlob`) so that `"src/**"` becomes `"src"`,
+/// then resolves relative patterns against `project_root`.
+/// This ensures `Path::starts_with` containment checks work correctly.
+pub fn normalize_region_path(pattern: &str, project_root: &std::path::Path) -> PathBuf {
+    let base = pattern.strip_suffix("/**").unwrap_or(pattern);
+    if std::path::Path::new(base).is_relative() {
+        project_root.join(base)
+    } else {
+        PathBuf::from(base)
+    }
+}
 use lancet_protocol::policy::SourcedCapability;
 use lancet_protocol::CepError;
 
@@ -154,14 +168,9 @@ impl AuthorizedEffectRegion {
             Capability::ReadPath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceObservation);
-                let abs_path = if std::path::Path::new(path_pattern).is_relative() {
-                    policy.project_root.join(path_pattern)
-                } else {
-                    PathBuf::from(path_pattern)
-                };
                 Self {
                     kinds,
-                    read_paths: vec![abs_path],
+                    read_paths: vec![normalize_region_path(path_pattern, &policy.project_root)],
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
                     hosts: Vec::new(),
@@ -188,16 +197,11 @@ impl AuthorizedEffectRegion {
             Capability::WritePath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceMutation);
-                let abs_path = if std::path::Path::new(path_pattern).is_relative() {
-                    policy.project_root.join(path_pattern)
-                } else {
-                    PathBuf::from(path_pattern)
-                };
                 Self {
                     kinds,
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
-                    write_paths: vec![abs_path],
+                    write_paths: vec![normalize_region_path(path_pattern, &policy.project_root)],
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: false,

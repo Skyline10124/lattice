@@ -69,10 +69,15 @@ pub(crate) async fn fetch_url(
         request = request.header(key, value);
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| ToolError::HttpError(e.to_string()).to_string())?;
+    let response = request.send().await.map_err(|e| {
+        let mut msg = e.to_string();
+        let mut source = std::error::Error::source(&e);
+        while let Some(cause) = source {
+            msg.push_str(&format!(" → {cause}"));
+            source = std::error::Error::source(cause);
+        }
+        ToolError::HttpError(msg).to_string()
+    })?;
 
     let status = response.status().as_u16();
     let content_type = response
