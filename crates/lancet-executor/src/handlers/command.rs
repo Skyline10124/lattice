@@ -28,7 +28,7 @@ use lancet_protocol::methods::command::{Run, RunParams, RunResult};
 use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Register native `command.run` handler.
 pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -122,6 +122,51 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     } else {
         None
     };
+    // 5b. Composite authorized region for WorkspaceMutation (EFF-03):
+    // The policy evaluator only matches RunCommand → authorized region only has
+    // CommandExecution. For composite invocations, union in WritePath regions
+    // from the active envelope so WorkspaceMutation effects are also authorized.
+    if let Some(ref record) = active_record {
+        let write_caps: Vec<_> = record
+            .envelope
+            .capabilities
+            .iter()
+            .filter_map(|cap| match cap {
+                Capability::WritePath { path_pattern } => {
+                    let abs = if std::path::Path::new(path_pattern).is_relative() {
+                        ctx.phase21
+                            .policy
+                            .project_root
+                            .join(path_pattern)
+                            .to_string_lossy()
+                            .to_string()
+                    } else {
+                        path_pattern.clone()
+                    };
+                    Some(abs)
+                }
+                _ => None,
+            })
+            .collect();
+        if !write_caps.is_empty() {
+            let mut write_region = crate::effect::region::AuthorizedEffectRegion::empty();
+            write_region
+                .kinds
+                .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
+            write_region.write_paths = write_caps
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            if let Some(existing) = ctx.authorized_region.get() {
+                let mut merged = existing.clone();
+                merged.union(&write_region);
+                ctx.authorized_region.set(merged);
+            } else {
+                ctx.authorized_region.set(write_region);
+            }
+        }
+    }
+
     let envelope_id = active_record
         .as_ref()
         .map(|record| record.envelope_id.clone());
@@ -188,9 +233,10 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
 
                     if !changed_paths.is_empty() {
                         for path in &changed_paths {
+                            let abs_path = Path::new(&project_root).join(path);
                             ctx.record_effect(ObservedEffect {
                                 kind: ImpactKind::WorkspaceMutation,
-                                scope: ObservedScope::Path(PathBuf::from(path)),
+                                scope: ObservedScope::Path(abs_path),
                                 required_capability: RequiredCapability::WritePath,
                                 source: EffectSource::HandlerBackend,
                             });

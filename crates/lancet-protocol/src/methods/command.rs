@@ -52,7 +52,10 @@ impl CepMethod for Run {
             ImpactKind::CommandExecution,
         ]),
         scope: EffectScopeKind::CommandExecution,
-        capabilities: &[RequiredCapability::RunCommand],
+        capabilities: &[
+            RequiredCapability::RunCommand,
+            RequiredCapability::WritePath,
+        ],
     };
 }
 

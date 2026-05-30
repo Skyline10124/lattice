@@ -154,9 +154,14 @@ impl AuthorizedEffectRegion {
             Capability::ReadPath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceObservation);
+                let abs_path = if std::path::Path::new(path_pattern).is_relative() {
+                    policy.project_root.join(path_pattern)
+                } else {
+                    PathBuf::from(path_pattern)
+                };
                 Self {
                     kinds,
-                    read_paths: vec![PathBuf::from(path_pattern)],
+                    read_paths: vec![abs_path],
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
                     hosts: Vec::new(),
@@ -183,11 +188,16 @@ impl AuthorizedEffectRegion {
             Capability::WritePath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceMutation);
+                let abs_path = if std::path::Path::new(path_pattern).is_relative() {
+                    policy.project_root.join(path_pattern)
+                } else {
+                    PathBuf::from(path_pattern)
+                };
                 Self {
                     kinds,
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
-                    write_paths: vec![PathBuf::from(path_pattern)],
+                    write_paths: vec![abs_path],
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: false,
@@ -233,6 +243,18 @@ impl AuthorizedEffectRegion {
                 }
             }
         }
+    }
+
+    /// Union another region into this one (kinds ∪ kinds, paths ∪ paths, etc.).
+    pub fn union(&mut self, other: &AuthorizedEffectRegion) {
+        self.kinds.extend(other.kinds.iter().cloned());
+        self.read_paths.extend(other.read_paths.iter().cloned());
+        self.observation_roots
+            .extend(other.observation_roots.iter().cloned());
+        self.write_paths.extend(other.write_paths.iter().cloned());
+        self.hosts.extend(other.hosts.iter().cloned());
+        self.session_state_allowed |= other.session_state_allowed;
+        self.command_allowed |= other.command_allowed;
     }
 
     /// Check whether an observed effect falls within this authorized region.

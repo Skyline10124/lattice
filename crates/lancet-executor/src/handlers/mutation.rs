@@ -278,9 +278,14 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         .collect();
 
     for changed_path in &changed_files {
+        let abs_path = if std::path::Path::new(changed_path).is_relative() {
+            PathBuf::from(&project_root).join(changed_path)
+        } else {
+            PathBuf::from(changed_path)
+        };
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(PathBuf::from(changed_path)),
+            scope: ObservedScope::Path(abs_path),
             required_capability: RequiredCapability::WritePath,
             source: EffectSource::HandlerBackend,
         });
