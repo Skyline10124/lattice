@@ -63,10 +63,7 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
 #[cfg(test)]
 mod phase21_native_registry_tests {
     use super::*;
-    use crate::audit::{
-        is_phase21_native_method, GUARD_STAGE, GUARD_STAGE_NATIVE, PHASE21_NATIVE_METHODS,
-        PHASE22_PENDING_BRIDGE_METHODS, SEMANTIC_STAGE, SEMANTIC_STAGE_NATIVE,
-    };
+    use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
     use crate::policy::observation::BACKEND_SAFETY_NET_TEST_PATH;
     use crate::policy::Phase21TurnContext;
     use crate::registry::{Cancellation, EventSink, HandlerContext};
@@ -199,22 +196,15 @@ mod phase21_native_registry_tests {
 
         drop(client);
         server_task.abort();
-
-        for method in PHASE21_NATIVE_METHODS {
-            assert!(is_phase21_native_method(method));
-        }
-        for method in PHASE22_PENDING_BRIDGE_METHODS {
-            assert!(!is_phase21_native_method(method));
-        }
     }
 
     #[tokio::test]
-    async fn phase21_native_registry_bridge_methods_retain_bridge_metadata() {
+    async fn phase21_native_registry_command_run_audited_as_native() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "bridge audit");
+        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "command audit");
         config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
         config.production_audit_routing = true;
 
@@ -226,7 +216,7 @@ mod phase21_native_registry_tests {
 
         let _ = client
             .call::<Run>(lancet_protocol::methods::command::RunParams {
-                argv: vec!["echo".into(), "bridge".into()],
+                argv: vec!["echo".into(), "native".into()],
                 cwd: None,
                 env: Default::default(),
                 timeout_ms: None,
@@ -237,9 +227,9 @@ mod phase21_native_registry_tests {
         assert_eq!(audit.row_count().unwrap(), 1);
         let run_row = audit.row_by_audit_id(1).unwrap();
         assert_eq!(run_row.method, Run::NAME);
-        assert_eq!(run_row.semantic_stage, SEMANTIC_STAGE);
-        assert_eq!(run_row.guard_stage, GUARD_STAGE);
-        assert!(!run_row.policy_enforced);
+        assert_eq!(run_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+        assert_eq!(run_row.guard_stage, GUARD_STAGE_NATIVE);
+        assert!(run_row.policy_enforced);
 
         drop(client);
         server_task.abort();

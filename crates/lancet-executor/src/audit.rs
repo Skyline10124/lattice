@@ -1,4 +1,4 @@
-//! Flat append-only SQLite audit store for Phase 20 CEP execution records.
+//! Flat append-only SQLite audit store for CEP execution records.
 
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::ImpactKind;
@@ -8,9 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
+/// Audit stage labels for the legacy CEP bridge.
+///
+/// Retained for the bridge harness (`register_phase20_legacy_backend`) and the
+/// `production_audit_routing = false` default; the production registry routes
+/// every method to native handlers and never emits these labels.
 pub const SEMANTIC_STAGE: &str = "phase20_legacy_bridge";
 pub const GUARD_STAGE: &str = "bridge_lifecycle_only";
-pub const POLICY_ENFORCED: bool = false;
 
 pub const SEMANTIC_STAGE_NATIVE: &str = "phase21_native";
 pub const GUARD_STAGE_NATIVE: &str = "cep_policy_lifecycle";
@@ -23,27 +27,6 @@ pub const SCAFFOLD_METHODS: [&str; 2] = ["workspace.inspect", "workspace.navigat
 /// Returns true when `method` is an inspect/navigate scaffold stub.
 pub fn is_scaffold_method(method: &str) -> bool {
     SCAFFOLD_METHODS.contains(&method)
-}
-
-/// Catalog methods served by Phase 21 native handlers in the production registry.
-pub const PHASE21_NATIVE_METHODS: [&str; 6] = [
-    "workspace.read_file",
-    "workspace.grep",
-    "workspace.list_directory",
-    "workspace.find_files",
-    "web.fetch",
-    "session.todo_write",
-];
-
-/// Phase 22-pending methods that remain on the Phase 20 legacy bridge in production.
-///
-/// After Plan 02: `command.run` and `envelope.declare` are native.
-/// Only `workspace.write_file` and `workspace.patch` remain on the bridge.
-pub const PHASE22_PENDING_BRIDGE_METHODS: [&str; 2] = ["workspace.write_file", "workspace.patch"];
-
-/// Returns true when `method` is registered as a Phase 21 native handler in production.
-pub fn is_phase21_native_method(method: &str) -> bool {
-    PHASE21_NATIVE_METHODS.contains(&method)
 }
 
 /// Per-call audit lifecycle metadata (replaces compile-time constants per row).
@@ -109,14 +92,16 @@ impl CallAuditMetadata {
         self
     }
 
-    /// Per-method audit metadata for the production registry (native vs bridge vs scaffold).
+    /// Per-method audit metadata for the production registry.
+    ///
+    /// Every catalog method is served by a native, policy-enforced handler; only
+    /// the feature-gated inspect/navigate scaffolds are stubs. The legacy CEP
+    /// bridge is no longer part of the production registry.
     pub fn for_production_dispatch(method: &str) -> Self {
-        if is_phase21_native_method(method) {
-            Self::native_policy_enforced(Some("started"))
-        } else if is_scaffold_method(method) {
+        if is_scaffold_method(method) {
             Self::scaffold_stub()
         } else {
-            Self::bridge_defaults()
+            Self::native_policy_enforced(Some("started"))
         }
     }
 }
