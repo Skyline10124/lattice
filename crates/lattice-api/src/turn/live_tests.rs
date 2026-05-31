@@ -56,6 +56,7 @@ fn make_request(input: &str) -> RunTurnRequest {
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
+        test_persist_audit: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
+        test_persist_audit: None,
     }
 }
 

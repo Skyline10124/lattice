@@ -33,6 +33,9 @@ pub struct RunTurnRequest {
     /// Test-only project root for CEP runtime and legacy backend wiring.
     #[serde(skip)]
     pub test_project_root: Option<String>,
+    /// When `Some(false)` with `test_llm`, persist audit to `.lattice/cep_audit.db` instead of in-memory.
+    #[serde(skip)]
+    pub test_persist_audit: Option<bool>,
 }
 
 impl PartialEq for RunTurnRequest {

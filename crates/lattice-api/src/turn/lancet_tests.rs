@@ -312,8 +312,16 @@ async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
             .build(),
     );
 
-    let deps = build_production_turn_deps(dir.path().to_str().unwrap(), &[], llm, true, None)
-        .expect("production runtime should build");
+    let deps = build_production_turn_deps(
+        dir.path().to_str().unwrap(),
+        &[],
+        llm,
+        true,
+        None,
+        "test-model",
+        "0.0.0-test",
+    )
+    .expect("production runtime should build");
 
     assert_eq!(deps.build_metrics.adapter_instances, 1);
     assert_eq!(deps.build_metrics.transport_pairs, 1);
@@ -324,6 +332,8 @@ async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
         Arc::new(RealLlmClient),
         false,
         None,
+        "test-model",
+        "0.0.0-test",
     )
     .expect("second runtime build");
     assert_eq!(deps2.build_metrics.adapter_instances, 1);
@@ -356,6 +366,22 @@ mod phase21_native_registry {
                 .iter()
                 .all(|cap| !matches!(cap, Capability::FetchUrl { host } if host == "*")),
             "production envelope must not grant FetchUrl(\"*\")"
+        );
+    }
+
+    #[test]
+    fn production_base_envelope_grants_read_audit() {
+        let dir = TempDir::new().unwrap();
+        let enabled = vec![ReadFile::NAME.to_string()];
+        let envelope =
+            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
+        assert!(
+            envelope
+                .inner
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::ReadAudit)),
+            "base envelope must grant ReadAudit for audit.query/replay"
         );
     }
 
@@ -404,6 +430,8 @@ mod phase21_native_registry {
             llm,
             true,
             None,
+            "sonnet-test",
+            env!("CARGO_PKG_VERSION"),
         )
         .expect("production deps");
 
@@ -421,5 +449,204 @@ mod phase21_native_registry {
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert!(row.policy_enforced);
         assert_eq!(row.impact_kind, "workspace_observation");
+        assert_eq!(row.model_id.as_deref(), Some("sonnet-test"));
+        assert_eq!(
+            row.runtime_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod attestation_and_dispatch {
+    use super::*;
+    use lancet_executor::canonicalize_in_toto_statement;
+    use lancet_protocol::error::jsonrpc;
+    use lancet_protocol::methods::audit::{AuditReplay, AuditReplayParams};
+    use lancet_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
+    use lancet_protocol::methods::workspace::{ReadFile, ReadFileParams};
+    use lattice_agent::testing::FakeStreamingLlmClient;
+    use lattice_agent::LlmClient;
+    use lattice_llm::{FunctionCall, ToolCall};
+    use tempfile::TempDir;
+
+    use crate::turn::lancet::{
+        build_production_turn_deps, generate_and_store_attestation, LancetExecutorAdapter,
+    };
+
+    #[tokio::test]
+    async fn dispatch_typed_routes_submit_intent() {
+        let dir = TempDir::new().unwrap();
+        let llm: Arc<dyn LlmClient> = Arc::new(
+            FakeStreamingLlmClient::builder()
+                .push_events(vec![lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                }])
+                .build(),
+        );
+        let deps = build_production_turn_deps(
+            dir.path().to_str().unwrap(),
+            &[SubmitIntent::NAME.to_string()],
+            llm,
+            true,
+            None,
+            "test-model",
+            "0.0.0-test",
+        )
+        .expect("deps");
+
+        let adapter = LancetExecutorAdapter::new(
+            deps.lancet_client.clone(),
+            [SubmitIntent::NAME.to_string()],
+        );
+        let call = ToolCall {
+            id: "call_submit".into(),
+            function: FunctionCall {
+                name: SubmitIntent::NAME.to_string(),
+                arguments: serde_json::to_string(&SubmitIntentParams {
+                    action: "write".into(),
+                    target: "workspace.write_file".into(),
+                    params: None,
+                    supersede: false,
+                    reason: None,
+                })
+                .unwrap(),
+            },
+        };
+        let err = adapter
+            .execute(&call)
+            .await
+            .expect_err("submit without session cap");
+        let code = err.cep_error.as_ref().map(|p| p.code).unwrap_or(0);
+        assert_ne!(
+            code,
+            jsonrpc::METHOD_NOT_FOUND,
+            "SubmitIntent must be routed, not method_not_found"
+        );
+    }
+
+    #[tokio::test]
+    async fn attestation_matches_replay_statement() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "attest").unwrap();
+        let llm: Arc<dyn LlmClient> = Arc::new(
+            FakeStreamingLlmClient::builder()
+                .push_events(vec![lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                }])
+                .build(),
+        );
+        let deps = build_production_turn_deps(
+            dir.path().to_str().unwrap(),
+            &[ReadFile::NAME.to_string()],
+            llm,
+            true,
+            None,
+            "sonnet-attest",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("deps");
+
+        let turn_id = "sess-1:root".to_string();
+        {
+            let mut ctx = deps.audit_context.write().await;
+            ctx.turn_id = turn_id.clone();
+            ctx.session_id = "sess-1".to_string();
+            ctx.model_id = "sonnet-attest".to_string();
+            ctx.runtime_version = env!("CARGO_PKG_VERSION").to_string();
+        }
+
+        deps.lancet_client
+            .call::<ReadFile>(ReadFileParams {
+                path: "hello.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            })
+            .await
+            .expect("read");
+
+        deps.audit.await_pending().await;
+        let ctx = deps.audit_context.read().await;
+        generate_and_store_attestation(&deps.audit, &ctx, &turn_id).expect("store attestation");
+
+        let replay = deps
+            .lancet_client
+            .call::<AuditReplay>(AuditReplayParams {
+                turn_id: turn_id.clone(),
+            })
+            .await
+            .expect("replay");
+
+        let stored = deps
+            .audit
+            .attestation_for_turn(&turn_id)
+            .expect("lookup")
+            .expect("stored row");
+        let stored_stmt: lancet_protocol::provenance::InTotoStatement =
+            serde_json::from_str(&stored.statement_json).expect("stored json");
+        let replay_stmt = replay.statement.expect("replay statement");
+
+        assert_eq!(
+            canonicalize_in_toto_statement(&stored_stmt),
+            canonicalize_in_toto_statement(&replay_stmt)
+        );
+    }
+
+    #[tokio::test]
+    async fn replay_without_stored_attestation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "x").unwrap();
+        let llm: Arc<dyn LlmClient> = Arc::new(
+            FakeStreamingLlmClient::builder()
+                .push_events(vec![lattice_llm::LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                }])
+                .build(),
+        );
+        let deps = build_production_turn_deps(
+            dir.path().to_str().unwrap(),
+            &[ReadFile::NAME.to_string()],
+            llm,
+            true,
+            None,
+            "m",
+            "v",
+        )
+        .expect("deps");
+
+        let turn_id = "sess-2:root".to_string();
+        {
+            let mut ctx = deps.audit_context.write().await;
+            ctx.turn_id = turn_id.clone();
+            ctx.session_id = "sess-2".to_string();
+        }
+
+        deps.lancet_client
+            .call::<ReadFile>(ReadFileParams {
+                path: "a.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            })
+            .await
+            .expect("read");
+
+        deps.audit.await_pending().await;
+        assert!(deps
+            .audit
+            .attestation_for_turn(&turn_id)
+            .expect("lookup")
+            .is_none());
+
+        let replay = deps
+            .lancet_client
+            .call::<AuditReplay>(AuditReplayParams { turn_id })
+            .await
+            .expect("replay without stored attestation");
+        assert!(replay.statement.is_some());
     }
 }

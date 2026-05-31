@@ -78,6 +78,7 @@ fn make_request(input: &str) -> RunTurnRequest {
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
+        test_persist_audit: None,
     }
 }
 
@@ -91,6 +92,7 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
+        test_persist_audit: None,
     }
 }
 
@@ -442,6 +444,7 @@ async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,
+            test_persist_audit: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -468,6 +471,7 @@ async fn run_cutover_profile_model_used_when_no_override() {
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,
+            test_persist_audit: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,
@@ -494,6 +498,7 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,
+            test_persist_audit: None,
         },
         fixture.llm.clone(),
         &fixture.enabled_tools,

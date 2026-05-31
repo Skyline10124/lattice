@@ -22,7 +22,7 @@ use lattice_session::GraphHead;
 use super::execute::{
     build_commit_input, derive_terminal_event, map_agent_event, TurnCommitContext,
 };
-use super::lancet::{map_cep_tool_event, ProductionTurnDeps};
+use super::lancet::{generate_and_store_attestation, map_cep_tool_event, ProductionTurnDeps};
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionApi};
@@ -165,14 +165,17 @@ async fn run_live_turn_task(
         ..
     } = &mut deps;
 
+    let turn_id = format!(
+        "{}:{}",
+        prepared.session_id,
+        prepared.parent_commit_id.as_deref().unwrap_or("root")
+    );
     {
         let mut ctx = audit_context.write().await;
-        ctx.turn_id = format!(
-            "{}:{}",
-            prepared.session_id,
-            prepared.parent_commit_id.as_deref().unwrap_or("root")
-        );
+        ctx.turn_id = turn_id.clone();
         ctx.session_id = prepared.session_id.clone();
+        ctx.model_id = prepared.model.clone();
+        ctx.runtime_version = env!("CARGO_PKG_VERSION").to_string();
     }
 
     let mut observer = ObserverSink::new(turn_tx);
@@ -239,6 +242,13 @@ async fn run_live_turn_task(
 
     runtime.shutdown().await;
     audit.await_pending().await;
+
+    {
+        let ctx = audit_context.read().await;
+        if let Err(err) = generate_and_store_attestation(audit, &ctx, &turn_id) {
+            eprintln!("failed to store turn attestation for {turn_id}: {err}");
+        }
+    }
 
     // 7. Terminal event derived from AgentTurnResult.status (D-10, WR-01)
     if let Some(terminal) = derive_terminal_event(&agent_result) {

@@ -465,6 +465,7 @@ async fn run_inner(
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
+        test_persist_audit: None,
     };
 
     // D-A1: drive stream_turn; lattice-api owns Lancet runtime construction

@@ -246,6 +246,19 @@ impl AuthorizedEffectRegion {
                     command_allowed: false,
                 }
             }
+            Capability::ReadAudit => {
+                let mut kinds = BTreeSet::new();
+                kinds.insert(ImpactKind::AuditObservation);
+                Self {
+                    kinds,
+                    read_paths: Vec::new(),
+                    observation_roots: Vec::new(),
+                    write_paths: Vec::new(),
+                    hosts: Vec::new(),
+                    session_state_allowed: true,
+                    command_allowed: false,
+                }
+            }
         }
     }
 
@@ -298,6 +311,9 @@ impl AuthorizedEffectRegion {
                 self.hosts.iter().any(|h| h == host)
             }
             (ImpactKind::SessionStateMutation, ObservedScope::SessionState) => {
+                self.session_state_allowed
+            }
+            (ImpactKind::AuditObservation, ObservedScope::SessionState) => {
                 self.session_state_allowed
             }
             // Mismatched kind+scope combinations are not authorized

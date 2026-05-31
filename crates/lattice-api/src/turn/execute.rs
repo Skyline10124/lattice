@@ -7,6 +7,7 @@ use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 use super::collector::RunTurnCollector;
 use super::lancet::build_production_turn_deps;
 use super::llm::RealLlmClient;
+use super::mapping::resolve_model_and_prompt;
 use super::mapping::{map_status, resolve_project_root};
 use super::types::{RunTurnRequest, RunTurnResult, TurnEvent, TurnEventStream, TurnUsageSummary};
 use crate::session::{Result, SessionApi};
@@ -234,12 +235,16 @@ fn production_llm(request: &RunTurnRequest) -> Arc<dyn lattice_agent::LlmClient>
 pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
     let project_root = resolve_project_root(&request);
     let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.cep);
+    let (model_id, _, _) = resolve_model_and_prompt(&request);
+    let runtime_version = env!("CARGO_PKG_VERSION");
     let deps = build_production_turn_deps(
         &project_root,
         &enabled_tools(&request),
         production_llm(&request),
-        request.test_llm.is_some(),
+        request.test_llm.is_some() && request.test_persist_audit != Some(false),
         cep,
+        &model_id,
+        runtime_version,
     )?;
     super::live::stream_turn_live(session, request, deps).await
 }

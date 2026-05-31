@@ -456,7 +456,9 @@ mod tests {
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
+                    ..Default::default()
                 })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
@@ -475,8 +477,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let registry = sample_registry(dir.path().to_str().unwrap());
         for descriptor in catalog() {
-            // SubmitIntent is a Phase 25 native handler, not in legacy backend
-            if descriptor.name == "envelope.submit_intent" {
+            // Native handlers — not in Phase 20 legacy backend
+            if descriptor.name.starts_with("audit.") || descriptor.name == "envelope.submit_intent"
+            {
                 continue;
             }
             assert!(

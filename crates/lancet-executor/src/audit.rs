@@ -2,7 +2,9 @@
 
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::method::RequiredCapability;
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -141,6 +143,96 @@ fn is_production_catalog_method(method: &str) -> bool {
 pub struct CepAuditContext {
     pub turn_id: String,
     pub session_id: String,
+    /// Resolved model id for PROV Agent reconstruction (D-04); empty in tests unless set.
+    pub model_id: String,
+    /// Runtime / crate version string persisted on each row (D-04).
+    pub runtime_version: String,
+}
+
+/// Filters for [`CepAuditStore::query_rows`] — mirrors `audit.query` wire params.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditQueryFilters {
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub method: Option<String>,
+    pub impact_kind: Option<String>,
+    pub capability: Option<String>,
+    pub verdict: Option<String>,
+    pub since_audit_id: Option<i64>,
+    pub until_audit_id: Option<i64>,
+    pub envelope_id: Option<String>,
+    pub started_after: Option<String>,
+    pub started_before: Option<String>,
+}
+
+/// Stored unsigned in-toto-shaped attestation for a turn (D-09).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttestationRecord {
+    pub turn_id: String,
+    pub session_id: String,
+    pub statement_json: String,
+    pub predicate_type: String,
+    pub generated_at: String,
+    pub source_audit_range_or_hash: String,
+}
+
+/// Snake-case label for a catalog [`RequiredCapability`] (metadata + query filters).
+pub fn required_capability_label(cap: RequiredCapability) -> &'static str {
+    match cap {
+        RequiredCapability::Inspect => "inspect",
+        RequiredCapability::ReadPath => "read_path",
+        RequiredCapability::WritePath => "write_path",
+        RequiredCapability::RunCommand => "run_command",
+        RequiredCapability::FetchUrl => "fetch_url",
+        RequiredCapability::MutateSessionState => "mutate_session_state",
+        RequiredCapability::ReadAudit => "read_audit",
+    }
+}
+
+/// D-01-safe finalize enrichment: merge transport/catalog keys into metadata JSON only.
+pub fn merge_finalize_metadata(
+    existing: Option<&str>,
+    method: &str,
+    observed_effects: &[crate::effect::ledger::ObservedEffect],
+    envelope_id: Option<&str>,
+) -> Option<String> {
+    let mut obj = existing
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let Some(obj_map) = obj.as_object_mut() else {
+        return existing.map(str::to_string);
+    };
+
+    if let Some(descriptor) = catalog().iter().find(|d| d.name == method) {
+        obj_map.insert(
+            "required_capability".into(),
+            serde_json::Value::String(required_capability_label(descriptor.capability).into()),
+        );
+    }
+
+    if !observed_effects.is_empty() {
+        let mut caps = HashSet::new();
+        for effect in observed_effects {
+            caps.insert(required_capability_label(effect.required_capability));
+        }
+        let list: Vec<_> = caps
+            .into_iter()
+            .map(|cap| serde_json::Value::String(cap.to_string()))
+            .collect();
+        obj_map.insert(
+            "observed_capabilities".into(),
+            serde_json::Value::Array(list),
+        );
+    }
+
+    if let Some(eid) = envelope_id {
+        obj_map
+            .entry("envelope_id")
+            .or_insert_with(|| serde_json::Value::String(eid.to_string()));
+    }
+
+    serde_json::to_string(&obj).ok()
 }
 
 /// Outcome summary written at audit finalization.
@@ -232,13 +324,30 @@ impl CepAuditStore {
                 semantic_status TEXT,
                 guard_stage TEXT NOT NULL,
                 policy_enforced INTEGER NOT NULL,
-                metadata_json TEXT
+                metadata_json TEXT,
+                model_id TEXT,
+                runtime_version TEXT
+             );
+             CREATE TABLE IF NOT EXISTS attestation_records (
+                turn_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                statement_json TEXT NOT NULL,
+                predicate_type TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                source_audit_range_or_hash TEXT NOT NULL
              );",
         )
         .map_err(|source| AuditError::Database {
             path: self.path.clone(),
             source,
-        })
+        })?;
+        for ddl in [
+            "ALTER TABLE cep_audit_entries ADD COLUMN model_id TEXT",
+            "ALTER TABLE cep_audit_entries ADD COLUMN runtime_version TEXT",
+        ] {
+            let _ = conn.execute(ddl, []);
+        }
+        Ok(())
     }
 
     /// Append a new audit row before handler dispatch when possible.
@@ -251,6 +360,7 @@ impl CepAuditStore {
     ) -> Result<AuditStart, AuditError> {
         let started_at = chrono_now();
         let impact_kind = impact_kind_for_method(method)
+            .as_ref()
             .map(impact_kind_label)
             .unwrap_or("unknown")
             .to_string();
@@ -260,8 +370,9 @@ impl CepAuditStore {
         conn.execute(
             "INSERT INTO cep_audit_entries (
                 call_id, method, started_at, impact_kind, turn_id, session_id,
-                semantic_stage, semantic_status, guard_stage, policy_enforced
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                semantic_stage, semantic_status, guard_stage, policy_enforced,
+                model_id, runtime_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 call_id as i64,
                 method,
@@ -273,6 +384,8 @@ impl CepAuditStore {
                 semantic_status,
                 metadata.guard_stage,
                 if metadata.policy_enforced { 1 } else { 0 },
+                null_if_empty(&ctx.model_id),
+                null_if_empty(&ctx.runtime_version),
             ],
         )
         .map_err(|source| AuditError::Database {
@@ -336,33 +449,185 @@ impl CepAuditStore {
     pub fn row_by_audit_id(&self, audit_id: i64) -> Result<AuditRow, AuditError> {
         let conn = self.conn.lock().expect("audit mutex poisoned");
         conn.query_row(
-            "SELECT call_id, method, started_at, ended_at, result_or_error, impact_kind,
+            "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
                     turn_id, session_id, semantic_stage, semantic_status, guard_stage,
-                    policy_enforced, metadata_json
+                    policy_enforced, metadata_json, model_id, runtime_version
              FROM cep_audit_entries WHERE audit_id = ?1",
             params![audit_id],
-            |row| {
-                Ok(AuditRow {
-                    call_id: row.get::<_, i64>(0)? as u64,
-                    method: row.get(1)?,
-                    started_at: row.get(2)?,
-                    ended_at: row.get(3)?,
-                    result_or_error: row.get(4)?,
-                    impact_kind: row.get(5)?,
-                    turn_id: row.get(6)?,
-                    session_id: row.get(7)?,
-                    semantic_stage: row.get(8)?,
-                    semantic_status: row.get(9)?,
-                    guard_stage: row.get(10)?,
-                    policy_enforced: row.get::<_, i64>(11)? != 0,
-                    metadata_json: row.get(12)?,
-                })
-            },
+            map_audit_row,
         )
         .map_err(|source| AuditError::Database {
             path: self.path.clone(),
             source,
         })
+    }
+
+    /// Filtered read for PROV projection and `audit.query` (parameterized SQL only).
+    pub fn query_rows(&self, filters: &AuditQueryFilters) -> Result<Vec<AuditRow>, AuditError> {
+        let mut sql = String::from(
+            "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
+                    turn_id, session_id, semantic_stage, semantic_status, guard_stage,
+                    policy_enforced, metadata_json, model_id, runtime_version
+             FROM cep_audit_entries WHERE 1=1",
+        );
+        let mut bind: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(session_id) = &filters.session_id {
+            sql.push_str(" AND session_id = ?");
+            bind.push(Box::new(session_id.clone()));
+        }
+        if let Some(turn_id) = &filters.turn_id {
+            sql.push_str(" AND turn_id = ?");
+            bind.push(Box::new(turn_id.clone()));
+        }
+        if let Some(method) = &filters.method {
+            sql.push_str(" AND method = ?");
+            bind.push(Box::new(method.clone()));
+        }
+        if let Some(impact_kind) = &filters.impact_kind {
+            sql.push_str(" AND impact_kind = ?");
+            bind.push(Box::new(impact_kind.clone()));
+        }
+        if let Some(since) = filters.since_audit_id {
+            sql.push_str(" AND audit_id >= ?");
+            bind.push(Box::new(since));
+        }
+        if let Some(until) = filters.until_audit_id {
+            sql.push_str(" AND audit_id <= ?");
+            bind.push(Box::new(until));
+        }
+        if let Some(after) = &filters.started_after {
+            sql.push_str(" AND started_at >= ?");
+            bind.push(Box::new(after.clone()));
+        }
+        if let Some(before) = &filters.started_before {
+            sql.push_str(" AND started_at <= ?");
+            bind.push(Box::new(before.clone()));
+        }
+        if let Some(capability) = &filters.capability {
+            sql.push_str(" AND json_extract(metadata_json, '$.required_capability') = ?");
+            bind.push(Box::new(capability.clone()));
+        }
+        if let Some(envelope_id) = &filters.envelope_id {
+            sql.push_str(" AND json_extract(metadata_json, '$.envelope_id') = ?");
+            bind.push(Box::new(envelope_id.clone()));
+        }
+        if let Some(verdict) = &filters.verdict {
+            match verdict.as_str() {
+                "success" => {
+                    sql.push_str(" AND semantic_status = ? AND result_or_error LIKE ?");
+                    bind.push(Box::new("native_handler".to_string()));
+                    bind.push(Box::new("success:%".to_string()));
+                }
+                "denied" => {
+                    sql.push_str(
+                        " AND semantic_status IN ('native_handler_denied', 'method_not_found', 'scaffold_stub')",
+                    );
+                }
+                "error" => {
+                    sql.push_str(" AND result_or_error LIKE ?");
+                    bind.push(Box::new("error:%".to_string()));
+                }
+                "cancelled" => {
+                    sql.push_str(" AND result_or_error = ?");
+                    bind.push(Box::new("cancelled".to_string()));
+                }
+                other => {
+                    sql.push_str(" AND semantic_status = ?");
+                    bind.push(Box::new(other.to_string()));
+                }
+            }
+        }
+
+        sql.push_str(" ORDER BY audit_id ASC");
+
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        let mut stmt = conn.prepare(&sql).map_err(|source| AuditError::Database {
+            path: self.path.clone(),
+            source,
+        })?;
+        let params_ref: Vec<&dyn rusqlite::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt
+            .query_map(params_ref.as_slice(), map_audit_row)
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?);
+        }
+        Ok(out)
+    }
+
+    pub fn insert_attestation(&self, record: &AttestationRecord) -> Result<(), AuditError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        conn.execute(
+            "INSERT INTO attestation_records (
+                turn_id, session_id, statement_json, predicate_type, generated_at,
+                source_audit_range_or_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                record.turn_id,
+                record.session_id,
+                record.statement_json,
+                record.predicate_type,
+                record.generated_at,
+                record.source_audit_range_or_hash,
+            ],
+        )
+        .map_err(|source| AuditError::Database {
+            path: self.path.clone(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    pub fn attestation_for_turn(
+        &self,
+        turn_id: &str,
+    ) -> Result<Option<AttestationRecord>, AuditError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        let result = conn.query_row(
+            "SELECT turn_id, session_id, statement_json, predicate_type, generated_at,
+                    source_audit_range_or_hash
+             FROM attestation_records WHERE turn_id = ?1",
+            params![turn_id],
+            |row| {
+                Ok(AttestationRecord {
+                    turn_id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    statement_json: row.get(2)?,
+                    predicate_type: row.get(3)?,
+                    generated_at: row.get(4)?,
+                    source_audit_range_or_hash: row.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(record) => Ok(Some(record)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(source) => Err(AuditError::Database {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+
+    pub fn delete_attestation_for_turn(&self, turn_id: &str) -> Result<(), AuditError> {
+        let conn = self.conn.lock().expect("audit mutex poisoned");
+        conn.execute(
+            "DELETE FROM attestation_records WHERE turn_id = ?1",
+            params![turn_id],
+        )
+        .map_err(|source| AuditError::Database {
+            path: self.path.clone(),
+            source,
+        })?;
+        Ok(())
     }
 
     pub fn row_count(&self) -> Result<usize, AuditError> {
@@ -379,9 +644,10 @@ impl CepAuditStore {
     }
 }
 
-/// Materialized audit row for tests.
+/// Materialized audit row for tests and PROV projection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditRow {
+    pub audit_id: i64,
     pub call_id: u64,
     pub method: String,
     pub started_at: String,
@@ -395,6 +661,37 @@ pub struct AuditRow {
     pub guard_stage: String,
     pub policy_enforced: bool,
     pub metadata_json: Option<String>,
+    pub model_id: Option<String>,
+    pub runtime_version: Option<String>,
+}
+
+fn null_if_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRow> {
+    Ok(AuditRow {
+        audit_id: row.get(0)?,
+        call_id: row.get::<_, i64>(1)? as u64,
+        method: row.get(2)?,
+        started_at: row.get(3)?,
+        ended_at: row.get(4)?,
+        result_or_error: row.get(5)?,
+        impact_kind: row.get(6)?,
+        turn_id: row.get(7)?,
+        session_id: row.get(8)?,
+        semantic_stage: row.get(9)?,
+        semantic_status: row.get(10)?,
+        guard_stage: row.get(11)?,
+        policy_enforced: row.get::<_, i64>(12)? != 0,
+        metadata_json: row.get(13)?,
+        model_id: row.get(14)?,
+        runtime_version: row.get(15)?,
+    })
 }
 
 pub fn impact_kind_for_method(method: &str) -> Option<ImpactKind> {
@@ -404,13 +701,45 @@ pub fn impact_kind_for_method(method: &str) -> Option<ImpactKind> {
         .map(|descriptor| descriptor.impact.clone())
 }
 
-pub fn impact_kind_label(kind: ImpactKind) -> &'static str {
+/// All [`ImpactKind`] variants in enum declaration order (keep in sync with `ImpactKind`).
+pub const ALL_IMPACT_KINDS: [ImpactKind; 6] = [
+    ImpactKind::WorkspaceObservation,
+    ImpactKind::WorkspaceMutation,
+    ImpactKind::CommandExecution,
+    ImpactKind::ExternalObservation,
+    ImpactKind::SessionStateMutation,
+    ImpactKind::AuditObservation,
+];
+
+pub fn impact_kind_label(kind: &ImpactKind) -> &'static str {
     match kind {
         ImpactKind::WorkspaceObservation => "workspace_observation",
         ImpactKind::WorkspaceMutation => "workspace_mutation",
         ImpactKind::CommandExecution => "command_execution",
         ImpactKind::ExternalObservation => "external_observation",
         ImpactKind::SessionStateMutation => "session_state_mutation",
+        ImpactKind::AuditObservation => "audit_observation",
+    }
+}
+
+/// Parse a persisted audit `impact_kind` column label (snake_case) or CLI filter name (PascalCase).
+///
+/// Authoritative inverse of [`impact_kind_label`]; extend [`ALL_IMPACT_KINDS`] when adding variants.
+pub fn impact_kind_from_label(label: &str) -> Option<ImpactKind> {
+    ALL_IMPACT_KINDS
+        .iter()
+        .find(|kind| impact_kind_label(kind) == label || impact_kind_cli_name(kind) == label)
+        .cloned()
+}
+
+fn impact_kind_cli_name(kind: &ImpactKind) -> &'static str {
+    match kind {
+        ImpactKind::WorkspaceObservation => "WorkspaceObservation",
+        ImpactKind::WorkspaceMutation => "WorkspaceMutation",
+        ImpactKind::CommandExecution => "CommandExecution",
+        ImpactKind::ExternalObservation => "ExternalObservation",
+        ImpactKind::SessionStateMutation => "SessionStateMutation",
+        ImpactKind::AuditObservation => "AuditObservation",
     }
 }
 
@@ -434,6 +763,7 @@ mod tests {
         CepAuditContext {
             turn_id: "turn-1".into(),
             session_id: "session-1".into(),
+            ..Default::default()
         }
     }
 
@@ -761,6 +1091,269 @@ mod tests {
         );
         assert!(!blob.contains(secret));
         let _ = secret;
+    }
+
+    #[test]
+    fn impact_kind_label_round_trips_all_variants() {
+        for kind in &ALL_IMPACT_KINDS {
+            let label = impact_kind_label(kind);
+            assert_eq!(
+                impact_kind_from_label(label),
+                Some(kind.clone()),
+                "snake_case round-trip for {label}"
+            );
+            let cli = impact_kind_cli_name(kind);
+            assert_eq!(
+                impact_kind_from_label(cli),
+                Some(kind.clone()),
+                "PascalCase round-trip for {cli}"
+            );
+        }
+        assert!(impact_kind_from_label("not_a_kind").is_none());
+    }
+
+    #[test]
+    fn start_call_persists_model_and_runtime_columns() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx = CepAuditContext {
+            turn_id: "turn-m".into(),
+            session_id: "session-m".into(),
+            model_id: "claude-sonnet".into(),
+            runtime_version: "0.1.0-test".into(),
+        };
+        let start = store
+            .start_call(
+                &ctx,
+                1,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                start,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                None,
+            )
+            .unwrap();
+        let row = store.row_by_audit_id(start.audit_id).unwrap();
+        assert_eq!(row.model_id.as_deref(), Some("claude-sonnet"));
+        assert_eq!(row.runtime_version.as_deref(), Some("0.1.0-test"));
+    }
+
+    #[test]
+    fn attestation_round_trip() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let record = AttestationRecord {
+            turn_id: "turn-a".into(),
+            session_id: "session-a".into(),
+            statement_json: r#"{"subject":[]}"#.into(),
+            predicate_type: "https://lattice.dev/attestation/cep-turn/v1".into(),
+            generated_at: "1".into(),
+            source_audit_range_or_hash: "1-3".into(),
+        };
+        store.insert_attestation(&record).unwrap();
+        let loaded = store.attestation_for_turn("turn-a").unwrap().unwrap();
+        assert_eq!(loaded, record);
+        store.delete_attestation_for_turn("turn-a").unwrap();
+        assert!(store.attestation_for_turn("turn-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn query_rows_filters_by_session_and_method() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx_a = CepAuditContext {
+            session_id: "sess-a".into(),
+            ..test_context()
+        };
+        let ctx_b = CepAuditContext {
+            session_id: "sess-b".into(),
+            ..test_context()
+        };
+        let s1 = store
+            .start_call(
+                &ctx_a,
+                1,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                s1,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                Some(r#"{"required_capability":"read_path"}"#),
+            )
+            .unwrap();
+        let s2 = store
+            .start_call(
+                &ctx_b,
+                2,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                s2,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                None,
+            )
+            .unwrap();
+
+        let rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some("sess-a".into()),
+                method: Some("workspace.read_file".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "sess-a");
+    }
+
+    #[test]
+    fn query_rows_filters_by_verdict() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx = test_context();
+        let ok = store
+            .start_call(
+                &ctx,
+                1,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                ok,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                None,
+            )
+            .unwrap();
+        let denied = store
+            .start_call(
+                &ctx,
+                2,
+                TodoWriteMethod::NAME,
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                denied,
+                AuditOutcome::Error {
+                    code: "GuardDenied".into(),
+                    summary: "denied".into(),
+                },
+                Some("native_handler_denied"),
+                None,
+            )
+            .unwrap();
+
+        let success_rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                verdict: Some("success".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(success_rows.len(), 1);
+        assert!(success_rows[0]
+            .result_or_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("success:"));
+
+        let denied_rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                verdict: Some("denied".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(denied_rows.len(), 1);
+        assert_eq!(
+            denied_rows[0].semantic_status.as_deref(),
+            Some("native_handler_denied")
+        );
+    }
+
+    #[test]
+    fn query_rows_filters_by_capability() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx = test_context();
+        let with_cap = store
+            .start_call(
+                &ctx,
+                1,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                with_cap,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                Some(r#"{"required_capability":"read_path"}"#),
+            )
+            .unwrap();
+        let without_cap = store
+            .start_call(
+                &ctx,
+                2,
+                "workspace.read_file",
+                &CallAuditMetadata::native_policy_enforced(None),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                without_cap,
+                AuditOutcome::Success {
+                    summary: "ok".into(),
+                },
+                Some("native_handler"),
+                Some(r#"{"observation_source":"workspace"}"#),
+            )
+            .unwrap();
+
+        let rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                capability: Some("read_path".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].audit_id, with_cap.audit_id);
+    }
+
+    #[test]
+    fn merge_finalize_metadata_adds_required_capability() {
+        let merged = merge_finalize_metadata(
+            Some(r#"{"observation_source":"workspace"}"#),
+            "workspace.read_file",
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(merged.contains("required_capability"));
+        assert!(merged.contains("read_path"));
     }
 
     #[tokio::test]

@@ -217,6 +217,9 @@ fn build_derived_envelope(
         ImpactKind::SessionStateMutation => {
             capabilities.insert(Capability::MutateSessionState);
         }
+        ImpactKind::AuditObservation => {
+            capabilities.insert(Capability::ReadAudit);
+        }
     }
 
     let scope_path = match scope {
@@ -364,7 +367,9 @@ mod tests {
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
+                    ..Default::default()
                 })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
             },

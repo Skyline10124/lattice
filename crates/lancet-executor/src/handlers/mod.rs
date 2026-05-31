@@ -1,5 +1,6 @@
 //! Phase 21/22 native CEP method handlers.
 
+pub mod audit;
 pub mod command;
 pub mod envelope;
 pub mod external;
@@ -10,6 +11,7 @@ pub mod scaffold;
 pub mod session_state;
 pub mod submit_intent;
 
+pub use audit::register_audit_methods;
 pub use command::register_command_methods;
 pub use envelope::register_envelope_methods;
 pub use external::register_external_methods;

@@ -161,6 +161,7 @@ async fn run_integration_creates_session_and_returns_commit() {
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
+        test_persist_audit: None,
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -193,6 +194,7 @@ async fn run_integration_missing_session_returns_not_found() {
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
+        test_persist_audit: None,
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -271,6 +273,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(ws.to_string_lossy().to_string()),
+        test_persist_audit: None,
     };
 
     let result = lattice_api::run_turn(session_api, request)

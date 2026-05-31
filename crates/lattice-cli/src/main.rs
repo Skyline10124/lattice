@@ -3,7 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod commands;
-use commands::{doctor, models, resolve, session as session_cmd};
+use commands::{audit, doctor, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -64,6 +64,8 @@ enum Commands {
     },
     /// Run diagnostics.
     Doctor,
+    /// Inspect CEP audit / provenance records.
+    Audit(audit::AuditCmd),
 }
 
 #[tokio::main]
@@ -120,6 +122,9 @@ fn run_other_commands(cli: Cli) -> Result<()> {
         }
         Some(Commands::Doctor) => {
             doctor::run(cli.json)?;
+        }
+        Some(Commands::Audit(cmd)) => {
+            audit::run(cmd, cli.json)?;
         }
         None => {
             let _ = Cli::command().print_help();
@@ -228,7 +233,7 @@ mod tests {
     fn cli_surface_help_contains_supported_commands() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
-        for name in &["run", "models", "resolve", "session", "doctor"] {
+        for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
             assert!(
                 help.contains(name),
                 "help should contain supported command '{name}'"
@@ -244,7 +249,7 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["run", "models", "resolve", "session", "doctor"]
+            vec!["run", "models", "resolve", "session", "doctor", "audit"]
         );
     }
 }

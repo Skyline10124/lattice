@@ -7,19 +7,21 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lancet_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
 use lancet_executor::{
-    impact_kind_for_method, impact_kind_label, invariants, register_production_method_registry,
-    to_tool_definitions, wire_code_for_error, ActiveEnvelopeStore, BudgetLimits, CallAuditMetadata,
-    CepAuditContext, CepAuditStore, CommandPolicy, LancetClient, LancetTransport, MethodRegistry,
-    NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext,
-    ServerRunConfig,
+    build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
+    register_production_method_registry, source_audit_range_hash, to_tool_definitions,
+    wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
+    CallAuditMetadata, CepAuditContext, CepAuditStore, CommandPolicy, LancetClient,
+    LancetTransport, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig,
+    Phase21PolicyConfig, Phase21TurnContext, ServerRunConfig,
 };
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::error::{
     invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
 };
+use lancet_protocol::methods::audit::{AuditQuery, AuditReplay, AuditTail};
 use lancet_protocol::methods::command::Run;
-use lancet_protocol::methods::envelope::Declare;
+use lancet_protocol::methods::envelope::{Declare, SubmitIntent};
 use lancet_protocol::methods::external::Fetch;
 use lancet_protocol::methods::session::TodoWrite;
 use lancet_protocol::methods::workspace::{
@@ -96,6 +98,10 @@ impl LancetExecutorAdapter {
             WriteFile::NAME => self.call_typed::<WriteFile>(params).await,
             Patch::NAME => self.call_typed::<Patch>(params).await,
             Declare::NAME => self.call_typed::<Declare>(params).await,
+            SubmitIntent::NAME => self.call_typed::<SubmitIntent>(params).await,
+            AuditQuery::NAME => self.call_typed::<AuditQuery>(params).await,
+            AuditTail::NAME => self.call_typed::<AuditTail>(params).await,
+            AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,
             other => Err(method_not_found(other)),
         }
     }
@@ -484,6 +490,7 @@ fn production_base_envelope_from_policy(
             }
         }
     }
+    base_envelope = base_envelope.with_read_audit();
     base_envelope
         .validate_no_write_or_command()
         .map_err(|err| ApiError::Internal(format!("invalid base envelope: {err}")))?;
@@ -504,6 +511,69 @@ pub(crate) fn production_base_envelope(
     production_base_envelope_from_policy(project_root, enabled_tools, &policy)
 }
 
+/// Persist an unsigned in-toto attestation for the turn after audit flush (D-09).
+pub(crate) fn generate_and_store_attestation(
+    audit: &CepAuditStore,
+    ctx: &CepAuditContext,
+    turn_id: &str,
+) -> Result<(), ApiError> {
+    if turn_id.is_empty() {
+        return Ok(());
+    }
+    if audit
+        .attestation_for_turn(turn_id)
+        .map_err(|err| ApiError::Internal(format!("attestation lookup: {err}")))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let filters = AuditQueryFilters {
+        session_id: Some(ctx.session_id.clone()),
+        turn_id: Some(turn_id.to_string()),
+        ..Default::default()
+    };
+    let rows = audit
+        .query_rows(&filters)
+        .map_err(|err| ApiError::Internal(format!("attestation query rows: {err}")))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let runtime_version = if ctx.runtime_version.is_empty() {
+        "lattice"
+    } else {
+        ctx.runtime_version.as_str()
+    };
+    let statement = build_in_toto_statement(turn_id, &rows, runtime_version);
+    let statement_json = serde_json::to_string(&statement)
+        .map_err(|err| ApiError::Internal(format!("attestation statement serialize: {err}")))?;
+    let range_hash = source_audit_range_hash(&rows);
+    let session_id = rows
+        .first()
+        .map(|r| r.session_id.clone())
+        .unwrap_or_else(|| ctx.session_id.clone());
+    let generated_at = rows
+        .iter()
+        .filter_map(|r| r.ended_at.as_deref())
+        .next_back()
+        .unwrap_or_else(|| rows[0].started_at.as_str())
+        .to_string();
+
+    audit
+        .insert_attestation(&AttestationRecord {
+            turn_id: turn_id.to_string(),
+            session_id,
+            statement_json,
+            predicate_type: statement.predicate_type.clone(),
+            generated_at,
+            source_audit_range_or_hash: range_hash,
+        })
+        .map_err(|err| ApiError::Internal(format!("attestation insert: {err}")))?;
+
+    Ok(())
+}
+
 /// Construct one turn-scoped Lancet runtime and inject it into a fresh AgentLoop.
 pub(crate) fn build_production_turn_deps(
     project_root: &str,
@@ -511,6 +581,8 @@ pub(crate) fn build_production_turn_deps(
     llm: Arc<dyn lattice_agent::LlmClient>,
     in_memory_audit: bool,
     cep: Option<&CepSection>,
+    model_id: &str,
+    runtime_version: &str,
 ) -> Result<ProductionTurnDeps, ApiError> {
     let tool_definitions = resolve_catalog_tool_definitions(enabled_tools)?;
 
@@ -554,7 +626,11 @@ pub(crate) fn build_production_turn_deps(
                 .map_err(|err| ApiError::Internal(format!("audit store setup: {err}")))?,
         )
     };
-    let audit_context = Arc::new(RwLock::new(CepAuditContext::default()));
+    let audit_context = Arc::new(RwLock::new(CepAuditContext {
+        model_id: model_id.to_string(),
+        runtime_version: runtime_version.to_string(),
+        ..Default::default()
+    }));
     let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
     let active_envelope = Arc::new(ActiveEnvelopeStore::new());
 
@@ -686,6 +762,7 @@ pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
                         call_id,
                         method: method.clone(),
                         impact_kind: impact_kind_for_method(&method)
+                            .as_ref()
                             .map(impact_kind_label)
                             .unwrap_or("unknown")
                             .to_string(),

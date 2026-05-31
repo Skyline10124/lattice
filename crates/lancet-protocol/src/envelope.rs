@@ -30,6 +30,7 @@ pub enum ImpactKind {
     CommandExecution,
     ExternalObservation,
     SessionStateMutation,
+    AuditObservation,
 }
 
 /// A const-constructible, order-canonical set of [`ImpactKind`] values.
@@ -123,6 +124,7 @@ pub enum Capability {
     FetchUrl { host: String },
     MutateSessionState,
     Inspect,
+    ReadAudit,
 }
 
 /// Guard verdict on an execution envelope.
@@ -333,6 +335,12 @@ impl BaseExecutionEnvelope {
         self
     }
 
+    /// Add session-scoped `ReadAudit` for provenance query/replay (D-07).
+    pub fn with_read_audit(mut self) -> Self {
+        self.inner.capabilities.insert(Capability::ReadAudit);
+        self
+    }
+
     /// Verify that this base envelope never grants `WritePath` or `RunCommand`.
     ///
     /// Per CEP-08, those two capabilities are reserved for explicitly declared
@@ -350,7 +358,8 @@ impl BaseExecutionEnvelope {
                 Capability::ReadPath { .. }
                 | Capability::Inspect
                 | Capability::FetchUrl { .. }
-                | Capability::MutateSessionState => {}
+                | Capability::MutateSessionState
+                | Capability::ReadAudit => {}
             }
         }
         Ok(())
@@ -486,6 +495,25 @@ mod tests {
     }
 
     #[test]
+    fn base_envelope_accepts_read_audit() {
+        let base = BaseExecutionEnvelope::for_workspace_root("/home/user/project", "audit read")
+            .with_read_audit();
+        assert!(base.validate_no_write_or_command().is_ok());
+        assert!(base
+            .inner
+            .capabilities
+            .iter()
+            .any(|c| matches!(c, Capability::ReadAudit)));
+
+        let mut inner = base.inner.clone();
+        inner.capabilities.insert(Capability::WritePath {
+            path_pattern: "/tmp".into(),
+        });
+        let bad = BaseExecutionEnvelope { inner };
+        assert!(bad.validate_no_write_or_command().is_err());
+    }
+
+    #[test]
     fn base_envelope_accepts_fetch_host() {
         let base = BaseExecutionEnvelope::for_workspace_root("/home/user/project", "with fetch")
             .with_fetch_host("example.com")
@@ -598,23 +626,43 @@ mod tests {
     }
 
     #[test]
-    fn impact_kind_has_exactly_five_variants() {
+    fn impact_kind_has_exactly_six_variants() {
         let variants: Vec<String> = [
             ImpactKind::WorkspaceObservation,
             ImpactKind::WorkspaceMutation,
             ImpactKind::CommandExecution,
             ImpactKind::ExternalObservation,
             ImpactKind::SessionStateMutation,
+            ImpactKind::AuditObservation,
         ]
         .iter()
         .map(|v| serde_json::to_string(v).unwrap().replace('"', ""))
         .collect();
-        assert_eq!(variants.len(), 5);
+        assert_eq!(variants.len(), 6);
         assert_eq!(variants[0], "workspace_observation");
         assert_eq!(variants[1], "workspace_mutation");
         assert_eq!(variants[2], "command_execution");
         assert_eq!(variants[3], "external_observation");
         assert_eq!(variants[4], "session_state_mutation");
+        assert_eq!(variants[5], "audit_observation");
+    }
+
+    #[test]
+    fn audit_observation_impact_kind_round_trips() {
+        let kind = ImpactKind::AuditObservation;
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, "\"audit_observation\"");
+        let parsed: ImpactKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, kind);
+    }
+
+    #[test]
+    fn read_audit_capability_round_trips() {
+        let cap = Capability::ReadAudit;
+        let json = serde_json::to_string(&cap).unwrap();
+        assert_eq!(json, "\"read_audit\"");
+        let parsed: Capability = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, cap);
     }
 
     #[test]

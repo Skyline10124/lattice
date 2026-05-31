@@ -162,6 +162,30 @@ fn capability_fixtures() -> Vec<CapabilityFixture> {
             base_verdict: CapabilityMatchVerdict::Satisfied,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
+        // audit.query → ReadAudit (session-scoped, pattern-less)
+        CapabilityFixture {
+            method: "audit.query",
+            required_capability: RequiredCapability::ReadAudit,
+            invocation: InvocationFacts::default(),
+            base_verdict: CapabilityMatchVerdict::Satisfied,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
+        // audit.replay → ReadAudit
+        CapabilityFixture {
+            method: "audit.replay",
+            required_capability: RequiredCapability::ReadAudit,
+            invocation: InvocationFacts::default(),
+            base_verdict: CapabilityMatchVerdict::Satisfied,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
+        // audit.tail → ReadAudit (session-scoped streaming read)
+        CapabilityFixture {
+            method: "audit.tail",
+            required_capability: RequiredCapability::ReadAudit,
+            invocation: InvocationFacts::default(),
+            base_verdict: CapabilityMatchVerdict::Satisfied,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
     ]
 }
 
@@ -182,6 +206,7 @@ fn sourced_cap_for(required: RequiredCapability, source: CapabilitySource) -> So
             host: "example.com".into(),
         },
         RequiredCapability::MutateSessionState => Capability::MutateSessionState,
+        RequiredCapability::ReadAudit => Capability::ReadAudit,
     };
     SourcedCapability { capability, source }
 }

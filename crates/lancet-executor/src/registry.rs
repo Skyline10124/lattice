@@ -1,6 +1,6 @@
 //! Typed method registry for CEP catalog dispatch.
 
-use crate::audit::CepAuditContext;
+use crate::audit::{CepAuditContext, CepAuditStore};
 use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::invariants::InvariantCardIndex;
@@ -100,6 +100,7 @@ pub struct HandlerContext {
     pub policy_hook: Arc<dyn PolicyHook>,
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
+    pub audit: Arc<CepAuditStore>,
     pub invariant_index: Arc<InvariantCardIndex>,
     pub cep_mode: CepMode,
 }
@@ -300,7 +301,9 @@ mod tests {
             audit_context: Arc::new(RwLock::new(CepAuditContext {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
+                ..Default::default()
             })),
+            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: CepMode::Off,
         }
@@ -386,8 +389,9 @@ mod tests {
         .unwrap();
 
         for descriptor in lancet_protocol::catalog() {
-            // submit_intent handler is registered in Phase 25 Plan 03
-            if descriptor.name == "envelope.submit_intent" {
+            // Native handlers — not in Phase 20 legacy backend
+            if descriptor.name.starts_with("audit.") || descriptor.name == "envelope.submit_intent"
+            {
                 continue;
             }
             assert!(registry.contains(descriptor.name));

@@ -366,8 +366,9 @@ fn parse_required_capability(
         "RunCommand" => Ok(RequiredCapability::RunCommand),
         "FetchUrl" => Ok(RequiredCapability::FetchUrl),
         "MutateSessionState" => Ok(RequiredCapability::MutateSessionState),
+        "ReadAudit" => Ok(RequiredCapability::ReadAudit),
         other => Err(format!(
-            "unknown required_capability '{}'; expected Inspect, ReadPath, WritePath, RunCommand, FetchUrl, or MutateSessionState",
+            "unknown required_capability '{}'; expected Inspect, ReadPath, WritePath, RunCommand, FetchUrl, MutateSessionState, or ReadAudit",
             other
         )),
     }
@@ -395,6 +396,7 @@ fn capability_kind_matches(
                 RequiredCapability::MutateSessionState
             )
             | (Capability::Inspect, RequiredCapability::Inspect)
+            | (Capability::ReadAudit, RequiredCapability::ReadAudit)
     )
 }
 

@@ -2,13 +2,13 @@
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
-    Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, SubmitIntent, TodoWrite,
-    WriteFile,
+    AuditQuery, AuditReplay, AuditTail, Declare, Fetch, FindFiles, Grep, ListDirectory, Patch,
+    ReadFile, Run, SubmitIntent, TodoWrite, WriteFile,
 };
 use std::sync::LazyLock;
 
 /// Exhaustive Phase 19 method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 11]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 14]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ReadFile>(),
         MethodDescriptor::for_method::<Grep>(),
@@ -21,6 +21,9 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 11]> = LazyLock::new(|| {
         MethodDescriptor::for_method::<Patch>(),
         MethodDescriptor::for_method::<Declare>(),
         MethodDescriptor::for_method::<SubmitIntent>(),
+        MethodDescriptor::for_method::<AuditQuery>(),
+        MethodDescriptor::for_method::<AuditTail>(),
+        MethodDescriptor::for_method::<AuditReplay>(),
     ]
 });
 
@@ -55,11 +58,11 @@ mod tests {
     use crate::envelope::ImpactKind;
     use crate::method::{CepMethod, RequiredCapability};
     use crate::methods::{
-        Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, SubmitIntent,
-        TodoWrite, WriteFile,
+        AuditQuery, AuditReplay, AuditTail, Declare, Fetch, FindFiles, Grep, ListDirectory, Patch,
+        ReadFile, Run, SubmitIntent, TodoWrite, WriteFile,
     };
 
-    const EXPECTED_ORDER: [&str; 11] = [
+    const EXPECTED_ORDER: [&str; 14] = [
         "workspace.read_file",
         "workspace.grep",
         "workspace.list_directory",
@@ -71,6 +74,9 @@ mod tests {
         "workspace.patch",
         "envelope.declare",
         "envelope.submit_intent",
+        "audit.query",
+        "audit.tail",
+        "audit.replay",
     ];
 
     #[test]
@@ -130,7 +136,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 11] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 14] = [
             (&catalog[0], ReadFile::IMPACT, ReadFile::CAPABILITY),
             (&catalog[1], Grep::IMPACT, Grep::CAPABILITY),
             (
@@ -146,6 +152,9 @@ mod tests {
             (&catalog[8], Patch::IMPACT, Patch::CAPABILITY),
             (&catalog[9], Declare::IMPACT, Declare::CAPABILITY),
             (&catalog[10], SubmitIntent::IMPACT, SubmitIntent::CAPABILITY),
+            (&catalog[11], AuditQuery::IMPACT, AuditQuery::CAPABILITY),
+            (&catalog[12], AuditTail::IMPACT, AuditTail::CAPABILITY),
+            (&catalog[13], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -163,8 +172,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_eleven() {
-        assert_eq!(catalog().len(), 11);
+    fn catalog_len_is_14() {
+        assert_eq!(catalog().len(), 14);
     }
 
     #[test]
@@ -229,7 +238,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 11);
+        assert_eq!(catalog().len(), 14);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -245,6 +254,9 @@ mod catalog_default_snapshot {
                 "workspace.patch",
                 "envelope.declare",
                 "envelope.submit_intent",
+                "audit.query",
+                "audit.tail",
+                "audit.replay",
             ]
         );
         for descriptor in catalog() {

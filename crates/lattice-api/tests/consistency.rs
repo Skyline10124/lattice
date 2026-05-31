@@ -136,6 +136,7 @@ fn make_request(ws: &Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurn
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(ws.root.to_string_lossy().to_string()),
+        test_persist_audit: None,
     }
 }
 

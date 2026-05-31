@@ -1,9 +1,9 @@
 //! Phase 21/22 native catalog method registration.
 
 use crate::handlers::{
-    register_command_methods, register_envelope_methods, register_external_methods,
-    register_mutation_methods, register_session_state_methods, register_submit_intent,
-    register_workspace_observation_methods,
+    register_audit_methods, register_command_methods, register_envelope_methods,
+    register_external_methods, register_mutation_methods, register_session_state_methods,
+    register_submit_intent, register_workspace_observation_methods,
 };
 use crate::registry::MethodRegistry;
 use lancet_protocol::CepError;
@@ -57,7 +57,8 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
     register_phase22_native_envelope(registry)?;
     register_phase22_native_command(registry)?;
     register_phase22_native_mutation(registry)?;
-    register_phase25_submit_intent(registry)
+    register_phase25_submit_intent(registry)?;
+    register_audit_methods(registry)
 }
 
 #[cfg(test)]
@@ -132,7 +133,9 @@ mod phase21_native_registry_tests {
             audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
+                ..Default::default()
             })),
+            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
@@ -267,7 +270,9 @@ mod phase21_native_registry_tests {
             audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
+                ..Default::default()
             })),
+            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
         };

@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod doctor;
 pub(crate) mod model_render;
 pub mod models;

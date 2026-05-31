@@ -23,6 +23,7 @@ pub mod invariants;
 mod legacy_backend;
 mod native_registry;
 pub mod policy;
+pub mod provenance;
 pub mod registry;
 pub mod testing;
 pub mod tool_definitions;
@@ -30,8 +31,8 @@ pub mod transport;
 pub mod verify;
 
 pub use audit::{
-    impact_kind_for_method, impact_kind_label, CallAuditMetadata, CepAuditContext, CepAuditStore,
-    SEMANTIC_STAGE_NATIVE,
+    impact_kind_for_method, impact_kind_from_label, impact_kind_label, AttestationRecord,
+    AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_NATIVE,
 };
 pub use envelope_store::ActiveEnvelopeStore;
 #[cfg(feature = "inspect-scaffold")]
@@ -41,6 +42,9 @@ pub use native_registry::register_production_method_registry;
 pub use policy::{
     command::CommandPolicy, BudgetLimits, NetworkPolicyConfig, ObservationPolicyConfig,
     Phase21PolicyConfig, Phase21TurnContext,
+};
+pub use provenance::{
+    build_in_toto_statement, canonicalize_in_toto_statement, source_audit_range_hash,
 };
 pub use registry::{wire_code_for_error, HandlerContext, MethodRegistry};
 #[cfg(feature = "inspect-scaffold")]

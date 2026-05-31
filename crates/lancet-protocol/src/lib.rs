@@ -18,6 +18,7 @@ pub mod jsonrpc;
 pub mod method;
 pub mod methods;
 pub mod policy;
+pub mod provenance;
 
 // Public re-exports of common types
 pub use catalog::{catalog, CATALOG};
@@ -35,4 +36,10 @@ pub use policy::{
     CapabilitySource, EffectiveEnvelopeSnapshot, PolicyActionRequired, PolicyAuditContext,
     PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
     SourcedCapability,
+};
+pub use provenance::{
+    InTotoStatement, InTotoSubjectDescriptor, ProvActivity, ProvAgent, ProvEntity,
+    ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
+    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
 };

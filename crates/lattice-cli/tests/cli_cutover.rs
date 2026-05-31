@@ -19,7 +19,7 @@ fn cli_cutover_help_contains_supported_commands() {
     let output = lattice().arg("--help").output().unwrap();
     assert!(output.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in &["run", "models", "resolve", "session", "doctor"] {
+    for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
         assert!(
             stdout.contains(name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -46,7 +46,7 @@ fn cli_cutover_help_omits_removed_commands() {
         }
     }
 
-    for name in &["run", "models", "resolve", "session", "doctor"] {
+    for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
         assert!(
             command_names.iter().any(|candidate| candidate == name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -55,8 +55,8 @@ fn cli_cutover_help_omits_removed_commands() {
 
     assert_eq!(
         command_names.len(),
-        6,
-        "help should list only the final supported command surface (5 + clap 'help'), got:\n{stdout}"
+        7,
+        "help should list only the final supported command surface (6 + clap 'help'), got:\n{stdout}"
     );
     assert!(
         command_names.contains(&"help".to_string()),

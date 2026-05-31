@@ -1085,6 +1085,8 @@ dependencies = [
  "dirs",
  "dotenvy",
  "futures",
+ "lancet-executor",
+ "lancet-protocol",
  "lattice-agent",
  "lattice-api",
  "lattice-llm",

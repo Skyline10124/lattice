@@ -8,6 +8,7 @@
 //! D-37: patch is all-or-nothing preflight — any out-of-scope path rejects entire patch.
 //! D-43..D-52: Verify flow after successful mutations.
 
+use crate::edit::content_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::types::PatchOperation;
 use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
@@ -173,10 +174,12 @@ async fn handle_write_file(
     }
 
     // 8. Record metadata
+    let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
         "method": WriteFile::NAME,
         "envelope_id": envelope_id,
         "bytes_written": bytes_written,
+        "content_hash": written_hash,
         "backend_invoked": true,
         "policy_enforced": true,
     }));
@@ -320,13 +323,23 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         ));
     }
 
-    let changed_files: Vec<String> = result
+    let changed_paths: Vec<String> = result
         .changed_files
         .iter()
         .map(|f| f.path.clone())
         .collect();
+    let changed_files_meta: Vec<serde_json::Value> = result
+        .changed_files
+        .iter()
+        .map(|f| {
+            json!({
+                "path": f.path,
+                "content_hash": f.hash_after,
+            })
+        })
+        .collect();
 
-    for changed_path in &changed_files {
+    for changed_path in &changed_paths {
         let abs_path = if std::path::Path::new(changed_path).is_relative() {
             PathBuf::from(&project_root).join(changed_path)
         } else {
@@ -370,12 +383,14 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
     ctx.record_durable_metadata(json!({
         "method": Patch::NAME,
         "envelope_id": envelope_id,
-        "changed_files": changed_files,
+        "changed_files": changed_files_meta,
         "backend_invoked": true,
         "policy_enforced": true,
     }));
 
-    Ok(PatchResult { changed_files })
+    Ok(PatchResult {
+        changed_files: changed_paths,
+    })
 }
 
 fn enforce_l2_result(
@@ -729,7 +744,9 @@ mod write_file_tests {
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
+                    ..Default::default()
                 })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
@@ -781,7 +798,9 @@ mod write_file_tests {
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
+                    ..Default::default()
                 })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode,
             },
@@ -1126,7 +1145,9 @@ mod patch_tests {
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
+                    ..Default::default()
                 })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode,
             },

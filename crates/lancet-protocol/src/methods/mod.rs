@@ -1,5 +1,6 @@
 //! Phase 19 CEP catalog method types.
 
+pub mod audit;
 pub mod command;
 pub mod envelope;
 pub mod external;
@@ -8,6 +9,7 @@ pub mod scaffold;
 pub mod session;
 pub mod workspace;
 
+pub use audit::{AuditQuery, AuditReplay, AuditTail};
 pub use command::Run;
 pub use envelope::{Declare, SubmitIntent};
 pub use external::Fetch;
@@ -19,6 +21,7 @@ pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 
 mod sealed {
     use super::{
+        audit::{AuditQuery, AuditReplay, AuditTail},
         command::Run,
         envelope::{Declare, SubmitIntent},
         external::Fetch,
@@ -38,6 +41,9 @@ mod sealed {
     impl Sealed for Run {}
     impl Sealed for Declare {}
     impl Sealed for SubmitIntent {}
+    impl Sealed for AuditQuery {}
+    impl Sealed for AuditTail {}
+    impl Sealed for AuditReplay {}
 }
 
 #[cfg(test)]
@@ -59,6 +65,9 @@ mod tests {
             Patch::NAME,
             Declare::NAME,
             SubmitIntent::NAME,
+            AuditQuery::NAME,
+            AuditTail::NAME,
+            AuditReplay::NAME,
         ];
         for name in names {
             assert!(name.contains('.'), "expected dotted name: {name}");
@@ -80,6 +89,9 @@ mod tests {
             Patch::NAME,
             Declare::NAME,
             SubmitIntent::NAME,
+            AuditQuery::NAME,
+            AuditTail::NAME,
+            AuditReplay::NAME,
         ];
         for name in names {
             assert_ne!(name, "session/create");

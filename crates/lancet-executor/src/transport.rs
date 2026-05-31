@@ -68,6 +68,7 @@ impl ServerRunConfig {
             audit_context: Arc::new(RwLock::new(CepAuditContext {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
+                ..Default::default()
             })),
             base_envelope,
             phase21,
@@ -460,6 +461,7 @@ async fn handle_request(
         policy_hook: Arc::clone(&policy_hook),
         default_policy_hook: default_policy_hook.clone(),
         audit_context: Arc::clone(&audit_context),
+        audit: Arc::clone(&audit),
         invariant_index: Arc::clone(&invariant_index),
         cep_mode: cep_mode.clone(),
     };
@@ -477,6 +479,13 @@ async fn handle_request(
     );
 
     let durable_metadata_json = durable_metadata.take_json();
+    let active_envelope_id = active_envelope.active_envelope().await.map(|(id, _)| id);
+    let merged_metadata = crate::audit::merge_finalize_metadata(
+        durable_metadata_json.as_deref(),
+        &method,
+        &observed_effects,
+        active_envelope_id.as_deref(),
+    );
 
     finalize_audit_for_dispatch(
         &audit,
@@ -484,7 +493,7 @@ async fn handle_request(
         &method,
         &final_result,
         &call_audit_metadata,
-        durable_metadata_json.as_deref(),
+        merged_metadata.as_deref(),
     );
     let ok = final_result.is_ok();
     let error_code = final_result
@@ -757,6 +766,7 @@ async fn emit_cep_call_started(
     metadata: &CallAuditMetadata,
 ) {
     let impact_kind = impact_kind_for_method(method)
+        .as_ref()
         .map(impact_kind_label)
         .unwrap_or("unknown");
     let event = ToolEvent::new(
@@ -1289,6 +1299,40 @@ mod tests {
         }
 
         assert_eq!(ACTIVE_HANDLERS.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn finalize_persists_required_capability() {
+        use crate::handlers::register_session_state_methods;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let mut registry = MethodRegistry::new();
+        register_session_state_methods(&mut registry).unwrap();
+
+        let mut config = ServerRunConfig::in_memory_for_tests();
+        config.production_audit_routing = true;
+        config.phase21 =
+            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root));
+        config.base_envelope =
+            BaseExecutionEnvelope::for_workspace_root(root, "cap merge test").with_session_state();
+        let audit = Arc::clone(&config.audit);
+
+        let (client, server) = LancetTransport::pair(8);
+        let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+        let _ = client
+            .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
+            .await
+            .unwrap();
+        drop(client);
+        server_task.await.unwrap();
+
+        let row = audit.row_by_audit_id(1).unwrap();
+        let metadata = row.metadata_json.expect("metadata");
+        assert!(metadata.contains("required_capability"));
+        assert!(metadata.contains("mutate_session_state"));
     }
 
     #[tokio::test]

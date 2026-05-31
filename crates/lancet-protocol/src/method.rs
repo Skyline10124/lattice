@@ -26,6 +26,7 @@ pub enum RequiredCapability {
     RunCommand,
     FetchUrl,
     MutateSessionState,
+    ReadAudit,
 }
 
 /// Patterns supplied at envelope construction time to materialize a concrete
@@ -75,6 +76,7 @@ impl RequiredCapability {
         match self {
             Self::Inspect => Ok(Capability::Inspect),
             Self::MutateSessionState => Ok(Capability::MutateSessionState),
+            Self::ReadAudit => Ok(Capability::ReadAudit),
             Self::ReadPath => Ok(Capability::ReadPath {
                 path_pattern: patterns
                     .path_pattern
@@ -163,6 +165,10 @@ mod tests {
                 .resolve(&empty)
                 .unwrap(),
             Capability::MutateSessionState
+        );
+        assert_eq!(
+            RequiredCapability::ReadAudit.resolve(&empty).unwrap(),
+            Capability::ReadAudit
         );
     }
 

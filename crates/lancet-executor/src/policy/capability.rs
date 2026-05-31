@@ -222,6 +222,7 @@ fn is_source_allowed_for_method(
         "session.todo_write" | "envelope.declare" | "envelope.submit_intent" => {
             &source_policy.session_state
         }
+        "audit.query" | "audit.tail" | "audit.replay" => &source_policy.session_state,
         "workspace.write_file" | "workspace.patch" => &source_policy.mutation,
         "command.run" => &source_policy.command,
         _ => return false,
@@ -257,6 +258,7 @@ fn capability_matches_required(cap: &Capability, required: RequiredCapability) -
                 RequiredCapability::MutateSessionState
             )
             | (Capability::Inspect, RequiredCapability::Inspect)
+            | (Capability::ReadAudit, RequiredCapability::ReadAudit)
     )
 }
 
@@ -329,6 +331,10 @@ fn check_pattern_coverage(
         }
         Capability::Inspect => {
             // Inspect covers all inspection operations
+            None
+        }
+        Capability::ReadAudit => {
+            // ReadAudit is pattern-less; session scope enforced at handler layer (Phase 26-03)
             None
         }
     }
@@ -557,9 +563,9 @@ fn pattern_action_for(required: RequiredCapability) -> CapabilityActionRequired 
         }
         RequiredCapability::RunCommand => CapabilityActionRequired::ChangeCommand,
         RequiredCapability::FetchUrl => CapabilityActionRequired::ChangeUrl,
-        RequiredCapability::Inspect | RequiredCapability::MutateSessionState => {
-            CapabilityActionRequired::WidenEnvelope
-        }
+        RequiredCapability::Inspect
+        | RequiredCapability::MutateSessionState
+        | RequiredCapability::ReadAudit => CapabilityActionRequired::WidenEnvelope,
     }
 }
 
