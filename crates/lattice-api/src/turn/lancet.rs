@@ -5,28 +5,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lancet_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
-use lancet_executor::{
+use cep_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use cep_executor::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
     wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
     CepAuditContext, CepAuditStore, CepPolicyConfig, CepTurnContext, CommandPolicy, LancetClient,
     LancetTransport, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
 };
-use lancet_protocol::catalog;
-use lancet_protocol::envelope::BaseExecutionEnvelope;
-use lancet_protocol::error::{
-    invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
-};
-use lancet_protocol::methods::audit::{AuditQuery, AuditReplay, AuditTail};
-use lancet_protocol::methods::command::Run;
-use lancet_protocol::methods::envelope::{Declare, SubmitIntent};
-use lancet_protocol::methods::external::Fetch;
-use lancet_protocol::methods::session::TodoWrite;
-use lancet_protocol::methods::workspace::{
+use cep_protocol::catalog;
+use cep_protocol::envelope::BaseExecutionEnvelope;
+use cep_protocol::error::{invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData};
+use cep_protocol::methods::audit::{AuditQuery, AuditReplay, AuditTail};
+use cep_protocol::methods::command::Run;
+use cep_protocol::methods::envelope::{Declare, SubmitIntent};
+use cep_protocol::methods::external::Fetch;
+use cep_protocol::methods::session::TodoWrite;
+use cep_protocol::methods::workspace::{
     FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
 };
-use lancet_protocol::{CatalogMethod, CepError, CepMethod, Retriability, ToolEvent};
+use cep_protocol::{CatalogMethod, CepError, CepMethod, Retriability, ToolEvent};
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
 };
@@ -656,7 +654,7 @@ pub(crate) fn build_production_turn_deps(
         default_policy_hook: Some(default_hook),
         cep_mode: cep
             .map(|c| c.mode.clone())
-            .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
+            .unwrap_or(cep_protocol::envelope::CepMode::Enforce),
         invariant_index,
     };
 

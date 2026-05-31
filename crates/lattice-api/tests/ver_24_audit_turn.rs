@@ -3,15 +3,15 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_executor::{
+use cep_executor::{
     register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
     LancetTransport, MethodRegistry, ServerRunConfig,
 };
-use lancet_protocol::envelope::{
+use cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
     ImpactKind, Intent, OnFailure, Scope,
 };
-use lancet_protocol::methods::audit::{AuditReplay, AuditReplayParams};
+use cep_protocol::methods::audit::{AuditReplay, AuditReplayParams};
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};

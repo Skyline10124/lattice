@@ -893,8 +893,8 @@ async fn stream_turn_error_after_partial_commits_error() {
 
 #[tokio::test]
 async fn stream_turn_emits_cep_lifecycle_events() {
-    use lancet_protocol::methods::TodoWrite;
-    use lancet_protocol::CepMethod;
+    use cep_protocol::methods::TodoWrite;
+    use cep_protocol::CepMethod;
 
     let tool_events = vec![
         LlmEvent::ToolCallStart {

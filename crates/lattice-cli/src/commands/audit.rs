@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use clap::Args;
-use lancet_executor::{
+use cep_executor::{
     impact_kind_from_label, register_production_method_registry, CepAuditStore, CepTurnContext,
     LancetClient, LancetTransport, MethodRegistry, ServerRunConfig,
 };
-use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
-use lancet_protocol::methods::audit::{
+use cep_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
+use cep_protocol::methods::audit::{
     AuditQuery, AuditQueryParams, AuditTail, AuditTailParams, AuditTailResult,
 };
+use clap::Args;
 use tokio::sync::RwLock;
 
 #[derive(Args, Debug, Clone)]
@@ -105,7 +105,7 @@ where
     config.base_envelope =
         BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-    config.audit_context = Arc::new(RwLock::new(lancet_executor::CepAuditContext {
+    config.audit_context = Arc::new(RwLock::new(cep_executor::CepAuditContext {
         session_id: session_id.to_string(),
         ..Default::default()
     }));
@@ -278,9 +278,9 @@ fn parse_impact_kind(label: Option<&str>) -> Result<Option<ImpactKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_executor::audit::{CallAuditMetadata, CepAuditContext};
-    use lancet_protocol::methods::workspace::ReadFile;
-    use lancet_protocol::CepMethod;
+    use cep_executor::audit::{CallAuditMetadata, CepAuditContext};
+    use cep_protocol::methods::workspace::ReadFile;
+    use cep_protocol::CepMethod;
     use tempfile::TempDir;
 
     fn seed_audit_db(dir: &Path, session_id: &str) {
@@ -304,7 +304,7 @@ mod tests {
         audit
             .finalize_call(
                 start,
-                lancet_executor::audit::AuditOutcome::Success {
+                cep_executor::audit::AuditOutcome::Success {
                     summary: "read ok".into(),
                 },
                 Some("native_handler"),

@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Subcommand;
-use colored::Colorize;
-use lancet_executor::invariants::loader::load_cards_from_dir;
-use lancet_executor::invariants::resolve_invariants_dir;
-use lancet_executor::{
+use cep_executor::invariants::loader::load_cards_from_dir;
+use cep_executor::invariants::resolve_invariants_dir;
+use cep_executor::{
     register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
     LancetTransport, MethodRegistry, ServerRunConfig,
 };
-use lancet_protocol::catalog::catalog;
-use lancet_protocol::envelope::BaseExecutionEnvelope;
-use lancet_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
+use cep_protocol::catalog::catalog;
+use cep_protocol::envelope::BaseExecutionEnvelope;
+use cep_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
+use clap::Subcommand;
+use colored::Colorize;
 
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
@@ -398,9 +398,9 @@ async fn submit_intent_smoke_async() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cep_executor::audit::{AuditOutcome, CallAuditMetadata};
+    use cep_executor::{CepAuditContext, CepAuditStore};
     use clap::Parser;
-    use lancet_executor::audit::{AuditOutcome, CallAuditMetadata};
-    use lancet_executor::{CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
 
     // -- Clap surface tests --
@@ -625,7 +625,7 @@ mod tests {
         );
         assert!(matches!(
             wire_freeze.anchor,
-            lancet_executor::invariants::types::CardAnchor::Glob(_)
+            cep_executor::invariants::types::CardAnchor::Glob(_)
         ));
 
         // no-legacy-public-expansion card
@@ -639,7 +639,7 @@ mod tests {
         );
         assert!(matches!(
             legacy_card.anchor,
-            lancet_executor::invariants::types::CardAnchor::Glob(_)
+            cep_executor::invariants::types::CardAnchor::Glob(_)
         ));
     }
 

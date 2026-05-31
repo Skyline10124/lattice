@@ -6,7 +6,7 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ## 技术债扫描修复 — 2026-05-27
 
-Verified: `cargo fmt --all --check` ✓, `cargo clippy --workspace --all-targets -- -D warnings` ✓, `cargo test --workspace` ✓ (731 tests), `cargo test -p lancet-executor` ✓ (121 tests; default sandbox blocked localhost bind, unrestricted local test passed), `cargo test -p lattice-hooks` ✓
+Verified: `cargo fmt --all --check` ✓, `cargo clippy --workspace --all-targets -- -D warnings` ✓, `cargo test --workspace` ✓ (731 tests), `cargo test -p cep-executor` ✓ (121 tests; default sandbox blocked localhost bind, unrestricted local test passed), `cargo test -p lattice-hooks` ✓
 
 | # | 严重度 | 问题 | 修复 |
 |---|--------|------|------|
@@ -19,13 +19,13 @@ Verified: `cargo fmt --all --check` ✓, `cargo clippy --workspace --all-targets
 
 Residual: SQLite 单连接串行化与 `ChatRequest` 每轮完整 `Vec<Message>` clone 属架构/性能项，已留在 `FINDINGS.md` 继续跟踪；扫描里的 “command injection” 在当前 argv-only 设计下未复现为 shell 注入。
 
-文件: `Cargo.toml`, `.github/workflows/ci.yml`, `AGENTS.md`, `crates/lancet-executor/src/executor/fs.rs`, `crates/lancet-executor/src/executor/shell.rs`, `crates/lattice-cli/src/commands/run.rs`
+文件: `Cargo.toml`, `.github/workflows/ci.yml`, `AGENTS.md`, `crates/cep-executor/src/executor/fs.rs`, `crates/cep-executor/src/executor/shell.rs`, `crates/lattice-cli/src/commands/run.rs`
 
 ---
 
 ## Phase 19 review fixes: CEP core / JSON-RPC wire — 2026-05-24
 
-Verified: `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lancet-executor` ✓ (44 tests + 1 doctest), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lancet-protocol` ✓ (46 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lattice-profile cep` ✓ (10 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo clippy -p lancet-executor -p lancet-protocol -p lattice-profile --all-targets -- -D warnings` ✓
+Verified: `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p cep-executor` ✓ (44 tests + 1 doctest), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p cep-protocol` ✓ (46 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lattice-profile cep` ✓ (10 tests), `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo clippy -p cep-executor -p cep-protocol -p lattice-profile --all-targets -- -D warnings` ✓
 
 | # | 严重度 | 问题 | 修复 |
 |---|--------|------|------|
@@ -35,7 +35,7 @@ Verified: `env TMPDIR=/home/astrin/Dev/lattice/target/tmp cargo test -p lancet-e
 | P19-CR-04 | MEDIUM | compile-fail doctest 因无效 `ImpactKind::ReadOnly` 失败，未证明 catalog sealing | doctest 改用有效 `ImpactKind::WorkspaceObservation`，现在失败点落在缺失 `CatalogMethod` bound |
 | P19-CR-05 | LOW | `[cep]` flatten extension 静默接受标量 typo | `CepSection` 改为自定义 deserialize，只保留 table-valued future sub-tables，拒绝 `cep.*` 标量 typo |
 
-文件: `crates/lancet-executor/src/transport.rs`, `crates/lancet-executor/src/registry.rs`, `crates/lancet-protocol/src/error.rs`, `crates/lattice-profile/src/schema.rs`
+文件: `crates/cep-executor/src/transport.rs`, `crates/cep-executor/src/registry.rs`, `crates/cep-protocol/src/error.rs`, `crates/lattice-profile/src/schema.rs`
 
 ---
 

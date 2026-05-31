@@ -23,13 +23,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lancet_executor::{
+use cep_executor::{
     register_production_method_registry, CepAuditStore, LancetTransport, MethodRegistry,
     ServerRunConfig,
 };
-use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
-use lancet_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lancet_protocol::CepErrorCode;
+use cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use cep_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use cep_protocol::CepErrorCode;
 use lattice_profile::CepSection;
 use tempfile::TempDir;
 
@@ -44,11 +44,11 @@ use tempfile::TempDir;
 // so the policy check passes. The overreach is in the effect region check.
 
 fn overreach_todo_handler() -> MethodRegistry {
-    use lancet_executor::effect::{
+    use cep_executor::effect::{
         ledger::{EffectSource, ObservedEffect, ObservedScope},
         region::AuthorizedEffectRegion,
     };
-    use lancet_protocol::method::RequiredCapability;
+    use cep_protocol::method::RequiredCapability;
 
     let mut registry = MethodRegistry::new();
     registry
@@ -197,12 +197,12 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // Set up a proper policy hook for the workspace root.
     {
-        use lancet_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
+        use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
         let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
-        config.cep_context = Arc::new(lancet_executor::CepTurnContext::defaults_for_project_root(
+        config.cep_context = Arc::new(cep_executor::CepTurnContext::defaults_for_project_root(
             canonical_str,
         ));
     }
@@ -213,7 +213,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // workspace.write_file without WritePath in any envelope → policy denial.
     // Off mode does NOT bypass the policy check.
-    use lancet_protocol::methods::workspace::{WriteFile, WriteFileParams};
+    use cep_protocol::methods::workspace::{WriteFile, WriteFileParams};
     let err = client
         .call::<WriteFile>(WriteFileParams {
             path: "should_be_denied.txt".into(),

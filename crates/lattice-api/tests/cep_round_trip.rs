@@ -4,21 +4,21 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_executor::{
+use cep_executor::{
     register_production_method_registry, to_tool_definitions, CepAuditStore, LancetTransport,
     MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use lancet_protocol::catalog;
-use lancet_protocol::envelope::{
+use cep_protocol::catalog;
+use cep_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use lancet_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
-use lancet_protocol::methods::command::Run;
-use lancet_protocol::methods::envelope::{Declare, DeclareParams};
-use lancet_protocol::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_protocol::methods::session::{TodoWrite, TodoWriteParams};
-use lancet_protocol::methods::workspace::{ReadFile, WriteFile};
-use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
+use cep_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
+use cep_protocol::methods::command::Run;
+use cep_protocol::methods::envelope::{Declare, DeclareParams};
+use cep_protocol::methods::external::{Fetch, FetchParams, FetchResult};
+use cep_protocol::methods::session::{TodoWrite, TodoWriteParams};
+use cep_protocol::methods::workspace::{ReadFile, WriteFile};
+use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_api::LancetExecutorAdapter;
 use lattice_llm::{FunctionCall, ToolCall};
@@ -370,10 +370,10 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (LancetExecutorAdapter, Arc<CepAuditStore>) {
-    use lancet_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use lancet_executor::{CepPolicyConfig, CepTurnContext};
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
-    use lancet_protocol::methods::session::TodoWrite;
+    use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use cep_executor::{CepPolicyConfig, CepTurnContext};
+    use cep_protocol::envelope::BaseExecutionEnvelope;
+    use cep_protocol::methods::session::TodoWrite;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
     let root = canonical_root.to_str().expect("utf-8 production root");

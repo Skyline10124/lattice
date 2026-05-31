@@ -4,7 +4,7 @@ LATTICE agents execute tools through **CEP** (Controlled Execution Protocol): JS
 
 ## Public surface (v1.3-alpha)
 
-The documented public contract for LANCET is the surface exported from **`lancet-protocol`**:
+The documented public contract for LANCET is the surface exported from **`cep-protocol`**:
 
 | Component | Description |
 |-----------|-------------|
@@ -15,7 +15,7 @@ The documented public contract for LANCET is the surface exported from **`lancet
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface |
 | Audit/provenance schemas | `ProvGraphFragment`, `AttestationRecord` wire shapes |
 
-**Not public surface:** `lancet-executor` handler internals, private low-level executor helpers, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native CEP server.
+**Not public surface:** `cep-executor` handler internals, private low-level executor helpers, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native CEP server.
 
 ### Release gate and self-check
 

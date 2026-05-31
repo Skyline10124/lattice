@@ -7,11 +7,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use futures::StreamExt;
-use lancet_protocol::envelope::{
+use cep_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope,
 };
+use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};

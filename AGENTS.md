@@ -36,17 +36,17 @@ envelopes, policy gating, path guards, and an audit trail. The workspace
 enforces a layered internal dependency flow:
 
 ```
-Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session   lattice-hooks
+Layer 0 (leaf):  cep-protocol   lattice-llm   lattice-session   lattice-hooks
 Layer 1:         lattice-profile(→protocol)  lattice-tooling(→llm)  lattice-agent(→llm,session)
-Layer 2:         lancet-executor(→protocol, llm, tooling)
+Layer 2:         cep-executor(→protocol, llm, tooling)
 Layer 3:         lattice-api(→ all of the above)
 Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 ```
 
 | Crate | Role |
 |---|---|
-| `lancet-protocol` | Pure CEP data layer: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, typed method catalog (`CATALOG`), policy hook types. No I/O, no tokio. |
-| `lancet-executor` | CEP **server-side runtime**: in-process JSON-RPC `transport`, `MethodRegistry`, native method `handlers`, `policy` engine, `guard` (path-scope), `verify` (post-mutation), `audit` store, envelope store. Low-level `executor/` and `edit/` helpers are private implementation details behind native handlers. |
+| `cep-protocol` | Pure CEP data layer: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, typed method catalog (`CATALOG`), policy hook types. No I/O, no tokio. |
+| `cep-executor` | CEP **server-side runtime**: in-process JSON-RPC `transport`, `MethodRegistry`, native method `handlers`, `policy` engine, `guard` (path-scope), `verify` (post-mutation), `audit` store, envelope store. Low-level `executor/` and `edit/` helpers are private implementation details behind native handlers. |
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[cep]` policy sections), discovery, defaults |
@@ -70,7 +70,7 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 
 ### CEP Method Catalog
 
-The catalog is exactly 14 methods (`lancet-protocol/src/catalog.rs`):
+The catalog is exactly 14 methods (`cep-protocol/src/catalog.rs`):
 
 `workspace.read_file`, `workspace.grep`, `workspace.list_directory`,
 `workspace.find_files`, `workspace.write_file`, `workspace.patch`, `web.fetch`,
@@ -112,15 +112,15 @@ Use this table to skip the "which crate owns this?" exploration step.
 
 | If you're changing… | Go to | Key files |
 |---|---|---|
-| CEP protocol types (envelopes, frames, errors, JSON-RPC) | `lancet-protocol/src/` | `envelope.rs`, `frame.rs`, `error.rs`, `jsonrpc.rs`, `method.rs` |
-| CEP method definitions / catalog | `lancet-protocol/src/` | `catalog.rs`, `methods/{workspace,command,external,session,envelope}.rs` |
-| Native CEP method handlers (server impls) | `lancet-executor/src/handlers/` | `mutation.rs`, `command.rs`, `external.rs`, `observation.rs`, `session_state.rs`, `envelope.rs` |
-| CEP transport / registry / server wiring | `lancet-executor/src/` | `transport.rs`, `registry.rs`, `native_registry.rs` |
-| Policy engine (capability/command/network/budget) | `lancet-executor/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
-| Path guard / verify / audit | `lancet-executor/src/` | `guard.rs`, `verify.rs`, `audit.rs`, `envelope_store.rs` |
-| Low-level executor helpers | `lancet-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs`, `path_guard.rs`, `render.rs` |
-| Edit/diff application logic | `lancet-executor/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
-| LLM-facing tool schema generation | `lancet-executor/src/` | `tool_definitions.rs` |
+| CEP protocol types (envelopes, frames, errors, JSON-RPC) | `cep-protocol/src/` | `envelope.rs`, `frame.rs`, `error.rs`, `jsonrpc.rs`, `method.rs` |
+| CEP method definitions / catalog | `cep-protocol/src/` | `catalog.rs`, `methods/{workspace,command,external,session,envelope}.rs` |
+| Native CEP method handlers (server impls) | `cep-executor/src/handlers/` | `mutation.rs`, `command.rs`, `external.rs`, `observation.rs`, `session_state.rs`, `envelope.rs` |
+| CEP transport / registry / server wiring | `cep-executor/src/` | `transport.rs`, `registry.rs`, `native_registry.rs` |
+| Policy engine (capability/command/network/budget) | `cep-executor/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
+| Path guard / verify / audit | `cep-executor/src/` | `guard.rs`, `verify.rs`, `audit.rs`, `envelope_store.rs` |
+| Low-level executor helpers | `cep-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs`, `path_guard.rs`, `render.rs` |
+| Edit/diff application logic | `cep-executor/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
+| LLM-facing tool schema generation | `cep-executor/src/` | `tool_definitions.rs` |
 | Enabled-tools resolution | `lattice-tooling/src/` | `enabled_tools.rs` |
 | Provider protocol adapters | `lattice-llm/src/providers/` | `anthropic.rs`, `openai.rs`, `gemini.rs` |
 | SSE streaming parser | `lattice-llm/src/` | `sse.rs`, `client.rs` |

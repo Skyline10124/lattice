@@ -206,6 +206,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "cep-executor"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cep-protocol",
+ "futures",
+ "globset",
+ "indexmap",
+ "lattice-llm",
+ "lattice-tooling",
+ "libc",
+ "proptest",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "cep-protocol"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -996,46 +1036,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lancet-executor"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "futures",
- "globset",
- "indexmap",
- "lancet-protocol",
- "lattice-llm",
- "lattice-tooling",
- "libc",
- "proptest",
- "regex",
- "reqwest",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tree-sitter",
- "tree-sitter-rust",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "lancet-protocol"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "lattice-agent"
 version = "0.1.0"
 dependencies = [
@@ -1053,9 +1053,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "cep-executor",
+ "cep-protocol",
  "futures",
- "lancet-executor",
- "lancet-protocol",
  "lattice-agent",
  "lattice-llm",
  "lattice-profile",
@@ -1079,14 +1079,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "cep-executor",
+ "cep-protocol",
  "chrono",
  "clap",
  "colored",
  "dirs",
  "dotenvy",
  "futures",
- "lancet-executor",
- "lancet-protocol",
  "lattice-agent",
  "lattice-api",
  "lattice-llm",
@@ -1137,7 +1137,7 @@ dependencies = [
 name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
- "lancet-protocol",
+ "cep-protocol",
  "serde",
  "serde_json",
  "tempfile",

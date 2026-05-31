@@ -5,21 +5,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "== P22 stress: lancet-executor command.run =="
-cargo test -p lancet-executor --lib handlers::command -- --nocapture
+echo "== P22 stress: cep-executor command.run =="
+cargo test -p cep-executor --lib handlers::command -- --nocapture
 
-echo "== P22 stress: lancet-executor guard L1 =="
-cargo test -p lancet-executor --lib guard:: -- --nocapture
+echo "== P22 stress: cep-executor guard L1 =="
+cargo test -p cep-executor --lib guard:: -- --nocapture
 
-echo "== P22 stress: lancet-executor mutation + verify =="
-cargo test -p lancet-executor --lib handlers::mutation -- --nocapture
+echo "== P22 stress: cep-executor mutation + verify =="
+cargo test -p cep-executor --lib handlers::mutation -- --nocapture
 
-echo "== P22 stress: lancet-executor shell executor =="
-cargo test -p lancet-executor --lib executor::shell::tests -- --nocapture
+echo "== P22 stress: cep-executor shell executor =="
+cargo test -p cep-executor --lib executor::shell::tests -- --nocapture
 
 echo "== P22 stress: CEP audit store + transport =="
-cargo test -p lancet-executor --lib audit::tests -- --nocapture
-cargo test -p lancet-executor --lib cep_audit_transport -- --nocapture
+cargo test -p cep-executor --lib audit::tests -- --nocapture
+cargo test -p cep-executor --lib cep_audit_transport -- --nocapture
 
 echo "== P22 stress: lattice-api turn / CEP event mapping =="
 cargo test -p lattice-api turn::tests:: -- --nocapture

@@ -48,20 +48,20 @@ echo ""
 
 echo "==> [3/9] LANCET protocol + executor tests"
 
-echo "  --> lancet-protocol"
-cargo test -p lancet-protocol
+echo "  --> cep-protocol"
+cargo test -p cep-protocol
 echo ""
 
-echo "  --> lancet-executor: guard_decide_fuzz"
-cargo test -p lancet-executor guard_decide_fuzz
+echo "  --> cep-executor: guard_decide_fuzz"
+cargo test -p cep-executor guard_decide_fuzz
 echo ""
 
-echo "  --> lancet-executor: cep_warn_harness"
-cargo test -p lancet-executor cep_warn_harness
+echo "  --> cep-executor: cep_warn_harness"
+cargo test -p cep-executor cep_warn_harness
 echo ""
 
-echo "  --> lancet-executor: remaining tests"
-cargo test -p lancet-executor
+echo "  --> cep-executor: remaining tests"
+cargo test -p cep-executor
 echo ""
 
 # ── Step 4: lattice-agent ─────────────────────────────────────────────────────

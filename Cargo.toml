@@ -7,8 +7,8 @@ members = [
     "crates/lattice-session",
     "crates/lattice-agent",
     "crates/lattice-tooling",
-    "crates/lancet-protocol",
-    "crates/lancet-executor",
+    "crates/cep-protocol",
+    "crates/cep-executor",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -28,8 +28,8 @@ lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lattice-tooling  = { path = "crates/lattice-tooling" }
-lancet-protocol  = { path = "crates/lancet-protocol" }
-lancet-executor  = { path = "crates/lancet-executor" }
+cep-protocol  = { path = "crates/cep-protocol" }
+cep-executor  = { path = "crates/cep-executor" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 

@@ -325,14 +325,12 @@ pub(super) async fn stream_turn_live_with_agent(
         tool_definitions,
         runtime: super::lancet::LancetTurnRuntime::dummy(),
         lancet_client: {
-            let (client, _server) = lancet_executor::LancetTransport::pair(1);
+            let (client, _server) = cep_executor::LancetTransport::pair(1);
             client
         },
-        audit: Arc::new(
-            lancet_executor::CepAuditStore::in_memory().expect("in-memory audit store"),
-        ),
+        audit: Arc::new(cep_executor::CepAuditStore::in_memory().expect("in-memory audit store")),
         audit_context: Arc::new(tokio::sync::RwLock::new(
-            lancet_executor::CepAuditContext::default(),
+            cep_executor::CepAuditContext::default(),
         )),
         build_metrics: super::lancet::CepRuntimeBuildMetrics {
             adapter_instances: 0,

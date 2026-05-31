@@ -218,8 +218,8 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-profile",
         "lattice-agent",
         "lattice-tooling",
-        "lancet-protocol",
-        "lancet-executor",
+        "cep-protocol",
+        "cep-executor",
         "lattice-api",
         "lattice-cli",
     ];

@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_executor::{AuditQueryFilters, CepAuditStore};
-use lancet_protocol::envelope::{
+use cep_executor::{AuditQueryFilters, CepAuditStore};
+use cep_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope, VerifyCommand,
 };

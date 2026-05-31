@@ -9,8 +9,8 @@ LATTICE is a Rust LLM runtime for running one session-centered agent with simple
 ```
 lattice/
 ├── crates/
-│   ├── lancet-protocol/     # CEP pure data layer: JSON-RPC envelopes, method catalog, errors
-│   ├── lancet-executor/     # CEP server runtime: transport, registry, handlers, policy, guard, verify, audit
+│   ├── cep-protocol/     # CEP pure data layer: JSON-RPC envelopes, method catalog, errors
+│   ├── cep-executor/     # CEP server runtime: transport, registry, handlers, policy, guard, verify, audit
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
 │   ├── lattice-profile/     # Agent profile schema ([cep] policy sections), discovery, defaults
@@ -27,8 +27,8 @@ lattice/
 Internal dependency flow:
 
 ```
-lancet-protocol ─┬─> lattice-profile ─┐
-                 └─> lancet-executor ─┤
+cep-protocol ─┬─> lattice-profile ─┐
+                 └─> cep-executor ─┤
 lattice-llm ─────┼─> lattice-tooling ─┼─> lattice-api ─> lattice-cli
                  └─> lattice-agent <──┘
 lattice-session ─────> lattice-agent

@@ -8,8 +8,8 @@ description = "LATTICE v1.1 thin public API facade for session creation, turn ex
 
 [dependencies]
 async-trait = { workspace = true }
-lancet-executor = { workspace = true }
-lancet-protocol = { workspace = true }
+cep-executor = { workspace = true }
+cep-protocol = { workspace = true }
 lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
@@ -30,6 +30,6 @@ tokio = { workspace = true }
 tempfile = { workspace = true }
 lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-tooling = { workspace = true }
-lancet-executor = { workspace = true }
+cep-executor = { workspace = true }
 lattice-profile = { workspace = true }
 blake3 = { workspace = true }

@@ -16,21 +16,21 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lancet_executor::audit::CepAuditContext;
-use lancet_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
-use lancet_executor::{
+use cep_executor::audit::CepAuditContext;
+use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
+use cep_executor::{
     register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTurnContext,
     LancetTransport, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use lancet_protocol::envelope::{
+use cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use lancet_protocol::methods::audit::{AuditReplay, AuditReplayParams};
-use lancet_protocol::methods::command::{Run, RunParams};
-use lancet_protocol::methods::envelope::{Declare, DeclareParams};
-use lancet_protocol::methods::external::{Fetch, FetchParams};
-use lancet_protocol::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
-use lancet_protocol::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
+use cep_protocol::methods::audit::{AuditReplay, AuditReplayParams};
+use cep_protocol::methods::command::{Run, RunParams};
+use cep_protocol::methods::envelope::{Declare, DeclareParams};
+use cep_protocol::methods::external::{Fetch, FetchParams};
+use cep_protocol::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
+use cep_protocol::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
@@ -279,7 +279,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // All rows (tool calls + envelope.declare calls) share the fixed turn_id.
     let all_rows = audit
-        .query_rows(&lancet_executor::AuditQueryFilters {
+        .query_rows(&cep_executor::AuditQueryFilters {
             session_id: Some(FIXED_SESSION_ID.to_string()),
             ..Default::default()
         })

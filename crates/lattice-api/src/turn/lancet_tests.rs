@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use lancet_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
-use lancet_protocol::catalog;
-use lancet_protocol::envelope::ImpactKind;
-use lancet_protocol::error::{
+use cep_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
+use cep_protocol::catalog;
+use cep_protocol::envelope::ImpactKind;
+use cep_protocol::error::{
     jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
     PermissionErrorData, StateErrorData, ValidationErrorData,
 };
-use lancet_protocol::methods::command::Run;
-use lancet_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lancet_protocol::methods::workspace::{ReadFile, ReadFileResult};
-use lancet_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
+use cep_protocol::methods::command::Run;
+use cep_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use cep_protocol::methods::workspace::{ReadFile, ReadFileResult};
+use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 
@@ -18,7 +18,7 @@ use super::lancet::LancetExecutorAdapter;
 
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
-    F: Fn(TodoWriteParams, lancet_executor::HandlerContext) -> Fut + Send + Sync + 'static,
+    F: Fn(TodoWriteParams, cep_executor::HandlerContext) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<TodoWriteResult, CepError>> + Send + 'static,
 {
     let mut registry = MethodRegistry::new();
@@ -54,7 +54,7 @@ fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
 }
 
 #[tokio::test]
-async fn lancet_executor_adapter_parse_error_maps_to_32700() {
+async fn cep_executor_adapter_parse_error_maps_to_32700() {
     let adapter = adapter_over_registry(todo_registry(|params, _ctx| async move {
         Ok(TodoWriteResult {
             todos: params.todos,
@@ -77,7 +77,7 @@ async fn lancet_executor_adapter_parse_error_maps_to_32700() {
 }
 
 #[tokio::test]
-async fn lancet_executor_adapter_rejects_profile_disabled_command_run() {
+async fn cep_executor_adapter_rejects_profile_disabled_command_run() {
     let adapter = LancetExecutorAdapter::new(
         LancetTransport::pair(8).0,
         ["workspace.read_file".to_string()],
@@ -97,7 +97,7 @@ async fn lancet_executor_adapter_rejects_profile_disabled_command_run() {
 }
 
 #[tokio::test]
-async fn lancet_executor_adapter_allows_enabled_workspace_read_file() {
+async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<ReadFile, _, _>(|params, _ctx| async move {
@@ -131,7 +131,7 @@ async fn lancet_executor_adapter_allows_enabled_workspace_read_file() {
 }
 
 #[tokio::test]
-async fn lancet_executor_adapter_unknown_method_maps_to_32601() {
+async fn cep_executor_adapter_unknown_method_maps_to_32601() {
     let adapter = adapter_over_registry(MethodRegistry::new()).await;
 
     let err = adapter
@@ -149,7 +149,7 @@ async fn lancet_executor_adapter_unknown_method_maps_to_32601() {
 }
 
 #[tokio::test]
-async fn lancet_executor_adapter_invalid_params_maps_to_32602() {
+async fn cep_executor_adapter_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<ReadFile, _, _>(|params, _ctx| async move {
@@ -223,7 +223,7 @@ macro_rules! cep_family_test {
 }
 
 cep_family_test!(
-    lancet_executor_adapter_validation_family_preserves_payload,
+    cep_executor_adapter_validation_family_preserves_payload,
     CepErrorCode::SchemaMismatch,
     CepErrorData::Validation(ValidationErrorData {
         field: "path".into(),
@@ -233,7 +233,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    lancet_executor_adapter_permission_family_preserves_payload,
+    cep_executor_adapter_permission_family_preserves_payload,
     CepErrorCode::CapabilityNotGranted,
     CepErrorData::Permission(PermissionErrorData {
         required_capability: "read_path".into(),
@@ -244,7 +244,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    lancet_executor_adapter_execution_family_preserves_payload,
+    cep_executor_adapter_execution_family_preserves_payload,
     CepErrorCode::ExecutionFailed,
     CepErrorData::Execution(ExecutionErrorData {
         command: "ls".into(),
@@ -255,7 +255,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    lancet_executor_adapter_state_family_preserves_payload,
+    cep_executor_adapter_state_family_preserves_payload,
     CepErrorCode::StaleContext,
     CepErrorData::State(StateErrorData {
         resource: "session".into(),
@@ -265,7 +265,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    lancet_executor_adapter_guard_family_preserves_payload,
+    cep_executor_adapter_guard_family_preserves_payload,
     CepErrorCode::GuardDenied,
     CepErrorData::Guard(GuardErrorData {
         method: TodoWrite::NAME.into(),
@@ -275,7 +275,7 @@ cep_family_test!(
 );
 
 cep_family_test!(
-    lancet_executor_adapter_effect_family_preserves_payload,
+    cep_executor_adapter_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
         method: "workspace.read_file".into(),
@@ -343,11 +343,11 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_executor::SEMANTIC_STAGE_NATIVE;
-    use lancet_protocol::envelope::Capability;
-    use lancet_protocol::methods::external::Fetch;
-    use lancet_protocol::methods::session::TodoWrite;
-    use lancet_protocol::methods::workspace::ReadFile;
+    use cep_executor::SEMANTIC_STAGE_NATIVE;
+    use cep_protocol::envelope::Capability;
+    use cep_protocol::methods::external::Fetch;
+    use cep_protocol::methods::session::TodoWrite;
+    use cep_protocol::methods::workspace::ReadFile;
     use lattice_profile::CepNetworkSection;
     use tempfile::TempDir;
 
@@ -406,7 +406,7 @@ mod cep_native_registry {
 
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
-        use lancet_protocol::methods::workspace::ReadFileParams;
+        use cep_protocol::methods::workspace::ReadFileParams;
         use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;
 
@@ -460,11 +460,11 @@ mod cep_native_registry {
 #[cfg(test)]
 mod attestation_and_dispatch {
     use super::*;
-    use lancet_executor::canonicalize_in_toto_statement;
-    use lancet_protocol::error::jsonrpc;
-    use lancet_protocol::methods::audit::{AuditReplay, AuditReplayParams};
-    use lancet_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
-    use lancet_protocol::methods::workspace::{ReadFile, ReadFileParams};
+    use cep_executor::canonicalize_in_toto_statement;
+    use cep_protocol::error::jsonrpc;
+    use cep_protocol::methods::audit::{AuditReplay, AuditReplayParams};
+    use cep_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
+    use cep_protocol::methods::workspace::{ReadFile, ReadFileParams};
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
     use lattice_llm::{FunctionCall, ToolCall};
@@ -585,7 +585,7 @@ mod attestation_and_dispatch {
             .attestation_for_turn(&turn_id)
             .expect("lookup")
             .expect("stored row");
-        let stored_stmt: lancet_protocol::provenance::InTotoStatement =
+        let stored_stmt: cep_protocol::provenance::InTotoStatement =
             serde_json::from_str(&stored.statement_json).expect("stored json");
         let replay_stmt = replay.statement.expect("replay statement");
 
