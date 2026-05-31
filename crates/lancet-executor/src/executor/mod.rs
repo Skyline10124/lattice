@@ -1,5 +1,12 @@
 //! Default tool executor — executes tool calls against the local filesystem.
 //!
+//! INTERNAL — superseded by CEP catalog methods.
+//!
+//! This module is a private bridge from the CEP registry to legacy tool bodies.
+//! It is not part of the public LANCET surface. The public tool contract is the
+//! CEP method catalog in [`lancet_protocol`] (CATALOG, params/results, CepError,
+//! envelope/policy, and audit/provenance schemas).
+//!
 //! Tool definitions (the schemas that tell the LLM what tools are available)
 //! live in [`crate::tool_definitions`]. This module provides the execution
 //! layer that runs those tools when the model requests them.

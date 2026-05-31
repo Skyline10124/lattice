@@ -47,22 +47,27 @@ pub struct AuditCmd {
 }
 
 pub fn run(cmd: AuditCmd, global_json: bool) -> Result<()> {
+    let project_root = std::env::current_dir().context("current working directory")?;
+    run_at(&project_root, cmd, global_json)
+}
+
+/// Run audit against an explicit project root (tests — avoids `set_current_dir` races).
+pub fn run_at(project_root: &Path, cmd: AuditCmd, global_json: bool) -> Result<()> {
     let json = cmd.json || global_json;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("tokio runtime")?;
-    rt.block_on(run_async(cmd, json))
+    rt.block_on(run_async(cmd, json, project_root))
 }
 
-async fn run_async(cmd: AuditCmd, json: bool) -> Result<()> {
-    let project_root = std::env::current_dir().context("current working directory")?;
+async fn run_async(cmd: AuditCmd, json: bool, project_root: &Path) -> Result<()> {
     let session_id = cmd.session.clone().unwrap_or_else(|| "default".to_string());
 
     if cmd.tail {
-        run_tail(&project_root, &session_id, &cmd, json).await
+        run_tail(project_root, &session_id, &cmd, json).await
     } else {
-        run_query(&project_root, &session_id, &cmd, json).await
+        run_query(project_root, &session_id, &cmd, json).await
     }
 }
 
@@ -315,9 +320,6 @@ mod tests {
         let session = "sess-cli-query";
         seed_audit_db(dir.path(), session);
 
-        let prev = std::env::current_dir().ok();
-        std::env::set_current_dir(dir.path()).unwrap();
-
         let cmd = AuditCmd {
             session: Some(session.to_string()),
             turn: None,
@@ -329,11 +331,7 @@ mod tests {
             since: None,
             json: true,
         };
-        let result = run(cmd, false);
-        if let Some(p) = prev {
-            let _ = std::env::set_current_dir(p);
-        }
-        result.expect("audit query should succeed");
+        run_at(dir.path(), cmd, false).expect("audit query should succeed");
     }
 
     #[tokio::test]
@@ -341,9 +339,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let session = "sess-cli-tail";
         seed_audit_db(dir.path(), session);
-
-        let prev = std::env::current_dir().ok();
-        std::env::set_current_dir(dir.path()).unwrap();
 
         let cmd = AuditCmd {
             session: Some(session.to_string()),
@@ -357,12 +352,8 @@ mod tests {
             json: true,
         };
 
-        run_async(cmd, true)
+        run_async(cmd, true, dir.path())
             .await
             .expect("audit tail should succeed");
-
-        if let Some(p) = prev {
-            let _ = std::env::set_current_dir(p);
-        }
     }
 }

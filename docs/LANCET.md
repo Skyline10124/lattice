@@ -2,6 +2,31 @@
 
 LATTICE agents execute tools through **CEP** (Controlled Execution Protocol): JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 
+## Public surface (v1.3-alpha)
+
+The documented public contract for LANCET is the surface exported from **`lancet-protocol`**:
+
+| Component | Description |
+|-----------|-------------|
+| `CATALOG` | The 10-method CEP catalog (`workspace.*`, `web.fetch`, `session.todo_write`, `command.run`, `envelope.declare`) |
+| Method params/results | Typed `*Params` / `*Result` structs per catalog method |
+| `CepError` / `CepErrorCode` | Typed error families with `Retriability` |
+| `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types |
+| `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface |
+| Audit/provenance schemas | `ProvGraphFragment`, `AttestationRecord` wire shapes |
+
+**Not public surface:** `lancet-executor` handler internals, `legacy_backend`, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the CEP server bridge.
+
+### Release gate and self-check
+
+- **Offline release gate:** `scripts/release-gate-v1.3.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, CEP boundary check, and `lattice lancet doctor`. Exits 0 on a clean tree.
+- **CEP self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and policy/`cep_mode` parses cleanly.
+- **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
+
+### cep_mode semantics
+
+`cep_mode = "off"` skips the effect-region L2 check only. The CEP policy hook still runs; capability declarations are still required. Legacy direct tool calls are not re-enabled — there is no legacy tool executor path in the production stack.
+
 ## Provenance audit (Phase 26)
 
 ### Flat store, projected graph (D-01)

@@ -3,7 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod commands;
-use commands::{audit, doctor, models, resolve, session as session_cmd};
+use commands::{audit, doctor, lancet as lancet_cmd, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -66,6 +66,11 @@ enum Commands {
     Doctor,
     /// Inspect CEP audit / provenance records.
     Audit(audit::AuditCmd),
+    /// CEP inspection and self-check subcommands.
+    Lancet {
+        #[command(subcommand)]
+        action: Option<lancet_cmd::LancetAction>,
+    },
 }
 
 #[tokio::main]
@@ -126,6 +131,9 @@ fn run_other_commands(cli: Cli) -> Result<()> {
         Some(Commands::Audit(cmd)) => {
             audit::run(cmd, cli.json)?;
         }
+        Some(Commands::Lancet { action }) => {
+            lancet_cmd::run(action, cli.json)?;
+        }
         None => {
             let _ = Cli::command().print_help();
             println!();
@@ -137,7 +145,7 @@ fn run_other_commands(cli: Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, Commands};
     use clap::{CommandFactory, Parser};
 
     // -- Positive parsing: Phase 10 supported commands --
@@ -233,7 +241,9 @@ mod tests {
     fn cli_surface_help_contains_supported_commands() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
-        for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
+        for name in &[
+            "run", "models", "resolve", "session", "doctor", "audit", "lancet",
+        ] {
             assert!(
                 help.contains(name),
                 "help should contain supported command '{name}'"
@@ -249,7 +259,41 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["run", "models", "resolve", "session", "doctor", "audit"]
+            vec!["run", "models", "resolve", "session", "doctor", "audit", "lancet"]
         );
+    }
+
+    #[test]
+    fn cli_surface_lancet_no_subcommand_parses() {
+        let cli = Cli::try_parse_from(["lattice", "lancet"]).unwrap();
+        assert!(cli.command.is_some());
+        match cli.command.unwrap() {
+            Commands::Lancet { action } => assert!(action.is_none()),
+            _ => panic!("expected Lancet"),
+        }
+    }
+
+    #[test]
+    fn cli_surface_lancet_status_parses() {
+        let cli = Cli::try_parse_from(["lattice", "lancet", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Lancet { .. })));
+    }
+
+    #[test]
+    fn cli_surface_lancet_doctor_parses() {
+        let cli = Cli::try_parse_from(["lattice", "lancet", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Lancet { .. })));
+    }
+
+    #[test]
+    fn cli_surface_doctor_unchanged() {
+        let cli = Cli::try_parse_from(["lattice", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Doctor)));
+    }
+
+    #[test]
+    fn cli_surface_audit_unchanged() {
+        let cli = Cli::try_parse_from(["lattice", "audit"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Audit(_))));
     }
 }

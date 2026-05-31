@@ -1,6 +1,6 @@
 //! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold (OBS-05).
 
-use crate::envelope::ImpactKind;
+use crate::envelope::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
 use crate::method::{CepMethod, RequiredCapability};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,11 @@ impl CepMethod for Inspect {
     type Result = ScaffoldStubResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::PathRead,
+        capabilities: &[RequiredCapability::Inspect],
+    };
 }
 
 /// `workspace.navigate` scaffold (not in default `CATALOG`).
@@ -63,6 +68,11 @@ impl CepMethod for Navigate {
     type Result = ScaffoldStubResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::PathRead,
+        capabilities: &[RequiredCapability::Inspect],
+    };
 }
 
 #[cfg(feature = "inspect-scaffold")]

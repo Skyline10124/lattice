@@ -62,22 +62,58 @@ async fn emit_scaffold_metadata(ctx: &HandlerContext, method: &str, result: &Sca
 #[cfg(all(test, feature = "inspect-scaffold"))]
 mod scaffold_tests {
     use super::*;
-    use crate::audit::{CallAuditMetadata, SEMANTIC_STAGE_SCAFFOLD};
+    use crate::audit::{
+        CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD,
+    };
+    use crate::invariants::InvariantCardIndex;
+    use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
     use crate::policy::Phase21TurnContext;
     use crate::registry::wire_code_for_error;
     use crate::registry::{Cancellation, EventSink};
     use crate::transport::{LancetTransport, ServerRunConfig};
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::methods::scaffold::InspectParams;
+    use lancet_protocol::policy::PolicyHook;
+    use lancet_protocol::ToolEvent;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::{mpsc, watch};
+    use tokio::sync::{mpsc, watch, RwLock};
 
     fn scaffold_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
         register_inspect_scaffold_methods(&mut registry).expect("register scaffold");
         registry
+    }
+
+    fn make_test_ctx(root: &str, event_tx: mpsc::Sender<ToolEvent>) -> HandlerContext {
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let default_hook = Arc::new(DefaultPolicyHook::new(
+            PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(root)),
+        ));
+        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
+        HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold test"),
+            phase21,
+            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
+            default_policy_hook: Some(default_hook),
+            audit_context: Arc::new(RwLock::new(CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+                ..Default::default()
+            })),
+            audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
+            invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
+            cep_mode: CepMode::Off,
+        }
     }
 
     #[test]
@@ -95,19 +131,7 @@ mod scaffold_tests {
         let mut registry = MethodRegistry::new();
         crate::register_production_method_registry(&mut registry).unwrap();
         let (event_tx, _rx) = mpsc::channel(8);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold off"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-        };
+        let ctx = make_test_ctx(root, event_tx);
         let err = registry
             .dispatch(Inspect::NAME, serde_json::json!({ "path": "src" }), ctx)
             .await
@@ -120,22 +144,10 @@ mod scaffold_tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = scaffold_registry();
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-        let before = phase21.budget.snapshot();
         let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 1,
-            events: EventSink::new(event_tx, 1),
-            cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold on"),
-            phase21: Arc::clone(&phase21),
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-        };
+        let ctx = make_test_ctx(root, event_tx);
+        let phase21 = Arc::clone(&ctx.phase21);
+        let before = phase21.budget.snapshot();
         let value = registry
             .dispatch(Inspect::NAME, serde_json::json!({ "path": "src" }), ctx)
             .await

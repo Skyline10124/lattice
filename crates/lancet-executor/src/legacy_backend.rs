@@ -1,4 +1,10 @@
 //! Private Phase 20 bridge from CEP catalog methods to legacy tool bodies.
+//!
+//! INTERNAL — superseded by CEP catalog methods.
+//!
+//! This module is not part of the public LANCET surface. The public tool contract
+//! is the CEP method catalog in [`lancet_protocol`] (CATALOG, params/results,
+//! CepError, envelope/policy, and audit/provenance schemas).
 
 use crate::edit::PatchResultEnvelope;
 use crate::executor::DefaultToolExecutor;

@@ -55,8 +55,8 @@ fn cli_cutover_help_omits_removed_commands() {
 
     assert_eq!(
         command_names.len(),
-        7,
-        "help should list only the final supported command surface (6 + clap 'help'), got:\n{stdout}"
+        8,
+        "help should list only the final supported command surface (7 + clap 'help'), got:\n{stdout}"
     );
     assert!(
         command_names.contains(&"help".to_string()),
