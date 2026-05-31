@@ -975,13 +975,13 @@ unknown = true
 mode = "enforce"
 
 [cep.invariants]
-dir = ".lancet/cards/"
+dir = ".cep/cards/"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
         let invariants = profile.cep.invariants.as_ref().unwrap();
-        assert_eq!(invariants.dir.as_deref(), Some(".lancet/cards/"));
+        assert_eq!(invariants.dir.as_deref(), Some(".cep/cards/"));
     }
 
     #[test]

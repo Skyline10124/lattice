@@ -68,7 +68,7 @@ mod cep_native_registry_tests {
     use crate::policy::observation::BACKEND_SAFETY_NET_TEST_PATH;
     use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink, HandlerContext};
-    use crate::transport::{LancetTransport, ServerRunConfig};
+    use crate::transport::{CepTransport, ServerRunConfig};
     use cep_protocol::catalog;
     use cep_protocol::envelope::BaseExecutionEnvelope;
     use cep_protocol::methods::command::Run;
@@ -170,7 +170,7 @@ mod cep_native_registry_tests {
         config.policy_hook = default_hook.clone();
         config.default_policy_hook = Some(default_hook);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();
@@ -206,7 +206,7 @@ mod cep_native_registry_tests {
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "command audit");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();

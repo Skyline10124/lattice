@@ -9,7 +9,7 @@
 # NOT CALLED: scripts/release-gate.sh
 #   The v1.1 gate runs `cargo test -p lattice-tools`, but the package was renamed
 #   to `lattice-tooling`. The v1.3 gate supersedes it by targeting the LATTICE and
-#   LANCET crates explicitly. Do not source or call the v1.1 file.
+#   CEP crates explicitly. Do not source or call the v1.1 file.
 #
 # LOC BUDGET: source-loc-budget.sh is called with --max 60000.
 #   Current measured source LOC is ~52-53k (RESEARCH Pitfall 4). The v1.1 default
@@ -41,12 +41,12 @@ echo "==> [2/9] cargo clippy --workspace --all-targets --all-features -- -D warn
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 echo ""
 
-# ── Step 3: LANCET crate tests ────────────────────────────────────────────────
+# ── Step 3: CEP crate tests ────────────────────────────────────────────────
 # Explicit per-crate targets. Does NOT use `cargo test --workspace` so test
 # scope is deterministic. `lattice-tools` is the old stale name — this gate
 # always uses the correct package name `lattice-tooling`.
 
-echo "==> [3/9] LANCET protocol + executor tests"
+echo "==> [3/9] CEP protocol + executor tests"
 
 echo "  --> cep-protocol"
 cargo test -p cep-protocol
@@ -83,19 +83,19 @@ echo "  --> cep_mode_integration (VER-23 / LEG-02)"
 cargo test -p lattice-api cep_mode_integration
 echo ""
 
-echo "  --> ver25_release_e2e (VER-25 Layer-1 fake-LLM e2e)"
-cargo test -p lattice-api ver25_release_e2e
+echo "  --> release_e2e_criterion_8 (VER-25 Layer-1 fake-LLM e2e)"
+cargo test -p lattice-api release_e2e_criterion_8
 echo ""
 
 echo "  --> lattice-api: remaining tests"
 cargo test -p lattice-api
 echo ""
 
-# ── Step 6: lattice-cli lancet tests ─────────────────────────────────────────
-echo "==> [6/9] lattice-cli (lancet_* unit tests + full suite)"
+# ── Step 6: lattice-cli cep tests ─────────────────────────────────────────
+echo "==> [6/9] lattice-cli (cep_* unit tests + full suite)"
 
-echo "  --> lancet_* unit tests"
-cargo test -p lattice-cli lancet
+echo "  --> cep_* unit tests"
+cargo test -p lattice-cli cep
 echo ""
 
 echo "  --> lattice-cli: remaining tests"
@@ -137,9 +137,9 @@ echo "  --> scripts/source-loc-budget.sh --max 60000 (advisory)"
 scripts/source-loc-budget.sh --max 60000 || true
 echo ""
 
-# ── Step 9: lancet doctor self-check (DOG-05) ─────────────────────────────────
-echo "==> [9/9] cargo run -p lattice-cli -- lancet doctor (DOG-05)"
-cargo run -p lattice-cli -- lancet doctor
+# ── Step 9: cep doctor self-check (DOG-05) ─────────────────────────────────
+echo "==> [9/9] cargo run -p lattice-cli -- cep doctor (DOG-05)"
+cargo run -p lattice-cli -- cep doctor
 echo ""
 
 # ── Done ──────────────────────────────────────────────────────────────────────

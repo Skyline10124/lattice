@@ -23,8 +23,8 @@ cargo run -p lattice-cli -- session status
 cargo run -p lattice-cli -- session list
 cargo run -p lattice-cli -- session log <session_id>
 cargo run -p lattice-cli -- doctor
-cargo run -p lattice-cli -- lancet status
-cargo run -p lattice-cli -- lancet doctor
+cargo run -p lattice-cli -- cep status
+cargo run -p lattice-cli -- cep doctor
 cargo run -p lattice-cli -- audit
 ```
 
@@ -53,7 +53,7 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 | `lattice-tooling` | Tool `ToolExecutor` trait, `ToolLimits`, and enabled-tools resolution shared types |
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
 | `lattice-api` | Thin public facade for create/open/run/stream/session; composes the per-turn CEP runtime |
-| `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor, lancet, audit) |
+| `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor, cep, audit) |
 | `lattice-hooks` | Lifecycle hook vocabulary (turn/tool/inference/session points). **Currently has no internal consumers** — a leaf crate kept for the planned hook-dispatch integration. |
 
 ### Key Types
@@ -64,8 +64,8 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 - `CepMethod` / `MethodDescriptor` / `CATALOG` — typed CEP methods and the static 14-method catalog
 - `ExecutionEnvelope` / `Capability` / `GuardVerdict` — CEP capability/scope/guard model
 - `PolicyHook` / `PolicyDecision` — pluggable capability/command/network/budget policy
-- `LancetClient` / `LancetTransport` / `MethodRegistry` — CEP client + in-process transport + server registry
-- `LancetExecutorAdapter` — maps LLM-shape `ToolCall`s into typed CEP invocations (implements `ToolCallExecutor`)
+- `CepClient` / `CepTransport` / `MethodRegistry` — CEP client + in-process transport + server registry
+- `CepExecutorAdapter` — maps LLM-shape `ToolCall`s into typed CEP invocations (implements `ToolCallExecutor`)
 - `SessionGraphStore` / `SessionApi` — session graph persistence trait + operations facade
 
 ### CEP Method Catalog
@@ -85,7 +85,7 @@ the catalog — there is no legacy `default_tool_definitions()` path.
 The main agent turn path is:
 
 1. `lattice-api` exposes `run_turn` / `stream_turn`; `stream_turn` is the single live execution core and `run_turn` drains it via `RunTurnCollector`.
-2. `turn/lancet.rs` composes a **turn-scoped CEP runtime**: it builds a `MethodRegistry` (`register_production_method_registry`), a `LancetTransport` server + `LancetClient`, installs the policy hook from the profile `[cep]` sections, and wraps the client in a `LancetExecutorAdapter`.
+2. `turn/cep.rs` composes a **turn-scoped CEP runtime**: it builds a `MethodRegistry` (`register_production_method_registry`), a `CepTransport` server + `CepClient`, installs the policy hook from the profile `[cep]` sections, and wraps the client in a `CepExecutorAdapter`.
 3. `AgentLoop` reads session state, builds messages, calls the LLM via `LlmClient`, and for each requested tool call invokes the adapter, which sends a typed CEP JSON-RPC frame over the transport.
 4. The server registry runs the method through policy → guard (path scope) → execution → verify (post-mutation), recording an audit entry; mutating methods require a prior `envelope.declare` authority.
 5. Turn outcomes are persisted as commits in the session graph via `SessionGraphStore`.
@@ -127,7 +127,7 @@ Use this table to skip the "which crate owns this?" exploration step.
 | Model resolution / aliases | `lattice-llm/src/` | `router.rs`, `endpoints.rs` |
 | URL / DNS / SSRF validation | `lattice-llm/src/` | `security.rs` |
 | Agent loop, turn state machine | `lattice-agent/src/agent_loop/` | `mod.rs`, `messages.rs`, `traits.rs`, `types.rs` |
-| Public turn API + per-turn CEP composition | `lattice-api/src/turn/` | `execute.rs`, `lancet.rs`, `live.rs`, `mapping.rs`, `collector.rs` |
+| Public turn API + per-turn CEP composition | `lattice-api/src/turn/` | `execute.rs`, `cep.rs`, `live.rs`, `mapping.rs`, `collector.rs` |
 | Session graph / SQLite persistence | `lattice-session/src/` | `graph.rs`, `sqlite_graph/{mod,commit,refs,session,schema}.rs` |
 | Profile schema (incl. `[cep]`), defaults, discovery | `lattice-profile/src/` | `schema.rs`, `defaults.rs`, `discovery.rs`, `load.rs` |
 | CLI subcommands | `lattice-cli/src/commands/` | `run.rs`, `models.rs`, `resolve.rs`, `session.rs`, `doctor.rs` |

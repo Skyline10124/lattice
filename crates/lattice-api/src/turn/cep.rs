@@ -1,4 +1,4 @@
-//! Turn-scoped Lancet runtime composition and the CEP client-backed executor adapter.
+//! Turn-scoped Cep runtime composition and the CEP client-backed executor adapter.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use cep_executor::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
     wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
-    CepAuditContext, CepAuditStore, CepPolicyConfig, CepTurnContext, CommandPolicy, LancetClient,
-    LancetTransport, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
+    CepAuditContext, CepAuditStore, CepClient, CepPolicyConfig, CepTransport, CepTurnContext,
+    CommandPolicy, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
 };
 use cep_protocol::catalog;
 use cep_protocol::envelope::BaseExecutionEnvelope;
@@ -47,15 +47,15 @@ pub(crate) struct CepRuntimeBuildMetrics {
 }
 
 /// Client-backed adapter that maps LLM-shape tool calls into typed CEP invocations.
-pub struct LancetExecutorAdapter {
-    client: LancetClient,
+pub struct CepExecutorAdapter {
+    client: CepClient,
     catalog_names: HashSet<String>,
     enabled_names: HashSet<String>,
 }
 
-impl LancetExecutorAdapter {
+impl CepExecutorAdapter {
     pub fn new(
-        client: LancetClient,
+        client: CepClient,
         enabled_names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         let catalog_names = catalog().iter().map(|d| d.name.to_string()).collect();
@@ -119,7 +119,7 @@ impl LancetExecutorAdapter {
 }
 
 #[async_trait]
-impl ToolCallExecutor for LancetExecutorAdapter {
+impl ToolCallExecutor for CepExecutorAdapter {
     async fn execute(&self, call: &ToolCall) -> Result<String, ToolExecutionError> {
         let params: Value = match serde_json::from_str(&call.function.arguments) {
             Ok(value) => value,
@@ -147,13 +147,13 @@ impl ToolCallExecutor for LancetExecutorAdapter {
     }
 }
 
-/// Turn-scoped Lancet server lifecycle; dropped when the turn task completes.
-pub(crate) struct LancetTurnRuntime {
+/// Turn-scoped Cep server lifecycle; dropped when the turn task completes.
+pub(crate) struct CepTurnRuntime {
     server_task: tokio::task::JoinHandle<()>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
-impl LancetTurnRuntime {
+impl CepTurnRuntime {
     pub async fn shutdown(&mut self) {
         let _ = self.shutdown.send(true);
         let task = std::mem::replace(&mut self.server_task, tokio::spawn(async {}));
@@ -169,7 +169,7 @@ impl LancetTurnRuntime {
     }
 }
 
-impl Drop for LancetTurnRuntime {
+impl Drop for CepTurnRuntime {
     fn drop(&mut self) {
         let _ = self.shutdown.send(true);
     }
@@ -179,8 +179,8 @@ impl Drop for LancetTurnRuntime {
 pub(crate) struct ProductionTurnDeps {
     pub agent_loop: Arc<AgentLoop>,
     pub tool_definitions: Vec<lattice_llm::ToolDefinition>,
-    pub runtime: LancetTurnRuntime,
-    pub lancet_client: LancetClient,
+    pub runtime: CepTurnRuntime,
+    pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     #[cfg(test)]
@@ -571,7 +571,7 @@ pub(crate) fn generate_and_store_attestation(
     Ok(())
 }
 
-/// Construct one turn-scoped Lancet runtime and inject it into a fresh AgentLoop.
+/// Construct one turn-scoped Cep runtime and inject it into a fresh AgentLoop.
 pub(crate) fn build_production_turn_deps(
     project_root: &str,
     enabled_tools: &[String],
@@ -608,7 +608,7 @@ pub(crate) fn build_production_turn_deps(
         transport_pairs: 1,
     };
 
-    let (client, server) = LancetTransport::pair(256);
+    let (client, server) = CepTransport::pair(256);
     let audit = if in_memory_audit {
         Arc::new(
             CepAuditStore::in_memory()
@@ -672,8 +672,8 @@ pub(crate) fn build_production_turn_deps(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
-    let lancet_client = client.clone();
-    let adapter = Arc::new(LancetExecutorAdapter::new(client, enabled_names));
+    let cep_client = client.clone();
+    let adapter = Arc::new(CepExecutorAdapter::new(client, enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
@@ -682,11 +682,11 @@ pub(crate) fn build_production_turn_deps(
     Ok(ProductionTurnDeps {
         agent_loop,
         tool_definitions,
-        runtime: LancetTurnRuntime {
+        runtime: CepTurnRuntime {
             server_task,
             shutdown: server_shutdown,
         },
-        lancet_client,
+        cep_client,
         audit,
         audit_context,
         #[cfg(test)]

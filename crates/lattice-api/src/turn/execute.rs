@@ -4,8 +4,8 @@ use futures::StreamExt;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
 
+use super::cep::build_production_turn_deps;
 use super::collector::RunTurnCollector;
-use super::lancet::build_production_turn_deps;
 use super::llm::RealLlmClient;
 use super::mapping::resolve_model_and_prompt;
 use super::mapping::{map_status, resolve_project_root};

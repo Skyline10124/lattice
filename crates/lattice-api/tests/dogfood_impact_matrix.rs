@@ -7,7 +7,7 @@
 //!
 //! For each impact class:
 //! 1. Declare the required envelope capabilities (where needed).
-//! 2. Execute the representative method via [`LancetClient`] typed calls.
+//! 2. Execute the representative method via [`CepClient`] typed calls.
 //! 3. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
 //! 4. Verify that all rows share one `turn_id` before calling `audit.replay`.
@@ -19,8 +19,8 @@ use std::sync::Arc;
 use cep_executor::audit::CepAuditContext;
 use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
 use cep_executor::{
-    register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTurnContext,
-    LancetTransport, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTransport,
+    CepTurnContext, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
@@ -139,7 +139,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     let config =
         build_production_config(canonical_str, base_envelope, Arc::clone(&audit), true).await;
-    let (client1, server1) = LancetTransport::pair(32);
+    let (client1, server1) = CepTransport::pair(32);
     let server_task1 = tokio::spawn(async move {
         let _ = server1.run(registry, config).await;
     });
@@ -392,7 +392,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     replay_config.policy_hook = hook2.clone();
     replay_config.default_policy_hook = Some(hook2);
 
-    let (replay_client, replay_server) = LancetTransport::pair(16);
+    let (replay_client, replay_server) = CepTransport::pair(16);
     let replay_task = tokio::spawn(async move {
         let _ = replay_server.run(replay_registry, replay_config).await;
     });

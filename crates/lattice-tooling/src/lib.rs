@@ -1,10 +1,10 @@
-//! Shared tool types (`ToolCallExecutor`, `ToolLimits`) used by the LANCET
+//! Shared tool types (`ToolCallExecutor`, `ToolLimits`) used by the CEP
 //! executor bridge and the agent loop.
 //!
 //! The **public tool contract** is the CEP method catalog in `cep-protocol`
 //! (CATALOG, params/result schemas, CepError, envelope/policy, and
 //! audit/provenance schemas). This crate is an internal shared-types layer,
-//! not the public API surface for callers building on LANCET.
+//! not the public API surface for callers building on CEP.
 
 pub mod enabled_tools;
 pub mod tool_error;

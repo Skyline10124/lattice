@@ -19,10 +19,10 @@ use lattice_agent::AgentLoop;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult};
 use lattice_session::GraphHead;
 
+use super::cep::{generate_and_store_attestation, map_cep_tool_event, ProductionTurnDeps};
 use super::execute::{
     build_commit_input, derive_terminal_event, map_agent_event, TurnCommitContext,
 };
-use super::lancet::{generate_and_store_attestation, map_cep_tool_event, ProductionTurnDeps};
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionApi};
@@ -157,7 +157,7 @@ async fn run_live_turn_task(
         agent_loop,
         tool_definitions,
         runtime,
-        lancet_client,
+        cep_client,
         audit,
         audit_context,
         #[cfg(test)]
@@ -203,7 +203,7 @@ async fn run_live_turn_task(
     // 3. Create agent event channel
     let (agent_tx, mut agent_rx) = mpsc::channel::<AgentTurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
 
-    let cep_client = lancet_client.clone();
+    let cep_client = cep_client.clone();
     let cep_agent_tx = agent_tx.clone();
     let cep_forwarder = tokio::spawn(async move {
         while let Some(event) = cep_client.next_event().await {
@@ -311,7 +311,7 @@ pub(super) async fn stream_turn_live(
     Ok(Box::pin(ReceiverStream::new(rx)))
 }
 
-/// Test-only live path that injects a prebuilt AgentLoop without Lancet runtime construction.
+/// Test-only live path that injects a prebuilt AgentLoop without Cep runtime construction.
 #[cfg(test)]
 pub(super) async fn stream_turn_live_with_agent(
     session: SessionApi,
@@ -323,16 +323,16 @@ pub(super) async fn stream_turn_live_with_agent(
     let deps = ProductionTurnDeps {
         agent_loop,
         tool_definitions,
-        runtime: super::lancet::LancetTurnRuntime::dummy(),
-        lancet_client: {
-            let (client, _server) = cep_executor::LancetTransport::pair(1);
+        runtime: super::cep::CepTurnRuntime::dummy(),
+        cep_client: {
+            let (client, _server) = cep_executor::CepTransport::pair(1);
             client
         },
         audit: Arc::new(cep_executor::CepAuditStore::in_memory().expect("in-memory audit store")),
         audit_context: Arc::new(tokio::sync::RwLock::new(
             cep_executor::CepAuditContext::default(),
         )),
-        build_metrics: super::lancet::CepRuntimeBuildMetrics {
+        build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,
             transport_pairs: 0,
         },

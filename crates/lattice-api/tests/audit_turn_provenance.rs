@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use cep_executor::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
-    LancetTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
+    CepTurnContext, MethodRegistry, ServerRunConfig,
 };
 use cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
@@ -109,7 +109,7 @@ fn metadata_has_capability(meta: Option<&str>) -> bool {
 }
 
 #[tokio::test]
-async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
+async fn full_turn_audit_rows_and_replay_fragment() {
     let ws = setup_workspace();
     std::env::set_current_dir(&ws.root).unwrap();
 
@@ -132,7 +132,7 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
     });
     let envelope = ExecutionEnvelope {
         intent: Intent {
-            description: "ver-24 patch".into(),
+            description: "audit patch".into(),
         },
         capabilities,
         scope: Scope::default(),
@@ -150,7 +150,7 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
     };
     let declare_args = serde_json::json!({
         "envelope": envelope,
-        "reason": "ver-24"
+        "reason": "audit-turn"
     });
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
@@ -163,7 +163,7 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
             .push_events(tool_call_events(
                 "c2",
                 "command.run",
-                r#"{"argv":["echo","ver24"]}"#,
+                r#"{"argv":["echo","audit-turn"]}"#,
             ))
             .push_events(tool_call_events(
                 "c3",
@@ -188,7 +188,7 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
         RunTurnRequest {
-            input: "ver-24 audit turn".into(),
+            input: "audit turn provenance".into(),
             session_id: None,
             profile: None,
             model: None,
@@ -260,14 +260,14 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::new(audit);
     config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "ver-24 replay").with_read_audit();
+        BaseExecutionEnvelope::for_workspace_root(root, "audit replay").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     {
         let mut ctx = config.audit_context.write().await;
         ctx.session_id = result.session_id.clone();
     }
 
-    let (client, server) = LancetTransport::pair(32);
+    let (client, server) = CepTransport::pair(32);
     let server_task = tokio::spawn(async move {
         server.run(registry, config).await.unwrap();
     });

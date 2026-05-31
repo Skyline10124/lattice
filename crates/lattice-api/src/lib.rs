@@ -20,4 +20,4 @@ pub use turn::{
 };
 
 #[doc(hidden)]
-pub use turn::LancetExecutorAdapter;
+pub use turn::CepExecutorAdapter;

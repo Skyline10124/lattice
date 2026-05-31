@@ -70,7 +70,7 @@ mod scaffold_tests {
     use crate::policy::CepTurnContext;
     use crate::registry::wire_code_for_error;
     use crate::registry::{Cancellation, EventSink};
-    use crate::transport::{LancetTransport, ServerRunConfig};
+    use crate::transport::{CepTransport, ServerRunConfig};
     use cep_protocol::envelope::{BaseExecutionEnvelope, CepMode};
     use cep_protocol::error::jsonrpc;
     use cep_protocol::methods::scaffold::InspectParams;
@@ -173,7 +173,7 @@ mod scaffold_tests {
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "scaffold audit");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let audit = Arc::clone(&config.audit);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();

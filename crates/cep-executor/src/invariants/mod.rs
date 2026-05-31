@@ -1,6 +1,6 @@
 //! Invariant card system for CEP.
 //!
-//! Loads `.lancet/invariants/*.toml` cards, indexes by anchor, and provides
+//! Loads `.cep/invariants/*.toml` cards, indexes by anchor, and provides
 //! target-path-based queries that feed structural constraints into the
 //! `submit_intent` handler (Plan 03).
 
@@ -19,7 +19,7 @@ pub use types::{CardAnchor, ForbiddenEntry, InvariantCard, OpaqueEntry};
 
 /// Default invariant card directory relative to the project root (D-09).
 pub fn default_invariants_dir() -> &'static str {
-    ".lancet/invariants/"
+    ".cep/invariants/"
 }
 
 /// Resolve the configured invariant directory against `project_root`.

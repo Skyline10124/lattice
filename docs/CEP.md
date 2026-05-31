@@ -1,10 +1,10 @@
-# LANCET runtime-enforced surface
+# CEP runtime-enforced surface
 
 LATTICE agents execute tools through **CEP** (Controlled Execution Protocol): JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 
 ## Public surface (v1.3-alpha)
 
-The documented public contract for LANCET is the surface exported from **`cep-protocol`**:
+The documented public contract for CEP is the surface exported from **`cep-protocol`**:
 
 | Component | Description |
 |-----------|-------------|
@@ -19,10 +19,12 @@ The documented public contract for LANCET is the surface exported from **`cep-pr
 
 ### Release gate and self-check
 
-- **Offline release gate:** `scripts/release-gate-v1.3.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, CEP boundary check, and `lattice lancet doctor`. Exits 0 on a clean tree.
-- **CEP self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and policy/`cep_mode` parses cleanly.
+- **Offline release gate:** `scripts/release-gate-v1.3.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, CEP boundary check, and `lattice cep doctor`. Exits 0 on a clean tree.
+- **CEP self-check:** `cargo run -p lattice-cli -- cep doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and policy/`cep_mode` parses cleanly.
 - **Warn-mode report:** `docs/cep-warn-report.md` — DOG-02 coverage report for all 14 catalog methods; the v1.3-alpha baseline is N=0 leaks and no `fix-now` triage rows.
 - **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
+
+If a checkout still has pre-cutover invariant cards, migrate them with `mv .lancet .cep`; new cards live under `.cep/invariants/`.
 
 ### cep_mode semantics
 

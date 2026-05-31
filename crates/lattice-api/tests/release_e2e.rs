@@ -5,7 +5,7 @@
 //! Uses a persisted on-disk audit DB so the attestation can be inspected after
 //! the turn completes.
 //!
-//! Filter: `ver25_release_e2e`
+//! Filter: `release_e2e_criterion_8`
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 // ── Workspace setup ──────────────────────────────────────────────────────────
 
-struct Ver25Workspace {
+struct ReleaseE2eWorkspace {
     _dir: tempfile::TempDir,
     _global_agents: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -75,8 +75,8 @@ struct Ver25Workspace {
 /// Build a temp workspace with a src/lib.rs seed and a custom profile.
 ///
 /// The `[cep.command]` section adds `grep` to `allowed_diagnostic_commands`
-/// so the `grep -q VER25_OK src/lib.rs` verify command passes policy validation.
-fn setup_ver25_workspace(src_content: &str) -> Ver25Workspace {
+/// so the `grep -q RELEASE_E2E_OK src/lib.rs` verify command passes policy validation.
+fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().to_path_buf();
 
@@ -111,7 +111,7 @@ allowed_diagnostic_commands = [["echo"], ["grep"]]
 
     let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
 
-    Ver25Workspace {
+    ReleaseE2eWorkspace {
         _dir: ws,
         _global_agents: global_agents,
         root,
@@ -120,7 +120,11 @@ allowed_diagnostic_commands = [["echo"], ["grep"]]
     }
 }
 
-fn make_ver25_request(ws: &Ver25Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurnRequest {
+fn make_release_e2e_request(
+    ws: &ReleaseE2eWorkspace,
+    input: &str,
+    llm: Arc<dyn LlmClient>,
+) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
     RunTurnRequest {
         input: input.to_string(),
@@ -136,25 +140,25 @@ fn make_ver25_request(ws: &Ver25Workspace, input: &str, llm: Arc<dyn LlmClient>)
     }
 }
 
-// ── VER-25 criterion-8 test ──────────────────────────────────────────────────
+// ── Release criterion-8 test ──────────────────────────────────────────────────
 
 /// VER-25 criterion-8: single run_turn driving declare → command.run →
 /// patch(verify-fail, RetainDiff) → patch(verify-pass) → Done(stop).
 ///
 /// Asserts:
 /// 1. Turn completes with status=Completed.
-/// 2. Workspace file contains the VER25_OK sentinel after the second patch.
+/// 2. Workspace file contains the RELEASE_E2E_OK sentinel after the second patch.
 /// 3. Session has exactly one commit in the graph.
 /// 4. On-disk attestation has correct in-toto subject / predicate / materials.
 /// 5. Audit rows are in declare → command.run → patch → patch order.
 /// 6. First patch tool result is ok=false (VerifyFailed); second is ok=true.
 #[tokio::test]
-async fn ver25_release_e2e_criterion_8() {
+async fn release_e2e_criterion_8() {
     let initial_content = "pub fn answer() -> i32 { 1 }";
-    let bad_content = "pub fn answer() -> i32 { 2 }"; // no VER25_OK — verify fails
-    let good_content = "pub fn answer() -> i32 { 42 } // VER25_OK"; // verify passes
+    let bad_content = "pub fn answer() -> i32 { 2 }"; // no RELEASE_E2E_OK — verify fails
+    let good_content = "pub fn answer() -> i32 { 42 } // RELEASE_E2E_OK"; // verify passes
 
-    let ws = setup_ver25_workspace(initial_content);
+    let ws = setup_release_e2e_workspace(initial_content);
 
     // ── Compute blake3 hashes for the two patch steps ──────────────────
     let hash1 = format!(
@@ -163,14 +167,14 @@ async fn ver25_release_e2e_criterion_8() {
     );
     let hash2 = format!("blake3:{}", blake3::hash(bad_content.as_bytes()).to_hex());
 
-    // Patch 1 (bad): changes content but does NOT add VER25_OK sentinel.
-    // verify.sh ("grep -q VER25_OK src/lib.rs") will exit 1 → VerifyFailed.
+    // Patch 1 (bad): changes content but does NOT add RELEASE_E2E_OK sentinel.
+    // verify.sh ("grep -q RELEASE_E2E_OK src/lib.rs") will exit 1 → VerifyFailed.
     // OnFailure::RetainDiff means the diff IS applied; file IS changed.
     let bad_patch = format!(
         "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{initial_content}\n+{bad_content}\n*** End Patch\n"
     );
 
-    // Patch 2 (good): changes content to include VER25_OK.
+    // Patch 2 (good): changes content to include RELEASE_E2E_OK.
     // Hash uses the post-bad-patch content since RetainDiff left it changed.
     let good_patch = format!(
         "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{bad_content}\n+{good_content}\n*** End Patch\n"
@@ -179,7 +183,7 @@ async fn ver25_release_e2e_criterion_8() {
     // ── Envelope for Round 1: RunCommand + WritePath + verify ──────────
     let envelope = ExecutionEnvelope {
         intent: Intent {
-            description: "VER-25 criterion-8 declare".into(),
+            description: "release criterion-8 declare".into(),
         },
         capabilities: BTreeSet::from([
             Capability::RunCommand {
@@ -198,10 +202,10 @@ async fn ver25_release_e2e_criterion_8() {
             unknowns: vec![],
         }],
         constraints: Constraints::default(),
-        // verify: "grep -q VER25_OK src/lib.rs" — runs from project root.
+        // verify: "grep -q RELEASE_E2E_OK src/lib.rs" — runs from project root.
         // Classified Diagnostic because ["grep"] is in cep.command.allowed_diagnostic_commands.
         verify: Some(VerifyCommand {
-            command: "grep -q VER25_OK src/lib.rs".into(),
+            command: "grep -q RELEASE_E2E_OK src/lib.rs".into(),
             expected_exit_code: None, // default expected exit code is 0
         }),
         on_failure: Some(OnFailure::RetainDiff),
@@ -210,12 +214,12 @@ async fn ver25_release_e2e_criterion_8() {
     let declare_args = serde_json::json!({
         "envelope": envelope,
         "supersede": false,
-        "reason": "VER-25 criterion-8 authority"
+        "reason": "release criterion-8 authority"
     });
 
     // Round 2: command.run uses the RunCommand from the declared envelope.
     let run_args = serde_json::json!({
-        "argv": ["echo", "ver25-command-run-ok"],
+        "argv": ["echo", "release-command-run-ok"],
         "timeout_ms": 5000,
         "declared_impact": "command_execution"
     });
@@ -260,7 +264,7 @@ async fn ver25_release_e2e_criterion_8() {
 
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_ver25_request(&ws, "Run VER-25 criterion-8 sequence", fake_llm),
+        make_release_e2e_request(&ws, "Run release criterion-8 sequence", fake_llm),
     )
     .await
     .expect("run_turn must succeed");
@@ -278,11 +282,11 @@ async fn ver25_release_e2e_criterion_8() {
         result.assistant_output
     );
 
-    // ── 2. Workspace file contains the VER25_OK sentinel ─────────────────
+    // ── 2. Workspace file contains the RELEASE_E2E_OK sentinel ─────────────────
     let final_content = std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
     assert!(
-        final_content.contains("VER25_OK"),
-        "src/lib.rs must contain VER25_OK after good patch, got: {final_content}"
+        final_content.contains("RELEASE_E2E_OK"),
+        "src/lib.rs must contain RELEASE_E2E_OK after good patch, got: {final_content}"
     );
 
     // ── 3. Session has exactly one commit ────────────────────────────────
@@ -438,11 +442,11 @@ async fn ver25_release_e2e_criterion_8() {
     );
     assert!(
         patch_results[1].ok,
-        "second workspace.patch must succeed (verify found VER25_OK sentinel)"
+        "second workspace.patch must succeed (verify found RELEASE_E2E_OK sentinel)"
     );
 
     println!(
-        "VER-25 criterion-8 PASSED: session={}, turn_id={}, attestation_predicate={}",
+        "release criterion-8 PASSED: session={}, turn_id={}, attestation_predicate={}",
         result.session_id, turn_id, attestation.predicate_type
     );
 }

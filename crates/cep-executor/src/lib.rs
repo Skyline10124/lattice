@@ -46,7 +46,7 @@ pub use registry::{wire_code_for_error, HandlerContext, MethodRegistry};
 #[cfg(feature = "inspect-scaffold")]
 pub use tool_definitions::scaffold_tool_definitions;
 pub use tool_definitions::to_tool_definitions;
-pub use transport::{LancetClient, LancetTransport, ServerRunConfig};
+pub use transport::{CepClient, CepTransport, ServerRunConfig};
 
 #[cfg(test)]
 mod public_api_tests {

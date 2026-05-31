@@ -281,7 +281,7 @@ mod tests {
     use crate::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use crate::native_registry::register_production_method_registry;
     use crate::policy::CepTurnContext;
-    use crate::transport::{LancetTransport, ServerRunConfig};
+    use crate::transport::{CepTransport, ServerRunConfig};
     use cep_protocol::envelope::BaseExecutionEnvelope;
     use cep_protocol::methods::audit::{AuditTail, AuditTailParams};
     use cep_protocol::methods::workspace::ReadFile;
@@ -340,7 +340,7 @@ mod tests {
 
         seed_read_row(&config.audit, "sess-audit", "turn-seed");
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();
         });
@@ -379,7 +379,7 @@ mod tests {
 
         seed_read_row(&config.audit, "sess-replay", "turn-replay");
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();
         });
@@ -414,7 +414,7 @@ mod tests {
             snap.session_id = "sess-empty".into();
         }
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();
         });
@@ -486,7 +486,7 @@ mod tests {
 
         seed_rows(&config.audit, "sess-tail", "turn-tail", 3);
 
-        let (client, server) = LancetTransport::pair(16);
+        let (client, server) = CepTransport::pair(16);
         let events = client.events();
         let server_task = tokio::spawn(async move {
             server.run(registry, config).await.unwrap();

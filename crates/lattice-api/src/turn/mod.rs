@@ -6,9 +6,9 @@
 //! the same live stream via [`collector::RunTurnCollector`] and returns
 //! [`RunTurnResult`].
 
+mod cep;
 mod collector;
 mod execute;
-mod lancet;
 mod live;
 mod llm;
 mod mapping;
@@ -18,7 +18,7 @@ mod types;
 mod tests;
 
 #[cfg(test)]
-mod lancet_tests;
+mod cep_tests;
 
 #[cfg(test)]
 mod live_tests;
@@ -31,4 +31,4 @@ pub use types::{
 };
 
 #[doc(hidden)]
-pub use lancet::LancetExecutorAdapter;
+pub use cep::CepExecutorAdapter;

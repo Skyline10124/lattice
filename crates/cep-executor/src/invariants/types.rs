@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-/// A structural invariant card loaded from `.lancet/invariants/*.toml`.
+/// A structural invariant card loaded from `.cep/invariants/*.toml`.
 ///
 /// Cards declaratively describe structural constraints (machine-decidable)
 /// and opaque cautionary notes (HumanReview only) keyed by file-system anchor.

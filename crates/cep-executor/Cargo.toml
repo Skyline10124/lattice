@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LANCET tool executor: concrete tool implementations (fs, shell, patch, search, web)"
+description = "CEP tool executor: concrete tool implementations (fs, shell, patch, search, web)"
 
 [dependencies]
 lattice-llm = { workspace = true }

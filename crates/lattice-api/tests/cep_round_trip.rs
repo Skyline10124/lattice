@@ -1,11 +1,11 @@
 //! VER-28 impact matrix: one representative method per `ImpactKind` round-trips
-//! from catalog-derived LLM tool shape through `LancetExecutorAdapter` and back.
+//! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use cep_executor::{
-    register_production_method_registry, to_tool_definitions, CepAuditStore, LancetTransport,
+    register_production_method_registry, to_tool_definitions, CepAuditStore, CepTransport,
     MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use cep_protocol::catalog;
@@ -20,7 +20,7 @@ use cep_protocol::methods::session::{TodoWrite, TodoWriteParams};
 use cep_protocol::methods::workspace::{ReadFile, WriteFile};
 use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
-use lattice_api::LancetExecutorAdapter;
+use lattice_api::CepExecutorAdapter;
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -32,21 +32,21 @@ struct ImpactRow {
     assert_result: fn(&Value),
 }
 
-async fn adapter_with_registry(registry: MethodRegistry) -> LancetExecutorAdapter {
-    let (client, server) = LancetTransport::pair(8);
+async fn adapter_with_registry(registry: MethodRegistry) -> CepExecutorAdapter {
+    let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
             .run(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = LancetExecutorAdapter::new(client, enabled);
+    let adapter = CepExecutorAdapter::new(client, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
 }
 
-async fn fetch_only_adapter() -> LancetExecutorAdapter {
+async fn fetch_only_adapter() -> CepExecutorAdapter {
     let mut registry = MethodRegistry::new();
     registry
         .register_method::<Fetch, _, _>(|_params: FetchParams, _ctx| async move {
@@ -369,7 +369,7 @@ async fn production_adapter(
     root: &str,
     enabled: &[&str],
     allow_localhost: bool,
-) -> (LancetExecutorAdapter, Arc<CepAuditStore>) {
+) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
     use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
     use cep_executor::{CepPolicyConfig, CepTurnContext};
     use cep_protocol::envelope::BaseExecutionEnvelope;
@@ -403,7 +403,7 @@ async fn production_adapter(
         base_envelope = base_envelope.with_session_state();
     }
 
-    let (client, server) = LancetTransport::pair(16);
+    let (client, server) = CepTransport::pair(16);
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::clone(&audit);
@@ -417,7 +417,7 @@ async fn production_adapter(
         let _ = server.run(registry, config).await;
     });
     let enabled_names: Vec<String> = enabled.iter().map(|s| (*s).to_string()).collect();
-    let adapter = LancetExecutorAdapter::new(client, enabled_names);
+    let adapter = CepExecutorAdapter::new(client, enabled_names);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     (adapter, audit)

@@ -3,7 +3,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
 mod commands;
-use commands::{audit, doctor, lancet as lancet_cmd, models, resolve, session as session_cmd};
+use commands::{audit, cep as cep_cmd, doctor, models, resolve, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -67,9 +67,9 @@ enum Commands {
     /// Inspect CEP audit / provenance records.
     Audit(audit::AuditCmd),
     /// CEP inspection and self-check subcommands.
-    Lancet {
+    Cep {
         #[command(subcommand)]
-        action: Option<lancet_cmd::LancetAction>,
+        action: Option<cep_cmd::CepAction>,
     },
 }
 
@@ -131,8 +131,8 @@ fn run_other_commands(cli: Cli) -> Result<()> {
         Some(Commands::Audit(cmd)) => {
             audit::run(cmd, cli.json)?;
         }
-        Some(Commands::Lancet { action }) => {
-            lancet_cmd::run(action, cli.json)?;
+        Some(Commands::Cep { action }) => {
+            cep_cmd::run(action, cli.json)?;
         }
         None => {
             let _ = Cli::command().print_help();
@@ -242,7 +242,7 @@ mod tests {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
         for name in &[
-            "run", "models", "resolve", "session", "doctor", "audit", "lancet",
+            "run", "models", "resolve", "session", "doctor", "audit", "cep",
         ] {
             assert!(
                 help.contains(name),
@@ -259,30 +259,30 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["run", "models", "resolve", "session", "doctor", "audit", "lancet"]
+            vec!["run", "models", "resolve", "session", "doctor", "audit", "cep"]
         );
     }
 
     #[test]
-    fn cli_surface_lancet_no_subcommand_parses() {
-        let cli = Cli::try_parse_from(["lattice", "lancet"]).unwrap();
+    fn cli_surface_cep_no_subcommand_parses() {
+        let cli = Cli::try_parse_from(["lattice", "cep"]).unwrap();
         assert!(cli.command.is_some());
         match cli.command.unwrap() {
-            Commands::Lancet { action } => assert!(action.is_none()),
-            _ => panic!("expected Lancet"),
+            Commands::Cep { action } => assert!(action.is_none()),
+            _ => panic!("expected Cep"),
         }
     }
 
     #[test]
-    fn cli_surface_lancet_status_parses() {
-        let cli = Cli::try_parse_from(["lattice", "lancet", "status"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Lancet { .. })));
+    fn cli_surface_cep_status_parses() {
+        let cli = Cli::try_parse_from(["lattice", "cep", "status"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Cep { .. })));
     }
 
     #[test]
-    fn cli_surface_lancet_doctor_parses() {
-        let cli = Cli::try_parse_from(["lattice", "lancet", "doctor"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Lancet { .. })));
+    fn cli_surface_cep_doctor_parses() {
+        let cli = Cli::try_parse_from(["lattice", "cep", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Cep { .. })));
     }
 
     #[test]

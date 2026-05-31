@@ -78,22 +78,22 @@ impl ServerRunConfig {
 }
 
 /// Factory for in-process client/server transport pairs.
-pub struct LancetTransport;
+pub struct CepTransport;
 
-impl LancetTransport {
+impl CepTransport {
     /// Create a connected client/server pair backed by Tokio channels.
-    pub fn pair(buffer: usize) -> (LancetClient, LancetServer) {
+    pub fn pair(buffer: usize) -> (CepClient, CepServer) {
         let (request_tx, request_rx) = mpsc::channel(buffer);
         let (event_tx, event_rx) = mpsc::channel(buffer);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let client = LancetClient {
+        let client = CepClient {
             request_tx,
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             next_id: Arc::new(AtomicU64::new(1)),
         };
 
-        let server = LancetServer {
+        let server = CepServer {
             request_rx,
             event_tx,
             shutdown_rx,
@@ -114,13 +114,13 @@ struct ServerRequest {
 
 /// Client-side transport handle.
 #[derive(Clone)]
-pub struct LancetClient {
+pub struct CepClient {
     request_tx: mpsc::Sender<ServerRequest>,
     event_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<ToolEvent>>>,
     next_id: Arc<AtomicU64>,
 }
 
-impl LancetClient {
+impl CepClient {
     /// Issue a typed catalog method call.
     pub async fn call<M>(&self, params: M::Params) -> Result<M::Result, CepError>
     where
@@ -295,14 +295,14 @@ impl Drop for CancelGuard {
 }
 
 /// Server-side transport handle.
-pub struct LancetServer {
+pub struct CepServer {
     request_rx: mpsc::Receiver<ServerRequest>,
     event_tx: mpsc::Sender<ToolEvent>,
     shutdown_rx: watch::Receiver<bool>,
     shutdown_tx: watch::Sender<bool>,
 }
 
-impl LancetServer {
+impl CepServer {
     /// Clone the shutdown signal sender for out-of-band shutdown requests.
     pub fn shutdown_handle(&self) -> watch::Sender<bool> {
         self.shutdown_tx.clone()
@@ -833,7 +833,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_round_trip_returns_typed_result() {
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|params, _ctx| async move {
             Ok(TodoWriteResult {
                 todos: params.todos,
@@ -893,7 +893,7 @@ mod tests {
             }
         });
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope = envelope;
         let server_task = tokio::spawn(async move {
@@ -911,7 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_structured_error_round_trip() {
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry =
             todo_registry(|_params, _ctx| async move { Err(method_not_found("injected")) });
 
@@ -934,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_unknown_raw_method_returns_32601() {
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = MethodRegistry::new();
         let server_task = tokio::spawn(async move {
             server
@@ -955,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_long_running_handler_has_no_transport_timeout() {
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|params, _ctx| async move {
             sleep(Duration::from_millis(150)).await;
             Ok(TodoWriteResult {
@@ -982,7 +982,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_events_stream_in_order_with_matching_call_id() {
-        let (client, server) = LancetTransport::pair(16);
+        let (client, server) = CepTransport::pair(16);
         let registry = todo_registry(|params, ctx| async move {
             ctx.events
                 .emit("started", serde_json::json!({"stage": "begin"}))
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn call_completes_when_progress_events_are_not_drained() {
-        let (client, server) = LancetTransport::pair(1);
+        let (client, server) = CepTransport::pair(1);
         let registry = todo_registry(|params, ctx| async move {
             for step in 0..8 {
                 ctx.events
@@ -1075,7 +1075,7 @@ mod tests {
         let ready = Arc::new(tokio::sync::Notify::new());
         let ready_clone = Arc::clone(&ready);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(move |_params, mut ctx| {
             let observed = Arc::clone(&observed_clone);
             let ready = Arc::clone(&ready_clone);
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_explicit_returns_typed_error() {
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|_params, mut ctx| async move {
             ctx.cancellation.cancelled().await;
             Err(call_cancelled())
@@ -1149,7 +1149,7 @@ mod tests {
         let cleaned = Arc::new(tokio::sync::Notify::new());
         let cleaned_clone = Arc::clone(&cleaned);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(move |_params, mut ctx| {
             let cleaned = Arc::clone(&cleaned_clone);
             async move {
@@ -1191,7 +1191,7 @@ mod tests {
         let cancelled = Arc::new(tokio::sync::Notify::new());
         let cancelled_clone = Arc::clone(&cancelled);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(move |params, mut ctx| {
             let hanging_ready = Arc::clone(&hanging_ready_clone);
             let cancelled = Arc::clone(&cancelled_clone);
@@ -1266,7 +1266,7 @@ mod tests {
         let _guard = ACTIVE_HANDLERS_TEST_LOCK.lock().await;
         ACTIVE_HANDLERS.store(0, Ordering::SeqCst);
         for _ in 0..50 {
-            let (client, server) = LancetTransport::pair(8);
+            let (client, server) = CepTransport::pair(8);
             let registry = todo_registry(|params, _ctx| async move {
                 ACTIVE_HANDLERS.fetch_add(1, Ordering::SeqCst);
                 sleep(Duration::from_millis(5)).await;
@@ -1310,7 +1310,7 @@ mod tests {
             BaseExecutionEnvelope::for_workspace_root(root, "cap merge test").with_session_state();
         let audit = Arc::clone(&config.audit);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
         let _ = client
@@ -1330,7 +1330,7 @@ mod tests {
     async fn cep_audit_transport_success_appends_one_row() {
         let config = ServerRunConfig::in_memory_for_tests();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|params, _ctx| async move {
             Ok(TodoWriteResult {
                 todos: params.todos,
@@ -1374,7 +1374,7 @@ mod tests {
             BaseExecutionEnvelope::for_workspace_root(root, "native audit denial test");
         let audit = Arc::clone(&config.audit);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
         let err = client
@@ -1401,7 +1401,7 @@ mod tests {
     async fn cep_audit_transport_unknown_method_appends_row() {
         let config = ServerRunConfig::in_memory_for_tests();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = MethodRegistry::new();
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -1421,7 +1421,7 @@ mod tests {
     async fn cep_audit_transport_cancellation_finalizes_row() {
         let config = ServerRunConfig::in_memory_for_tests();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|_params, mut ctx| async move {
             ctx.cancellation.cancelled().await;
             Err(call_cancelled())
@@ -1460,7 +1460,7 @@ mod tests {
             let initial_fds = open_fd_count();
 
             for _ in 0..20 {
-                let (client, server) = LancetTransport::pair(8);
+                let (client, server) = CepTransport::pair(8);
                 let child_done = Arc::new(tokio::sync::Notify::new());
                 let child_done_clone = Arc::clone(&child_done);
 
@@ -1578,7 +1578,7 @@ mod tests {
     async fn effect_enforce_overrides_dispatch() {
         let config = enforce_config();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = overreach_handler();
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -1609,7 +1609,7 @@ mod tests {
     async fn effect_warn_records_and_passes() {
         let config = warn_config();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = overreach_handler();
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -1633,7 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn effect_off_passes_through() {
         let config = off_config();
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = overreach_handler();
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -1651,7 +1651,7 @@ mod tests {
     async fn cancel_partial_flush() {
         let config = ServerRunConfig::in_memory_for_tests();
         let audit = Arc::clone(&config.audit);
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let registry = todo_registry(|_params, mut ctx| async move {
             ctx.record_effect(crate::effect::ledger::ObservedEffect {
                 kind: ImpactKind::WorkspaceMutation,
@@ -1696,7 +1696,7 @@ mod tests {
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
 
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let mut registry = MethodRegistry::new();
         crate::register_production_method_registry(&mut registry).unwrap();
         let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
@@ -1722,7 +1722,7 @@ mod tests {
     #[tokio::test]
     async fn none_region_after_ok_fails_closed() {
         let config = enforce_config();
-        let (client, server) = LancetTransport::pair(8);
+        let (client, server) = CepTransport::pair(8);
         let mut registry = MethodRegistry::new();
         registry
             .register_method::<TodoWrite, _, _>(|params, _ctx| async move {

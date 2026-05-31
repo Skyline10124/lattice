@@ -29,7 +29,7 @@ use cep_executor::effect::{
     region::AuthorizedEffectRegion,
 };
 use cep_executor::{
-    register_production_method_registry, CepAuditStore, CepTurnContext, LancetTransport,
+    register_production_method_registry, CepAuditStore, CepTransport, CepTurnContext,
     MethodRegistry, ServerRunConfig,
 };
 use cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
@@ -289,7 +289,7 @@ where
 {
     let audit = Arc::new(CepAuditStore::in_memory().expect("in-memory audit"));
     let config = warn_server_config(Arc::clone(&audit));
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
     let row_before = audit.row_count().unwrap_or(0) as i64;
@@ -467,7 +467,7 @@ async fn generate_warn_report() -> String {
     success_config.cep_context =
         Arc::new(CepTurnContext::defaults_for_project_root(&canonical_str));
 
-    let (success_client, success_server) = LancetTransport::pair(32);
+    let (success_client, success_server) = CepTransport::pair(32);
     let server_task2 = tokio::spawn(async move {
         let _ = success_server
             .run(production_registry, success_config)

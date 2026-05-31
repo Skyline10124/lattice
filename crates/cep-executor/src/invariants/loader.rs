@@ -1,4 +1,4 @@
-//! TOML card loading from `.lancet/invariants/` directories (D-09, D-13).
+//! TOML card loading from `.cep/invariants/` directories (D-09, D-13).
 
 use crate::invariants::types::{CardAnchor, InvariantCard};
 use std::path::{Path, PathBuf};

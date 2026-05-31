@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cep_executor::{LancetTransport, MethodRegistry, ServerRunConfig};
+use cep_executor::{CepTransport, MethodRegistry, ServerRunConfig};
 use cep_protocol::catalog;
 use cep_protocol::envelope::ImpactKind;
 use cep_protocol::error::{
@@ -14,7 +14,7 @@ use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 
-use super::lancet::LancetExecutorAdapter;
+use super::cep::CepExecutorAdapter;
 
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
@@ -28,15 +28,15 @@ where
     registry
 }
 
-async fn adapter_over_registry(registry: MethodRegistry) -> LancetExecutorAdapter {
-    let (client, server) = LancetTransport::pair(8);
+async fn adapter_over_registry(registry: MethodRegistry) -> CepExecutorAdapter {
+    let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
             .run(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
     let enabled: Vec<String> = catalog().iter().map(|d| d.name.to_string()).collect();
-    let adapter = LancetExecutorAdapter::new(client, enabled);
+    let adapter = CepExecutorAdapter::new(client, enabled);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
@@ -78,10 +78,8 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
 
 #[tokio::test]
 async fn cep_executor_adapter_rejects_profile_disabled_command_run() {
-    let adapter = LancetExecutorAdapter::new(
-        LancetTransport::pair(8).0,
-        ["workspace.read_file".to_string()],
-    );
+    let adapter =
+        CepExecutorAdapter::new(CepTransport::pair(8).0, ["workspace.read_file".to_string()]);
     let err = adapter
         .execute(&ToolCall {
             id: "call_1".to_string(),
@@ -107,13 +105,13 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
             })
         })
         .unwrap();
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move {
         let _ = server
             .run(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
-    let adapter = LancetExecutorAdapter::new(client, [ReadFile::NAME.to_string()]);
+    let adapter = CepExecutorAdapter::new(client, [ReadFile::NAME.to_string()]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
 
@@ -297,7 +295,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
 
-    use super::lancet::build_production_turn_deps;
+    use super::cep::build_production_turn_deps;
     use super::llm::RealLlmClient;
 
     let dir = TempDir::new().unwrap();
@@ -351,7 +349,7 @@ mod cep_native_registry {
     use lattice_profile::CepNetworkSection;
     use tempfile::TempDir;
 
-    use crate::turn::lancet::production_base_envelope;
+    use crate::turn::cep::production_base_envelope;
 
     #[test]
     fn cep_native_registry_production_envelope_has_no_fetch_wildcard() {
@@ -410,7 +408,7 @@ mod cep_native_registry {
         use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;
 
-        use crate::turn::lancet::build_production_turn_deps;
+        use crate::turn::cep::build_production_turn_deps;
 
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "native audit").unwrap();
@@ -435,7 +433,7 @@ mod cep_native_registry {
         )
         .expect("production deps");
 
-        deps.lancet_client
+        deps.cep_client
             .call::<ReadFile>(ReadFileParams {
                 path: "hello.txt".into(),
                 offset: None,
@@ -470,8 +468,8 @@ mod attestation_and_dispatch {
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
-    use crate::turn::lancet::{
-        build_production_turn_deps, generate_and_store_attestation, LancetExecutorAdapter,
+    use crate::turn::cep::{
+        build_production_turn_deps, generate_and_store_attestation, CepExecutorAdapter,
     };
 
     #[tokio::test]
@@ -496,10 +494,8 @@ mod attestation_and_dispatch {
         )
         .expect("deps");
 
-        let adapter = LancetExecutorAdapter::new(
-            deps.lancet_client.clone(),
-            [SubmitIntent::NAME.to_string()],
-        );
+        let adapter =
+            CepExecutorAdapter::new(deps.cep_client.clone(), [SubmitIntent::NAME.to_string()]);
         let call = ToolCall {
             id: "call_submit".into(),
             function: FunctionCall {
@@ -558,7 +554,7 @@ mod attestation_and_dispatch {
             ctx.runtime_version = env!("CARGO_PKG_VERSION").to_string();
         }
 
-        deps.lancet_client
+        deps.cep_client
             .call::<ReadFile>(ReadFileParams {
                 path: "hello.txt".into(),
                 offset: None,
@@ -573,7 +569,7 @@ mod attestation_and_dispatch {
         generate_and_store_attestation(&deps.audit, &ctx, &turn_id).expect("store attestation");
 
         let replay = deps
-            .lancet_client
+            .cep_client
             .call::<AuditReplay>(AuditReplayParams {
                 turn_id: turn_id.clone(),
             })
@@ -625,7 +621,7 @@ mod attestation_and_dispatch {
             ctx.session_id = "sess-2".to_string();
         }
 
-        deps.lancet_client
+        deps.cep_client
             .call::<ReadFile>(ReadFileParams {
                 path: "a.txt".into(),
                 offset: None,
@@ -643,7 +639,7 @@ mod attestation_and_dispatch {
             .is_none());
 
         let replay = deps
-            .lancet_client
+            .cep_client
             .call::<AuditReplay>(AuditReplayParams { turn_id })
             .await
             .expect("replay without stored attestation");

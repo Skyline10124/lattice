@@ -2,7 +2,7 @@
 //!
 //! INTERNAL — superseded by CEP catalog methods.
 //!
-//! This module is not part of the public LANCET surface. The public tool
+//! This module is not part of the public CEP surface. The public tool
 //! contract is the CEP method catalog in [`cep_protocol`] (CATALOG,
 //! params/results, CepError, envelope/policy, and audit/provenance schemas).
 

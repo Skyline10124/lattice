@@ -466,7 +466,7 @@ async fn run_inner(
         test_persist_audit: None,
     };
 
-    // D-A1: drive stream_turn; lattice-api owns Lancet runtime construction
+    // D-A1: drive stream_turn; lattice-api owns Cep runtime construction
     let mut stream = match lattice_api::stream_turn(session_api, request).await {
         Ok(s) => s,
         Err(lattice_api::ApiError::NotFound(id)) => {

@@ -1,8 +1,8 @@
-//! `lattice lancet` — CEP inspection and self-check subcommands (CLI3-01, CLI3-03).
+//! `lattice cep` — CEP inspection and self-check subcommands (CLI3-01, CLI3-03).
 //!
-//! - `lancet status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
+//! - `cep status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
 //!   the latest envelope.declare fields, recent calls, and last guard verdict.
-//! - `lancet doctor`: catalog count, transport smoke, invariant-card parse, and an
+//! - `cep doctor`: catalog count, transport smoke, invariant-card parse, and an
 //!   isolated `submit_intent` smoke that asserts `unknowns == 0`.
 
 use std::path::{Path, PathBuf};
@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use cep_executor::invariants::loader::load_cards_from_dir;
 use cep_executor::invariants::resolve_invariants_dir;
 use cep_executor::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
-    LancetTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
+    CepTurnContext, MethodRegistry, ServerRunConfig,
 };
 use cep_protocol::catalog::catalog;
 use cep_protocol::envelope::BaseExecutionEnvelope;
@@ -21,9 +21,9 @@ use cep_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
 use clap::Subcommand;
 use colored::Colorize;
 
-/// `lattice lancet` subcommand group.
+/// `lattice cep` subcommand group.
 #[derive(Subcommand)]
-pub enum LancetAction {
+pub enum CepAction {
     /// Show audit-derived CEP status: active envelope, recent calls, last guard verdict.
     Status {
         /// Emit JSON instead of human-readable output.
@@ -34,11 +34,11 @@ pub enum LancetAction {
     Doctor,
 }
 
-/// Dispatch the `lancet` subcommand group. `None` action defaults to `Status`.
-pub fn run(action: Option<LancetAction>, global_json: bool) -> Result<()> {
-    match action.unwrap_or(LancetAction::Status { json: false }) {
-        LancetAction::Status { json } => run_status(json || global_json),
-        LancetAction::Doctor => run_doctor(global_json),
+/// Dispatch the `cep` subcommand group. `None` action defaults to `Status`.
+pub fn run(action: Option<CepAction>, global_json: bool) -> Result<()> {
+    match action.unwrap_or(CepAction::Status { json: false }) {
+        CepAction::Status { json } => run_status(json || global_json),
+        CepAction::Doctor => run_doctor(global_json),
     }
 }
 
@@ -58,10 +58,10 @@ fn compute_duration_ms(started_at: &str, ended_at: Option<&str>) -> Option<i64> 
 }
 
 // ---------------------------------------------------------------------------
-// lancet status
+// cep status
 // ---------------------------------------------------------------------------
 
-pub(crate) struct LancetStatusOutput {
+pub(crate) struct CepStatusOutput {
     pub active_envelope: Option<serde_json::Value>,
     pub no_active_envelope_observed: bool,
     pub recent_calls: Vec<RecentCallEntry>,
@@ -77,11 +77,11 @@ pub(crate) struct RecentCallEntry {
 }
 
 /// Build status data from the audit store without spawning a CEP server.
-pub(crate) fn collect_status(project_root: &Path) -> Result<LancetStatusOutput> {
+pub(crate) fn collect_status(project_root: &Path) -> Result<CepStatusOutput> {
     let db_path = audit_db_path(project_root);
 
     if !db_path.exists() {
-        return Ok(LancetStatusOutput {
+        return Ok(CepStatusOutput {
             active_envelope: None,
             no_active_envelope_observed: true,
             recent_calls: vec![],
@@ -131,7 +131,7 @@ pub(crate) fn collect_status(project_root: &Path) -> Result<LancetStatusOutput> 
         })
         .collect();
 
-    Ok(LancetStatusOutput {
+    Ok(CepStatusOutput {
         active_envelope,
         no_active_envelope_observed,
         recent_calls,
@@ -163,8 +163,8 @@ fn run_status(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn render_status_text(output: &LancetStatusOutput) {
-    println!("{}", "lancet status".dimmed());
+fn render_status_text(output: &CepStatusOutput) {
+    println!("{}", "cep status".dimmed());
     match &output.active_envelope {
         Some(env) => {
             println!("{}: {}", "Active Envelope".bold(), "found".green());
@@ -209,10 +209,10 @@ fn render_status_text(output: &LancetStatusOutput) {
 }
 
 // ---------------------------------------------------------------------------
-// lancet doctor
+// cep doctor
 // ---------------------------------------------------------------------------
 
-/// Public entry point — derives invariants dir from `$PWD/.lancet/invariants/`.
+/// Public entry point — derives invariants dir from `$PWD/.cep/invariants/`.
 pub fn run_doctor(json: bool) -> Result<()> {
     let project_root = std::env::current_dir().context("current working directory")?;
     let invariants_dir = resolve_invariants_dir(&project_root, None);
@@ -299,7 +299,7 @@ fn emit_doctor_result(
             }))?
         );
     } else {
-        println!("{}", "lancet doctor".dimmed());
+        println!("{}", "cep doctor".dimmed());
         for item in ok_items {
             println!("  {} {}", "\u{2713}".green(), item);
         }
@@ -309,7 +309,7 @@ fn emit_doctor_result(
     }
 
     if !all_ok {
-        anyhow::bail!("lancet doctor: {} check(s) failed", issues.len());
+        anyhow::bail!("cep doctor: {} check(s) failed", issues.len());
     }
     Ok(())
 }
@@ -354,12 +354,11 @@ async fn submit_intent_smoke_async() -> Result<()> {
 
     // submit_intent requires MutateSessionState capability to store the derived envelope.
     let mut config = ServerRunConfig::in_memory_for_tests();
-    config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root_str, "lancet doctor smoke")
-            .with_session_state();
+    config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root_str, "cep doctor smoke")
+        .with_session_state();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root_str));
 
-    let (client, server) = LancetTransport::pair(64);
+    let (client, server) = CepTransport::pair(64);
     let server_task = tokio::spawn(async move {
         server
             .run(registry, config)
@@ -405,44 +404,44 @@ mod tests {
 
     // -- Clap surface tests --
 
-    /// Test wrapper that wraps LancetAction as a top-level subcommand.
+    /// Test wrapper that wraps CepAction as a top-level subcommand.
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
-        action: LancetAction,
+        action: CepAction,
     }
 
-    fn try_parse_action(args: &[&str]) -> std::result::Result<LancetAction, clap::Error> {
-        let mut full = vec!["lancet"];
+    fn try_parse_action(args: &[&str]) -> std::result::Result<CepAction, clap::Error> {
+        let mut full = vec!["cep"];
         full.extend_from_slice(args);
         TestCli::try_parse_from(full).map(|c| c.action)
     }
 
     #[test]
-    fn lancet_status_json_flag_parses() {
+    fn cep_status_json_flag_parses() {
         let action = try_parse_action(&["status", "--json"]);
-        assert!(action.is_ok(), "should parse `lancet status --json`");
+        assert!(action.is_ok(), "should parse `cep status --json`");
         match action.unwrap() {
-            LancetAction::Status { json } => assert!(json),
+            CepAction::Status { json } => assert!(json),
             _ => panic!("expected Status"),
         }
     }
 
     #[test]
-    fn lancet_status_no_args_parses() {
+    fn cep_status_no_args_parses() {
         let action = try_parse_action(&["status"]);
         assert!(action.is_ok());
         match action.unwrap() {
-            LancetAction::Status { json } => assert!(!json),
+            CepAction::Status { json } => assert!(!json),
             _ => panic!("expected Status"),
         }
     }
 
     #[test]
-    fn lancet_doctor_parses() {
+    fn cep_doctor_parses() {
         let action = try_parse_action(&["doctor"]);
         assert!(action.is_ok());
-        assert!(matches!(action.unwrap(), LancetAction::Doctor));
+        assert!(matches!(action.unwrap(), CepAction::Doctor));
     }
 
     // -- Status tests --
@@ -498,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn lancet_status_missing_db_returns_empty_state() {
+    fn cep_status_missing_db_returns_empty_state() {
         let dir = TempDir::new().unwrap();
         let output = collect_status(dir.path()).unwrap();
         assert!(output.no_active_envelope_observed);
@@ -508,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn lancet_status_seeded_audit_json() {
+    fn cep_status_seeded_audit_json() {
         let dir = TempDir::new().unwrap();
         seed_audit_db(dir.path());
 
@@ -570,13 +569,13 @@ mod tests {
     // -- Doctor tests --
 
     #[test]
-    fn lancet_doctor_passes_on_repo_root() {
+    fn cep_doctor_passes_on_repo_root() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crates/")
             .parent()
             .expect("workspace root");
-        let invariants_dir = workspace_root.join(".lancet").join("invariants");
+        let invariants_dir = workspace_root.join(".cep").join("invariants");
 
         let prev = std::env::current_dir().ok();
         std::env::set_current_dir(workspace_root).unwrap();
@@ -592,13 +591,13 @@ mod tests {
     }
 
     #[test]
-    fn lancet_doctor_reports_invariant_cards() {
+    fn cep_doctor_reports_invariant_cards() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crates/")
             .parent()
             .expect("workspace root");
-        let invariants_dir = workspace_root.join(".lancet").join("invariants");
+        let invariants_dir = workspace_root.join(".cep").join("invariants");
 
         let cards =
             load_cards_from_dir(&invariants_dir).expect("cards should load without parse errors");
@@ -644,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn lancet_doctor_submit_intent_unknowns_zero() {
+    fn cep_doctor_submit_intent_unknowns_zero() {
         let result = run_submit_intent_smoke();
         assert!(
             result.is_ok(),
@@ -654,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn lancet_doctor_fails_on_broken_card() {
+    fn cep_doctor_fails_on_broken_card() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("bad.toml"), "this is not valid toml {{{").unwrap();
 

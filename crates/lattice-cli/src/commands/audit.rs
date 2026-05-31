@@ -1,12 +1,12 @@
-//! `lancet audit` — query and tail the CEP audit store (CLI3-04).
+//! `cep audit` — query and tail the CEP audit store (CLI3-04).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use cep_executor::{
-    impact_kind_from_label, register_production_method_registry, CepAuditStore, CepTurnContext,
-    LancetClient, LancetTransport, MethodRegistry, ServerRunConfig,
+    impact_kind_from_label, register_production_method_registry, CepAuditStore, CepClient,
+    CepTransport, CepTurnContext, MethodRegistry, ServerRunConfig,
 };
 use cep_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use cep_protocol::methods::audit::{
@@ -77,7 +77,7 @@ fn audit_db_path(project_root: &Path) -> PathBuf {
 
 async fn with_audit_client<F, Fut>(project_root: &Path, session_id: &str, f: F) -> Result<()>
 where
-    F: FnOnce(LancetClient) -> Fut,
+    F: FnOnce(CepClient) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     let audit_path = audit_db_path(project_root);
@@ -103,14 +103,14 @@ where
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
     config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
+        BaseExecutionEnvelope::for_workspace_root(root, "cep audit").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     config.audit_context = Arc::new(RwLock::new(cep_executor::CepAuditContext {
         session_id: session_id.to_string(),
         ..Default::default()
     }));
 
-    let (client, server) = LancetTransport::pair(64);
+    let (client, server) = CepTransport::pair(64);
     let server_task = tokio::spawn(async move {
         server
             .run(registry, config)

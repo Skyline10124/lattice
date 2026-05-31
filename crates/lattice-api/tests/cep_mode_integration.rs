@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use cep_executor::{
-    register_production_method_registry, CepAuditStore, LancetTransport, MethodRegistry,
+    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
 use cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
@@ -84,7 +84,7 @@ fn overreach_server_config(cep_mode: CepMode) -> (ServerRunConfig, Arc<CepAuditS
 #[tokio::test]
 async fn cep_mode_enforce_effect_overreach_denied() {
     let (config, audit) = overreach_server_config(CepMode::Enforce);
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -127,7 +127,7 @@ async fn cep_mode_enforce_effect_overreach_denied() {
 #[tokio::test]
 async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
     let (config, audit) = overreach_server_config(CepMode::Warn);
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -141,7 +141,7 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
     drop(client);
     server_task.abort();
 
-    // Assert durable warning in CepAuditStore — NOT in LancetExecutorAdapter return value.
+    // Assert durable warning in CepAuditStore — NOT in CepExecutorAdapter return value.
     let row = audit.row_by_audit_id(1).expect("warn row");
     let metadata = row.metadata_json.as_deref().unwrap_or("");
     assert!(
@@ -156,7 +156,7 @@ async fn cep_mode_warn_effect_overreach_ok_with_audit_warning() {
 #[tokio::test]
 async fn cep_mode_off_effect_overreach_passes() {
     let (config, _audit) = overreach_server_config(CepMode::Off);
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let registry = overreach_todo_handler();
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
 
@@ -207,7 +207,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
         ));
     }
 
-    let (client, server) = LancetTransport::pair(8);
+    let (client, server) = CepTransport::pair(8);
     let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
     tokio::task::yield_now().await;
 
