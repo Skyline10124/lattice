@@ -1,8 +1,8 @@
 //! Agent profile discovery — explicit path, named lookup, and default resolution.
 //!
 //! Preserves the `.lattice/agents/<name>/agent.toml` and
-//! `~/.lattice/agents/<name>/agent.toml` package semantics per D-02.
-//! Lookup order: explicit path > project-local > user-global (D-05).
+//! `~/.lattice/agents/<name>/agent.toml` package semantics.
+//! Lookup order: explicit path > project-local > user-global.
 
 use std::path::PathBuf;
 
@@ -37,10 +37,10 @@ impl DiscoveryPaths {
 
 /// Resolve a `ProfileSource` to a loaded and validated profile.
 ///
-/// Explicit paths are loaded directly (D-05). Named lookups check
-/// project-local before user-global (D-02, D-05). The `Default` source
-/// uses name `"default"` (D-06). Missing default returns a typed error
-/// with template text and proposed create path; no files are written (D-07).
+/// Explicit paths are loaded directly. Named lookups check project-local before
+/// user-global. The `Default` source uses name `"default"`. Missing default
+/// returns a typed error with template text and proposed create path; no files
+/// are written.
 pub fn resolve_agent_profile(
     source: ProfileSource,
     paths: &DiscoveryPaths,
@@ -66,7 +66,7 @@ fn resolve_named(name: &str, paths: &DiscoveryPaths) -> Result<LoadedAgentProfil
     let project_path = paths.project_agents_dir().join(name).join("agent.toml");
     let global_path = paths.global_agents_dir.join(name).join("agent.toml");
 
-    // Project-local wins (D-05).
+    // Project-local wins over user-global.
     if project_path.exists() {
         return load_agent_profile(&project_path);
     }

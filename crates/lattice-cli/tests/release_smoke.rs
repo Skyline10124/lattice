@@ -1,4 +1,4 @@
-//! CLI Plan 07: Isolated CLI release smoke tests (D-16).
+//! Isolated CLI release smoke tests.
 //!
 //! Every smoke command sets temporary HOME, XDG_CONFIG_HOME, and project cwd
 //! to prevent reading real user ~/.lattice state or leaking credentials.
@@ -170,7 +170,7 @@ fn smoke_resolve_missing_credential_names_env_var() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should name the env var (VER-04: clear missing-env-var failures)
+    // Should name the env var so missing-credential failures are actionable.
     assert!(
         stdout.contains("ANTHROPIC_API_KEY"),
         "resolve should mention the env var name, got:\n{stdout}"

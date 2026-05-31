@@ -28,7 +28,7 @@ fn store_creates_v11_tables_on_open() {
     // Trigger lazy connection init (creates tables).
     drop(store.conn().expect("init"));
 
-    // Verify the four v1.1 tables exist via a raw connection.
+    // Verify the four graph tables exist via a raw connection.
     let conn = Connection::open(store.db_path()).expect("raw conn");
     for table in &[
         "graph_sessions",

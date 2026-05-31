@@ -23,7 +23,7 @@ pub(super) struct TurnCommitContext {
 
 /// Build a [`TurnCommitInput`] from the user input, commit context, and agent
 /// result. Shared by the live turn path to ensure commit construction stays
-/// consistent (D-16).
+/// consistent.
 pub(super) fn build_commit_input(
     user_input: &str,
     ctx: &TurnCommitContext,
@@ -58,12 +58,12 @@ pub(super) fn build_commit_input(
     }
 }
 
-/// Derive the terminal [`TurnEvent`] from the agent result status (D-10).
+/// Derive the terminal [`TurnEvent`] from the agent result status.
 ///
 /// Returns `None` for `Completed` (no terminal event needed), `Some(TurnFailed)`
 /// for `Error`, and `Some(TurnCancelled)` for `Cancelled`. Terminal status is
 /// always derived from `AgentTurnResult.status`, never from the presence or
-/// absence of `ModelFinished` in the event stream (WR-01).
+/// absence of `ModelFinished` in the event stream.
 pub(super) fn derive_terminal_event(result: &AgentTurnResult) -> Option<TurnEvent> {
     match result.status {
         AgentTurnStatus::Error => Some(TurnEvent::TurnFailed {

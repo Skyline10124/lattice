@@ -1,6 +1,6 @@
-//! VER-23 / LEG-02 cep_mode integration tests.
+//! cep_mode integration tests.
 //!
-//! **LEG-02 invariant:** `cep_mode = Off` does **NOT** re-enable legacy direct tool calls.
+//! Invariant: `cep_mode = Off` does **not** re-enable retired direct tool calls.
 //! In the production stack (post-API), there is no legacy tool executor path.
 //! `Off` mode only skips the effect-region check; the CEP policy hook still runs and will
 //! deny requests that lack the required capability declaration.
@@ -23,13 +23,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use cep_executor::{
+use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lattice_cep_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
-use cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
-use cep_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use cep_protocol::CepErrorCode;
+use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use lattice_cep_protocol::CepErrorCode;
 use lattice_profile::CepSection;
 use tempfile::TempDir;
 
@@ -44,11 +44,11 @@ use tempfile::TempDir;
 // so the policy check passes. The overreach is in the effect region check.
 
 fn overreach_todo_handler() -> MethodRegistry {
-    use cep_executor::effect::{
+    use lattice_cep_catalog::method::RequiredCapability;
+    use lattice_cep_native::effect::{
         ledger::{EffectSource, ObservedEffect, ObservedScope},
         region::AuthorizedEffectRegion,
     };
-    use cep_protocol::method::RequiredCapability;
 
     let mut registry = MethodRegistry::new();
     registry
@@ -171,7 +171,7 @@ async fn cep_mode_off_effect_overreach_passes() {
     server_task.abort();
 }
 
-/// Off mode — Part 2 (LEG-02): policy/capability deny still returns Err when the
+/// Off mode: policy/capability deny still returns Err when the
 /// envelope lacks the required capability.
 ///
 /// Off does NOT re-enable legacy direct tool calls. The CEP policy hook always runs.
@@ -197,14 +197,13 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // Set up a proper policy hook for the workspace root.
     {
-        use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
+        use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
         let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
-        config.cep_context = Arc::new(cep_executor::CepTurnContext::defaults_for_project_root(
-            canonical_str,
-        ));
+        config.cep_context =
+            Arc::new(lattice_cep_native::CepTurnContext::defaults_for_project_root(canonical_str));
     }
 
     let (client, server) = CepTransport::pair(8);
@@ -213,7 +212,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // workspace.write_file without WritePath in any envelope → policy denial.
     // Off mode does NOT bypass the policy check.
-    use cep_protocol::methods::workspace::{WriteFile, WriteFileParams};
+    use lattice_cep_catalog::methods::workspace::{WriteFile, WriteFileParams};
     let err = client
         .call::<WriteFile>(WriteFileParams {
             path: "should_be_denied.txt".into(),
@@ -251,7 +250,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
 /// Profile default: `CepSection::default()` must yield `CepMode::Enforce`.
 ///
-/// Documents the LEG-02 requirement that the effective default mode is Enforce
+/// Documents that the effective default mode is Enforce
 /// when no `[cep]` section is present in agent.toml.
 #[test]
 fn cep_mode_default_enforce_from_profile_schema() {
@@ -266,7 +265,7 @@ fn cep_mode_default_enforce_from_profile_schema() {
 
 /// CepSection deserialization: omitting `mode` from `[cep]` table preserves Enforce default.
 ///
-/// Documents the LEG-02 guarantee at the serialization level: the TOML `[cep]` section
+/// Documents the serialization guarantee: the TOML `[cep]` section
 /// without a `mode` key deserializes to `CepMode::Enforce`.
 #[test]
 fn cep_mode_enforce_when_cep_section_mode_absent() {

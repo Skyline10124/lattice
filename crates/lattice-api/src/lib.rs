@@ -1,7 +1,7 @@
-//! LATTICE v1.1 thin public API facade.
+//! LATTICE thin public API facade.
 //!
 //! This crate is the application entry point for session creation, session
-//! lookup, turn execution, and streaming. It exposes the v1.1 surface through
+//! lookup, turn execution, and streaming. It exposes the public surface through
 //! [`SessionApi`], `run_turn`, and `stream_turn`.
 //!
 //! # Boundary

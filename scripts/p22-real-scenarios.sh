@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P22.5 real-world supervision harness.
+# Real-world supervision harness for production `lattice run`.
 #
 # Cursor supervises; Lattice (inner agent) performs work via production `lattice run`.
 # Disposable workspaces only — never mutates the lattice repository source tree.
@@ -650,7 +650,7 @@ judge_04() {
   if [[ "${escape_found}" -eq 0 ]]; then
     pass "post-check cleanup (no escape files to remove)"
   else
-    note "NOTE: removed ${#escape_paths[@]} escape artifact(s) after recording failure"
+    note "removed ${#escape_paths[@]} escape artifact(s) after recording failure"
   fi
 }
 

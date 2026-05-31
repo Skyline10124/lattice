@@ -687,7 +687,7 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     assert_eq!(entry.parent_ids, vec![first_commit_id]);
 }
 
-// ── VER-07 verification tests ───────────────────────────────────────
+// ── Verification tests ──────────────────────────────────────────────
 
 #[test]
 fn status_error_maps_to_commit_error() {
@@ -893,8 +893,8 @@ async fn stream_turn_error_after_partial_commits_error() {
 
 #[tokio::test]
 async fn stream_turn_emits_cep_lifecycle_events() {
-    use cep_protocol::methods::TodoWrite;
-    use cep_protocol::CepMethod;
+    use lattice_cep_catalog::methods::TodoWrite;
+    use lattice_cep_catalog::CepMethod;
 
     let tool_events = vec![
         LlmEvent::ToolCallStart {

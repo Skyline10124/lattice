@@ -5,29 +5,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use cep_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
-use cep_executor::{
+use lattice_agent::{
+    AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
+};
+use lattice_cep_catalog::catalog;
+use lattice_cep_catalog::methods::audit::{AuditQuery, AuditReplay, AuditTail};
+use lattice_cep_catalog::methods::command::Run;
+use lattice_cep_catalog::methods::envelope::{Declare, SubmitIntent};
+use lattice_cep_catalog::methods::external::Fetch;
+use lattice_cep_catalog::methods::session::TodoWrite;
+use lattice_cep_catalog::methods::workspace::{
+    FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
+};
+use lattice_cep_catalog::{CatalogMethod, CepMethod};
+use lattice_cep_native::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use lattice_cep_native::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
     wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
     CepAuditContext, CepAuditStore, CepClient, CepPolicyConfig, CepTransport, CepTurnContext,
     CommandPolicy, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
 };
-use cep_protocol::catalog;
-use cep_protocol::envelope::BaseExecutionEnvelope;
-use cep_protocol::error::{invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData};
-use cep_protocol::methods::audit::{AuditQuery, AuditReplay, AuditTail};
-use cep_protocol::methods::command::Run;
-use cep_protocol::methods::envelope::{Declare, SubmitIntent};
-use cep_protocol::methods::external::Fetch;
-use cep_protocol::methods::session::TodoWrite;
-use cep_protocol::methods::workspace::{
-    FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
+use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
+use lattice_cep_protocol::error::{
+    invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
 };
-use cep_protocol::{CatalogMethod, CepError, CepMethod, Retriability, ToolEvent};
-use lattice_agent::{
-    AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
-};
+use lattice_cep_protocol::{CepError, Retriability, ToolEvent};
 use lattice_llm::ToolCall;
 use lattice_profile::{CepNetworkSection, CepObservationSection, CepSection};
 use lattice_tooling::resolve_enabled_tools;
@@ -315,7 +318,7 @@ fn apply_network_profile(section: &CepNetworkSection, network: &mut NetworkPolic
 /// Build `CommandPolicy` from the profile `[cep.command]` section.
 ///
 /// Missing `[cep.command]` falls back to `CommandPolicy::defaults()`.
-/// Partial fields use defaults for the unspecified ones (D-23).
+/// Partial fields use defaults for the unspecified ones.
 fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
     let defaults = CommandPolicy::defaults();
     match cep.command.as_ref() {
@@ -350,7 +353,7 @@ fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
 
 /// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
 ///
-/// Merge precedence: compiled defaults < profile inline `[cep.*]` < external policy file (D-32).
+/// Merge precedence: compiled defaults < profile inline `[cep.*]` < external policy file.
 pub(crate) fn load_policy_config(
     cep: &CepSection,
     runtime_project_root: &Path,
@@ -508,7 +511,7 @@ pub(crate) fn production_base_envelope(
     production_base_envelope_from_policy(project_root, enabled_tools, &policy)
 }
 
-/// Persist an unsigned in-toto attestation for the turn after audit flush (D-09).
+/// Persist an unsigned in-toto attestation for the turn after audit flush.
 pub(crate) fn generate_and_store_attestation(
     audit: &CepAuditStore,
     ctx: &CepAuditContext,
@@ -654,7 +657,7 @@ pub(crate) fn build_production_turn_deps(
         default_policy_hook: Some(default_hook),
         cep_mode: cep
             .map(|c| c.mode.clone())
-            .unwrap_or(cep_protocol::envelope::CepMode::Enforce),
+            .unwrap_or(lattice_cep_protocol::envelope::CepMode::Enforce),
         invariant_index,
     };
 

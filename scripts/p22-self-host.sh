@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P22.6 self-host supervision harness.
+# Self-host supervision harness for disposable Lattice checkouts.
 #
 # Cursor (outer) supervises; Lattice (inner) runs in a disposable clone of
 # Skyline10124/lattice. The outer lattice checkout is only used to build the

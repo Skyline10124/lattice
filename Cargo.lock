@@ -206,46 +206,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cep-executor"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "cep-protocol",
- "futures",
- "globset",
- "indexmap",
- "lattice-llm",
- "lattice-tooling",
- "libc",
- "proptest",
- "regex",
- "reqwest",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tree-sitter",
- "tree-sitter-rust",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "cep-protocol"
-version = "0.1.0"
-dependencies = [
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1053,10 +1013,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
- "cep-executor",
- "cep-protocol",
  "futures",
  "lattice-agent",
+ "lattice-cep-catalog",
+ "lattice-cep-native",
+ "lattice-cep-protocol",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
@@ -1073,14 +1034,89 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cep-audit"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lattice-cep-catalog",
+ "lattice-cep-protocol",
+ "rusqlite",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-cep-catalog"
+version = "0.1.0"
+dependencies = [
+ "lattice-cep-protocol",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lattice-cep-dispatch"
+version = "0.1.0"
+dependencies = [
+ "lattice-cep-catalog",
+ "lattice-cep-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lattice-cep-native"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "futures",
+ "globset",
+ "indexmap",
+ "lattice-cep-audit",
+ "lattice-cep-catalog",
+ "lattice-cep-dispatch",
+ "lattice-cep-protocol",
+ "lattice-llm",
+ "lattice-tooling",
+ "libc",
+ "proptest",
+ "regex",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "lattice-cep-protocol"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64",
- "cep-executor",
- "cep-protocol",
  "chrono",
  "clap",
  "colored",
@@ -1089,6 +1125,9 @@ dependencies = [
  "futures",
  "lattice-agent",
  "lattice-api",
+ "lattice-cep-catalog",
+ "lattice-cep-native",
+ "lattice-cep-protocol",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
@@ -1104,17 +1143,6 @@ dependencies = [
  "tracing",
  "uuid",
  "zeroize",
-]
-
-[[package]]
-name = "lattice-hooks"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]
@@ -1137,7 +1165,7 @@ dependencies = [
 name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
- "cep-protocol",
+ "lattice-cep-protocol",
  "serde",
  "serde_json",
  "tempfile",

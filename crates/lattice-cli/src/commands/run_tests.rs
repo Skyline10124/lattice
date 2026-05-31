@@ -458,7 +458,7 @@ fn render_human_status_line_after_partial_token_inserts_stderr_newline() {
 
 #[test]
 fn flush_before_status_resets_mid_token_flag_after_first_status() {
-    // WR-01 regression: after the mid-token newline trick fires for the
+    // Regression: after the mid-token newline trick fires for the
     // first status event, subsequent status events must NOT produce
     // duplicate blank lines on stderr.
     let events = vec![
@@ -727,7 +727,7 @@ fn exit_code_from_state_covers_all_da4_rows() {
     );
 }
 
-// ─── Sequence test helpers (Plan 02, Task 1) ──────────────────
+// ─── Sequence test helpers ────────────────────────────────────
 
 /// Drive a Vec<TurnEvent> through the human renderer with Vec<u8>
 /// writers, applying D-B4 final-newline policy, and return the
@@ -767,7 +767,7 @@ fn s(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).expect("test buffers must be valid UTF-8")
 }
 
-// ─── Happy-path + interleave sequence tests (Plan 02, Task 2) ──
+// ─── Happy-path + interleave sequence tests ───────────────────
 
 #[test]
 fn seq_happy_path_human() {
@@ -956,7 +956,7 @@ fn seq_multiround_usage_sums_into_state() {
     assert!(epilogue_str.contains("completion: 10"));
 }
 
-// ─── Failure / cancellation / protocol-violation sequence tests (Plan 02, Task 3) ──
+// ─── Failure / cancellation / protocol-violation sequence tests ─────────
 
 #[test]
 fn seq_tool_failure_renders_summary() {
@@ -991,7 +991,7 @@ fn seq_tool_failure_renders_summary() {
     assert!(err_str.contains("permission denied"));
     assert!(err_str.contains("✗"));
     // D-A4: tool failure inside a successful turn does NOT change exit code
-    // — terminal status comes from TurnCommitted per WR-01
+    // Terminal status comes from TurnCommitted.
     assert_eq!(
         format!("{:?}", exit_code_from_state(&state)),
         format!("{:?}", std::process::ExitCode::SUCCESS)

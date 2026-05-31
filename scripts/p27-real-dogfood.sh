@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# scripts/p27-real-dogfood.sh — Phase 27 Layer-2 real-LLM dogfood checklist (D-06)
+# scripts/p27-real-dogfood.sh — manual real-LLM dogfood checklist
 #
 # MANUAL CHECKLIST — NOT CALLED FROM CI OR scripts/release-gate-v1.3.sh
 #
 # This script exercises the full CEP stack (declare + workspace.patch +
-# command.run + verify) with a real LLM provider. It is the Layer-2 complement
-# to the Layer-1 offline e2e test (release_e2e_criterion_8).
+# command.run + verify) with a real LLM provider. It complements the offline
+# fake-LLM e2e test without becoming part of the release gate.
 #
 # Required env:
 #   ANTHROPIC_API_KEY   (or one of the alternatives below)

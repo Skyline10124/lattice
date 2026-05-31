@@ -1,6 +1,6 @@
 id = "ALPHA-WIRE-FREEZE"
-title = "Alpha wire freeze — no new struct/enum definitions in cep-protocol"
-anchor = { type = "glob", value = "crates/cep-protocol/src/**/*.rs" }
+title = "Alpha wire freeze — no new struct/enum definitions in lattice-cep-protocol"
+anchor = { type = "glob", value = "crates/lattice-cep-protocol/src/**/*.rs" }
 
 [[forbidden]]
 category = "struct_def"

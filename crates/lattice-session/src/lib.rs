@@ -1,6 +1,6 @@
 //! Session graph and branch pointer storage for LATTICE.
 //!
-//! This crate owns the final v1.1 conversation graph contract: sessions,
+//! This crate owns the conversation graph contract: sessions,
 //! transcript messages, immutable turn commits, branch refs, HEAD state, and
 //! the SQLite graph store. It intentionally exposes only the graph API used by
 //! the API and CLI facade.

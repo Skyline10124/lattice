@@ -1,4 +1,4 @@
-//! DOG-04: Production-native five-impact-class matrix.
+//! Production-native five-impact-class matrix.
 //!
 //! Exercises one representative CEP method per `ImpactKind` through the
 //! production method registry (`register_production_method_registry`).
@@ -16,26 +16,26 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use cep_executor::audit::CepAuditContext;
-use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
-use cep_executor::{
+use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+use lattice_cep_catalog::methods::command::{Run, RunParams};
+use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
+use lattice_cep_catalog::methods::external::{Fetch, FetchParams};
+use lattice_cep_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
+use lattice_cep_catalog::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
+use lattice_cep_native::audit::CepAuditContext;
+use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lattice_cep_native::{
     register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTransport,
     CepTurnContext, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use cep_protocol::envelope::{
+use lattice_cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use cep_protocol::methods::audit::{AuditReplay, AuditReplayParams};
-use cep_protocol::methods::command::{Run, RunParams};
-use cep_protocol::methods::envelope::{Declare, DeclareParams};
-use cep_protocol::methods::external::{Fetch, FetchParams};
-use cep_protocol::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
-use cep_protocol::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-const FIXED_TURN_ID: &str = "dog04-turn-001";
-const FIXED_SESSION_ID: &str = "dog04-session-001";
+const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
+const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -279,7 +279,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // All rows (tool calls + envelope.declare calls) share the fixed turn_id.
     let all_rows = audit
-        .query_rows(&cep_executor::AuditQueryFilters {
+        .query_rows(&lattice_cep_native::AuditQueryFilters {
             session_id: Some(FIXED_SESSION_ID.to_string()),
             ..Default::default()
         })

@@ -104,7 +104,7 @@ impl LlmClient for ChatOnlyFakeLlm {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 1 (VER-08, AGENT-03): multi-chunk token assembly
+// Scenario 1: multi-chunk token assembly.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -154,7 +154,7 @@ async fn streaming_multi_chunk_tokens_assemble_into_one_message() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 2 (VER-08, AGENT-04): reasoning separate from visible output
+// Scenario 2: reasoning separate from visible output.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -196,7 +196,7 @@ async fn streaming_reasoning_separate_from_visible() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3 (AGENT-06): tool call assembly and sequential execution
+// Scenario 3: tool call assembly and sequential execution.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -285,7 +285,7 @@ async fn streaming_tool_call_assembly_and_sequential_execution() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 4 (AGENT-05): incomplete tool call error, no execution
+// Scenario 4: incomplete tool call error, no execution.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -337,7 +337,7 @@ async fn streaming_incomplete_tool_call_error_no_execution() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5 (AGENT-05, D-09): invalid tool call JSON, no execution
+// Scenario 5: invalid tool call JSON, no execution.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -516,7 +516,7 @@ async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 6 (AGENT-06): multiple valid tool calls, sequential execution
+// Scenario 6: multiple valid tool calls, sequential execution.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -585,7 +585,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 7 (D-09): multiple tool calls, one invalid -> none executed
+// Scenario 7: multiple tool calls, one invalid means none execute.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -641,7 +641,7 @@ async fn streaming_multiple_tool_calls_one_invalid_none_executed() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8 (AGENT-05, D-11): mid-stream error preserves partial content
+// Scenario 8: mid-stream error preserves partial content.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -698,7 +698,7 @@ async fn streaming_mid_stream_error_preserves_partial_content() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 9 (D-12): stream exhaustion without Done is error
+// Scenario 9: stream exhaustion without Done is an error.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -747,7 +747,7 @@ async fn streaming_exhausted_without_done_is_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 10 (AGENT-07): failed tool does not make turn error
+// Scenario 10: failed tool does not make turn error.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -810,7 +810,7 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 11 (AGENT-03, AGENT-06): multi-round tool loop
+// Scenario 11: multi-round tool loop.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -892,7 +892,7 @@ async fn streaming_multi_round_tool_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 12 (D-04): Started event ignored, no double ModelStarted
+// Scenario 12: Started event ignored, no double ModelStarted.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -938,7 +938,7 @@ async fn streaming_started_event_ignored_no_double_model_started() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 13 / D-17: backward compatibility, chat-only FakeLlm still works
+// Scenario 13: backward compatibility, chat-only FakeLlm still works.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

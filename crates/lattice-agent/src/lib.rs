@@ -1,4 +1,4 @@
-//! AgentLoop-only agent crate for the v1.1 runtime.
+//! AgentLoop-only agent crate.
 
 pub mod agent_loop;
 

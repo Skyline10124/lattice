@@ -1,4 +1,4 @@
-//! Run/stream consistency integration tests (deadline, Plan 03, VER-13).
+//! Run/stream consistency integration tests.
 //!
 //! Proves `run_turn` is equivalent to collecting a `stream_turn` event stream
 //! via [`collect_turn_result_from_events`], with durable session-store anchors.

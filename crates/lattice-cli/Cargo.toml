@@ -16,8 +16,9 @@ lattice-agent = { workspace = true, features = ["test-utils"] }
 lattice-tooling = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
-cep-executor = { workspace = true }
-cep-protocol = { workspace = true }
+lattice-cep-protocol = { workspace = true }
+lattice-cep-catalog = { workspace = true }
+lattice-cep-native = { workspace = true }
 lattice-llm = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }

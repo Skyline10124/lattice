@@ -1,26 +1,27 @@
-//! VER-28 impact matrix: one representative method per `ImpactKind` round-trips
+//! Impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use cep_executor::{
+use lattice_agent::{ToolCallExecutor, ToolExecutionError};
+use lattice_api::CepExecutorAdapter;
+use lattice_cep_catalog::catalog;
+use lattice_cep_catalog::methods::command::Run;
+use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
+use lattice_cep_catalog::methods::external::{Fetch, FetchParams, FetchResult};
+use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams};
+use lattice_cep_catalog::methods::workspace::{ReadFile, WriteFile};
+use lattice_cep_catalog::CepMethod;
+use lattice_cep_native::{
     register_production_method_registry, to_tool_definitions, CepAuditStore, CepTransport,
     MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use cep_protocol::catalog;
-use cep_protocol::envelope::{
+use lattice_cep_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use cep_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
-use cep_protocol::methods::command::Run;
-use cep_protocol::methods::envelope::{Declare, DeclareParams};
-use cep_protocol::methods::external::{Fetch, FetchParams, FetchResult};
-use cep_protocol::methods::session::{TodoWrite, TodoWriteParams};
-use cep_protocol::methods::workspace::{ReadFile, WriteFile};
-use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
-use lattice_api::CepExecutorAdapter;
+use lattice_cep_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
+use lattice_cep_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -370,10 +371,10 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
-    use cep_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use cep_executor::{CepPolicyConfig, CepTurnContext};
-    use cep_protocol::envelope::BaseExecutionEnvelope;
-    use cep_protocol::methods::session::TodoWrite;
+    use lattice_cep_catalog::methods::session::TodoWrite;
+    use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lattice_cep_native::{CepPolicyConfig, CepTurnContext};
+    use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
     let root = canonical_root.to_str().expect("utf-8 production root");

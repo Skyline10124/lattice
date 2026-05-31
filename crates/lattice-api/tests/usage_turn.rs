@@ -1,4 +1,4 @@
-//! Deterministic usage tests for the v1.1 main chain path.
+//! Deterministic usage tests for the main turn path.
 //!
 //! These tests exercise the real `run_turn` → live `stream_turn` collector →
 //! `AgentLoop` CEP adapter pipeline with a fake streaming LLM.
@@ -7,14 +7,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use cep_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
-    OnFailure, Scope,
-};
 use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
+use lattice_cep_protocol::envelope::{
+    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
+    OnFailure, Scope,
+};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};

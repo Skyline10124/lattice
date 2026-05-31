@@ -9,16 +9,18 @@ LATTICE is a Rust LLM runtime for running one session-centered agent with simple
 ```
 lattice/
 ├── crates/
-│   ├── cep-protocol/     # CEP pure data layer: JSON-RPC envelopes, method catalog, errors
-│   ├── cep-executor/     # CEP server runtime: transport, registry, handlers, policy, guard, verify, audit
+│   ├── lattice-cep-protocol/ # CEP wire/data contracts: JSON-RPC, envelopes, errors, policy seam
+│   ├── lattice-cep-catalog/  # CEP typed methods, params/results, descriptors, static catalog
+│   ├── lattice-cep-dispatch/ # CEP typed dispatch, client/transport, cancellation, event sinks
+│   ├── lattice-cep-audit/    # CEP audit store, query filters, rows, stages, attestations
+│   ├── lattice-cep-native/   # CEP native handlers plus policy, guard, effect, verify, edit helpers
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
 │   ├── lattice-profile/     # Agent profile schema ([cep] policy sections), discovery, defaults
 │   ├── lattice-tooling/     # ToolExecutor trait, limits, enabled-tools resolution
 │   ├── lattice-agent/       # Multi-turn agent loop (AgentLoop), state machine
 │   ├── lattice-api/         # Public facade (run/stream/session); composes the per-turn CEP runtime
-│   ├── lattice-cli/         # CLI (run, models, resolve, session, doctor)
-│   └── lattice-hooks/       # Lifecycle hook vocabulary (leaf; no internal consumers yet)
+│   └── lattice-cli/         # CLI (run, models, resolve, session, doctor)
 ├── README.md
 ├── FINDINGS.md
 └── FIX.md
@@ -27,11 +29,12 @@ lattice/
 Internal dependency flow:
 
 ```
-cep-protocol ─┬─> lattice-profile ─┐
-                 └─> cep-executor ─┤
-lattice-llm ─────┼─> lattice-tooling ─┼─> lattice-api ─> lattice-cli
-                 └─> lattice-agent <──┘
-lattice-session ─────> lattice-agent
+lattice-cep-protocol ─┬─> lattice-cep-catalog ─┬─> lattice-cep-dispatch ─┐
+                      ├─> lattice-profile       ├─> lattice-cep-audit     ├─> lattice-cep-native
+                      └─────────────────────────┘                         ┘
+lattice-llm ─────────────> lattice-tooling ───────────────┐
+                                                           ├─> lattice-api ─> lattice-cli
+lattice-session ─────────> lattice-agent <─────────────────┘
 ```
 
 ## Build
@@ -62,6 +65,7 @@ The following capabilities are deferred beyond the current release:
 - **TUI (deferred)** — A minimal terminal UI will be rebuilt on top of the `lattice-api` facade in a later milestone.
 - **Rich prompt compilation (deferred)** — Layer priorities, token budgets, and provider-specific prompt assembly will be reintroduced after the main path is small and stable.
 - **Sandbox & interactive approval (deferred)** — CEP now provides the capability/policy/guard/verify layer over tool execution; OS-level sandboxing and interactive approval prompts are still future work.
+- **Lifecycle hooks (deferred)** — The unused `lattice-hooks` leaf crate was removed. Reintroduce hooks with a concrete hook-dispatch integration point and internal consumer rather than as a standalone vocabulary crate.
 - **Plugins and orchestration (deferred)** — Plugin contracts and DAG runners will be reconsidered after the session and API boundaries are stable.
 - **Swarm and multi-agent collaboration (deferred)** — Coordination features will use the session graph as a foundation in a later milestone.
 

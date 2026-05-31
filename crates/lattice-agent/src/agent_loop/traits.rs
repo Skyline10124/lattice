@@ -2,7 +2,7 @@ use lattice_llm::ToolCall;
 
 /// Structured CEP error metadata preserved by the agent loop for API/CLI observation.
 ///
-/// Plain data fields only — no imports from `cep-protocol` error enums.
+/// Plain data fields only — no imports from `lattice-cep-protocol` error enums.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CepErrorPayload {
     pub code: i32,

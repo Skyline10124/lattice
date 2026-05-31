@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/release-boundary-check.sh [--docs]
 
-Checks Phase 11 release boundaries:
+Checks release boundaries:
   - removed old crate identities in manifests, source, and lockfile
   - removed old crate directories
   - unsupported CLI/TUI files

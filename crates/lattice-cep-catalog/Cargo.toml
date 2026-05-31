@@ -1,0 +1,17 @@
+[package]
+name = "lattice-cep-catalog"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "CEP typed method contracts, method params/results, descriptors, and static catalog"
+
+[features]
+default = []
+inspect-scaffold = []
+
+[dependencies]
+lattice-cep-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }

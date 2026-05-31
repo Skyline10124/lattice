@@ -1,16 +1,16 @@
-//! v1.1 default agent templates — generated text only, no filesystem writes.
+//! Default agent templates — generated text only, no filesystem writes.
 
 /// Generate a strict v1 `agent.toml` template for a new agent.
 ///
-/// The template is parseable by the strict schema and contains only v1.1
-/// sections: `[agent]`, `[prompt]`, `[tools]`.  Tools are enabled
-/// explicitly by name.
+/// The template is parseable by the strict schema and contains only supported
+/// sections: `[agent]`, `[prompt]`, `[tools]`. Tools are enabled explicitly by
+/// name.
 pub fn default_agent_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
 
     format!(
-        r#"# LATTICE Agent Profile (v1.1)
+        r#"# LATTICE Agent Profile (v1)
 # Auto-generated template — edit for your project's role, prompt, and tools.
 #
 # Sections:
@@ -42,7 +42,7 @@ pub fn default_reader_template(name: &str, model: &str) -> String {
     let model = toml_string(model);
 
     format!(
-        r#"# LATTICE Agent Profile (v1.1) — Reader
+        r#"# LATTICE Agent Profile (v1) — Reader
 # Read-only agent for code review, understanding, and search.
 # No command execution, file modification, or internet access.
 
@@ -71,7 +71,7 @@ pub fn default_editor_template(name: &str, model: &str) -> String {
     let model = toml_string(model);
 
     format!(
-        r#"# LATTICE Agent Profile (v1.1) — Editor
+        r#"# LATTICE Agent Profile (v1) — Editor
 # Read-write agent for editing, refactoring, and applying patches.
 # No shell or web access — editing only.
 
@@ -99,7 +99,7 @@ pub fn default_dev_template(name: &str, model: &str) -> String {
     let model = toml_string(model);
 
     format!(
-        r#"# LATTICE Agent Profile (v1.1) — Developer
+        r#"# LATTICE Agent Profile (v1) — Developer
 # Full development agent with all standard tools enabled.
 
 schema_version = 1

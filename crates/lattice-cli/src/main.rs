@@ -17,7 +17,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Human status lines and verbose epilogue are suppressed. JSONL emits public TurnEvent values as received, including ReasoningDelta when present. Alpha behavior change from v1.1 pretty JSON."
+        help = "Emit one TurnEvent JSON object per line on stdout (JSONL). Human status lines and verbose epilogue are suppressed. JSONL emits public TurnEvent values as received, including ReasoningDelta when present."
     )]
     json: bool,
 

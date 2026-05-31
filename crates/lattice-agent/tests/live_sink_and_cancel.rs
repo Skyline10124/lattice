@@ -1,11 +1,10 @@
 #![cfg(feature = "test-utils")]
 //! live streaming behavioral suite: AgentLoop live sink + cooperative cancellation.
 //!
-//! Locks the seven D-18 scenarios that prove VER-11, AGENT-08, AGENT-09 and the
-//! Plan 15-02 invariants exposed by `run_turn_live` + the five new cancel
-//! checkpoints (1b / 2 / 3 / 4 / 5). All scenarios with a live sender drive via
+//! Locks the live-sink and cooperative cancellation scenarios exposed by
+//! `run_turn_live`. All scenarios with a live sender drive via
 //! `drive_run_turn_live`, which `tokio::join!`s the run + drain so the bounded
-//! mpsc channel never deadlocks (RESEARCH §5 / D-19).
+//! mpsc channel never deadlocks.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,7 +75,7 @@ fn make_request_with_cancel(user_input: &str, flag: Arc<AtomicBool>) -> AgentTur
 /// `&AgentLoop` borrow stays usable; switching to `tokio::spawn` would force
 /// callers to wrap `AgentLoop` in `Arc`.
 ///
-/// The bounded channel is sized at 32 (D-20). The drain loop terminates when
+/// The bounded channel is sized at 32. The drain loop terminates when
 /// `run_turn_live` returns and drops its `Sender`, closing `rx`.
 async fn drive_run_turn_live(
     loop_inst: &AgentLoop,
@@ -133,7 +132,7 @@ impl ToolCallExecutor for FakeToolExecutor {
 /// `execute` is called, *before* forwarding to the inner executor and returning
 /// the inner's real result.
 ///
-/// Drives scenarios #2 (cancel mid-tool, real result preserved per D-07) and
+/// Drives scenarios #2 (cancel mid-tool, real result preserved) and
 /// #6 (cancel between two tools in a multi-tool batch — checkpoint #5).
 struct CancelOnFirstTool {
     inner: FakeToolExecutor,
@@ -171,7 +170,7 @@ impl ToolCallExecutor for CancelOnFirstTool {
 /// Used by scenario #1 to exercise checkpoint #3 (post-`Done` finalize, pre-tool
 /// loop) without tripping checkpoint #2: the cancel flag is set *between* the
 /// last non-`Done` event's checkpoint #2 fire and the `Done` arm; `Done` is
-/// never a cancel point inside `consume_model_stream` (D-03), so the function
+/// never a cancel point inside `consume_model_stream`, so the function
 /// returns `StreamOutcome::Done` and `run_turn_inner` finalizes the assistant
 /// message + emits `ModelFinished` before checkpoint #3 observes the cancel.
 struct CancelOnDoneLlm {
@@ -230,7 +229,7 @@ impl LlmClient for CancelOnDoneLlm {
                         // Last non-Done event has been consumed (and checkpoint
                         // #2 fired with cancel still false). Flip cancel, then
                         // yield Done — the cancel is observed at checkpoint #3,
-                        // not #2 (Done is never a cancel point per D-03).
+                        // not #2 (Done is never a cancel point).
                         cancel.store(true, Ordering::Relaxed);
                         let done = LlmEvent::Done {
                             finish_reason,
@@ -305,7 +304,7 @@ async fn scenario_01_cancel_before_tool_execution() {
         "no ToolCallStarted should be emitted when cancel observed at checkpoint #3"
     );
 
-    // Per D-08: assistant tool-call GraphMessage IS in transcript; tool result
+    // The assistant tool-call GraphMessage is in transcript; tool result
     // GraphMessage is NOT.
     let assistant_with_tool_calls = result
         .messages
@@ -322,7 +321,7 @@ async fn scenario_01_cancel_before_tool_execution() {
         "no tool result message should be committed when cancelled before tool execution"
     );
 
-    // ModelFinished was emitted (D-08 — model response finalized before cancel).
+    // ModelFinished was emitted before cancellation.
     let model_finished = result
         .events
         .iter()
@@ -482,7 +481,7 @@ async fn scenario_02_cancel_during_tool_execution() {
 
     // Single valid tool call. The CancelOnFirstTool wrapper flips cancel
     // synchronously *before* forwarding to the inner executor — the inner then
-    // returns its real result. Per D-07: agent records the real result, no
+    // returns its real result. The agent records the real result, no
     // synthesized "cancelled" tool finish, then checkpoint #5 returns Cancelled
     // before the next round opens.
     let llm = Arc::new(
@@ -525,7 +524,7 @@ async fn scenario_02_cancel_during_tool_execution() {
     );
 
     // Both ToolCallStarted and ToolCallFinished are recorded — the in-flight
-    // tool is never aborted (D-07).
+    // tool is never aborted.
     let started_count = result
         .events
         .iter()
@@ -596,7 +595,7 @@ async fn scenario_02_cancel_during_tool_execution() {
 async fn scenario_03_live_sender_mirrors_result_events() {
     // Round 1: a few tokens + reasoning + one valid tool call (Done(tool_calls)).
     // Round 2: more tokens + Done(stop). Concurrent drain (capacity 32) is
-    // mandatory or the bounded channel deadlocks (D-19).
+    // mandatory or the bounded channel deadlocks.
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(vec![
@@ -651,8 +650,8 @@ async fn scenario_03_live_sender_mirrors_result_events() {
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
 
-    // Element-wise equality of Vec<AgentTurnEvent> via the PartialEq derive
-    // landed in Plan 15-01. This is the load-bearing assertion of band B3.
+    // Element-wise equality of Vec<AgentTurnEvent> proves the live sink mirrors
+    // the buffered result events.
     assert_eq!(received, result.events);
 }
 
@@ -884,14 +883,14 @@ async fn scenario_05_cancel_mid_stream_preserves_partial_content() {
         .messages
         .iter()
         .find(|m| m.role == "assistant")
-        .expect("partial assistant message should be flushed via D-04 helper");
+        .expect("partial assistant message should be flushed");
     assert_eq!(assistant_msg.content, "par");
     assert_eq!(
         assistant_msg.reasoning_content, None,
         "no Reasoning event was emitted; reasoning_content must remain None"
     );
 
-    // No ModelFinished event in the Cancelled branch (D-04).
+    // No ModelFinished event in the Cancelled branch.
     assert!(!result
         .events
         .iter()
@@ -962,8 +961,7 @@ async fn scenario_07_run_turn_buffered_matches_run_turn_live() {
     assert_eq!(result_b.status, AgentTurnStatus::Completed);
     assert_eq!(result_a.assistant_output, result_b.assistant_output);
 
-    // Buffered events vector identical across both entrypoints — the B4
-    // backward-compat invariant. Relies on PartialEq from Plan 15-01.
+    // Buffered events vector identical across both entrypoints.
     assert_eq!(result_a.events, result_b.events);
 }
 
@@ -1042,7 +1040,7 @@ async fn scenario_08_timeout_cooperative_preserves_partial() {
 
     let (result, received) = drive_run_turn_live(&loop_inst, request, 32).await;
 
-    // D-15 assertions:
+    // Timeout assertions:
     // (1) status == Error
     assert_eq!(result.status, AgentTurnStatus::Error);
     // (2) terminal_reason contains "timeout"

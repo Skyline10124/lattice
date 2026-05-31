@@ -24,7 +24,7 @@ pub struct AgentTurnRequest {
     pub provider: Option<String>,
     /// Pre-resolved tool definitions for this turn (assembled by the API layer).
     pub tool_definitions: Vec<ToolDefinition>,
-    /// Optional cancellation flag for external cancel support (D-09).
+    /// Optional cancellation flag for external cancel support.
     /// When set to `true`, the loop terminates with `Cancelled` status.
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// Optional cooperative deadline for LLM and tool execution.
@@ -32,7 +32,7 @@ pub struct AgentTurnRequest {
     /// The agent checks this deadline around stream creation, stream
     /// consumption, and tool execution. On expiry, it returns `Error` status
     /// with a timeout terminal reason while preserving accumulated messages
-    /// and events. Live-sink backpressure uses non-blocking `try_send` (M-19a)
+    /// and events. Live-sink backpressure uses non-blocking `try_send`
     /// and is not covered by this deadline.
     pub timeout: Option<Duration>,
 }
@@ -127,12 +127,11 @@ pub enum AgentTurnEvent {
     /// their outcome is observable on `AgentTurnResult.status`.
     ///
     /// Note: cancellation observed *after* the model's `Done` chunk —
-    /// specifically Plan 15-02 checkpoint #3 (post-`ModelFinished`,
-    /// pre-tool-execution) and checkpoint #4 (pre-each-tool) — runs after
-    /// this event has already been buffered/forwarded. A `Cancelled` turn
-    /// can therefore include a trailing `ModelFinished` in
-    /// `AgentTurnResult.events`. live turn event mapping must not assume
-    /// "no `ModelFinished` ⇒ Completed".
+    /// specifically after `ModelFinished` and before tool execution — runs
+    /// after this event has already been buffered/forwarded. A `Cancelled`
+    /// turn can therefore include a trailing `ModelFinished` in
+    /// `AgentTurnResult.events`. Live turn event mapping must not assume
+    /// "no `ModelFinished` implies Completed".
     ModelFinished {
         finish_reason: String,
         usage: Option<TurnUsage>,

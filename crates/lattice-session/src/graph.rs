@@ -1,4 +1,4 @@
-//! v1.1 session graph contract: types, narrow store trait, and canonical helpers.
+//! Session graph contract: types, narrow store trait, and canonical helpers.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

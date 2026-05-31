@@ -1,4 +1,4 @@
-//! Behavioral tests for the live `stream_turn` path (live turn Plan 03, deadline Plan 02).
+//! Behavioral tests for the live `stream_turn` path.
 //!
 //! These tests exercise the full live path: real SessionApi backed by SQLite,
 //! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live_with_agent
@@ -113,7 +113,7 @@ fn ordered_events() -> Vec<LlmEvent> {
 // A streaming LLM fake that yields initial events, then blocks on a
 // `tokio::sync::Notify` before emitting the remaining events. This gives
 // the test thread deterministic control over when the agent loop progresses
-// past model consumption (D-02).
+// past model consumption.
 
 struct BlockingLlmClient {
     pre_block_events: std::sync::Mutex<Option<Vec<LlmEvent>>>,
@@ -431,7 +431,7 @@ async fn stream_turn_live_with_agent_startup_failure_no_stream() {
 
     let result = stream_turn_live_with_agent(session, agent_loop, request, vec![]).await;
 
-    // Should return Err, not Ok with error events inside the stream (API-04/API-05)
+    // Should return Err, not Ok with error events inside the stream.
     assert!(
         result.is_err(),
         "startup failure should return Err, not Ok with error events in stream"
@@ -602,7 +602,7 @@ async fn stream_turn_live_with_agent_branch_populated() {
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_commit_failure_deterministic() {
-    // D-01/D-02/D-03: Deterministic commit failure using BlockingLlmClient
+    // Deterministic commit failure using BlockingLlmClient.
     // and real SQLite parent conflict.
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
@@ -664,12 +664,12 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
     let request2 = make_request_with_session("second turn", &session_id);
 
     // stream_turn_live_with_agent returning Ok guarantees prepare_live_turn completed
-    // with the stale parent (D-02 synchronization point a).
+    // with the stale parent.
     let stream2 = stream_turn_live_with_agent(session2, agent_loop2, request2, vec![])
         .await
         .expect("second turn prepare should succeed");
 
-    // Insert racing commit while BlockingLlmClient is paused (D-02 step 4)
+    // Insert racing commit while BlockingLlmClient is paused.
     let session3 = make_session(dir.path());
     let log = session3.log(&session_id).expect("log");
     let current_head = log.last().unwrap().commit_id.clone();
@@ -699,7 +699,7 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
         .expect("racing commit should succeed");
 
     // Resume BlockingLlmClient — agent finishes, commit_turn_inner finds
-    // parent mismatch (D-02 synchronization point b).
+    // parent mismatch.
     resume.notify_one();
 
     // Collect second turn's events
@@ -759,7 +759,7 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
-    // VER-12: Receiver drop does not cancel a live turn — the background
+    // Receiver drop does not cancel a live turn; the background
     // task completes and commits despite the stream being dropped.
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
@@ -771,7 +771,7 @@ async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
 
     // Extract session_id from the first event, then let the stream drop
     // when the block ends — receiver gone, background task should still
-    // commit (API-10, VER-12).
+    // commit.
     let session_id = {
         let mut stream = stream_turn_live_with_agent(session, agent_loop, request, vec![])
             .await
@@ -795,7 +795,7 @@ async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
         }
     })
     .await
-    .expect("background task should commit after receiver drop (VER-12)");
+    .expect("background task should commit after receiver drop");
 }
 
 /// Many small token events to fill the bounded public channel when the

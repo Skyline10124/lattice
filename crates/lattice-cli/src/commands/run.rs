@@ -8,10 +8,9 @@
 //! # JSONL mode (`--json`)
 //!
 //! `--json` emits one `TurnEvent` JSON object per line on stdout,
-//! terminated by `\n`. This is an alpha behavior change from the v1.1
-//! pretty-printed `RunTurnResult`. Human status lines and verbose epilogue
-//! are suppressed in JSON mode. JSONL emits public `TurnEvent` values as
-//! received, including `ReasoningDelta` when present (D-D3 / D-D4).
+//! terminated by `\n`. Human status lines and verbose epilogue are suppressed
+//! in JSON mode. JSONL emits public `TurnEvent` values as received, including
+//! `ReasoningDelta` when present.
 //!
 //! # Exit codes
 //!
@@ -407,7 +406,7 @@ fn render_verbose_epilogue<WErr: Write>(
     Ok(())
 }
 
-/// Execute the v1.1 `run` command.
+/// Execute the `run` command.
 pub async fn run(
     prompt: String,
     model: Option<String>,

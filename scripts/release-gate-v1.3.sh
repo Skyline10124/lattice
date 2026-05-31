@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/release-gate-v1.3.sh — v1.3-alpha offline release gate (D-08, VER-25, DOG-01, DOG-05)
+# scripts/release-gate-v1.3.sh — v1.3-alpha offline release gate
 #
 # FAIL-FAST: `set -euo pipefail` means the first failing step terminates the gate
 # immediately. This is intentional — a broken fmt/clippy/test run should not be
@@ -7,18 +7,16 @@
 # in order.
 #
 # NOT CALLED: scripts/release-gate.sh
-#   The v1.1 gate runs `cargo test -p lattice-tools`, but the package was renamed
-#   to `lattice-tooling`. The v1.3 gate supersedes it by targeting the LATTICE and
-#   CEP crates explicitly. Do not source or call the v1.1 file.
+#   The older gate targets stale package names. This gate supersedes it by
+#   targeting the current LATTICE and CEP crates explicitly.
 #
 # LOC BUDGET: source-loc-budget.sh is called with --max 60000.
-#   Current measured source LOC is ~52-53k (RESEARCH Pitfall 4). The v1.1 default
-#   of 20k is far below reality. Cap is raised to 60k for alpha; revisit for beta.
+#   Current measured source LOC is ~52-53k. The older default of 20k is far below
+#   reality. Cap is raised to 60k for alpha; revisit for beta.
 #   The check is advisory — gate output shows current totals for tracking.
 #
 # NO REAL-LLM STEPS: this gate is fully offline. No API keys, no model calls.
-#   The Layer-2 real-LLM checklist and Layer-3 walkthrough are manual artifacts
-#   in scripts/ and docs/ respectively (see docs/v1.3-alpha-walkthrough.md).
+#   Real-provider checks remain manual artifacts in scripts/ and docs/.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,22 +44,34 @@ echo ""
 # scope is deterministic. `lattice-tools` is the old stale name — this gate
 # always uses the correct package name `lattice-tooling`.
 
-echo "==> [3/9] CEP protocol + executor tests"
+echo "==> [3/9] CEP crate tests"
 
-echo "  --> cep-protocol"
-cargo test -p cep-protocol
+echo "  --> lattice-cep-protocol"
+cargo test -p lattice-cep-protocol
 echo ""
 
-echo "  --> cep-executor: guard_decide_fuzz"
-cargo test -p cep-executor guard_decide_fuzz
+echo "  --> lattice-cep-catalog"
+cargo test -p lattice-cep-catalog
 echo ""
 
-echo "  --> cep-executor: cep_warn_harness"
-cargo test -p cep-executor cep_warn_harness
+echo "  --> lattice-cep-dispatch"
+cargo test -p lattice-cep-dispatch
 echo ""
 
-echo "  --> cep-executor: remaining tests"
-cargo test -p cep-executor
+echo "  --> lattice-cep-audit"
+cargo test -p lattice-cep-audit
+echo ""
+
+echo "  --> lattice-cep-native: guard_decide_fuzz"
+cargo test -p lattice-cep-native guard_decide_fuzz
+echo ""
+
+echo "  --> lattice-cep-native: cep_warn_harness"
+cargo test -p lattice-cep-native cep_warn_harness
+echo ""
+
+echo "  --> lattice-cep-native: remaining tests"
+cargo test -p lattice-cep-native
 echo ""
 
 # ── Step 4: lattice-agent ─────────────────────────────────────────────────────
@@ -70,20 +80,20 @@ cargo test -p lattice-agent --features test-utils
 echo ""
 
 # ── Step 5: lattice-api dogfood suite ────────────────────────────────────────
-# Runs the DOG-04 impact matrix, cep_mode integration, and VER-25 Layer-1 e2e.
+# Runs the impact matrix, cep_mode integration, and fake-LLM end-to-end test.
 # All offline; no model calls.
 
 echo "==> [5/9] lattice-api dogfood suite"
 
-echo "  --> dogfood_impact (DOG-04 production-class matrix)"
+echo "  --> dogfood_impact (production-class matrix)"
 cargo test -p lattice-api dogfood_impact
 echo ""
 
-echo "  --> cep_mode_integration (VER-23 / LEG-02)"
+echo "  --> cep_mode_integration"
 cargo test -p lattice-api cep_mode_integration
 echo ""
 
-echo "  --> release_e2e_criterion_8 (VER-25 Layer-1 fake-LLM e2e)"
+echo "  --> release_e2e_criterion_8 (fake-LLM e2e)"
 cargo test -p lattice-api release_e2e_criterion_8
 echo ""
 
@@ -103,8 +113,7 @@ cargo test -p lattice-cli
 echo ""
 
 # ── Step 7: Leaf regression crates ────────────────────────────────────────────
-# These were skipped by the v1.1 gate (it ran lattice-tools which doesn't exist).
-# Included here as a baseline regression net.
+# Included here as a baseline regression net for leaf crates.
 
 echo "==> [7/9] Leaf crate regression tests"
 
@@ -120,14 +129,10 @@ echo "  --> lattice-profile"
 cargo test -p lattice-profile
 echo ""
 
-echo "  --> lattice-hooks"
-cargo test -p lattice-hooks
-echo ""
-
 # ── Step 8: Sub-check scripts ─────────────────────────────────────────────────
 echo "==> [8/9] Sub-check scripts (CEP boundary + LOC budget)"
 
-echo "  --> scripts/cep-boundary-check.sh (DOG-01)"
+echo "  --> scripts/cep-boundary-check.sh"
 scripts/cep-boundary-check.sh
 echo ""
 
@@ -137,8 +142,8 @@ echo "  --> scripts/source-loc-budget.sh --max 60000 (advisory)"
 scripts/source-loc-budget.sh --max 60000 || true
 echo ""
 
-# ── Step 9: cep doctor self-check (DOG-05) ─────────────────────────────────
-echo "==> [9/9] cargo run -p lattice-cli -- cep doctor (DOG-05)"
+# ── Step 9: cep doctor self-check ─────────────────────────────────────────
+echo "==> [9/9] cargo run -p lattice-cli -- cep doctor"
 cargo run -p lattice-cli -- cep doctor
 echo ""
 

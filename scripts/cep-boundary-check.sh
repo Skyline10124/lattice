@@ -5,8 +5,8 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/cep-boundary-check.sh
 
-Phase 20 CEP boundary gate:
-  - lattice-agent must not depend on cep-executor or lattice-tooling
+CEP boundary gate:
+  - lattice-agent must not depend on lattice-cep-native or lattice-tooling
   - active source must not reintroduce legacy executor bypass symbols
 
 Scans Cargo.toml manifests, crates/*/src/**/*.rs, and crate integration tests.
@@ -38,22 +38,23 @@ print_group() {
   fi
 }
 
-# Narrow allowlists documented per Phase 20 D-18 / D-23.
+# Narrow allowlists for symbols that are intentionally kept behind native CEP
+# handlers or test-only projections.
 DEFAULT_TOOL_EXECUTOR_ALLOWLIST=(
-  'crates/cep-executor/src/executor/'
-  'crates/cep-executor/src/legacy_backend.rs'
-  'crates/cep-executor/src/lib.rs'
+  'crates/lattice-cep-native/src/executor/'
+  'crates/lattice-cep-native/src/legacy_backend.rs'
+  'crates/lattice-cep-native/src/lib.rs'
 )
 
 DEFAULT_TOOL_DEFINITIONS_ALLOWLIST=(
-  'crates/cep-executor/src/tool_definitions.rs'
-  'crates/cep-executor/src/lib.rs'
+  'crates/lattice-cep-native/src/tool_definitions.rs'
+  'crates/lattice-cep-native/src/lib.rs'
   'crates/lattice-api/tests/usage_turn.rs'
 )
 
 COMPOSITE_EXECUTOR_ALLOWLIST=(
-  'crates/cep-executor/src/registry.rs'
-  'crates/cep-executor/src/transport.rs'
+  'crates/lattice-cep-native/src/registry.rs'
+  'crates/lattice-cep-native/src/transport.rs'
 )
 
 filter_allowlist() {
@@ -78,12 +79,11 @@ filter_allowlist() {
 
 scan_source() {
   pattern="$1"
-  rg -n --hidden \
-    --glob '!target/**' \
-    --glob '!.planning/**' \
-    --glob 'crates/*/src/**/*.rs' \
-    --glob 'crates/*/tests/**/*.rs' \
-    "$pattern" crates 2>/dev/null || true
+  grep -RInE \
+    --include='*.rs' \
+    --exclude-dir=target \
+    --exclude-dir=.planning \
+    "$pattern" crates/*/src crates/*/tests 2>/dev/null || true
 }
 
 # ── Dependency graph (cargo metadata) ────────────────────────────────────────
@@ -101,7 +101,7 @@ else
         .packages[]
         | select(.name == "lattice-agent")
         | .dependencies[]
-        | select(.name == "cep-executor" or .name == "lattice-tooling")
+        | select(.name == "lattice-cep-native" or .name == "lattice-tooling")
         | "lattice-agent -> \(.name)"
       ' 2>/dev/null || true
     )
@@ -109,7 +109,7 @@ else
 fi
 
 manifest_forbidden=$(
-  rg -n 'cep-executor|lattice-tooling' crates/lattice-agent/Cargo.toml 2>/dev/null || true
+  grep -nE 'lattice-cep-native|lattice-tooling' crates/lattice-agent/Cargo.toml 2>/dev/null || true
 )
 
 graph_output=""
@@ -150,10 +150,10 @@ print_group "default_tool_definitions outside allowlisted fixtures" "$default_to
 # ── Legacy ToolExecutor re-export as agent-facing seam ───────────────────────
 
 tool_executor_reexport_hits=$(
-  rg -n --hidden \
-    --glob '!target/**' \
-    --glob '!.planning/**' \
-    --glob 'crates/lattice-agent/src/**/*.rs' \
+  grep -RInE \
+    --include='*.rs' \
+    --exclude-dir=target \
+    --exclude-dir=.planning \
     'pub use .*ToolExecutor|lattice_tooling::ToolExecutor' \
     crates/lattice-agent 2>/dev/null || true
 )
@@ -177,12 +177,12 @@ CLI_PRODUCTION_ALLOWLIST=(
 )
 
 cli_bypass_hits=$(
-  rg -n --hidden \
-    --glob '!target/**' \
-    --glob '!.planning/**' \
-    --glob 'crates/lattice-cli/src/**/*.rs' \
-    --glob '!crates/lattice-cli/src/**/*_tests.rs' \
-    --glob '!crates/lattice-cli/src/**/tests/**' \
+  grep -RInE \
+    --include='*.rs' \
+    --exclude='*_tests.rs' \
+    --exclude-dir=tests \
+    --exclude-dir=target \
+    --exclude-dir=.planning \
     'DefaultToolExecutor|AgentLoop::new' \
     crates/lattice-cli/src 2>/dev/null || true
 )

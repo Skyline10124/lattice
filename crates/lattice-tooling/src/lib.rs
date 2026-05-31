@@ -1,10 +1,11 @@
 //! Shared tool types (`ToolCallExecutor`, `ToolLimits`) used by the CEP
 //! executor bridge and the agent loop.
 //!
-//! The **public tool contract** is the CEP method catalog in `cep-protocol`
-//! (CATALOG, params/result schemas, CepError, envelope/policy, and
-//! audit/provenance schemas). This crate is an internal shared-types layer,
-//! not the public API surface for callers building on CEP.
+//! The **public tool contract** is split between `lattice-cep-catalog`
+//! (CATALOG plus params/result schemas) and `lattice-cep-protocol`
+//! (errors, envelope/policy, and provenance wire schemas). This crate is an
+//! internal shared-types layer, not the public API surface for callers building
+//! on CEP.
 
 pub mod enabled_tools;
 pub mod tool_error;

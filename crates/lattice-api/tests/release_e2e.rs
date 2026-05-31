@@ -1,4 +1,4 @@
-//! VER-25 Layer-1 fake-LLM end-to-end criterion-8 demo (D-05).
+//! Fake-LLM end-to-end release scenario.
 //!
 //! Validates the full declare → command.run → patch(fail-verify) → patch(ok)
 //! cycle in a **single `run_turn`** with a multi-round `FakeStreamingLlmClient`.
@@ -10,14 +10,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use cep_executor::{AuditQueryFilters, CepAuditStore};
-use cep_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
-    OnFailure, Scope, VerifyCommand,
-};
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
+use lattice_cep_native::{AuditQueryFilters, CepAuditStore};
+use lattice_cep_protocol::envelope::{
+    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
+    OnFailure, Scope, VerifyCommand,
+};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
@@ -142,7 +142,7 @@ fn make_release_e2e_request(
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
-/// VER-25 criterion-8: single run_turn driving declare → command.run →
+/// Single `run_turn` driving declare → command.run →
 /// patch(verify-fail, RetainDiff) → patch(verify-pass) → Done(stop).
 ///
 /// Asserts:

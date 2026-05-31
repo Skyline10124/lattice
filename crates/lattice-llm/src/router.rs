@@ -1,4 +1,4 @@
-//! Fixed alias-table model router for v1.1.
+//! Fixed alias-table model router.
 //!
 //! Maps a small set of explicit model aliases to provider metadata:
 //! provider kind, provider model name, base URL, API-key environment variable,

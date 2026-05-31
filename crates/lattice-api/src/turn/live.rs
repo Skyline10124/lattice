@@ -27,10 +27,10 @@ use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
 use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionApi};
 
-/// Bounded channel capacity for the turn event stream (D-17).
+/// Bounded channel capacity for the turn event stream.
 pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
 
-/// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer (M-19b).
+/// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer.
 /// After timeout, further public events are skipped but the turn still commits.
 const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -216,9 +216,8 @@ async fn run_live_turn_task(
     // 4. Pin agent future
     let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
 
-    // 5. MANDATORY select! concurrent drain loop (D-20). Forwarding uses
-    // non-blocking / bounded-wait observer emission so a slow consumer cannot
-    // stall agent_rx drain (M-19b).
+    // 5. Concurrent drain loop. Forwarding uses non-blocking / bounded-wait
+    // observer emission so a slow consumer cannot stall agent_rx drain.
     let agent_result: AgentTurnResult = loop {
         tokio::select! {
             maybe_event = agent_rx.recv() => {
@@ -250,7 +249,7 @@ async fn run_live_turn_task(
         }
     }
 
-    // 7. Terminal event derived from AgentTurnResult.status (D-10, WR-01)
+    // 7. Terminal event derived from AgentTurnResult.status.
     if let Some(terminal) = derive_terminal_event(&agent_result) {
         observer.emit(terminal).await;
     }
@@ -269,8 +268,8 @@ async fn run_live_turn_task(
 
     let commit_input = build_commit_input(&request.input, &ctx, &agent_result);
 
-    // 10. Commit and emit result (D-13). Commit runs even when the observer
-    // stopped accepting events (M-19b).
+    // 10. Commit and emit result. Commit runs even when the observer stopped
+    // accepting events.
     match session.commit_turn(commit_input) {
         Ok(commit) => {
             let status = map_status(&agent_result.status);
@@ -325,12 +324,14 @@ pub(super) async fn stream_turn_live_with_agent(
         tool_definitions,
         runtime: super::cep::CepTurnRuntime::dummy(),
         cep_client: {
-            let (client, _server) = cep_executor::CepTransport::pair(1);
+            let (client, _server) = lattice_cep_native::CepTransport::pair(1);
             client
         },
-        audit: Arc::new(cep_executor::CepAuditStore::in_memory().expect("in-memory audit store")),
+        audit: Arc::new(
+            lattice_cep_native::CepAuditStore::in_memory().expect("in-memory audit store"),
+        ),
         audit_context: Arc::new(tokio::sync::RwLock::new(
-            cep_executor::CepAuditContext::default(),
+            lattice_cep_native::CepAuditContext::default(),
         )),
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,

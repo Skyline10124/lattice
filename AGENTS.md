@@ -36,17 +36,21 @@ envelopes, policy gating, path guards, and an audit trail. The workspace
 enforces a layered internal dependency flow:
 
 ```
-Layer 0 (leaf):  cep-protocol   lattice-llm   lattice-session   lattice-hooks
-Layer 1:         lattice-profile(→protocol)  lattice-tooling(→llm)  lattice-agent(→llm,session)
-Layer 2:         cep-executor(→protocol, llm, tooling)
-Layer 3:         lattice-api(→ all of the above)
-Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
+Layer 0 (leaf):  lattice-cep-protocol   lattice-llm   lattice-session
+Layer 1:         lattice-cep-catalog(→protocol)  lattice-profile(→protocol)  lattice-tooling(→llm)  lattice-agent(→llm,session)
+Layer 2:         lattice-cep-dispatch(→protocol,catalog)  lattice-cep-audit(→protocol,catalog)
+Layer 3:         lattice-cep-native(→protocol,catalog,dispatch,audit,llm,tooling)
+Layer 4:         lattice-api(→ all of the above)
+Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 ```
 
 | Crate | Role |
 |---|---|
-| `cep-protocol` | Pure CEP data layer: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, typed method catalog (`CATALOG`), policy hook types. No I/O, no tokio. |
-| `cep-executor` | CEP **server-side runtime**: in-process JSON-RPC `transport`, `MethodRegistry`, native method `handlers`, `policy` engine, `guard` (path-scope), `verify` (post-mutation), `audit` store, envelope store. Low-level `executor/` and `edit/` helpers are private implementation details behind native handlers. |
+| `lattice-cep-protocol` | Pure CEP wire/data contract: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, policy hook types, provenance wire types. No I/O, no tokio. |
+| `lattice-cep-catalog` | Typed CEP methods: `CepMethod`, params/results, `MethodDescriptor`, static 14-method `CATALOG`, and schema data needed for catalog projection. |
+| `lattice-cep-dispatch` | CEP typed dispatch and in-process transport: generic `MethodRegistry`, `CepClient`/`CepTransport`, cancellation, and event sink. Does not depend on native policy/audit/effect implementations. |
+| `lattice-cep-audit` | Audit persistence: `CepAuditStore`, query filters, row model, stage labels, impact/capability labels, PROV projection, and attestation persistence. SQLite dependency is kept here. |
+| `lattice-cep-native` | Production native handlers plus the native policy, guard, effect, verify, edit, shell/web helper, envelope store, invariants, and LLM-facing tool definition projection. Low-level helpers remain crate-internal implementation details behind native handlers. |
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[cep]` policy sections), discovery, defaults |
@@ -54,7 +58,6 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
 | `lattice-api` | Thin public facade for create/open/run/stream/session; composes the per-turn CEP runtime |
 | `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor, cep, audit) |
-| `lattice-hooks` | Lifecycle hook vocabulary (turn/tool/inference/session points). **Currently has no internal consumers** — a leaf crate kept for the planned hook-dispatch integration. |
 
 ### Key Types
 
@@ -70,7 +73,7 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 
 ### CEP Method Catalog
 
-The catalog is exactly 14 methods (`cep-protocol/src/catalog.rs`):
+The catalog is exactly 14 methods (`lattice-cep-catalog/src/catalog.rs`):
 
 `workspace.read_file`, `workspace.grep`, `workspace.list_directory`,
 `workspace.find_files`, `workspace.write_file`, `workspace.patch`, `web.fetch`,
@@ -85,9 +88,9 @@ the catalog — there is no legacy `default_tool_definitions()` path.
 The main agent turn path is:
 
 1. `lattice-api` exposes `run_turn` / `stream_turn`; `stream_turn` is the single live execution core and `run_turn` drains it via `RunTurnCollector`.
-2. `turn/cep.rs` composes a **turn-scoped CEP runtime**: it builds a `MethodRegistry` (`register_production_method_registry`), a `CepTransport` server + `CepClient`, installs the policy hook from the profile `[cep]` sections, and wraps the client in a `CepExecutorAdapter`.
+2. `turn/cep.rs` composes a **turn-scoped CEP runtime**: it builds a native `MethodRegistry` (`register_production_method_registry`), a dispatch `CepTransport` server + `CepClient`, installs the policy hook from the profile `[cep]` sections, runs the server with `run_native`, and wraps the client in a `CepExecutorAdapter`.
 3. `AgentLoop` reads session state, builds messages, calls the LLM via `LlmClient`, and for each requested tool call invokes the adapter, which sends a typed CEP JSON-RPC frame over the transport.
-4. The server registry runs the method through policy → guard (path scope) → execution → verify (post-mutation), recording an audit entry; mutating methods require a prior `envelope.declare` authority.
+4. The native server lifecycle records audit start/finish and effect checks; native handlers run policy → guard (path scope) → execution → verify (post-mutation). Mutating methods require a prior `envelope.declare` authority.
 5. Turn outcomes are persisted as commits in the session graph via `SessionGraphStore`.
 6. CLI renders events and requires successful completion (exit-code semantics).
 
@@ -112,15 +115,16 @@ Use this table to skip the "which crate owns this?" exploration step.
 
 | If you're changing… | Go to | Key files |
 |---|---|---|
-| CEP protocol types (envelopes, frames, errors, JSON-RPC) | `cep-protocol/src/` | `envelope.rs`, `frame.rs`, `error.rs`, `jsonrpc.rs`, `method.rs` |
-| CEP method definitions / catalog | `cep-protocol/src/` | `catalog.rs`, `methods/{workspace,command,external,session,envelope}.rs` |
-| Native CEP method handlers (server impls) | `cep-executor/src/handlers/` | `mutation.rs`, `command.rs`, `external.rs`, `observation.rs`, `session_state.rs`, `envelope.rs` |
-| CEP transport / registry / server wiring | `cep-executor/src/` | `transport.rs`, `registry.rs`, `native_registry.rs` |
-| Policy engine (capability/command/network/budget) | `cep-executor/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
-| Path guard / verify / audit | `cep-executor/src/` | `guard.rs`, `verify.rs`, `audit.rs`, `envelope_store.rs` |
-| Low-level executor helpers | `cep-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs`, `path_guard.rs`, `render.rs` |
-| Edit/diff application logic | `cep-executor/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
-| LLM-facing tool schema generation | `cep-executor/src/` | `tool_definitions.rs` |
+| CEP protocol types (envelopes, frames, errors, JSON-RPC, policy seam, provenance wire types) | `lattice-cep-protocol/src/` | `capability.rs`, `envelope.rs`, `frame.rs`, `error.rs`, `jsonrpc.rs`, `policy.rs`, `provenance.rs` |
+| CEP method definitions / catalog | `lattice-cep-catalog/src/` | `catalog.rs`, `method.rs`, `methods/{workspace,command,external,session,envelope,audit}.rs` |
+| CEP generic dispatch / transport | `lattice-cep-dispatch/src/` | `registry.rs`, `transport.rs` |
+| CEP audit persistence / provenance projection | `lattice-cep-audit/src/` | `audit.rs`, `provenance/{attestation,canonicalize,projector}.rs` |
+| Native CEP method handlers (server impls) | `lattice-cep-native/src/handlers/` | `mutation.rs`, `command.rs`, `external.rs`, `observation.rs`, `session_state.rs`, `envelope.rs`, `audit.rs` |
+| Policy engine (capability/command/network/budget) | `lattice-cep-native/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
+| Path guard / verify / effect / envelope lifecycle | `lattice-cep-native/src/` | `guard_l1.rs`, `verify.rs`, `effect/`, `envelope_store.rs`, `transport.rs` |
+| Low-level native helpers | `lattice-cep-native/src/executor/` | `shell.rs`, `web.rs`, `render.rs` |
+| Edit/diff application logic | `lattice-cep-native/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
+| LLM-facing tool schema generation | `lattice-cep-native/src/` | `tool_definitions.rs` |
 | Enabled-tools resolution | `lattice-tooling/src/` | `enabled_tools.rs` |
 | Provider protocol adapters | `lattice-llm/src/providers/` | `anthropic.rs`, `openai.rs`, `gemini.rs` |
 | SSE streaming parser | `lattice-llm/src/` | `sse.rs`, `client.rs` |
@@ -149,6 +153,7 @@ The following capabilities are deferred beyond the current release:
 - **Rich prompt compilation (deferred)** — Layer priorities, token budgets, and provider-specific assembly.
 - **Redesigned security model (deferred)** — A new sandbox and approval system on the simplified API/session substrate.
 - **Plugins and orchestration (deferred)** — Plugin contracts and DAG runners for multi-agent coordination.
+- **Lifecycle hooks (deferred)** — The unused `lattice-hooks` leaf crate was removed. Reintroduce hooks only with a concrete dispatch integration point and internal consumer.
 - **Swarm and multi-agent collaboration (deferred)** — Session-graph-based coordination features.
 
 ## Cursor Cloud specific instructions

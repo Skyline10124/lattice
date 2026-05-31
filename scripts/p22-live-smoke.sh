@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 22 live smoke: production CLI turn path with OpenAI-compatible compat:* model.
+# Live smoke for the production CLI turn path with an OpenAI-compatible model.
 #
 # Required env (values must NOT be logged):
 #   OPENAI_COMPATIBLE_API_KEY
@@ -40,7 +40,7 @@ require_env() {
   echo "OK: $1 is set"
 }
 
-echo "== P22 live smoke preflight =="
+echo "== CEP live smoke preflight =="
 require_env OPENAI_COMPATIBLE_API_KEY
 require_env OPENAI_COMPATIBLE_BASE_URL
 
@@ -59,10 +59,10 @@ model = "${MODEL}"
 
 [prompt]
 system = """
-You are executing a Phase 22 CEP live smoke test. Use tools only; keep assistant text minimal.
+You are executing a CEP live smoke test. Use tools only; keep assistant text minimal.
 
 Required sequence (do not skip or reorder):
-1. envelope.declare — intent "P22 live smoke"; WritePath smoke/**; RunCommand allowlist must include echo with args P22_SMOKE_OK; verify command: echo verify-ok (diagnostic allowlist only; never use test/true/[); expected_exit_code 0; on_failure retain_diff.
+1. envelope.declare — intent "CEP live smoke"; WritePath smoke/**; RunCommand allowlist must include echo with args P22_SMOKE_OK; verify command: echo verify-ok (diagnostic allowlist only; never use test/true/[); expected_exit_code 0; on_failure retain_diff.
 2. workspace.read_file — path smoke/fixture.txt
 3. workspace.grep — pattern "version" under smoke (use path smoke or smoke/fixture.txt)
 4. command.run — argv ["echo", "P22_SMOKE_OK"] (diagnostic)
@@ -85,7 +85,7 @@ enabled = [
 EOF
 # heredoc above is unquoted so \${MODEL} is expanded; prompt/system text has no shell expansions.
 
-PROMPT='Execute the Phase 22 smoke sequence from your system prompt now.'
+PROMPT='Execute the CEP smoke sequence from your system prompt now.'
 
 if [[ -n "${P22_SMOKE_BIN:-}" ]]; then
   # shellcheck disable=SC2206
@@ -95,10 +95,10 @@ else
   LATTICE=("${ROOT}/target/debug/lattice")
 fi
 
-echo "== P22 live smoke: resolve =="
+echo "== CEP live smoke: resolve =="
 "${LATTICE[@]}" resolve "${MODEL}" --verbose
 
-echo "== P22 live smoke: run (JSONL) =="
+echo "== CEP live smoke: run (JSONL) =="
 set +e
 (
   cd "${SMOKE_HOME}"
@@ -185,7 +185,7 @@ verify_jsonl || JSONL_FAIL=1
 verify_audit || AUDIT_FAIL=1
 
 if [[ "${RUN_EXIT}" -ne 0 ]] || [[ "${JSONL_FAIL}" -ne 0 ]] || [[ "${AUDIT_FAIL}" -ne 0 ]]; then
-  echo "P22 live smoke: FAIL (run_exit=${RUN_EXIT} jsonl=${JSONL_FAIL} audit=${AUDIT_FAIL})" >&2
+  echo "CEP live smoke: FAIL (run_exit=${RUN_EXIT} jsonl=${JSONL_FAIL} audit=${AUDIT_FAIL})" >&2
   echo "--- JSONL sample (tool + cep events) ---"
   jq -c 'select(.type | test("^(tool_call_|cep_)"))' "${JSONL}" 2>/dev/null | head -n 40 || true
   # slurp fallback for debug
@@ -193,4 +193,4 @@ if [[ "${RUN_EXIT}" -ne 0 ]] || [[ "${JSONL_FAIL}" -ne 0 ]] || [[ "${AUDIT_FAIL}
   exit 1
 fi
 
-echo "P22 live smoke: PASS"
+echo "CEP live smoke: PASS"

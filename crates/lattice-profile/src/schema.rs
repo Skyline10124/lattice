@@ -1,10 +1,10 @@
-use cep_protocol::CepMode;
+use lattice_cep_protocol::CepMode;
 use serde::{de, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
 ///
-/// Sections removed in v1.1: `[security]`, `[context]`, `[behavior]`.
+/// Removed sections: `[security]`, `[context]`, `[behavior]`.
 /// The `[tools]` section only supports explicit `enabled` — no `bundles`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -18,7 +18,7 @@ pub struct AgentProfile {
     pub cep: CepSection,
 }
 
-/// CEP `[cep]` profile section with CEP PROF-02 typed sub-tables.
+/// CEP `[cep]` profile section with typed policy sub-tables.
 ///
 /// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
 /// typed fields. Other future sub-tables (e.g. `[cep.command]`) remain in
@@ -76,7 +76,7 @@ pub struct CepNetworkSection {
     pub max_web_response_bytes: Option<usize>,
 }
 
-/// `[cep.command]` — command execution policy overrides (CEP, PROF-03).
+/// `[cep.command]` — command execution policy overrides.
 ///
 /// All fields are `Option<T>` with `#[serde(default)]` so missing fields
 /// fall back to `CommandPolicy::defaults()`. Missing `[cep.command]` entirely
@@ -110,7 +110,7 @@ pub struct CepPolicySection {
     pub path: Option<String>,
 }
 
-/// `[cep.invariants]` — invariant card directory configuration (CEP, PROF-05 / D-09).
+/// `[cep.invariants]` — invariant card directory configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CepInvariantsSection {
@@ -212,7 +212,7 @@ pub struct PromptSection {
     pub system_path: Option<String>,
 }
 
-/// v1.1 tool section: only explicit `enabled` tool names are supported.
+/// Tool section: only explicit `enabled` tool names are supported.
 ///
 /// `bundles` and any other field are rejected by `#[serde(deny_unknown_fields)]`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]

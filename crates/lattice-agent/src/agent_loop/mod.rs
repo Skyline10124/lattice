@@ -54,7 +54,7 @@ impl fmt::Debug for AgentLoopConfig {
     }
 }
 
-/// The v1.1 agent loop.
+/// The agent loop.
 ///
 /// Owns the configuration needed to execute a single turn: an LLM client and
 /// a tool executor. Call [`AgentLoop::run_turn`] to execute a turn.
@@ -72,7 +72,7 @@ impl AgentLoop {
     /// sequentially, and repeat until a final assistant response or terminal
     /// outcome.
     pub async fn run_turn(&self, request: AgentTurnRequest) -> AgentTurnResult {
-        // Compute cooperative deadline from request.timeout (D-13, deadline)
+        // Compute the cooperative deadline from request.timeout.
         let deadline = request.timeout.map(|d| Instant::now() + d);
         self.run_turn_inner(&request, None, deadline).await
     }
@@ -81,49 +81,44 @@ impl AgentLoop {
     ///
     /// Behavior is identical to [`AgentLoop::run_turn`] — same tool execution,
     /// same cancel checkpoints, same timeout shape — with one addition: every
-    /// emission site routes through `emit_agent_event` (Plan 15-02 D-12 / D-13)
-    /// so events also flow into the supplied `events` sender as they happen.
+    /// emission site routes through `emit_agent_event` so events also flow into
+    /// the supplied `events` sender as they happen.
     /// The buffered `AgentTurnResult.events` returned at the end stays
     /// complete: the live channel is a best-effort mirror, not a replacement.
     ///
     /// Drop semantics — if the receiver is dropped at any point during the
     /// turn, subsequent live `try_send`s fail and are ignored; the turn
-    /// continues normally and returns a fully populated `AgentTurnResult`
-    /// (Plan 15-02 D-12, M-19a).
+    /// continues normally and returns a fully populated `AgentTurnResult`.
     ///
     /// Cancellation — `request.cancel_flag` (set by the caller) is the sole
-    /// cancel input (Plan 15-02 D-11 / D-17). All five new cancel checkpoints
-    /// (1b, 2, 3, 4, 5) honor it identically across `run_turn` and
-    /// `run_turn_live`; the live mirror does not change cancel semantics.
+    /// cancel input. The same cancel checkpoints are honored by both
+    /// `run_turn` and `run_turn_live`; the live mirror does not change cancel
+    /// semantics.
     ///
     /// Timeout — when `request.timeout` is `Some`, a cooperative deadline is
     /// computed before entering `run_turn_inner` and threaded into both the
     /// `stream_chat().await` call and the `stream.next()` loop via
     /// `tokio::select!`. On elapse, the returned `AgentTurnResult` preserves
-    /// all partial state accumulated before the deadline fired (deadline D-13).
-    ///
-    /// Added in Plan 15-02 (D-09 / D-10). Timeout cooperative deadline added
-    /// in deadline Plan 01.
+    /// all partial state accumulated before the deadline fired.
     pub async fn run_turn_live(
         &self,
         request: AgentTurnRequest,
         events: tokio::sync::mpsc::Sender<AgentTurnEvent>,
     ) -> AgentTurnResult {
-        // Compute cooperative deadline from request.timeout (D-13, deadline)
+        // Compute the cooperative deadline from request.timeout.
         let deadline = request.timeout.map(|d| Instant::now() + d);
         self.run_turn_inner(&request, Some(&events), deadline).await
     }
 
     /// Inner turn execution (called by `run_turn` and `run_turn_live`).
     ///
-    /// `live_events` (Plan 15-02 D-10): when `Some`, every event emission site
-    /// in this function and inside `consume_model_stream` mirrors the event
-    /// onto the live channel via `emit_agent_event`; when `None`, emissions
-    /// are buffered only — preserving the previous `run_turn` shape.
+    /// `live_events`: when `Some`, every event emission site in this function
+    /// and inside `consume_model_stream` mirrors the event onto the live channel
+    /// via `emit_agent_event`; when `None`, emissions are buffered only.
     ///
-    /// `deadline` (deadline D-13): when `Some`, a cooperative deadline is
-    /// applied to both `stream_chat().await` and `stream.next()` calls. On
-    /// elapse, the function returns with all accumulated partial state preserved.
+    /// `deadline`: when `Some`, a cooperative deadline is applied to both
+    /// `stream_chat().await` and `stream.next()` calls. On elapse, the function
+    /// returns with all accumulated partial state preserved.
     async fn run_turn_inner(
         &self,
         request: &AgentTurnRequest,
@@ -183,7 +178,7 @@ impl AgentLoop {
             }
             round += 1;
 
-            // Check cancel (D-09)
+            // Check cancellation before starting the next model round.
             if let Some(flag) = &request.cancel_flag {
                 if flag.load(Ordering::Relaxed) {
                     return AgentTurnResult {
@@ -221,11 +216,9 @@ impl AgentLoop {
             )
             .await;
 
-            // Cancel checkpoint #1b (Plan 15-02 D-06): the awaited
-            // `emit_agent_event` for ModelStarted can yield; check the cancel
-            // flag here so a flip between checkpoint #1 (round top) and the
-            // actual `stream_chat` open is observed before we open the stream.
-            // No partial to preserve — `stream_chat` was never called.
+            // The awaited ModelStarted emission can yield; check cancellation
+            // here so a flip between the round-top check and stream opening is
+            // observed before opening the stream. No partial state exists yet.
             if let Some(flag) = &request.cancel_flag {
                 if flag.load(Ordering::Relaxed) {
                     return AgentTurnResult {
@@ -292,7 +285,7 @@ impl AgentLoop {
             // Handle stream outcome
             match stream_result.outcome {
                 StreamOutcome::Error(msg) => {
-                    // Preserve partial content on error (D-11, D-13)
+                    // Preserve partial content on stream error.
                     flush_partial_assistant_message(
                         &mut messages,
                         &mut all_messages,
@@ -310,7 +303,7 @@ impl AgentLoop {
                     };
                 }
                 StreamOutcome::Exhausted => {
-                    // Stream ended without Done (D-12)
+                    // Stream ended without Done.
                     flush_partial_assistant_message(
                         &mut messages,
                         &mut all_messages,
@@ -328,10 +321,10 @@ impl AgentLoop {
                     };
                 }
                 StreamOutcome::Cancelled => {
-                    // Cancel observed inside `consume_model_stream` (post-event,
-                    // pre-next-iteration). Plan 15-02 D-04: flush any partial
-                    // assistant + reasoning content via the shared helper from
-                    // Plan 15-01 D-05 (no `ModelFinished` synthesized — D-08).
+                    // Cancel observed inside `consume_model_stream` after an
+                    // event was processed and before fetching the next one.
+                    // Flush partial assistant + reasoning content without
+                    // synthesizing `ModelFinished`.
                     flush_partial_assistant_message(
                         &mut messages,
                         &mut all_messages,
@@ -349,8 +342,8 @@ impl AgentLoop {
                     };
                 }
                 StreamOutcome::Timeout => {
-                    // Cooperative deadline fired during stream.next() (deadline
-                    // D-13). Flush partial content and return with preserved state.
+                    // Cooperative deadline fired during stream.next(). Flush
+                    // partial content and return with preserved state.
                     flush_partial_assistant_message(
                         &mut messages,
                         &mut all_messages,
@@ -410,7 +403,7 @@ impl AgentLoop {
                         };
                     }
 
-                    // Tool calls present: validate all-or-nothing (D-09)
+                    // Tool calls present: validate the whole batch before executing any.
                     let mut all_valid = true;
                     let mut invalid_info: Option<String> = None;
                     let mut validated_calls: Vec<PendingToolCall> = Vec::new();
@@ -517,12 +510,9 @@ impl AgentLoop {
                         };
                     }
 
-                    // Cancel checkpoint #3 (Plan 15-02 D-06 / D-08): the
-                    // assistant tool-call message is committed above; observe
-                    // cancel here so the transcript keeps the assistant
-                    // message but no tool result messages. Done's "model
-                    // response was finalized" semantics is preserved before
-                    // this branch.
+                    // The assistant tool-call message is committed above.
+                    // Observe cancellation here so the transcript keeps that
+                    // assistant message but no tool result messages.
                     if let Some(flag) = &request.cancel_flag {
                         if flag.load(Ordering::Relaxed) {
                             return AgentTurnResult {
@@ -537,14 +527,13 @@ impl AgentLoop {
                         }
                     }
 
-                    // Execute validated tool calls sequentially (D-10, AGENT-07)
+                    // Execute validated tool calls sequentially.
                     for call in &validated_calls {
-                        // Cancel checkpoint #4 (Plan 15-02 D-06): observe cancel
-                        // before emitting `ToolCallStarted` for the next tool.
+                        // Observe cancellation before emitting `ToolCallStarted`
+                        // for the next tool.
                         // Skips the rest of the batch on cancel; no
                         // `ToolCallStarted` for the skipped tool, prior tools'
-                        // events / `tool_summaries` / messages are preserved
-                        // (D-07).
+                        // events / `tool_summaries` / messages are preserved.
                         if let Some(flag) = &request.cancel_flag {
                             if flag.load(Ordering::Relaxed) {
                                 return AgentTurnResult {
@@ -629,7 +618,8 @@ impl AgentLoop {
                             cep_error,
                         });
 
-                        // Full tool result as GraphMessage (D-23..D-26: no summarization)
+                        // Store the full tool result as a GraphMessage; commit-time
+                        // summarization belongs outside the agent loop.
                         let tool_msg = GraphMessage {
                             role: "tool".to_string(),
                             content: tool_content,
@@ -652,12 +642,11 @@ impl AgentLoop {
                             };
                         }
 
-                        // Cancel checkpoint #5 (Plan 15-02 D-06 / D-07): the
-                        // just-finished tool's `ToolCallStarted` /
+                        // The just-finished tool's `ToolCallStarted` /
                         // `ToolCallFinished` events, summary, and tool message
                         // are all committed above. On cancel, exit before
                         // the next iteration starts another tool — already
-                        // in-flight tools are never aborted (D-07).
+                        // in-flight tools are never aborted.
                         if let Some(flag) = &request.cancel_flag {
                             if flag.load(Ordering::Relaxed) {
                                 return AgentTurnResult {
@@ -699,7 +688,7 @@ enum StreamOutcome {
     Error(String),
     /// Caller requested cancellation while the stream was still producing
     /// events. Observed via the post-event cancel-flag check inside
-    /// `consume_model_stream` (Plan 15-02 D-01..D-04). Surrounding
+    /// `consume_model_stream`. Surrounding
     /// `StreamResult` preserves accumulated `assistant_content` /
     /// `reasoning_content` / `tool_calls` so the upstream `Cancelled` arm in
     /// `run_turn_inner` can flush partial content with the same shape used by
@@ -709,7 +698,7 @@ enum StreamOutcome {
     Cancelled,
     /// Stream ended without receiving a `Done` event.
     Exhausted,
-    /// Cooperative deadline fired during `stream.next()` (deadline D-13).
+    /// Cooperative deadline fired during `stream.next()`.
     /// Accumulated partial state is preserved in the surrounding `StreamResult`.
     Timeout,
 }
@@ -731,7 +720,7 @@ impl AgentLoop {
     /// tool calls, usage, and the terminal outcome (Done, Error, Cancelled,
     /// or Exhausted).
     ///
-    /// Plan 15-02 widens this with two optional side-channels:
+    /// The stream consumer accepts two optional side-channels:
     ///
     /// - `live` — when `Some`, every Token/Reasoning emission is mirrored onto
     ///   the live `mpsc::Sender` via `emit_agent_event`. Buffered `events`
@@ -740,15 +729,14 @@ impl AgentLoop {
     ///   each non-`Done` `LlmEvent` match arm body completes (after the per-event
     ///   emit, after pending-call mutations) and *before* the next
     ///   `stream.next().await`. On observed cancel, returns immediately with
-    ///   `outcome: StreamOutcome::Cancelled` and accumulated state preserved
-    ///   (D-02). `Done` is intentionally never a cancel point — the upstream
-    ///   loop finalizes the model response before any cancel branch (D-03).
+    ///   `outcome: StreamOutcome::Cancelled` and accumulated state preserved.
+    ///   `Done` is intentionally never a cancel point: the upstream loop
+    ///   finalizes the model response before any cancel branch.
     ///
     /// deadline adds:
     /// - `deadline` — when `Some`, each `stream.next()` is raced against the
     ///   remaining time via `tokio::select!`. On timeout, returns with
-    ///   `outcome: StreamOutcome::Timeout` and all accumulated state
-    ///   preserved (D-13).
+    ///   `outcome: StreamOutcome::Timeout` and all accumulated state preserved.
     async fn consume_model_stream(
         &self,
         mut stream: lattice_llm::LlmStream,
@@ -764,7 +752,7 @@ impl AgentLoop {
         let mut finish_reason: Option<String> = None;
 
         loop {
-            // Fetch next event, racing against deadline when configured (D-13).
+            // Fetch the next event, racing against the deadline when configured.
             let next_event = match await_with_deadline(stream.next(), deadline).await {
                 Ok(event) => event,
                 Err(DeadlineElapsed) => {
@@ -783,7 +771,7 @@ impl AgentLoop {
             let event = match next_event {
                 Some(ev) => ev,
                 None => {
-                    // Stream exhausted without Done (D-12)
+                    // Stream exhausted without Done.
                     return StreamResult {
                         assistant_content,
                         reasoning_content,
@@ -913,7 +901,7 @@ impl AgentLoop {
                         outcome: StreamOutcome::Error(message),
                     };
                 }
-                // No-op events (D-04, D-05)
+                // No-op events that do not affect accumulated turn state.
                 lattice_llm::LlmEvent::Started
                 | lattice_llm::LlmEvent::Citation { .. }
                 | lattice_llm::LlmEvent::Signature { .. }
@@ -921,11 +909,9 @@ impl AgentLoop {
                 | lattice_llm::LlmEvent::SafetyRating { .. } => {}
             }
 
-            // Cancel checkpoint #2 (Plan 15-02 D-02 / D-06): observe cancel
-            // *after* the per-event emit + pending-call mutations and *before*
-            // the next `stream.next().await`. Done is excluded above (D-03);
-            // malformed-toolcall Error early-returns are also above (they keep
-            // their pre-existing inline StreamResult shape).
+            // Observe cancellation after the per-event emit and pending-call
+            // mutations, but before the next `stream.next().await`. Done is
+            // excluded above; malformed-toolcall error returns are also above.
             if let Some(flag) = cancel_flag {
                 if flag.load(Ordering::Relaxed) {
                     return StreamResult {
@@ -942,7 +928,7 @@ impl AgentLoop {
     }
 
     /// Build the initial message list from the transcript, system prompt,
-    /// and current user input (D-11).
+    /// and current user input.
     fn build_messages(&self, request: &AgentTurnRequest) -> Vec<GraphMessage> {
         let mut messages = Vec::new();
 
@@ -983,13 +969,13 @@ impl AgentLoop {
 /// `buffered` so `AgentTurnResult.events` stays complete regardless of whether
 /// a live receiver is attached or has already been dropped.
 ///
-/// The live mirror is best-effort and non-blocking (M-19a): `try_send` never
+/// The live mirror is best-effort and non-blocking: `try_send` never
 /// waits on a full bounded channel. `TokenDelta` / `ReasoningDelta` may be
 /// dropped under backpressure; lifecycle events use the same non-blocking path
 /// but remain complete in `buffered` for `AgentTurnResult.events`.
 ///
-/// Added in Plan 15-02 (D-12 / D-13) so every emission site in
-/// `run_turn_inner` and `consume_model_stream` routes through one path.
+/// Every emission site in `run_turn_inner` and `consume_model_stream` routes
+/// through this helper.
 async fn emit_agent_event(
     buffered: &mut Vec<AgentTurnEvent>,
     live: Option<&tokio::sync::mpsc::Sender<AgentTurnEvent>>,
@@ -1023,7 +1009,7 @@ async fn await_with_deadline<T>(
 
 /// Append a partial assistant message to both the per-turn `messages` buffer and
 /// the `all_messages` accumulator when an LLM stream terminates before a clean
-/// `Done` (Error/Exhausted, and in Plan 15-02 also Cancelled).
+/// `Done` (Error, Exhausted, or Cancelled).
 ///
 /// Returns early without mutating either buffer when both `assistant_content`
 /// and `reasoning_content` are empty. Otherwise constructs a single
@@ -1031,8 +1017,8 @@ async fn await_with_deadline<T>(
 /// in `Some(...)` only when non-empty, then pushes a clone to `messages` and
 /// the original to `all_messages`.
 ///
-/// Extracted in Plan 15-01 (D-05) to deduplicate the Error/Exhausted partial
-/// flush blocks before the new Cancelled arm becomes a third user.
+/// Centralizes the partial flush logic shared by error, exhaustion, and
+/// cancellation paths.
 fn flush_partial_assistant_message(
     messages: &mut Vec<GraphMessage>,
     all_messages: &mut Vec<GraphMessage>,

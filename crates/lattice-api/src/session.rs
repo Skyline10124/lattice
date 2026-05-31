@@ -1,4 +1,4 @@
-//! v1.1 API session types.
+//! API session types.
 //!
 //! `SessionApi` wraps [`SqliteSessionGraphStore`] to provide an explicit
 //! durable session API for create/open/status/list/log/checkout/branch/diff/

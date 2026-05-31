@@ -1,24 +1,25 @@
 use std::sync::Arc;
 
-use cep_executor::{CepTransport, MethodRegistry, ServerRunConfig};
-use cep_protocol::catalog;
-use cep_protocol::envelope::ImpactKind;
-use cep_protocol::error::{
+use lattice_agent::{ToolCallExecutor, ToolExecutionError};
+use lattice_cep_catalog::catalog;
+use lattice_cep_catalog::methods::command::Run;
+use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lattice_cep_catalog::methods::workspace::{ReadFile, ReadFileResult};
+use lattice_cep_catalog::CepMethod;
+use lattice_cep_native::{CepTransport, MethodRegistry, ServerRunConfig};
+use lattice_cep_protocol::envelope::ImpactKind;
+use lattice_cep_protocol::error::{
     jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
     PermissionErrorData, StateErrorData, ValidationErrorData,
 };
-use cep_protocol::methods::command::Run;
-use cep_protocol::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use cep_protocol::methods::workspace::{ReadFile, ReadFileResult};
-use cep_protocol::{CepError, CepErrorCode, CepMethod, Retriability};
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
+use lattice_cep_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_llm::{FunctionCall, ToolCall};
 
 use super::cep::CepExecutorAdapter;
 
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
-    F: Fn(TodoWriteParams, cep_executor::HandlerContext) -> Fut + Send + Sync + 'static,
+    F: Fn(TodoWriteParams, lattice_cep_native::HandlerContext) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<TodoWriteResult, CepError>> + Send + 'static,
 {
     let mut registry = MethodRegistry::new();
@@ -341,11 +342,11 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use cep_executor::SEMANTIC_STAGE_NATIVE;
-    use cep_protocol::envelope::Capability;
-    use cep_protocol::methods::external::Fetch;
-    use cep_protocol::methods::session::TodoWrite;
-    use cep_protocol::methods::workspace::ReadFile;
+    use lattice_cep_catalog::methods::external::Fetch;
+    use lattice_cep_catalog::methods::session::TodoWrite;
+    use lattice_cep_catalog::methods::workspace::ReadFile;
+    use lattice_cep_native::SEMANTIC_STAGE_NATIVE;
+    use lattice_cep_protocol::envelope::Capability;
     use lattice_profile::CepNetworkSection;
     use tempfile::TempDir;
 
@@ -404,9 +405,9 @@ mod cep_native_registry {
 
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
-        use cep_protocol::methods::workspace::ReadFileParams;
         use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;
+        use lattice_cep_catalog::methods::workspace::ReadFileParams;
 
         use crate::turn::cep::build_production_turn_deps;
 
@@ -458,13 +459,13 @@ mod cep_native_registry {
 #[cfg(test)]
 mod attestation_and_dispatch {
     use super::*;
-    use cep_executor::canonicalize_in_toto_statement;
-    use cep_protocol::error::jsonrpc;
-    use cep_protocol::methods::audit::{AuditReplay, AuditReplayParams};
-    use cep_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
-    use cep_protocol::methods::workspace::{ReadFile, ReadFileParams};
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
+    use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+    use lattice_cep_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
+    use lattice_cep_catalog::methods::workspace::{ReadFile, ReadFileParams};
+    use lattice_cep_native::canonicalize_in_toto_statement;
+    use lattice_cep_protocol::error::jsonrpc;
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
@@ -581,7 +582,7 @@ mod attestation_and_dispatch {
             .attestation_for_turn(&turn_id)
             .expect("lookup")
             .expect("stored row");
-        let stored_stmt: cep_protocol::provenance::InTotoStatement =
+        let stored_stmt: lattice_cep_protocol::provenance::InTotoStatement =
             serde_json::from_str(&stored.statement_json).expect("stored json");
         let replay_stmt = replay.statement.expect("replay statement");
 

@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "LATTICE v1.1 LLM vocabulary and functional call facade"
+description = "LATTICE LLM vocabulary and function-call facade"
 
 [dependencies]
 serde = { workspace = true }

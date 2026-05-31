@@ -1,14 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/lattice-hooks",
     "crates/lattice-llm",
     "crates/lattice-api",
     "crates/lattice-session",
     "crates/lattice-agent",
     "crates/lattice-tooling",
-    "crates/cep-protocol",
-    "crates/cep-executor",
+    "crates/lattice-cep-protocol",
+    "crates/lattice-cep-catalog",
+    "crates/lattice-cep-dispatch",
+    "crates/lattice-cep-audit",
+    "crates/lattice-cep-native",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -22,14 +24,16 @@ authors = ["LATTICE Contributors"]
 
 [workspace.dependencies]
 # Internal crates
-lattice-hooks    = { path = "crates/lattice-hooks" }
 lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lattice-tooling  = { path = "crates/lattice-tooling" }
-cep-protocol  = { path = "crates/cep-protocol" }
-cep-executor  = { path = "crates/cep-executor" }
+lattice-cep-protocol = { path = "crates/lattice-cep-protocol" }
+lattice-cep-catalog  = { path = "crates/lattice-cep-catalog" }
+lattice-cep-dispatch = { path = "crates/lattice-cep-dispatch" }
+lattice-cep-audit    = { path = "crates/lattice-cep-audit" }
+lattice-cep-native   = { path = "crates/lattice-cep-native" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 

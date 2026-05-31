@@ -13,13 +13,13 @@
 ## MEDIUM
 
 ### M-24-01: `host_pattern` 字段名暗示通配符但实际只做精确匹配 — `api-shape`
-- **位置**: `crates/cep-executor/src/effect/region.rs:270-272`、`crates/cep-protocol/src/envelope.rs`（`FetchUrl { host_pattern }` 定义）
+- **位置**: `crates/lattice-cep-native/src/effect/region.rs:270-272`、`crates/lattice-cep-protocol/src/envelope.rs`（`FetchUrl { host_pattern }` 定义）
 - **问题**: `AuthorizedEffectRegion::contains` 对 `ExternalObservation` 的 host 检查是 `h == host`（精确匹配），但 `FetchUrl` capability 字段名为 `host_pattern`，暗示 glob/通配符支持。若 capability 声明 `host_pattern: "*.example.com"`，实际 `api.example.com` 不会匹配。
 - **当前状态**: 当前无通配符 host 的使用场景，行为正确但字段名误导。
 - **计划**: 重命名 `host_pattern` → `host`（破坏性改动需协调 envelope 序列化），或实现简单通配符匹配（`*.example.com` → suffix match）。排期取决于是否有多 host 的 `web.fetch` envelope 需求。
 
 ### M-24-02: `capture_workspace_snapshot` 同步无界遍历阻塞 async runtime — `performance`
-- **位置**: `crates/cep-executor/src/handlers/command.rs:365-442`
+- **位置**: `crates/lattice-cep-native/src/handlers/command.rs:365-442`
 - **问题**: 对整个 project root 做同步 `std::fs::read_dir` + `std::fs::read` 递归遍历（仅排除 `.git`/`target`），无深度/文件数上限。每次 `WorkspaceMutation` 命令调用两次（pre + post snapshot）。大仓库会阻塞 tokio worker thread。
 - **当前状态**: v1.3-alpha CLI 场景工作区规模可控，非 bug。
 - **计划**: `tokio::task::spawn_blocking` 包装 + 加深度/文件数上限；或改用 mtime 比较 + 按需 hash。与 command handler async 签名无关（snapshot 函数独立）。

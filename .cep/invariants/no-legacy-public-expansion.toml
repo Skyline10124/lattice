@@ -1,10 +1,10 @@
 id = "NO-LEGACY-EXPANSION"
 title = "No legacy executor public surface expansion"
-anchor = { type = "glob", value = "crates/cep-executor/src/executor/**/*.rs" }
+anchor = { type = "glob", value = "crates/lattice-cep-native/src/executor/**/*.rs" }
 
 [[forbidden]]
 category = "public_api_expansion"
-reason = "The Phase 20 legacy executor backend is a private bridge scheduled for removal; new functionality must be routed through native CEP method handlers in handlers/ rather than expanding the legacy public surface"
+reason = "The retired executor backend is a private bridge scheduled for removal; new functionality must be routed through native CEP method handlers in handlers/ rather than expanding the retired public surface"
 
 [[opaque]]
-text = "If a new CEP method requires filesystem access, add a native handler in cep-executor/src/handlers/ and register it in native_registry.rs; do not extend the legacy executor module"
+text = "If a new CEP method requires filesystem access, add a native handler in lattice-cep-native/src/handlers/ and register it in native_registry.rs; do not extend the legacy executor module"

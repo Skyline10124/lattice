@@ -1,4 +1,4 @@
-//! `lattice cep` — CEP inspection and self-check subcommands (CLI3-01, CLI3-03).
+//! `lattice cep` — CEP inspection and self-check subcommands.
 //!
 //! - `cep status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
 //!   the latest envelope.declare fields, recent calls, and last guard verdict.
@@ -9,17 +9,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use cep_executor::invariants::loader::load_cards_from_dir;
-use cep_executor::invariants::resolve_invariants_dir;
-use cep_executor::{
+use clap::Subcommand;
+use colored::Colorize;
+use lattice_cep_catalog::catalog::catalog;
+use lattice_cep_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
+use lattice_cep_native::invariants::loader::load_cards_from_dir;
+use lattice_cep_native::invariants::resolve_invariants_dir;
+use lattice_cep_native::{
     register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
     CepTurnContext, MethodRegistry, ServerRunConfig,
 };
-use cep_protocol::catalog::catalog;
-use cep_protocol::envelope::BaseExecutionEnvelope;
-use cep_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
-use clap::Subcommand;
-use colored::Colorize;
+use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
 
 /// `lattice cep` subcommand group.
 #[derive(Subcommand)]
@@ -92,7 +92,7 @@ pub(crate) fn collect_status(project_root: &Path) -> Result<CepStatusOutput> {
     let store =
         CepAuditStore::open(&db_path).map_err(|e| anyhow::anyhow!("open audit store: {e}"))?;
 
-    // Latest envelope.declare row — raw metadata_json only (D-02 review decision).
+    // Latest envelope.declare row — raw metadata_json only.
     let declare_rows = store
         .query_rows(&AuditQueryFilters {
             method: Some("envelope.declare".to_string()),
@@ -241,7 +241,7 @@ pub(crate) fn run_doctor_inner(invariants_dir: &Path, json: bool) -> Result<()> 
         }
     }
 
-    // 3. Invariant cards — parse errors fail doctor (D-12).
+    // 3. Invariant cards — parse errors fail doctor.
     let card_ids: Vec<String> = match load_cards_from_dir(invariants_dir) {
         Ok(cards) if cards.is_empty() => {
             ok_items.push("invariants: ok_empty (no cards)".to_string());
@@ -263,7 +263,7 @@ pub(crate) fn run_doctor_inner(invariants_dir: &Path, json: bool) -> Result<()> 
         }
     };
 
-    // 4. submit_intent smoke in isolated temp workspace (D-03).
+    // 4. submit_intent smoke in isolated temp workspace.
     match run_submit_intent_smoke() {
         Ok(()) => ok_items.push("submit_intent smoke: ok (unknowns == 0)".to_string()),
         Err(e) => issues.push(format!("submit_intent smoke: {e}")),
@@ -314,7 +314,7 @@ fn emit_doctor_result(
     Ok(())
 }
 
-/// Run an isolated submit_intent smoke using an in-memory CEP runtime (D-03).
+/// Run an isolated submit_intent smoke using an in-memory CEP runtime.
 ///
 /// Uses the current directory as the project root so that `canonicalize` succeeds.
 /// The submit is for a "read" action on `Cargo.toml` — a file that exists in every
@@ -397,9 +397,9 @@ async fn submit_intent_smoke_async() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cep_executor::audit::{AuditOutcome, CallAuditMetadata};
-    use cep_executor::{CepAuditContext, CepAuditStore};
     use clap::Parser;
+    use lattice_cep_native::audit::{AuditOutcome, CallAuditMetadata};
+    use lattice_cep_native::{CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
 
     // -- Clap surface tests --
@@ -456,7 +456,7 @@ mod tests {
             model_id: "test-model".into(),
             runtime_version: "test".into(),
         };
-        // envelope.declare row with intent/capabilities in metadata_json (D-02)
+        // envelope.declare row with intent/capabilities in metadata_json.
         let start = audit
             .start_call(
                 &ctx,
@@ -624,7 +624,7 @@ mod tests {
         );
         assert!(matches!(
             wire_freeze.anchor,
-            cep_executor::invariants::types::CardAnchor::Glob(_)
+            lattice_cep_native::invariants::types::CardAnchor::Glob(_)
         ));
 
         // no-legacy-public-expansion card
@@ -638,7 +638,7 @@ mod tests {
         );
         assert!(matches!(
             legacy_card.anchor,
-            cep_executor::invariants::types::CardAnchor::Glob(_)
+            lattice_cep_native::invariants::types::CardAnchor::Glob(_)
         ));
     }
 

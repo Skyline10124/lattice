@@ -1,4 +1,4 @@
-//! CLI Plan 05: CLI boundary smoke integration tests.
+//! CLI boundary smoke integration tests.
 //!
 //! These tests verify the completed CLI CLI surface cutover from the
 //! binary/user perspective. They exercise help output, command parsing,
@@ -205,12 +205,12 @@ fn cli_cutover_session_log_missing_session_fails_with_id_in_message() {
     );
 }
 
-// ─── Workspace boundary: no removed crate imports in focused tests (VER-02) ──
+// ─── Workspace boundary: no removed crate imports in focused tests ──────
 
 #[test]
 fn focused_tests_import_no_removed_crate_names() {
     // Verify that no source or test file under the active workspace crates
-    // imports a removed crate name. This proves VER-02: focused tests do not
+    // imports a removed crate name. This proves focused tests do not
     // preserve old architecture fixtures.
     let crate_dirs = [
         "lattice-llm",
@@ -218,8 +218,11 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-profile",
         "lattice-agent",
         "lattice-tooling",
-        "cep-protocol",
-        "cep-executor",
+        "lattice-cep-protocol",
+        "lattice-cep-catalog",
+        "lattice-cep-dispatch",
+        "lattice-cep-audit",
+        "lattice-cep-native",
         "lattice-api",
         "lattice-cli",
     ];
@@ -229,6 +232,8 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice_prompt",
         "lattice_sandbox",
         "lattice_policy",
+        "cep_protocol",
+        "cep_executor",
     ];
 
     let mut violations: Vec<String> = Vec::new();
@@ -277,7 +282,13 @@ fn focused_tests_import_no_removed_crate_names() {
                         continue;
                     }
                     for forbidden_name in &forbidden {
-                        if trimmed.contains(forbidden_name) {
+                        let bare_use = format!("use {forbidden_name};");
+                        let qualified_use = format!("use {forbidden_name}::");
+                        let extern_crate = format!("extern crate {forbidden_name}");
+                        if trimmed == bare_use
+                            || trimmed.starts_with(&qualified_use)
+                            || trimmed.starts_with(&extern_crate)
+                        {
                             violations.push(format!(
                                 "{}:{}: {}",
                                 path.strip_prefix(workspace_root).unwrap_or(&path).display(),

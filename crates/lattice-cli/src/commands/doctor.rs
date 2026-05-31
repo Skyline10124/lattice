@@ -82,7 +82,7 @@ pub fn render_json(report: &DoctorReport) -> Result<String> {
 pub fn render_text(report: &DoctorReport) -> String {
     let mut output = String::new();
 
-    output.push_str(&format!("{} LATTICE v1.1\n", "doctor".dimmed()));
+    output.push_str(&format!("{} LATTICE\n", "doctor".dimmed()));
 
     // Config
     output.push_str(&format!(
@@ -136,7 +136,7 @@ pub fn render_text(report: &DoctorReport) -> String {
     output
 }
 
-/// Run v1.1 CLI/API health diagnostics.
+/// Run CLI/API health diagnostics.
 ///
 /// Reports: config loading, credential status by env var name,
 /// session store availability, and small alias table state.

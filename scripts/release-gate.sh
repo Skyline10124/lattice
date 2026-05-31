@@ -22,9 +22,6 @@ cargo test -p lattice-tools
 echo "==> cargo test -p lattice-profile"
 cargo test -p lattice-profile
 
-echo "==> cargo test -p lattice-hooks"
-cargo test -p lattice-hooks
-
 echo "==> cargo test -p lattice-agent --features test-utils"
 cargo test -p lattice-agent --features test-utils
 
