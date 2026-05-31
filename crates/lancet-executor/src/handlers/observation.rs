@@ -1,4 +1,4 @@
-//! Native Phase 21 workspace observation CEP handlers.
+//! Native CEP workspace observation CEP handlers.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use crate::executor::render::render_file_slice;
 use crate::guard::evaluate_and_enforce_policy;
 use crate::policy::budget::BudgetExhausted;
 use crate::policy::observation::{resolve_observation_target, ResolvedObservationTarget};
-use crate::policy::Phase21PolicyConfig;
+use crate::policy::CepPolicyConfig;
 use crate::registry::{HandlerContext, MethodRegistry};
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
@@ -44,7 +44,7 @@ async fn handle_read_file(
 ) -> Result<ReadFileResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, ReadFile::NAME, &params).await?;
 
-    let policy = &ctx.phase21.policy;
+    let policy = &ctx.cep_context.policy;
     let target = match resolve_observation_target(policy, &params.path).await {
         Ok(t) => t,
         Err(err) => {
@@ -136,7 +136,7 @@ async fn handle_list_directory(
 ) -> Result<ListDirectoryResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, ListDirectory::NAME, &params).await?;
 
-    let policy = &ctx.phase21.policy;
+    let policy = &ctx.cep_context.policy;
     let target = resolve_target_or_deny(policy, &params.path, ListDirectory::NAME, &ctx).await?;
     backend_or_continue(&params.path, ListDirectory::NAME, &ctx).await?;
 
@@ -195,7 +195,7 @@ async fn handle_find_files(
     let path = params.path.as_deref().unwrap_or(".");
     let _evaluation = evaluate_and_enforce_policy(&ctx, FindFiles::NAME, &params).await?;
 
-    let policy = &ctx.phase21.policy;
+    let policy = &ctx.cep_context.policy;
     let target = resolve_target_or_deny(policy, path, FindFiles::NAME, &ctx).await?;
     backend_or_continue(path, FindFiles::NAME, &ctx).await?;
 
@@ -250,7 +250,7 @@ async fn run_grep(
     ctx: HandlerContext,
     path: &str,
 ) -> Result<GrepResult, CepError> {
-    let policy = &ctx.phase21.policy;
+    let policy = &ctx.cep_context.policy;
     let target = resolve_target_or_deny(policy, path, Grep::NAME, &ctx).await?;
     backend_or_continue(path, Grep::NAME, &ctx).await?;
 
@@ -317,7 +317,7 @@ async fn run_grep(
 }
 
 async fn resolve_target_or_deny(
-    policy: &Phase21PolicyConfig,
+    policy: &CepPolicyConfig,
     path: &str,
     method: &str,
     ctx: &HandlerContext,
@@ -354,13 +354,13 @@ async fn backend_or_continue(
 }
 
 fn charge_observation_bytes(ctx: &HandlerContext, bytes: usize) -> Result<(), CepError> {
-    ctx.phase21
+    ctx.cep_context
         .budget
         .try_charge_observation(bytes)
         .map_err(|e: BudgetExhausted| e.to_cep_error())
 }
 
-fn single_read_budget_exceeded(actual: usize, policy: &Phase21PolicyConfig) -> CepError {
+fn single_read_budget_exceeded(actual: usize, policy: &CepPolicyConfig) -> CepError {
     BudgetExhausted {
         limit: "observation.max_single_read_bytes",
         requested: actual,
@@ -722,7 +722,7 @@ async fn emit_denial_metadata(
 mod tests {
     use super::*;
     use crate::policy::observation::{reject_parent_traversal, BACKEND_SAFETY_NET_TEST_PATH};
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::fs;
@@ -740,15 +740,15 @@ mod tests {
     fn ctx_for(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         let policy_cfg = crate::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
-            command: phase21.policy.command.clone(),
-            network: phase21.policy.network.clone(),
-            budget: phase21.policy.budget.clone(),
-            observation: phase21.policy.observation.clone(),
-            project_root: phase21.policy.project_root.clone(),
+            command: cep_context.policy.command.clone(),
+            network: cep_context.policy.network.clone(),
+            budget: cep_context.policy.budget.clone(),
+            observation: cep_context.policy.observation.clone(),
+            project_root: cep_context.policy.project_root.clone(),
         };
         let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
         let mut base = BaseExecutionEnvelope::for_workspace_root(root, "native obs test");
@@ -771,7 +771,7 @@ mod tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: base,
-                phase21,
+                cep_context,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -792,13 +792,13 @@ mod tests {
         )
     }
 
-    fn policy_with_limits(root: &Path, max_single: usize, max_turn: usize) -> Phase21TurnContext {
-        let mut policy = Phase21PolicyConfig::defaults_for_project_root(root);
+    fn policy_with_limits(root: &Path, max_single: usize, max_turn: usize) -> CepTurnContext {
+        let mut policy = CepPolicyConfig::defaults_for_project_root(root);
         policy.observation.max_single_read_bytes = max_single;
         policy.observation.max_turn_observation_bytes = max_turn;
         policy.budget.max_single_read_bytes = max_single;
         policy.budget.max_turn_observation_bytes = max_turn;
-        Phase21TurnContext::from_policy(policy)
+        CepTurnContext::from_policy(policy)
     }
 
     #[tokio::test]
@@ -856,13 +856,13 @@ mod tests {
         register_workspace_observation_methods(&mut registry).unwrap();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let phase21 = Arc::new(policy_with_limits(dir.path(), 50, 10_000));
+        let cep_context = Arc::new(policy_with_limits(dir.path(), 50, 10_000));
         let ctx = HandlerContext {
             call_id: 2,
             events: EventSink::new(event_tx, 2),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "budget test"),
-            phase21,
+            cep_context,
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -905,13 +905,13 @@ mod tests {
         register_workspace_observation_methods(&mut registry).unwrap();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let phase21 = Arc::new(policy_with_limits(dir.path(), 10_000, 5));
+        let cep_context = Arc::new(policy_with_limits(dir.path(), 10_000, 5));
         let ctx = HandlerContext {
             call_id: 3,
             events: EventSink::new(event_tx, 3),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "turn budget"),
-            phase21,
+            cep_context,
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1106,7 +1106,7 @@ mod tests {
         register_workspace_observation_methods(&mut registry).unwrap();
         let (event_tx, _rx) = mpsc::channel(8);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut policy = Phase21PolicyConfig::defaults_for_project_root(dir.path());
+        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
         policy.observation.max_grep_matches = 2;
         policy.budget.max_grep_matches = 2;
         let ctx = HandlerContext {
@@ -1114,7 +1114,7 @@ mod tests {
             events: EventSink::new(event_tx, 4),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "grep cap"),
-            phase21: Arc::new(Phase21TurnContext::from_policy(policy)),
+            cep_context: Arc::new(CepTurnContext::from_policy(policy)),
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

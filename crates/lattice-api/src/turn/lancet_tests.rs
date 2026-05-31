@@ -291,7 +291,7 @@ cep_family_test!(
 );
 
 #[tokio::test]
-async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
+async fn turn_runtime_constructs_one_adapter_per_turn() {
     use tempfile::TempDir;
 
     use lattice_agent::testing::FakeStreamingLlmClient;
@@ -341,7 +341,7 @@ async fn phase20_turn_runtime_constructs_one_adapter_per_turn() {
 }
 
 #[cfg(test)]
-mod phase21_native_registry {
+mod cep_native_registry {
     use super::*;
     use lancet_executor::SEMANTIC_STAGE_NATIVE;
     use lancet_protocol::envelope::Capability;
@@ -354,7 +354,7 @@ mod phase21_native_registry {
     use crate::turn::lancet::production_base_envelope;
 
     #[test]
-    fn phase21_native_registry_production_envelope_has_no_fetch_wildcard() {
+    fn cep_native_registry_production_envelope_has_no_fetch_wildcard() {
         let dir = TempDir::new().unwrap();
         let enabled = vec![Fetch::NAME.to_string(), TodoWrite::NAME.to_string()];
         let envelope =
@@ -386,7 +386,7 @@ mod phase21_native_registry {
     }
 
     #[test]
-    fn phase21_native_registry_allowed_hosts_become_fetch_capabilities() {
+    fn cep_native_registry_allowed_hosts_become_fetch_capabilities() {
         let dir = TempDir::new().unwrap();
         let cep = lattice_profile::CepSection {
             network: Some(CepNetworkSection {
@@ -405,7 +405,7 @@ mod phase21_native_registry {
     }
 
     #[tokio::test]
-    async fn phase21_native_registry_production_runtime_uses_native_audit_stage() {
+    async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
         use lancet_protocol::methods::workspace::ReadFileParams;
         use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;

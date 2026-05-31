@@ -32,7 +32,7 @@ use lancet_protocol::CepError;
 
 use super::ledger::{ObservedEffect, ObservedScope};
 use crate::policy::command::EffectiveImpact;
-use crate::policy::Phase21PolicyConfig;
+use crate::policy::CepPolicyConfig;
 
 /// Per-invocation materialized effect — the middle layer of D-03.
 ///
@@ -140,7 +140,7 @@ impl AuthorizedEffectRegion {
     /// Two-source rule (caution line 207):
     /// - `ReadPath` → read region from the capability's path pattern
     /// - `Inspect` → read region from `policy` observation roots (Inspect has
-    ///   no path pattern — Phase 21 D-07)
+    ///   no path pattern — CEP D-07)
     /// - `WritePath` → write region from the capability's path pattern
     /// - `RunCommand` → command execution authorized
     /// - `FetchUrl` → host authorized
@@ -156,7 +156,7 @@ impl AuthorizedEffectRegion {
     /// picking one — precedence is union.
     pub fn from_matched_capability(
         matched: Option<&SourcedCapability>,
-        policy: &Phase21PolicyConfig,
+        policy: &CepPolicyConfig,
     ) -> Self {
         let Some(sc) = matched else {
             // None → empty region (fail-closed, review concern 5)
@@ -181,7 +181,7 @@ impl AuthorizedEffectRegion {
             Capability::Inspect => {
                 // Inspect has NO path pattern (capability.rs:329).
                 // Authorized observation region comes from policy roots
-                // (Phase 21 D-07, caution line 207).
+                // (CEP D-07, caution line 207).
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceObservation);
                 Self {

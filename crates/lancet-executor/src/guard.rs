@@ -101,7 +101,7 @@ pub fn normalize_write_path_pattern(pattern: &str) -> Result<WritePathPattern, C
     if pattern.starts_with('!') {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "WritePath pattern negation is not supported in Phase 22",
+            "WritePath pattern negation is not supported in CEP",
             CepErrorData::Validation(ValidationErrorData {
                 field: "capabilities.WritePath.path_pattern".into(),
                 reason: "negation is not supported".into(),
@@ -556,7 +556,7 @@ pub async fn build_policy_input(
         build_effective_envelope_snapshot(&ctx.base_envelope, active_record.as_ref());
 
     let audit_snapshot = ctx.audit_context.read().await;
-    let budget = ctx.phase21.budget.snapshot();
+    let budget = ctx.cep_context.budget.snapshot();
     let budget_snapshot = PolicyBudgetSnapshot {
         turn_observation_bytes_used: budget.turn_observation_bytes_used as u64,
         turn_observation_bytes_limit: budget.max_turn_observation_bytes as u64,
@@ -761,7 +761,7 @@ pub async fn evaluate_and_enforce_policy(
                     .and_then(|cm| cm.matched.as_ref());
                 let region = crate::effect::region::AuthorizedEffectRegion::from_matched_capability(
                     matched_cap,
-                    &ctx.phase21.policy,
+                    &ctx.cep_context.policy,
                 );
                 ctx.authorized_region.set(region);
             }
@@ -1050,7 +1050,7 @@ mod policy_tests {
     use super::*;
     use crate::audit::CepAuditContext;
     use crate::policy::default::PolicyConfig;
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{BaseExecutionEnvelope, ExecutionEnvelope, Intent, Scope};
     use lancet_protocol::policy::PolicyBudgetSnapshot;
@@ -1072,7 +1072,7 @@ mod policy_tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "policy test"),
-                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

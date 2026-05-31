@@ -1,4 +1,4 @@
-//! Phase 21/22 native CEP method handlers.
+//! CEP/22 native CEP method handlers.
 
 pub mod audit;
 pub mod command;

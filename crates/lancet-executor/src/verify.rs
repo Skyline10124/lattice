@@ -41,7 +41,7 @@ pub struct VerifyOutcome {
     pub stderr_summary: Option<String>,
 }
 
-/// Build the typed Phase 22 error returned when verify executes but fails.
+/// Build the typed CEP error returned when verify executes but fails.
 pub fn verify_failed_error(spec: &VerifyCommandSpec, outcome: &VerifyOutcome) -> CepError {
     CepError::new(
         CepErrorCode::VerifyFailed,

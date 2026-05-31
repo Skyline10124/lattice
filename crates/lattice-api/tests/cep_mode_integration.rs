@@ -1,7 +1,7 @@
 //! VER-23 / LEG-02 cep_mode integration tests.
 //!
 //! **LEG-02 invariant:** `cep_mode = Off` does **NOT** re-enable legacy direct tool calls.
-//! In the production stack (post-Phase 12), there is no legacy tool executor path.
+//! In the production stack (post-API), there is no legacy tool executor path.
 //! `Off` mode only skips the effect-region check; the CEP policy hook still runs and will
 //! deny requests that lack the required capability declaration.
 //!
@@ -194,7 +194,6 @@ async fn cep_mode_off_policy_deny_still_enforced() {
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.cep_mode = CepMode::Off; // Off: effect check skipped, but policy still runs.
     config.base_envelope = base_envelope;
-    config.production_audit_routing = true;
 
     // Set up a proper policy hook for the workspace root.
     {
@@ -203,8 +202,9 @@ async fn cep_mode_off_policy_deny_still_enforced() {
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
-        config.phase21 =
-            Arc::new(lancet_executor::Phase21TurnContext::defaults_for_project_root(canonical_str));
+        config.cep_context = Arc::new(lancet_executor::CepTurnContext::defaults_for_project_root(
+            canonical_str,
+        ));
     }
 
     let (client, server) = LancetTransport::pair(8);

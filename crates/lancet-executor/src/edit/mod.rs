@@ -11,4 +11,3 @@ pub mod types;
 
 pub use apply::apply_patch;
 pub use hash::content_hash;
-pub use types::PatchResultEnvelope;

@@ -1,11 +1,11 @@
-//! Phase 21 workspace observation path policy configuration and resolution.
+//! CEP workspace observation path policy configuration and resolution.
 
 use std::path::{Component, Path, PathBuf};
 
 use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 
-use super::Phase21PolicyConfig;
+use super::CepPolicyConfig;
 
 /// Immutable observation policy derived from profile `[cep.project_root]` and `[cep.observation]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub fn reject_parent_traversal(path: &str) -> Result<(), CepError> {
 
 /// Resolve and validate an observation path before backend filesystem work.
 pub async fn resolve_observation_target(
-    policy: &Phase21PolicyConfig,
+    policy: &CepPolicyConfig,
     path: &str,
 ) -> Result<ResolvedObservationTarget, CepError> {
     if path.contains('\0') {
@@ -179,7 +179,7 @@ fn project_root_violation_message(message: String) -> CepError {
 }
 
 #[cfg(test)]
-pub(crate) const BACKEND_SAFETY_NET_TEST_PATH: &str = "__phase21_backend_safety_net__";
+pub(crate) const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
 
 /// Test-only hook simulating a backend-time denial after CEP policy allowed the path.
 #[cfg(test)]
@@ -194,12 +194,12 @@ pub(crate) fn check_backend_safety_net(path: &str) -> Option<CepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Phase21PolicyConfig;
+    use crate::policy::CepPolicyConfig;
     use std::fs;
     use tempfile::TempDir;
 
-    fn policy_for(dir: &TempDir) -> Phase21PolicyConfig {
-        Phase21PolicyConfig::defaults_for_project_root(dir.path())
+    fn policy_for(dir: &TempDir) -> CepPolicyConfig {
+        CepPolicyConfig::defaults_for_project_root(dir.path())
     }
 
     #[tokio::test]

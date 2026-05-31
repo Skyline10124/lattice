@@ -153,21 +153,6 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
             guard_stage,
             error_code,
         },
-        AgentTurnEvent::CepGuardVerdict {
-            call_id,
-            method,
-            semantic_stage,
-            guard_stage,
-            policy_enforced,
-            semantic_status,
-        } => TurnEvent::CepGuardVerdict {
-            call_id,
-            method,
-            semantic_stage,
-            guard_stage,
-            policy_enforced,
-            semantic_status,
-        },
         AgentTurnEvent::CepEnvelopeDeclared {
             envelope_id,
             envelope_hash,

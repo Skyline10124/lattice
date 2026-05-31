@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lancet_executor::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, LancetTransport,
-    MethodRegistry, Phase21TurnContext, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
+    LancetTransport, MethodRegistry, ServerRunConfig,
 };
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
@@ -261,8 +261,7 @@ async fn ver_24_full_turn_audit_rows_and_replay_fragment() {
     config.audit = Arc::new(audit);
     config.base_envelope =
         BaseExecutionEnvelope::for_workspace_root(root, "ver-24 replay").with_read_audit();
-    config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-    config.production_audit_routing = true;
+    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     {
         let mut ctx = config.audit_context.write().await;
         ctx.session_id = result.session_id.clone();

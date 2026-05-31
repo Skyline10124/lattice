@@ -276,8 +276,6 @@ fn render_human_event<WOut: Write, WErr: Write>(
                 }
             }
         }
-        // Bridge lifecycle guard metadata is observation-only in human mode.
-        TurnEvent::CepGuardVerdict { .. } => {}
         TurnEvent::CepEnvelopeDeclared { envelope_id, .. } => {
             if verbose {
                 flush_before_status(out, err, state)?;

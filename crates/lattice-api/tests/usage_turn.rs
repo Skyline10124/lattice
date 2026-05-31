@@ -436,7 +436,7 @@ async fn usage_resume_session_includes_previous_turn_context() {
     );
 }
 
-// ── Phase 21: network policy without FetchUrl("*") ──────────────────────────
+// ── CEP: network policy without FetchUrl("*") ──────────────────────────
 
 fn setup_workspace_with_cep_network(
     src_content: &str,
@@ -540,7 +540,7 @@ async fn public_https_policy_requires_fetch_capability() {
                 ..
             } if method == "web.fetch"
                 && impact_kind == "external_observation"
-                && semantic_stage == "phase21_native"
+                && semantic_stage == "cep_native"
         )),
         "native web.fetch must emit CEP lifecycle with external_observation impact"
     );

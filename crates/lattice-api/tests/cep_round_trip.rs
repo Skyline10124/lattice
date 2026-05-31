@@ -1,16 +1,20 @@
 //! VER-28 impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `LancetExecutorAdapter` and back.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lancet_executor::{
-    register_phase20_legacy_backend, register_production_method_registry, to_tool_definitions,
-    CepAuditStore, LancetTransport, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    register_production_method_registry, to_tool_definitions, CepAuditStore, LancetTransport,
+    MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use lancet_protocol::catalog;
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::envelope::{
+    Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
+};
 use lancet_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
 use lancet_protocol::methods::command::Run;
+use lancet_protocol::methods::envelope::{Declare, DeclareParams};
 use lancet_protocol::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_protocol::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_protocol::methods::workspace::{ReadFile, WriteFile};
@@ -28,13 +32,6 @@ struct ImpactRow {
     assert_result: fn(&Value),
 }
 
-fn test_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("http client")
-}
-
 async fn adapter_with_registry(registry: MethodRegistry) -> LancetExecutorAdapter {
     let (client, server) = LancetTransport::pair(8);
     let server_task = tokio::spawn(async move {
@@ -47,13 +44,6 @@ async fn adapter_with_registry(registry: MethodRegistry) -> LancetExecutorAdapte
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
     adapter
-}
-
-async fn legacy_adapter(root: &str) -> LancetExecutorAdapter {
-    let mut registry = MethodRegistry::new();
-    register_phase20_legacy_backend(&mut registry, root, test_http_client())
-        .expect("legacy backend registration");
-    adapter_with_registry(registry).await
 }
 
 async fn fetch_only_adapter() -> LancetExecutorAdapter {
@@ -89,6 +79,33 @@ fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
     }
 }
 
+fn envelope_declare_call(
+    description: &str,
+    capabilities: BTreeSet<Capability>,
+    supersede: bool,
+) -> ToolCall {
+    let params = DeclareParams {
+        envelope: ExecutionEnvelope {
+            intent: Intent {
+                description: description.to_string(),
+            },
+            capabilities,
+            scope: Scope::default(),
+            impact: vec![],
+            constraints: Constraints::default(),
+            verify: None,
+            on_failure: None,
+            extensions: serde_json::Map::new(),
+        },
+        supersede,
+        reason: Some(description.to_string()),
+    };
+    llm_tool_call(
+        Declare::NAME,
+        serde_json::to_value(params).expect("serialize declare params"),
+    )
+}
+
 fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
     let payload = err
         .cep_error
@@ -106,7 +123,18 @@ async fn cep_round_trip_impact_matrix() {
     let root = dir.path();
     std::fs::write(root.join("hello.txt"), "hello impact matrix\n").expect("seed file");
 
-    let legacy = legacy_adapter(root.to_str().unwrap()).await;
+    let (adapter, _audit) = production_adapter(
+        root.to_str().unwrap(),
+        &[
+            ReadFile::NAME,
+            WriteFile::NAME,
+            Run::NAME,
+            TodoWrite::NAME,
+            Declare::NAME,
+        ],
+        false,
+    )
+    .await;
 
     let rows = [
         ImpactRow {
@@ -164,8 +192,35 @@ async fn cep_round_trip_impact_matrix() {
     ];
 
     for row in rows {
+        if row.method == Run::NAME {
+            let declare_run = envelope_declare_call(
+                "cep round-trip command",
+                BTreeSet::from([Capability::RunCommand {
+                    argv_allowlist: vec!["echo".into()],
+                }]),
+                true,
+            );
+            adapter
+                .execute(&declare_run)
+                .await
+                .expect("declare RunCommand envelope");
+        }
+        if row.method == WriteFile::NAME {
+            let declare_write = envelope_declare_call(
+                "cep round-trip write",
+                BTreeSet::from([Capability::WritePath {
+                    path_pattern: "created.txt".into(),
+                }]),
+                true,
+            );
+            adapter
+                .execute(&declare_write)
+                .await
+                .expect("declare WritePath envelope");
+        }
+
         let call = llm_tool_call(row.method, row.arguments);
-        let result_json = legacy
+        let result_json = adapter
             .execute(&call)
             .await
             .unwrap_or_else(|err| panic!("{} ({:?}) failed: {err:?}", row.method, row.impact));
@@ -192,7 +247,9 @@ async fn cep_round_trip_impact_matrix() {
 
 #[tokio::test]
 async fn cep_round_trip_unknown_method_rejected_at_adapter() {
-    let adapter = legacy_adapter(TempDir::new().unwrap().path().to_str().unwrap()).await;
+    let dir = TempDir::new().unwrap();
+    let (adapter, _audit) =
+        production_adapter(dir.path().to_str().unwrap(), &[ReadFile::NAME], false).await;
 
     let err = adapter
         .execute(&ToolCall {
@@ -210,7 +267,9 @@ async fn cep_round_trip_unknown_method_rejected_at_adapter() {
 
 #[tokio::test]
 async fn cep_round_trip_schema_mismatch_preserves_field_path() {
-    let adapter = legacy_adapter(TempDir::new().unwrap().path().to_str().unwrap()).await;
+    let dir = TempDir::new().unwrap();
+    let (adapter, _audit) =
+        production_adapter(dir.path().to_str().unwrap(), &[ReadFile::NAME], false).await;
 
     let err = adapter
         .execute(&llm_tool_call(ReadFile::NAME, serde_json::json!({})))
@@ -311,22 +370,31 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (LancetExecutorAdapter, Arc<CepAuditStore>) {
-    use lancet_executor::{CallAuditMetadata, Phase21PolicyConfig, Phase21TurnContext};
+    use lancet_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lancet_executor::{CepPolicyConfig, CepTurnContext};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::methods::session::TodoWrite;
+
+    let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
+    let root = canonical_root.to_str().expect("utf-8 production root");
 
     let mut registry = MethodRegistry::new();
     register_production_method_registry(&mut registry).expect("production registry");
 
-    let mut policy = Phase21PolicyConfig::defaults_for_project_root(root);
+    let mut policy = CepPolicyConfig::defaults_for_project_root(root);
     policy.network.allow_localhost = allow_localhost;
     if allow_localhost {
         policy.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
+    let mut policy_config = PolicyConfig::defaults_for_project_root(canonical_root.clone());
+    policy_config.network.allow_localhost = allow_localhost;
+    if allow_localhost {
+        policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
+    }
 
     let mut base_envelope = BaseExecutionEnvelope::for_workspace_root(
         root,
-        "phase21 round-trip without workspace tools",
+        "cep_context round-trip without workspace tools",
     );
     if enabled.contains(&Fetch::NAME) {
         base_envelope = base_envelope.with_fetch_host("*");
@@ -340,9 +408,10 @@ async fn production_adapter(
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::clone(&audit);
     config.base_envelope = base_envelope;
-    config.phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
-    config.production_audit_routing = true;
-    config.call_audit_metadata = CallAuditMetadata::bridge_defaults();
+    config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
+    let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
+    config.policy_hook = default_hook.clone();
+    config.default_policy_hook = Some(default_hook);
 
     let server_task = tokio::spawn(async move {
         let _ = server.run(registry, config).await;
@@ -355,10 +424,10 @@ async fn production_adapter(
 }
 
 #[tokio::test]
-async fn phase21_web_fetch_and_todo_write_audit_without_workspace_envelope() {
+async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     let dir = TempDir::new().expect("temp workspace");
     let root = dir.path();
-    let fetch_url = spawn_echo_server("200 OK", "phase21-body").await;
+    let fetch_url = spawn_echo_server("200 OK", "cep-body").await;
 
     let (adapter, audit) = production_adapter(
         root.to_str().unwrap(),
@@ -370,7 +439,7 @@ async fn phase21_web_fetch_and_todo_write_audit_without_workspace_envelope() {
     let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
     let fetch_result = adapter.execute(&fetch_call).await.expect("web.fetch");
     let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch json");
-    assert_eq!(fetch_parsed["body"].as_str(), Some("phase21-body"));
+    assert_eq!(fetch_parsed["body"].as_str(), Some("cep-body"));
 
     let todo_call = llm_tool_call(
         TodoWrite::NAME,
@@ -387,7 +456,7 @@ async fn phase21_web_fetch_and_todo_write_audit_without_workspace_envelope() {
     assert!(fetch_row.policy_enforced);
     let fetch_metadata = fetch_row.metadata_json.expect("fetch metadata");
     assert!(fetch_metadata.contains("response_size"));
-    assert!(!fetch_metadata.contains("phase21-body"));
+    assert!(!fetch_metadata.contains("cep-body"));
     assert!(!fetch_metadata.contains("secret todo"));
 
     let todo_row = audit.row_by_audit_id(2).expect("todo audit row");

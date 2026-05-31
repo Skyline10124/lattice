@@ -67,7 +67,7 @@ mod scaffold_tests {
     };
     use crate::invariants::InvariantCardIndex;
     use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::wire_code_for_error;
     use crate::registry::{Cancellation, EventSink};
     use crate::transport::{LancetTransport, ServerRunConfig};
@@ -91,13 +91,13 @@ mod scaffold_tests {
         let default_hook = Arc::new(DefaultPolicyHook::new(
             PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(root)),
         ));
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         HandlerContext {
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold test"),
-            phase21,
+            cep_context,
             active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -146,8 +146,8 @@ mod scaffold_tests {
         let registry = scaffold_registry();
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let ctx = make_test_ctx(root, event_tx);
-        let phase21 = Arc::clone(&ctx.phase21);
-        let before = phase21.budget.snapshot();
+        let cep_context = Arc::clone(&ctx.cep_context);
+        let before = cep_context.budget.snapshot();
         let value = registry
             .dispatch(Inspect::NAME, serde_json::json!({ "path": "src" }), ctx)
             .await
@@ -155,7 +155,7 @@ mod scaffold_tests {
         assert_eq!(value["status"], "not_yet_routed");
         assert_eq!(value["semantic_stage"], "scaffold");
         assert_eq!(value["routed"], false);
-        assert_eq!(phase21.budget.snapshot(), before);
+        assert_eq!(cep_context.budget.snapshot(), before);
 
         let event = event_rx.recv().await.expect("scaffold metadata");
         assert_eq!(event.method, "cep.scaffold_metadata");
@@ -171,9 +171,7 @@ mod scaffold_tests {
         let registry = scaffold_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "scaffold audit");
-        config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-        config.call_audit_metadata = CallAuditMetadata::scaffold_stub();
-        config.production_audit_routing = true;
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
 
         let (client, server) = LancetTransport::pair(8);
         let audit = Arc::clone(&config.audit);

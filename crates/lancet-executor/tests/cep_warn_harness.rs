@@ -29,8 +29,8 @@ use lancet_executor::effect::{
     region::AuthorizedEffectRegion,
 };
 use lancet_executor::{
-    register_production_method_registry, CepAuditStore, LancetTransport, MethodRegistry,
-    Phase21TurnContext, ServerRunConfig,
+    register_production_method_registry, CepAuditStore, CepTurnContext, LancetTransport,
+    MethodRegistry, ServerRunConfig,
 };
 use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
 use lancet_protocol::method::RequiredCapability;
@@ -65,7 +65,6 @@ fn warn_server_config(audit: Arc<CepAuditStore>) -> ServerRunConfig {
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
     config.cep_mode = CepMode::Warn;
-    config.production_audit_routing = true;
     config
 }
 
@@ -465,10 +464,8 @@ async fn generate_warn_report() -> String {
 
     let mut success_config = warn_server_config(Arc::clone(&audit_success));
     success_config.base_envelope = base;
-    success_config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(
-        &canonical_str,
-    ));
-    success_config.production_audit_routing = true;
+    success_config.cep_context =
+        Arc::new(CepTurnContext::defaults_for_project_root(&canonical_str));
 
     let (success_client, success_server) = LancetTransport::pair(32);
     let server_task2 = tokio::spawn(async move {

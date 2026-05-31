@@ -72,7 +72,7 @@ impl AgentLoop {
     /// sequentially, and repeat until a final assistant response or terminal
     /// outcome.
     pub async fn run_turn(&self, request: AgentTurnRequest) -> AgentTurnResult {
-        // Compute cooperative deadline from request.timeout (D-13, Phase 17)
+        // Compute cooperative deadline from request.timeout (D-13, deadline)
         let deadline = request.timeout.map(|d| Instant::now() + d);
         self.run_turn_inner(&request, None, deadline).await
     }
@@ -100,16 +100,16 @@ impl AgentLoop {
     /// computed before entering `run_turn_inner` and threaded into both the
     /// `stream_chat().await` call and the `stream.next()` loop via
     /// `tokio::select!`. On elapse, the returned `AgentTurnResult` preserves
-    /// all partial state accumulated before the deadline fired (Phase 17 D-13).
+    /// all partial state accumulated before the deadline fired (deadline D-13).
     ///
     /// Added in Plan 15-02 (D-09 / D-10). Timeout cooperative deadline added
-    /// in Phase 17 Plan 01.
+    /// in deadline Plan 01.
     pub async fn run_turn_live(
         &self,
         request: AgentTurnRequest,
         events: tokio::sync::mpsc::Sender<AgentTurnEvent>,
     ) -> AgentTurnResult {
-        // Compute cooperative deadline from request.timeout (D-13, Phase 17)
+        // Compute cooperative deadline from request.timeout (D-13, deadline)
         let deadline = request.timeout.map(|d| Instant::now() + d);
         self.run_turn_inner(&request, Some(&events), deadline).await
     }
@@ -119,9 +119,9 @@ impl AgentLoop {
     /// `live_events` (Plan 15-02 D-10): when `Some`, every event emission site
     /// in this function and inside `consume_model_stream` mirrors the event
     /// onto the live channel via `emit_agent_event`; when `None`, emissions
-    /// are buffered only — preserving the pre-Phase-15 `run_turn` shape.
+    /// are buffered only — preserving the previous `run_turn` shape.
     ///
-    /// `deadline` (Phase 17 D-13): when `Some`, a cooperative deadline is
+    /// `deadline` (deadline D-13): when `Some`, a cooperative deadline is
     /// applied to both `stream_chat().await` and `stream.next()` calls. On
     /// elapse, the function returns with all accumulated partial state preserved.
     async fn run_turn_inner(
@@ -349,7 +349,7 @@ impl AgentLoop {
                     };
                 }
                 StreamOutcome::Timeout => {
-                    // Cooperative deadline fired during stream.next() (Phase 17
+                    // Cooperative deadline fired during stream.next() (deadline
                     // D-13). Flush partial content and return with preserved state.
                     flush_partial_assistant_message(
                         &mut messages,
@@ -709,7 +709,7 @@ enum StreamOutcome {
     Cancelled,
     /// Stream ended without receiving a `Done` event.
     Exhausted,
-    /// Cooperative deadline fired during `stream.next()` (Phase 17 D-13).
+    /// Cooperative deadline fired during `stream.next()` (deadline D-13).
     /// Accumulated partial state is preserved in the surrounding `StreamResult`.
     Timeout,
 }
@@ -744,7 +744,7 @@ impl AgentLoop {
     ///   (D-02). `Done` is intentionally never a cancel point — the upstream
     ///   loop finalizes the model response before any cancel branch (D-03).
     ///
-    /// Phase 17 adds:
+    /// deadline adds:
     /// - `deadline` — when `Some`, each `stream.next()` is raced against the
     ///   remaining time via `tokio::select!`. On timeout, returns with
     ///   `outcome: StreamOutcome::Timeout` and all accumulated state

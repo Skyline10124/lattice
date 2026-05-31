@@ -5,7 +5,7 @@ use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::invariants::InvariantCardIndex;
 use crate::policy::default::DefaultPolicyHook;
-use crate::policy::Phase21TurnContext;
+use crate::policy::CepTurnContext;
 use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 use lancet_protocol::error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData};
 use lancet_protocol::policy::PolicyHook;
@@ -91,7 +91,7 @@ pub struct HandlerContext {
     pub events: EventSink,
     pub cancellation: Cancellation,
     pub base_envelope: BaseExecutionEnvelope,
-    pub phase21: Arc<Phase21TurnContext>,
+    pub cep_context: Arc<CepTurnContext>,
     pub active_envelope: Arc<ActiveEnvelopeStore>,
     pub turn_id: String,
     pub(crate) durable_metadata: CallDurableMetadata,
@@ -112,7 +112,7 @@ impl std::fmt::Debug for HandlerContext {
             .field("events", &self.events)
             .field("cancellation", &self.cancellation)
             .field("base_envelope", &self.base_envelope)
-            .field("phase21", &self.phase21)
+            .field("cep_context", &self.cep_context)
             .field("active_envelope", &self.active_envelope)
             .field("turn_id", &self.turn_id)
             .field("effect_ledger", &self.effect_ledger)
@@ -290,7 +290,7 @@ mod tests {
             events: EventSink::new(event_tx, call_id),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "registry test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(".")),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(".")),
             active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: CallDurableMetadata::default(),
@@ -358,14 +358,8 @@ mod tests {
 
     #[tokio::test]
     async fn registry_unknown_method_returns_32601() {
-        let dir = tempfile::tempdir().unwrap();
         let mut registry = MethodRegistry::new();
-        crate::register_phase20_legacy_backend(
-            &mut registry,
-            dir.path().to_str().unwrap(),
-            reqwest::Client::new(),
-        )
-        .unwrap();
+        crate::register_production_method_registry(&mut registry).unwrap();
 
         let (event_tx, _event_rx) = mpsc::channel(8);
         let ctx = test_handler_context(3, event_tx);
@@ -378,22 +372,11 @@ mod tests {
     }
 
     #[test]
-    fn registry_full_catalog_registered_via_public_helper() {
-        let dir = tempfile::tempdir().unwrap();
+    fn registry_full_catalog_registered_via_production_helper() {
         let mut registry = MethodRegistry::new();
-        crate::register_phase20_legacy_backend(
-            &mut registry,
-            dir.path().to_str().unwrap(),
-            reqwest::Client::new(),
-        )
-        .unwrap();
+        crate::register_production_method_registry(&mut registry).unwrap();
 
         for descriptor in lancet_protocol::catalog() {
-            // Native handlers — not in Phase 20 legacy backend
-            if descriptor.name.starts_with("audit.") || descriptor.name == "envelope.submit_intent"
-            {
-                continue;
-            }
             assert!(registry.contains(descriptor.name));
         }
     }

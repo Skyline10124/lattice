@@ -103,7 +103,6 @@ impl RunTurnCollector {
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepGuardVerdict { .. }
             | TurnEvent::CepEnvelopeDeclared { .. }
             | TurnEvent::CepEnvelopeSuperseded { .. }
             | TurnEvent::CepEnvelopeMissing { .. }

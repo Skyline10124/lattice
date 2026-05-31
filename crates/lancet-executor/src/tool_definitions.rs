@@ -5,7 +5,7 @@
 //! [`to_tool_definitions`]. Names, descriptions, and JSON schemas all come
 //! from the catalog — no namespace stripping, no rename maps, no hand-written
 //! schemas. The legacy `default_tool_definitions` helper that mirrored the
-//! pre-CEP tool surface was removed at the end of Phase 19; consumers must
+//! pre-CEP tool surface was removed at the end of CEP; consumers must
 //! call [`to_tool_definitions`] against the catalog.
 
 use lancet_protocol::MethodDescriptor;

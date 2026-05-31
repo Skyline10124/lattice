@@ -10,17 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
-/// Audit stage labels for the legacy CEP bridge.
-///
-/// The production registry is fully native, so the production audit-routing path
-/// (`production_audit_routing = true`) never emits these labels — it uses
-/// native / unrouted / scaffold metadata instead. They remain in use for the
-/// `production_audit_routing = false` default and the legacy bridge test harness
-/// (`register_phase20_legacy_backend`).
-pub const SEMANTIC_STAGE: &str = "phase20_legacy_bridge";
-pub const GUARD_STAGE: &str = "bridge_lifecycle_only";
-
-pub const SEMANTIC_STAGE_NATIVE: &str = "phase21_native";
+pub const SEMANTIC_STAGE_NATIVE: &str = "cep_native";
 pub const GUARD_STAGE_NATIVE: &str = "cep_policy_lifecycle";
 
 pub const SEMANTIC_STAGE_SCAFFOLD: &str = "scaffold";
@@ -50,20 +40,7 @@ pub struct CallAuditMetadata {
 }
 
 impl CallAuditMetadata {
-    /// Phase 20 legacy bridge defaults (`policy_enforced = false`).
-    pub fn bridge_defaults() -> Self {
-        Self {
-            semantic_stage: SEMANTIC_STAGE.to_string(),
-            semantic_status: Some("started".to_string()),
-            guard_stage: GUARD_STAGE.to_string(),
-            policy_enforced: false,
-            denial_source: None,
-            backend_invoked: None,
-            observation_source: None,
-        }
-    }
-
-    /// Phase 21 native handler with CEP policy enforcement.
+    /// CEP native handler with CEP policy enforcement.
     pub fn native_policy_enforced(semantic_status: Option<&str>) -> Self {
         Self {
             semantic_stage: SEMANTIC_STAGE_NATIVE.to_string(),
@@ -779,8 +756,6 @@ mod tests {
         assert_eq!(unknown.semantic_stage, SEMANTIC_STAGE_UNROUTED);
         assert!(!unknown.policy_enforced);
         assert_eq!(unknown.backend_invoked, Some(false));
-        // Must not be mislabeled as the legacy bridge.
-        assert_ne!(unknown.semantic_stage, SEMANTIC_STAGE);
     }
 
     #[test]
@@ -792,7 +767,7 @@ mod tests {
                 &ctx,
                 42,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         store
@@ -801,7 +776,7 @@ mod tests {
                 AuditOutcome::Success {
                     summary: "todo_count=1".into(),
                 },
-                Some("bridged_legacy_body"),
+                Some("native_handler"),
                 Some(r#"{"outcome":"todo_write","count":1}"#),
             )
             .unwrap();
@@ -816,10 +791,10 @@ mod tests {
         assert_eq!(row.impact_kind, "session_state_mutation");
         assert_eq!(row.turn_id, "turn-1");
         assert_eq!(row.session_id, "session-1");
-        assert_eq!(row.semantic_stage, SEMANTIC_STAGE);
-        assert_eq!(row.semantic_status.as_deref(), Some("bridged_legacy_body"));
-        assert_eq!(row.guard_stage, GUARD_STAGE);
-        assert!(!row.policy_enforced);
+        assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+        assert_eq!(row.semantic_status.as_deref(), Some("native_handler"));
+        assert_eq!(row.guard_stage, GUARD_STAGE_NATIVE);
+        assert!(row.policy_enforced);
     }
 
     #[test]
@@ -830,7 +805,7 @@ mod tests {
                 &test_context(),
                 7,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         store
@@ -838,7 +813,7 @@ mod tests {
                 start,
                 AuditOutcome::Error {
                     code: "ExecutionFailed".into(),
-                    summary: "legacy body failed".into(),
+                    summary: "handler failed".into(),
                 },
                 None,
                 None,
@@ -861,7 +836,7 @@ mod tests {
                 &test_context(),
                 1,
                 "crafted.unknown",
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::unrouted(),
             )
             .unwrap();
         store
@@ -881,7 +856,7 @@ mod tests {
                 &test_context(),
                 2,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         store
@@ -893,7 +868,7 @@ mod tests {
                 &test_context(),
                 3,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         store
@@ -917,7 +892,7 @@ mod tests {
                 &test_context(),
                 9,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         store
@@ -926,7 +901,7 @@ mod tests {
                 AuditOutcome::Success {
                     summary: "todo_count=1".into(),
                 },
-                Some("bridged_legacy_body"),
+                Some("native_handler"),
                 Some(r#"{"outcome":"todo_write","count":1}"#),
             )
             .unwrap();
@@ -955,7 +930,7 @@ mod tests {
             &test_context(),
             1,
             TodoWriteMethod::NAME,
-            &CallAuditMetadata::bridge_defaults(),
+            &CallAuditMetadata::native_policy_enforced(Some("started")),
         );
         assert!(result.is_err());
         assert_eq!(store.pending.load(Ordering::SeqCst), 0);
@@ -969,7 +944,7 @@ mod tests {
                 &test_context(),
                 2,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         assert_eq!(store.pending.load(Ordering::SeqCst), 1);
@@ -992,24 +967,20 @@ mod tests {
     }
 
     #[test]
-    fn cep_audit_native_and_bridge_rows_coexist() {
+    fn cep_audit_native_and_unrouted_rows_coexist() {
         let store = CepAuditStore::in_memory().unwrap();
         let ctx = test_context();
-        let bridge = store
-            .start_call(
-                &ctx,
-                1,
-                TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
-            )
+        let unrouted = store
+            .start_call(&ctx, 1, "crafted.unknown", &CallAuditMetadata::unrouted())
             .unwrap();
         store
             .finalize_call(
-                bridge,
-                AuditOutcome::Success {
-                    summary: "todo_count=0".into(),
+                unrouted,
+                AuditOutcome::Error {
+                    code: "MethodNotFound".into(),
+                    summary: "unknown method".into(),
                 },
-                Some("bridged_legacy_body"),
+                Some("method_not_found"),
                 None,
             )
             .unwrap();
@@ -1035,7 +1006,7 @@ mod tests {
 
         assert!(
             !store
-                .row_by_audit_id(bridge.audit_id)
+                .row_by_audit_id(unrouted.audit_id)
                 .unwrap()
                 .policy_enforced
         );
@@ -1047,10 +1018,10 @@ mod tests {
         );
         assert_eq!(
             store
-                .row_by_audit_id(bridge.audit_id)
+                .row_by_audit_id(unrouted.audit_id)
                 .unwrap()
                 .semantic_stage,
-            SEMANTIC_STAGE
+            SEMANTIC_STAGE_UNROUTED
         );
         assert_eq!(
             store
@@ -1365,7 +1336,7 @@ mod tests {
                 &test_context(),
                 1,
                 TodoWriteMethod::NAME,
-                &CallAuditMetadata::bridge_defaults(),
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
         let finalize = tokio::spawn(async move {

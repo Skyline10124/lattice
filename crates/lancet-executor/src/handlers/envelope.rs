@@ -1,7 +1,6 @@
-//! Native Phase 22 envelope.declare handler.
+//! Native CEP envelope.declare handler.
 //!
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
-//! Replaces the legacy bridge stub for `envelope.declare`.
 //!
 //! D-46: Validates verify commands at declaration time.
 
@@ -29,7 +28,7 @@ async fn handle_declare(
     // Use turn_id from HandlerContext (injected from audit_context.turn_id per D-07)
     let turn_id = &ctx.turn_id;
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -43,7 +42,7 @@ async fn handle_declare(
 
     // D-46: Validate verify command at declare-time if present
     if let Some(verify_cmd) = extract_verify_command(&params.envelope) {
-        let policy = &ctx.phase21.policy.command;
+        let policy = &ctx.cep_context.policy.command;
         validate_verify_command(&verify_cmd, policy, &project_root)?;
     }
 
@@ -250,9 +249,9 @@ mod tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "declare test"),
-                phase21: Arc::new(
-                    crate::policy::Phase21TurnContext::defaults_for_project_root(root),
-                ),
+                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+                    root,
+                )),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

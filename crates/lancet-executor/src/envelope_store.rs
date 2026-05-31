@@ -1,4 +1,4 @@
-//! Turn-scoped active envelope store for Phase 22.
+//! Turn-scoped active envelope store for CEP.
 //!
 //! `ActiveEnvelopeStore` holds the currently active `ExecutionEnvelope` for a
 //! single turn. It is created by `lattice-api` during turn composition, injected

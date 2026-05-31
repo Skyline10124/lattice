@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use lancet_executor::{
-    impact_kind_from_label, register_production_method_registry, CepAuditStore, LancetClient,
-    LancetTransport, MethodRegistry, Phase21TurnContext, ServerRunConfig,
+    impact_kind_from_label, register_production_method_registry, CepAuditStore, CepTurnContext,
+    LancetClient, LancetTransport, MethodRegistry, ServerRunConfig,
 };
 use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use lancet_protocol::methods::audit::{
@@ -104,8 +104,7 @@ where
     config.audit = audit;
     config.base_envelope =
         BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
-    config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-    config.production_audit_routing = true;
+    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     config.audit_context = Arc::new(RwLock::new(lancet_executor::CepAuditContext {
         session_id: session_id.to_string(),
         ..Default::default()

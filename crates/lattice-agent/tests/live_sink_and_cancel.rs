@@ -1,5 +1,5 @@
 #![cfg(feature = "test-utils")]
-//! Phase 15 behavioral suite: AgentLoop live sink + cooperative cancellation.
+//! live streaming behavioral suite: AgentLoop live sink + cooperative cancellation.
 //!
 //! Locks the seven D-18 scenarios that prove VER-11, AGENT-08, AGENT-09 and the
 //! Plan 15-02 invariants exposed by `run_turn_live` + the five new cancel
@@ -100,7 +100,7 @@ async fn drive_run_turn_live(
 
 // ---------------------------------------------------------------------------
 // FakeToolExecutor — VecDeque<Result<String, String>> + execution-order log.
-// Mirrors the shape from streaming_delta.rs (Phase 14 test infrastructure).
+// Mirrors the shape from streaming_delta.rs (streaming test infrastructure).
 // ---------------------------------------------------------------------------
 
 struct FakeToolExecutor {
@@ -214,18 +214,18 @@ impl LlmClient for CancelOnDoneLlm {
 
         // State machine for futures::stream::unfold: emit each pre-Done event,
         // then on the trailing transition flip the cancel flag and emit Done.
-        enum Phase {
+        enum StreamState {
             Pending(VecDeque<LlmEvent>, String, Arc<AtomicBool>),
             DoneEmitted,
         }
 
-        let initial = Phase::Pending(VecDeque::from(pre), finish_reason, cancel);
+        let initial = StreamState::Pending(VecDeque::from(pre), finish_reason, cancel);
 
         let stream = futures::stream::unfold(initial, |state| async move {
             match state {
-                Phase::Pending(mut queue, finish_reason, cancel) => {
+                StreamState::Pending(mut queue, finish_reason, cancel) => {
                     if let Some(event) = queue.pop_front() {
-                        Some((event, Phase::Pending(queue, finish_reason, cancel)))
+                        Some((event, StreamState::Pending(queue, finish_reason, cancel)))
                     } else {
                         // Last non-Done event has been consumed (and checkpoint
                         // #2 fired with cancel still false). Flip cancel, then
@@ -236,10 +236,10 @@ impl LlmClient for CancelOnDoneLlm {
                             finish_reason,
                             usage: None,
                         };
-                        Some((done, Phase::DoneEmitted))
+                        Some((done, StreamState::DoneEmitted))
                     }
                 }
-                Phase::DoneEmitted => None,
+                StreamState::DoneEmitted => None,
             }
         });
 
@@ -785,7 +785,7 @@ struct CancelBetweenTokensLlm {
 }
 
 #[derive(Clone, Copy)]
-enum CancelStreamPhase {
+enum CancelStreamState {
     BeforeP,
     BeforeAr,
     BeforeTial,
@@ -807,17 +807,17 @@ impl LlmClient for CancelBetweenTokensLlm {
         _request: lattice_llm::ChatRequest,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let cancel = self.cancel.clone();
-        let stream = futures::stream::unfold(CancelStreamPhase::BeforeP, move |phase| {
+        let stream = futures::stream::unfold(CancelStreamState::BeforeP, move |state| {
             let cancel = cancel.clone();
             async move {
-                match phase {
-                    CancelStreamPhase::BeforeP => Some((
+                match state {
+                    CancelStreamState::BeforeP => Some((
                         LlmEvent::Token {
                             content: "p".to_string(),
                         },
-                        CancelStreamPhase::BeforeAr,
+                        CancelStreamState::BeforeAr,
                     )),
-                    CancelStreamPhase::BeforeAr => {
+                    CancelStreamState::BeforeAr => {
                         // Flip cancel BEFORE yielding "ar". The consumer
                         // processes "ar" (emit + accumulate), then checkpoint
                         // #2 fires and returns Cancelled — "tial" and Done
@@ -827,23 +827,23 @@ impl LlmClient for CancelBetweenTokensLlm {
                             LlmEvent::Token {
                                 content: "ar".to_string(),
                             },
-                            CancelStreamPhase::BeforeTial,
+                            CancelStreamState::BeforeTial,
                         ))
                     }
-                    CancelStreamPhase::BeforeTial => Some((
+                    CancelStreamState::BeforeTial => Some((
                         LlmEvent::Token {
                             content: "tial".to_string(),
                         },
-                        CancelStreamPhase::BeforeDone,
+                        CancelStreamState::BeforeDone,
                     )),
-                    CancelStreamPhase::BeforeDone => Some((
+                    CancelStreamState::BeforeDone => Some((
                         LlmEvent::Done {
                             finish_reason: "stop".to_string(),
                             usage: None,
                         },
-                        CancelStreamPhase::Done,
+                        CancelStreamState::Done,
                     )),
-                    CancelStreamPhase::Done => None,
+                    CancelStreamState::Done => None,
                 }
             }
         });
@@ -968,7 +968,7 @@ async fn scenario_07_run_turn_buffered_matches_run_turn_live() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8 — cooperative deadline timeout preserves partial state (Phase 17)
+// Scenario 8 — cooperative deadline timeout preserves partial state (deadline)
 // ---------------------------------------------------------------------------
 
 /// LlmClient whose `stream_chat` yields a few Token events with small delays,
@@ -990,33 +990,33 @@ impl LlmClient for SlowStreamLlm {
         _request: lattice_llm::ChatRequest,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         // State machine: yield Token("partial "), Token("content"), then hang.
-        enum Phase {
+        enum StreamState {
             Token1,
             Token2,
             Hanging,
         }
 
-        let stream = futures::stream::unfold(Phase::Token1, |state| async move {
+        let stream = futures::stream::unfold(StreamState::Token1, |state| async move {
             match state {
-                Phase::Token1 => {
+                StreamState::Token1 => {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     Some((
                         LlmEvent::Token {
                             content: "partial ".to_string(),
                         },
-                        Phase::Token2,
+                        StreamState::Token2,
                     ))
                 }
-                Phase::Token2 => {
+                StreamState::Token2 => {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     Some((
                         LlmEvent::Token {
                             content: "content".to_string(),
                         },
-                        Phase::Hanging,
+                        StreamState::Hanging,
                     ))
                 }
-                Phase::Hanging => {
+                StreamState::Hanging => {
                     // Never resolve — cooperative deadline will fire
                     futures::future::pending::<()>().await;
                     unreachable!()
@@ -1087,7 +1087,7 @@ async fn scenario_08_timeout_cooperative_preserves_partial() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8b — timeout on stream_chat creation (Phase 17)
+// Scenario 8b — timeout on stream_chat creation (deadline)
 // ---------------------------------------------------------------------------
 
 /// LlmClient whose `stream_chat` hangs forever (never returns a stream).
@@ -1154,7 +1154,7 @@ async fn scenario_08b_timeout_on_stream_creation() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8c — timeout during tool execution (Phase 17 review fix)
+// Scenario 8c — timeout during tool execution (deadline review fix)
 // ---------------------------------------------------------------------------
 
 struct HangingToolExecutor;
@@ -1255,7 +1255,7 @@ async fn scenario_08c_timeout_during_tool_execution_preserves_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 8d — expired deadline wins over ready stream (Phase 17 review fix)
+// Scenario 8d — expired deadline wins over ready stream (deadline review fix)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

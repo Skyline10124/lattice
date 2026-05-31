@@ -164,7 +164,7 @@ fn aggregate_events_to_chat_response(
         },
         tool_calls,
         // Intentional StubLlm/chat parity: missing Done defaults to "stop".
-        // Phase 14 streaming consumers must treat this as Error instead —
+        // streaming streaming consumers must treat this as Error instead —
         // do not emit ModelFinished on incomplete streams.
         finish_reason: if finish_reason.is_empty() {
             "stop".to_string()

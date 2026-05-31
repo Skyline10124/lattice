@@ -1,4 +1,4 @@
-//! Phase 21 network policy configuration for `web.fetch`.
+//! CEP network policy configuration for `web.fetch`.
 
 use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -100,7 +100,7 @@ fn url_validation_error(reason: impl Into<String>) -> CepError {
     )
 }
 
-/// Validate `url` against Phase 21 network policy before any network I/O.
+/// Validate `url` against CEP network policy before any network I/O.
 pub fn validate_fetch_url(
     url_str: &str,
     policy: &NetworkPolicyConfig,

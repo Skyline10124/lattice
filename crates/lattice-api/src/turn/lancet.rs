@@ -10,9 +10,8 @@ use lancet_executor::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
     wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
-    CallAuditMetadata, CepAuditContext, CepAuditStore, CommandPolicy, LancetClient,
-    LancetTransport, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig,
-    Phase21PolicyConfig, Phase21TurnContext, ServerRunConfig,
+    CepAuditContext, CepAuditStore, CepPolicyConfig, CepTurnContext, CommandPolicy, LancetClient,
+    LancetTransport, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
 };
 use lancet_protocol::catalog;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
@@ -44,7 +43,7 @@ use crate::session::ApiError;
 /// Per-build construction metrics (test-only; each production build is exactly one pair + adapter).
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Phase20BuildMetrics {
+pub(crate) struct CepRuntimeBuildMetrics {
     pub adapter_instances: usize,
     pub transport_pairs: usize,
 }
@@ -187,7 +186,7 @@ pub(crate) struct ProductionTurnDeps {
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     #[cfg(test)]
-    pub build_metrics: Phase20BuildMetrics,
+    pub build_metrics: CepRuntimeBuildMetrics,
 }
 
 /// Build catalog-derived tool definitions filtered by the profile enabled list.
@@ -204,11 +203,11 @@ pub(crate) fn resolve_catalog_tool_definitions(
     Ok(resolved.definitions)
 }
 
-/// Build executor-facing Phase 21 policy from profile `[cep]` and the runtime project root.
-pub(crate) fn phase21_policy_from_profile(
+/// Build executor-facing CEP policy from profile `[cep]` and the runtime project root.
+pub(crate) fn cep_policy_from_profile(
     cep: &CepSection,
     runtime_project_root: &Path,
-) -> Result<Phase21PolicyConfig, ApiError> {
+) -> Result<CepPolicyConfig, ApiError> {
     let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
         ApiError::BadRequest(format!(
             "cannot canonicalize project root '{}': {err}",
@@ -250,7 +249,7 @@ pub(crate) fn phase21_policy_from_profile(
         max_todo_ops: observation.max_todo_ops,
     };
 
-    Ok(Phase21PolicyConfig {
+    Ok(CepPolicyConfig {
         project_root: effective_root,
         observation,
         network,
@@ -380,15 +379,15 @@ pub(crate) fn load_policy_config(
         )));
     }
 
-    let phase21 = phase21_policy_from_profile(cep, runtime_project_root)?;
+    let cep_context = cep_policy_from_profile(cep, runtime_project_root)?;
     let mut config = PolicyConfig {
         capability_sources: Default::default(),
         methods: Default::default(),
-        command: phase21.command,
-        network: phase21.network,
-        budget: phase21.budget,
-        observation: phase21.observation,
-        project_root: phase21.project_root,
+        command: cep_context.command,
+        network: cep_context.network,
+        budget: cep_context.budget,
+        observation: cep_context.observation,
+        project_root: cep_context.project_root,
     };
 
     if let Some(policy_section) = &cep.policy {
@@ -475,10 +474,10 @@ fn canonicalize_existing(path: &Path, field: &str) -> Result<PathBuf, ApiError> 
 fn production_base_envelope_from_policy(
     project_root: &str,
     enabled_tools: &[String],
-    policy: &Phase21PolicyConfig,
+    policy: &CepPolicyConfig,
 ) -> Result<BaseExecutionEnvelope, ApiError> {
     let mut base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(project_root, "phase21 turn observation");
+        BaseExecutionEnvelope::for_workspace_root(project_root, "cep_context turn observation");
     if enabled_tools.iter().any(|name| name == TodoWrite::NAME) {
         base_envelope = base_envelope.with_session_state();
     }
@@ -505,8 +504,8 @@ pub(crate) fn production_base_envelope(
     cep: Option<&CepSection>,
 ) -> Result<BaseExecutionEnvelope, ApiError> {
     let policy = match cep {
-        Some(cep_section) => phase21_policy_from_profile(cep_section, Path::new(project_root))?,
-        None => Phase21PolicyConfig::defaults_for_project_root(project_root),
+        Some(cep_section) => cep_policy_from_profile(cep_section, Path::new(project_root))?,
+        None => CepPolicyConfig::defaults_for_project_root(project_root),
     };
     production_base_envelope_from_policy(project_root, enabled_tools, &policy)
 }
@@ -592,21 +591,21 @@ pub(crate) fn build_production_turn_deps(
     // `/var` -> `/private/var` temp dirs) yields a raw pattern that fails to
     // prefix-match the canonicalized target, denying legitimate reads. Best
     // effort: fall back to the raw path if canonicalization fails, matching the
-    // tolerance in `Phase21PolicyConfig::defaults_for_project_root`.
+    // tolerance in `CepPolicyConfig::defaults_for_project_root`.
     let canonical_root = std::fs::canonicalize(project_root)
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned));
     let project_root = canonical_root.as_deref().unwrap_or(project_root);
 
-    let phase21_policy = match cep {
-        Some(cep_section) => phase21_policy_from_profile(cep_section, Path::new(project_root))?,
-        None => Phase21PolicyConfig::defaults_for_project_root(project_root),
+    let cep_policy = match cep {
+        Some(cep_section) => cep_policy_from_profile(cep_section, Path::new(project_root))?,
+        None => CepPolicyConfig::defaults_for_project_root(project_root),
     };
     let base_envelope =
-        production_base_envelope_from_policy(project_root, enabled_tools, &phase21_policy)?;
+        production_base_envelope_from_policy(project_root, enabled_tools, &cep_policy)?;
 
     #[cfg(test)]
-    let build_metrics = Phase20BuildMetrics {
+    let build_metrics = CepRuntimeBuildMetrics {
         adapter_instances: 1,
         transport_pairs: 1,
     };
@@ -631,7 +630,7 @@ pub(crate) fn build_production_turn_deps(
         runtime_version: runtime_version.to_string(),
         ..Default::default()
     }));
-    let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
+    let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
     let active_envelope = Arc::new(ActiveEnvelopeStore::new());
 
     let policy_config = match cep {
@@ -651,10 +650,8 @@ pub(crate) fn build_production_turn_deps(
         audit: Arc::clone(&audit),
         audit_context: Arc::clone(&audit_context),
         base_envelope: base_envelope.clone(),
-        phase21: Arc::clone(&phase21),
+        cep_context: Arc::clone(&cep_context),
         active_envelope,
-        call_audit_metadata: CallAuditMetadata::bridge_defaults(),
-        production_audit_routing: true,
         policy_hook: default_hook.clone(),
         default_policy_hook: Some(default_hook),
         cep_mode: cep
@@ -776,20 +773,6 @@ pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
                             .map(str::to_string),
                     })
                 }
-                "cep.bridge_metadata" => Some(AgentTurnEvent::CepGuardVerdict {
-                    call_id,
-                    method: string_param(&params, "method")?,
-                    semantic_stage: string_param(&params, "semantic_stage")?,
-                    guard_stage: string_param(&params, "guard_stage")?,
-                    policy_enforced: params
-                        .get("policy_enforced")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false),
-                    semantic_status: params
-                        .get("semantic_status")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                }),
                 _ => None,
             }
         }
@@ -847,16 +830,15 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 }
 
 #[cfg(test)]
-mod phase21_profile_policy {
+mod cep_context_profile_policy {
     use super::*;
     use lattice_profile::CepSection;
     use tempfile::TempDir;
 
     #[test]
-    fn phase21_profile_policy_defaults_when_cep_absent() {
+    fn cep_context_profile_policy_defaults_when_cep_absent() {
         let dir = TempDir::new().unwrap();
-        let policy =
-            phase21_policy_from_profile(&CepSection::default(), dir.path()).expect("defaults");
+        let policy = cep_policy_from_profile(&CepSection::default(), dir.path()).expect("defaults");
         assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
         assert_eq!(
             policy.budget.max_turn_observation_bytes,
@@ -865,7 +847,7 @@ mod phase21_profile_policy {
     }
 
     #[test]
-    fn phase21_profile_policy_canonicalizes_observation_roots() {
+    fn cep_context_profile_policy_canonicalizes_observation_roots() {
         let dir = TempDir::new().unwrap();
         let sub = dir.path().join("src");
         std::fs::create_dir_all(&sub).unwrap();
@@ -876,7 +858,7 @@ mod phase21_profile_policy {
             }),
             ..Default::default()
         };
-        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(
             policy.observation.allowed_roots,
             vec![sub.canonicalize().unwrap()]
@@ -884,7 +866,7 @@ mod phase21_profile_policy {
     }
 
     #[test]
-    fn phase21_profile_policy_rejects_roots_outside_project() {
+    fn cep_context_profile_policy_rejects_roots_outside_project() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         let cep = CepSection {
@@ -894,12 +876,12 @@ mod phase21_profile_policy {
             }),
             ..Default::default()
         };
-        let err = phase21_policy_from_profile(&cep, dir.path()).unwrap_err();
+        let err = cep_policy_from_profile(&cep, dir.path()).unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(_)));
     }
 
     #[test]
-    fn phase21_profile_policy_network_max_web_response_bytes() {
+    fn cep_context_profile_policy_network_max_web_response_bytes() {
         let dir = TempDir::new().unwrap();
         let cep = CepSection {
             network: Some(CepNetworkSection {
@@ -908,7 +890,7 @@ mod phase21_profile_policy {
             }),
             ..Default::default()
         };
-        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.network.max_web_response_bytes, 2048);
     }
 
@@ -978,7 +960,7 @@ mod phase21_profile_policy {
     }
 
     #[test]
-    fn phase21_policy_from_profile_uses_command_policy_from_profile() {
+    fn cep_policy_from_profile_uses_command_policy_from_profile() {
         let dir = TempDir::new().unwrap();
         let cep = CepSection {
             command: Some(lattice_profile::CepCommandSection {
@@ -987,15 +969,15 @@ mod phase21_profile_policy {
             }),
             ..Default::default()
         };
-        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.command.default_timeout_ms, 45_000);
     }
 
     #[test]
-    fn phase21_policy_from_profile_older_profile_uses_command_defaults() {
+    fn cep_policy_from_profile_older_profile_uses_command_defaults() {
         let dir = TempDir::new().unwrap();
         let cep = CepSection::default();
-        let policy = phase21_policy_from_profile(&cep, dir.path()).expect("policy");
+        let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.command, CommandPolicy::defaults());
     }
 }

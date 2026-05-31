@@ -1,4 +1,4 @@
-//! Native Phase 21 `session.todo_write` CEP handler.
+//! Native CEP `session.todo_write` CEP handler.
 
 use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::guard::evaluate_and_enforce_policy;
@@ -29,7 +29,7 @@ async fn handle_todo_write(
     }
 
     let op_count = params.todos.len();
-    if let Err(budget_err) = ctx.phase21.budget.try_charge_todo_ops(op_count) {
+    if let Err(budget_err) = ctx.cep_context.budget.try_charge_todo_ops(op_count) {
         emit_denial_metadata(&ctx, op_count, "cep_budget").await;
         return Err(budget_err.to_cep_error());
     }
@@ -120,7 +120,7 @@ async fn emit_denial_metadata(ctx: &HandlerContext, op_count: usize, denial_sour
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;
@@ -134,7 +134,7 @@ mod tests {
     }
 
     fn ctx_for(
-        phase21: Arc<Phase21TurnContext>,
+        cep_context: Arc<CepTurnContext>,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -150,7 +150,7 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "todo test")
                     .with_session_state(),
-                phase21,
+                cep_context,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -173,11 +173,11 @@ mod tests {
 
     #[tokio::test]
     async fn native_todo_write_succeeds_without_workspace_envelope() {
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         ));
         let registry = test_registry();
-        let (ctx, mut events) = ctx_for(phase21);
+        let (ctx, mut events) = ctx_for(cep_context);
 
         let params = TodoWriteParams {
             todos: vec![
@@ -211,12 +211,12 @@ mod tests {
 
     #[tokio::test]
     async fn native_todo_write_rejects_over_max_todo_ops() {
-        let mut policy = crate::policy::Phase21PolicyConfig::defaults_for_project_root(
+        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.observation.max_todo_ops = 1;
         policy.budget.max_todo_ops = 1;
-        let phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
 
         let item = TodoWriteParams {
@@ -225,7 +225,7 @@ mod tests {
                 status: TodoStatus::Pending,
             }],
         };
-        let (ctx_ok, _events) = ctx_for(Arc::clone(&phase21));
+        let (ctx_ok, _events) = ctx_for(Arc::clone(&cep_context));
         registry
             .dispatch(
                 TodoWrite::NAME,
@@ -235,7 +235,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (ctx_denied, mut events) = ctx_for(phase21);
+        let (ctx_denied, mut events) = ctx_for(cep_context);
         let err = registry
             .dispatch(
                 TodoWrite::NAME,
@@ -252,14 +252,14 @@ mod tests {
 
     #[tokio::test]
     async fn native_todo_write_rejects_many_todos_in_one_call_over_cap() {
-        let mut policy = crate::policy::Phase21PolicyConfig::defaults_for_project_root(
+        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.observation.max_todo_ops = 1;
         policy.budget.max_todo_ops = 1;
-        let phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
-        let (ctx, mut events) = ctx_for(phase21);
+        let (ctx, mut events) = ctx_for(cep_context);
 
         let params = TodoWriteParams {
             todos: vec![
@@ -285,11 +285,11 @@ mod tests {
 
     #[tokio::test]
     async fn native_todo_write_rejects_two_in_progress() {
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         ));
         let registry = test_registry();
-        let (ctx, _events) = ctx_for(phase21);
+        let (ctx, _events) = ctx_for(cep_context);
 
         let params = TodoWriteParams {
             todos: vec![

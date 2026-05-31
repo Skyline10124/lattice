@@ -13,7 +13,7 @@ pub(crate) mod sealed {
 ///
 /// Maps to a full [`Capability`] via [`RequiredCapability::resolve`]. Catalog
 /// methods declare the capability *kind* as a const; concrete path / argv /
-/// host patterns are resolved at envelope scope in later phases. There is **no
+/// host patterns are resolved at envelope scope in later releases. There is **no
 /// permissive default** — `resolve` requires explicit patterns for every
 /// pattern-bearing capability so that "no ambient authority" (CEP-07) is
 /// preserved at the type system level.

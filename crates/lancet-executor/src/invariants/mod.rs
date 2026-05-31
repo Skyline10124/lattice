@@ -1,4 +1,4 @@
-//! Invariant card system for Phase 25.
+//! Invariant card system for CEP.
 //!
 //! Loads `.lancet/invariants/*.toml` cards, indexes by anchor, and provides
 //! target-path-based queries that feed structural constraints into the

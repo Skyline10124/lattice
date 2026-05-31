@@ -1,4 +1,4 @@
-//! Live turn streaming path (Phase 16).
+//! Live turn streaming path (live turn).
 //!
 //! This module implements the live `stream_turn` path: startup validation via
 //! [`prepare_live_turn`], a spawned background task ([`run_live_turn_task`])
@@ -334,7 +334,7 @@ pub(super) async fn stream_turn_live_with_agent(
         audit_context: Arc::new(tokio::sync::RwLock::new(
             lancet_executor::CepAuditContext::default(),
         )),
-        build_metrics: super::lancet::Phase20BuildMetrics {
+        build_metrics: super::lancet::CepRuntimeBuildMetrics {
             adapter_instances: 0,
             transport_pairs: 0,
         },

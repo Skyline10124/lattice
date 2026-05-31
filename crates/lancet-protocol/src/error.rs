@@ -32,13 +32,13 @@ pub enum CepErrorFamily {
 
 /// Closed enum of CEP error codes within `-32000..-32099`.
 ///
-/// Execution-family note (Phase 22 contract preview): `CommandTimeout`
+/// Execution-family note (CEP contract preview): `CommandTimeout`
 /// (`-32021`) is the **default** wire code emitted by `command.run` whenever
 /// the configured deadline elapses — both when `kill().await` succeeds and
 /// when the child has already exited. `ChildKillFailed` (`-32022`) is the
 /// narrower "we hit the timeout but the kill itself failed" case; handlers
 /// emit it only when `Child::kill().await` returns an error or the OS reports
-/// an unreaped child after the deadline. Phase 22 (CMD-04) finalizes the
+/// an unreaped child after the deadline. CEP (CMD-04) finalizes the
 /// distinction with structured `ExecutionErrorData`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

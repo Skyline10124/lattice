@@ -9,7 +9,7 @@
 //! `rt().block_on(async { … })`. Do NOT combine with `#[tokio::test]` — the
 //! two macros conflict during expansion.
 //!
-//! This module is `pub` so Phase 27 DOG-03 can reuse the harness scaffolding
+//! This module is `pub` so CEP DOG-03 can reuse the harness scaffolding
 //! without duplication (D-25).
 
 use std::sync::{Arc, OnceLock};
@@ -29,7 +29,7 @@ use crate::effect::region::AuthorizedEffectRegion;
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
 use crate::policy::network::NetworkPolicyConfig;
-use crate::policy::{Phase21PolicyConfig, Phase21TurnContext};
+use crate::policy::{CepPolicyConfig, CepTurnContext};
 use crate::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
 
 /// Module-level Tokio runtime for bridging sync `proptest!` bodies to async dispatch.
@@ -185,7 +185,7 @@ pub fn assert_effect_violation(outcome: &HarnessOutcome) {
 /// Build a test context, returning `(ctx, event_rx, canonical_root)`.
 ///
 /// The canonical root is the `fs::canonicalize`d form of `root` (matches what
-/// `defaults_for_project_root` stores in `Phase21PolicyConfig::project_root`).
+/// `defaults_for_project_root` stores in `CepPolicyConfig::project_root`).
 /// Callers should use this canonical root when building `AuthorizedEffectRegion`
 /// paths so that region containment checks match the paths handlers record.
 pub fn build_test_context(
@@ -204,9 +204,9 @@ pub fn build_test_context(
     let policy_cfg = PolicyConfig::defaults_for_project_root(root_path.to_path_buf());
     let canonical_root = policy_cfg.project_root.to_string_lossy().to_string();
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
-    let mut phase21_policy = Phase21PolicyConfig::defaults_for_project_root(root_path);
-    phase21_policy.network = network;
-    let phase21 = Arc::new(Phase21TurnContext::from_policy(phase21_policy));
+    let mut cep_policy = CepPolicyConfig::defaults_for_project_root(root_path);
+    cep_policy.network = network;
+    let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
 
     let mut base =
         BaseExecutionEnvelope::for_workspace_root(&canonical_root, "effect-contract-test");
@@ -217,7 +217,7 @@ pub fn build_test_context(
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
         base_envelope: base,
-        phase21,
+        cep_context,
         active_envelope: Arc::new(ActiveEnvelopeStore::new()),
         turn_id: "test-turn".into(),
         durable_metadata: CallDurableMetadata::default(),

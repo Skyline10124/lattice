@@ -3,12 +3,12 @@
 //! Exercises one representative CEP method per `ImpactKind` through the
 //! production method registry (`register_production_method_registry`).
 //!
-//! The legacy backend (`register_phase20_legacy_backend`) is **never** registered.
+//! The retired legacy backend is not present; all calls go through native handlers.
 //!
 //! For each impact class:
 //! 1. Declare the required envelope capabilities (where needed).
 //! 2. Execute the representative method via [`LancetClient`] typed calls.
-//! 3. Assert the audit row: `impact_kind`, `semantic_stage = "phase21_native"`,
+//! 3. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
 //! 4. Verify that all rows share one `turn_id` before calling `audit.replay`.
 //! 5. Assert PROV `activities` order and `wasInformedBy` chain from replay.
@@ -19,8 +19,8 @@ use std::sync::Arc;
 use lancet_executor::audit::CepAuditContext;
 use lancet_executor::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_executor::{
-    register_production_method_registry, CepAuditStore, LancetTransport, MethodRegistry,
-    Phase21PolicyConfig, Phase21TurnContext, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTurnContext,
+    LancetTransport, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
@@ -70,7 +70,7 @@ async fn build_production_config(
     audit: Arc<CepAuditStore>,
     allow_localhost: bool,
 ) -> ServerRunConfig {
-    let mut policy = Phase21PolicyConfig::defaults_for_project_root(canonical_root);
+    let mut policy = CepPolicyConfig::defaults_for_project_root(canonical_root);
     if allow_localhost {
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
@@ -83,8 +83,7 @@ async fn build_production_config(
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
     config.base_envelope = base_envelope;
-    config.phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
-    config.production_audit_routing = true;
+    config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
     {
@@ -131,7 +130,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit store"));
 
-    // ── Phase 1: execute the five impact classes ───────────────────────
+    // ── Step 1: execute the five impact classes ────────────────────────
 
     let mut registry = MethodRegistry::new();
     register_production_method_registry(&mut registry).expect("production registry");
@@ -276,7 +275,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     server_task1.abort();
     tokio::task::yield_now().await;
 
-    // ── Phase 2: assert audit rows ─────────────────────────────────────
+    // ── Step 2: assert audit rows ──────────────────────────────────────
 
     // All rows (tool calls + envelope.declare calls) share the fixed turn_id.
     let all_rows = audit
@@ -367,7 +366,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // ── Phase 3: audit.replay PROV assertions ─────────────────────────
+    // ── Step 3: audit.replay PROV assertions ──────────────────────────
 
     // Build a fresh server on the same audit store with ReadAudit cap for replay.
     let mut replay_registry = MethodRegistry::new();
@@ -388,8 +387,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let mut replay_config = ServerRunConfig::in_memory_for_tests();
     replay_config.audit = Arc::clone(&audit);
     replay_config.base_envelope = replay_base;
-    replay_config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(canonical_str));
-    replay_config.production_audit_routing = true;
+    replay_config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(canonical_str));
     replay_config.audit_context = replay_audit_ctx;
     replay_config.policy_hook = hook2.clone();
     replay_config.default_policy_hook = Some(hook2);

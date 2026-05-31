@@ -1,7 +1,7 @@
-//! Native Phase 22 workspace mutation handlers.
+//! Native CEP workspace mutation handlers.
 //!
 //! Implements `workspace.write_file` and `workspace.patch` with Guard L1 scope
-//! enforcement and verify flow. Replaces the legacy bridge for mutation methods.
+//! enforcement and verify flow.
 //!
 //! D-31: Both methods require an active `ExecutionEnvelope`.
 //! D-36: write_file may create new files if parent exists; no mkdir -p.
@@ -70,7 +70,7 @@ async fn handle_write_file(
 
     // 3. Get project root
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -134,8 +134,7 @@ async fn handle_write_file(
         }
     }
 
-    // 7. Write file using the existing secure containment from fs.rs
-    // We call the legacy executor's write_file via a direct safe path
+    // 7. Write file using native secure containment.
     let bytes_written = params.content.len() as u64;
     write_file_secure(&project_root, &params.path, &params.content).await?;
 
@@ -148,7 +147,7 @@ async fn handle_write_file(
 
     // 7. Run verify if configured
     if let Some(verify_cmd) = extract_verify_command(&envelope) {
-        let policy = &ctx.phase21.policy.command;
+        let policy = &ctx.cep_context.policy.command;
         validate_verify_command(&verify_cmd, policy, &project_root)?;
 
         let mut cancellation = ctx.cancellation.clone();
@@ -222,7 +221,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
 
     // 3. Get project root
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -355,7 +354,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
 
     // 7. Run verify if configured
     if let Some(verify_cmd) = extract_verify_command(&envelope) {
-        let policy = &ctx.phase21.policy.command;
+        let policy = &ctx.cep_context.policy.command;
         validate_verify_command(&verify_cmd, policy, &project_root)?;
 
         let mut cancellation = ctx.cancellation.clone();
@@ -620,8 +619,7 @@ async fn write_file_secure(
         ));
     }
 
-    // Write using tokio::fs::write — the fs.rs secure_write_file_unix
-    // containment is already applied at the Guard L1 level.
+    // Write using tokio::fs::write after Guard L1 containment checks.
     tokio::fs::write(&full_path, content).await.map_err(|e| {
         CepError::new(
             CepErrorCode::ExecutionFailed,
@@ -731,9 +729,9 @@ mod write_file_tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
-                phase21: Arc::new(
-                    crate::policy::Phase21TurnContext::defaults_for_project_root(root),
-                ),
+                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+                    root,
+                )),
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -785,9 +783,9 @@ mod write_file_tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
-                phase21: Arc::new(
-                    crate::policy::Phase21TurnContext::defaults_for_project_root(root),
-                ),
+                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+                    root,
+                )),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1132,9 +1130,9 @@ mod patch_tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "patch test"),
-                phase21: Arc::new(
-                    crate::policy::Phase21TurnContext::defaults_for_project_root(root),
-                ),
+                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+                    root,
+                )),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

@@ -247,10 +247,10 @@ impl PolicyConfig {
         }
     }
 
-    /// Construct a `Phase21PolicyConfig` for backward compatibility with
-    /// existing Phase 21 handlers during the wrapper-first migration.
-    pub fn to_phase21_policy_config(&self) -> super::Phase21PolicyConfig {
-        super::Phase21PolicyConfig {
+    /// Construct a `CepPolicyConfig` for backward compatibility with
+    /// existing CEP handlers during the wrapper-first migration.
+    pub fn to_cep_policy_config(&self) -> super::CepPolicyConfig {
+        super::CepPolicyConfig {
             project_root: self.project_root.clone(),
             observation: self.observation.clone(),
             network: self.network.clone(),
@@ -1058,15 +1058,15 @@ allow_public_https = false
         assert_eq!(decision, PolicyDecision::Allowed);
     }
 
-    // ── Additional: to_phase21_policy_config backward compat ───────────
+    // ── Additional: to_cep_policy_config backward compat ───────────
 
     #[test]
-    fn policy_config_to_phase21_backward_compat() {
+    fn policy_config_to_cep_policy_config() {
         let config = PolicyConfig::defaults_for_project_root(PathBuf::from("/tmp/test"));
-        let phase21 = config.to_phase21_policy_config();
-        assert_eq!(phase21.project_root, config.project_root);
+        let cep_context = config.to_cep_policy_config();
+        assert_eq!(cep_context.project_root, config.project_root);
         assert_eq!(
-            phase21.budget.max_single_read_bytes,
+            cep_context.budget.max_single_read_bytes,
             config.budget.max_single_read_bytes
         );
     }

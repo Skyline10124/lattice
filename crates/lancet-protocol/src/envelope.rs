@@ -271,7 +271,7 @@ pub struct ExecutionEnvelope {
 /// every turn starts with. It may carry `ReadPath`, `Inspect`, and optionally
 /// `MutateSessionState` and `FetchUrl(host)` capabilities; it **never**
 /// grants `WritePath` or `RunCommand`. Those two capabilities require an
-/// explicitly declared envelope (Phase 22 `declare_envelope` / `submit_intent`).
+/// explicitly declared envelope (CEP `declare_envelope` / `submit_intent`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BaseExecutionEnvelope {
     pub inner: ExecutionEnvelope,
@@ -314,7 +314,7 @@ impl BaseExecutionEnvelope {
     /// Add a `MutateSessionState` capability to this base envelope.
     ///
     /// Per CEP-08, session-state mutation is allowed in the base envelope
-    /// (it is not a workspace mutation). Phase 21 (PROF-02) consumes this
+    /// (it is not a workspace mutation). CEP (PROF-02) consumes this
     /// builder when wiring `session.todo_write`.
     pub fn with_session_state(mut self) -> Self {
         self.inner
@@ -344,7 +344,7 @@ impl BaseExecutionEnvelope {
     /// Verify that this base envelope never grants `WritePath` or `RunCommand`.
     ///
     /// Per CEP-08, those two capabilities are reserved for explicitly declared
-    /// envelopes (Phase 22). All other capabilities — `ReadPath`, `Inspect`,
+    /// envelopes (CEP). All other capabilities — `ReadPath`, `Inspect`,
     /// `MutateSessionState`, `FetchUrl` — are allowed in a base envelope.
     pub fn validate_no_write_or_command(&self) -> Result<(), &'static str> {
         for cap in &self.inner.capabilities {

@@ -14,8 +14,8 @@ use colored::Colorize;
 use lancet_executor::invariants::loader::load_cards_from_dir;
 use lancet_executor::invariants::resolve_invariants_dir;
 use lancet_executor::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, LancetTransport,
-    MethodRegistry, Phase21TurnContext, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTurnContext,
+    LancetTransport, MethodRegistry, ServerRunConfig,
 };
 use lancet_protocol::catalog::catalog;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
@@ -357,7 +357,7 @@ async fn submit_intent_smoke_async() -> Result<()> {
     config.base_envelope =
         BaseExecutionEnvelope::for_workspace_root(root_str, "lancet doctor smoke")
             .with_session_state();
-    config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root_str));
+    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root_str));
 
     let (client, server) = LancetTransport::pair(64);
     let server_task = tokio::spawn(async move {

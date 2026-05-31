@@ -55,7 +55,7 @@ impl CepMethod for AuditQuery {
 
 impl CatalogMethod for AuditQuery {}
 
-/// `audit.tail` — stream new audit rows as notifications (wire shape; handler in Phase 26-03).
+/// `audit.tail` — stream new audit rows as notifications (wire shape; handler in CEP-03).
 pub struct AuditTail;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

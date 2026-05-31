@@ -1,6 +1,6 @@
-//! Phase 10 Plan 05: CLI boundary smoke integration tests.
+//! CLI Plan 05: CLI boundary smoke integration tests.
 //!
-//! These tests verify the completed Phase 10 CLI surface cutover from the
+//! These tests verify the completed CLI CLI surface cutover from the
 //! binary/user perspective. They exercise help output, command parsing,
 //! secret-safe diagnostics, and failure behavior without requiring live
 //! provider credentials or adding new dev dependencies.

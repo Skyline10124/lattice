@@ -1,4 +1,4 @@
-//! Phase 19 CEP catalog method types.
+//! CEP CEP catalog method types.
 
 pub mod audit;
 pub mod command;

@@ -8,19 +8,20 @@ The documented public contract for LANCET is the surface exported from **`lancet
 
 | Component | Description |
 |-----------|-------------|
-| `CATALOG` | The 10-method CEP catalog (`workspace.*`, `web.fetch`, `session.todo_write`, `command.run`, `envelope.declare`) |
+| `CATALOG` | The 14-method CEP catalog: `workspace.read_file`, `workspace.grep`, `workspace.list_directory`, `workspace.find_files`, `workspace.write_file`, `workspace.patch`, `web.fetch`, `session.todo_write`, `command.run`, `envelope.declare`, `envelope.submit_intent`, `audit.query`, `audit.tail`, `audit.replay` |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types |
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface |
 | Audit/provenance schemas | `ProvGraphFragment`, `AttestationRecord` wire shapes |
 
-**Not public surface:** `lancet-executor` handler internals, `legacy_backend`, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the CEP server bridge.
+**Not public surface:** `lancet-executor` handler internals, private low-level executor helpers, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native CEP server.
 
 ### Release gate and self-check
 
 - **Offline release gate:** `scripts/release-gate-v1.3.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, CEP boundary check, and `lattice lancet doctor`. Exits 0 on a clean tree.
 - **CEP self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and policy/`cep_mode` parses cleanly.
+- **Warn-mode report:** `docs/cep-warn-report.md` — DOG-02 coverage report for all 14 catalog methods; the v1.3-alpha baseline is N=0 leaks and no `fix-now` triage rows.
 - **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
 
 ### cep_mode semantics

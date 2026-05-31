@@ -1,7 +1,6 @@
 //! Native command.run CEP handler with policy enforcement.
 //!
-//! Replaces the legacy bridge's handle_run with a policy-aware native handler.
-//! This is the only shell execution path from the agent after Phase 22.
+//! This is the only shell execution path from the agent.
 //!
 //! D-30, D-38: WorkspaceMutation commands capture pre-execution workspace snapshot,
 //! compute changed paths after execution, and check against WritePath scope.
@@ -41,7 +40,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
 
     let _evaluation = evaluate_and_enforce_policy(&ctx, Run::NAME, &params).await?;
 
-    let policy = &ctx.phase21.policy.command;
+    let policy = &ctx.cep_context.policy.command;
 
     // 3. Classify command
     let effective_impact = classify_command(&params.argv, params.declared_impact, policy)?;
@@ -135,7 +134,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                 Capability::WritePath { path_pattern } => {
                     Some(crate::effect::region::normalize_region_path(
                         path_pattern,
-                        &ctx.phase21.policy.project_root,
+                        &ctx.cep_context.policy.project_root,
                     ))
                 }
                 _ => None,
@@ -171,7 +170,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
 
     // 9. Execute via rewritten execute_argv with bounded tail reader
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -332,7 +331,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                     .unwrap_or_default();
 
             // EFF-03 composite: records both command_execution and workspace_mutation
-            // for WorkspaceMutation commands. Phase 26 PROV replay reads this field.
+            // for WorkspaceMutation commands. CEP PROV replay reads this field.
             ctx.record_durable_metadata(json!({
                 "classification": format!("{:?}", effective_impact),
                 "effective_effect": effective_effect,
@@ -655,7 +654,7 @@ async fn emit_success_metadata(
 mod tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact,
@@ -688,7 +687,7 @@ mod tests {
                     root,
                     "command handler test",
                 ),
-                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -763,7 +762,7 @@ mod tests {
                     root,
                     "command handler test",
                 ),
-                phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+                cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -900,7 +899,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -981,7 +980,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "allowlist test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1065,7 +1064,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "multi run cap test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1149,7 +1148,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "hidden path test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1172,10 +1171,7 @@ mod tests {
         };
 
         let params = RunParams {
-            argv: vec![
-                "touch".into(),
-                ".github/workflows/phase22-hidden.yml".into(),
-            ],
+            argv: vec!["touch".into(), ".github/workflows/cep-hidden.yml".into()],
             cwd: None,
             env: BTreeMap::new(),
             timeout_ms: Some(5000),
@@ -1201,7 +1197,7 @@ mod tests {
             "ledger must contain WorkspaceMutation effect for out-of-scope path"
         );
         let has_out_of_scope = mutation_effects.iter().any(|e| {
-            matches!(&e.scope, crate::effect::ledger::ObservedScope::Path(p) if p.to_string_lossy().contains("phase22-hidden"))
+            matches!(&e.scope, crate::effect::ledger::ObservedScope::Path(p) if p.to_string_lossy().contains("cep-hidden"))
         });
         assert!(
             has_out_of_scope,
@@ -1267,7 +1263,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "supersede race test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: Arc::clone(&store),
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1375,8 +1371,8 @@ mod tests {
         let root = dir.path().to_str().unwrap();
         let (mut ctx, _event_rx, _cancel_tx) =
             test_ctx_with_run_command(root, vec!["python3".into()]).await;
-        ctx.phase21 = Arc::new({
-            let mut policy = Phase21TurnContext::defaults_for_project_root(root);
+        ctx.cep_context = Arc::new({
+            let mut policy = CepTurnContext::defaults_for_project_root(root);
             policy.policy.command.max_output_bytes = 50;
             policy
         });
@@ -1515,7 +1511,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: cancel,
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "cancel test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -1620,7 +1616,7 @@ mod tests {
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
-            phase21: Arc::new(Phase21TurnContext::defaults_for_project_root(root)),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
             active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

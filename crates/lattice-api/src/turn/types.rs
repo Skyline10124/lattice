@@ -30,7 +30,7 @@ pub struct RunTurnRequest {
     /// Test-only LLM injection for lattice-api integration tests.
     #[serde(skip)]
     pub test_llm: Option<Arc<dyn lattice_agent::LlmClient>>,
-    /// Test-only project root for CEP runtime and legacy backend wiring.
+    /// Test-only project root for CEP runtime wiring.
     #[serde(skip)]
     pub test_project_root: Option<String>,
     /// When `Some(false)` with `test_llm`, persist audit to `.lattice/cep_audit.db` instead of in-memory.
@@ -210,40 +210,31 @@ pub enum TurnEvent {
         guard_stage: String,
         error_code: Option<String>,
     },
-    /// Staged bridge lifecycle guard metadata (Phase 20 bridge only).
-    CepGuardVerdict {
-        call_id: u64,
-        method: String,
-        semantic_stage: String,
-        guard_stage: String,
-        policy_enforced: bool,
-        semantic_status: Option<String>,
-    },
-    /// An envelope was declared for the current turn (Phase 22).
+    /// An envelope was declared for the current turn (CEP).
     CepEnvelopeDeclared {
         envelope_id: String,
         envelope_hash: String,
     },
-    /// An existing envelope was superseded by a new one (Phase 22).
+    /// An existing envelope was superseded by a new one (CEP).
     CepEnvelopeSuperseded {
         old_envelope_id: String,
         new_envelope_id: String,
         reason: Option<String>,
     },
-    /// A mutation was attempted without an active envelope (Phase 22).
+    /// A mutation was attempted without an active envelope (CEP).
     CepEnvelopeMissing {
         call_id: u64,
         method: String,
         required_for: String,
     },
-    /// A verify command failed after a successful mutation (Phase 22).
+    /// A verify command failed after a successful mutation (CEP).
     CepVerifyFailed {
         call_id: u64,
         envelope_id: String,
         verify_exit_code: Option<i32>,
         diff_retained: bool,
     },
-    /// A mutation landed outside the active envelope's scope (Phase 22).
+    /// A mutation landed outside the active envelope's scope (CEP).
     CepReplanRequired {
         call_id: u64,
         method: String,

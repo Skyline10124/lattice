@@ -204,7 +204,7 @@ impl LlmClient for CancelOnDoneLlm {
         let finish_reason = self.finish_reason.clone();
         let usage = self.usage.clone();
 
-        enum Phase {
+        enum StreamState {
             Pending(
                 VecDeque<LlmEvent>,
                 String,
@@ -214,22 +214,25 @@ impl LlmClient for CancelOnDoneLlm {
             DoneEmitted,
         }
 
-        let initial = Phase::Pending(VecDeque::from(pre), finish_reason, usage, cancel);
+        let initial = StreamState::Pending(VecDeque::from(pre), finish_reason, usage, cancel);
         let stream = futures::stream::unfold(initial, |state| async move {
             match state {
-                Phase::Pending(mut queue, finish_reason, usage, cancel) => {
+                StreamState::Pending(mut queue, finish_reason, usage, cancel) => {
                     if let Some(event) = queue.pop_front() {
-                        Some((event, Phase::Pending(queue, finish_reason, usage, cancel)))
+                        Some((
+                            event,
+                            StreamState::Pending(queue, finish_reason, usage, cancel),
+                        ))
                     } else {
                         cancel.store(true, Ordering::Relaxed);
                         let done = LlmEvent::Done {
                             finish_reason,
                             usage,
                         };
-                        Some((done, Phase::DoneEmitted))
+                        Some((done, StreamState::DoneEmitted))
                     }
                 }
-                Phase::DoneEmitted => None,
+                StreamState::DoneEmitted => None,
             }
         });
 
@@ -966,17 +969,10 @@ async fn stream_turn_emits_cep_lifecycle_events() {
         ..
     } = cep_started_event
     {
-        assert_eq!(semantic_stage, "phase21_native");
+        assert_eq!(semantic_stage, "cep_native");
         assert_eq!(guard_stage, "cep_policy_lifecycle");
         assert_eq!(impact_kind, "session_state_mutation");
     }
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, TurnEvent::CepGuardVerdict { .. })),
-        "native session.todo_write must not emit Phase 20 bridge guard metadata"
-    );
-
     assert!(
         events
             .iter()

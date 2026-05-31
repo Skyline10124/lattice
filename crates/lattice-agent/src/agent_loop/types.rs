@@ -131,7 +131,7 @@ pub enum AgentTurnEvent {
     /// pre-tool-execution) and checkpoint #4 (pre-each-tool) — runs after
     /// this event has already been buffered/forwarded. A `Cancelled` turn
     /// can therefore include a trailing `ModelFinished` in
-    /// `AgentTurnResult.events`. Phase 16 event mapping must not assume
+    /// `AgentTurnResult.events`. live turn event mapping must not assume
     /// "no `ModelFinished` ⇒ Completed".
     ModelFinished {
         finish_reason: String,
@@ -157,40 +157,31 @@ pub enum AgentTurnEvent {
         guard_stage: String,
         error_code: Option<String>,
     },
-    /// Staged bridge lifecycle guard metadata (Phase 20 only; not Guard L1 enforcement).
-    CepGuardVerdict {
-        call_id: u64,
-        method: String,
-        semantic_stage: String,
-        guard_stage: String,
-        policy_enforced: bool,
-        semantic_status: Option<String>,
-    },
-    /// An envelope was declared for the current turn (Phase 22).
+    /// An envelope was declared for the current turn (CEP).
     CepEnvelopeDeclared {
         envelope_id: String,
         envelope_hash: String,
     },
-    /// An existing envelope was superseded by a new one (Phase 22).
+    /// An existing envelope was superseded by a new one (CEP).
     CepEnvelopeSuperseded {
         old_envelope_id: String,
         new_envelope_id: String,
         reason: Option<String>,
     },
-    /// A mutation was attempted without an active envelope (Phase 22).
+    /// A mutation was attempted without an active envelope (CEP).
     CepEnvelopeMissing {
         call_id: u64,
         method: String,
         required_for: String,
     },
-    /// A verify command failed after a successful mutation (Phase 22).
+    /// A verify command failed after a successful mutation (CEP).
     CepVerifyFailed {
         call_id: u64,
         envelope_id: String,
         verify_exit_code: Option<i32>,
         diff_retained: bool,
     },
-    /// A mutation landed outside the active envelope's scope (Phase 22).
+    /// A mutation landed outside the active envelope's scope (CEP).
     CepReplanRequired {
         call_id: u64,
         method: String,

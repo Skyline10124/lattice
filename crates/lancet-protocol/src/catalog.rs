@@ -1,4 +1,4 @@
-//! Static CEP method catalog for Phase 19.
+//! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
@@ -7,7 +7,7 @@ use crate::methods::{
 };
 use std::sync::LazyLock;
 
-/// Exhaustive Phase 19 method descriptor list in stable registration order.
+/// Exhaustive CEP method descriptor list in stable registration order.
 pub static CATALOG: LazyLock<[MethodDescriptor; 14]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ReadFile>(),

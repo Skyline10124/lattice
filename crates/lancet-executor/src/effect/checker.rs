@@ -12,7 +12,7 @@ use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
 use super::ledger::{EffectSource, ObservedEffect};
 use super::region::AuthorizedEffectRegion;
-use crate::policy::Phase21PolicyConfig;
+use crate::policy::CepPolicyConfig;
 
 /// Check observed effects against a pre-built authorized region.
 ///
@@ -83,7 +83,7 @@ pub fn check_effects(
     method: &str,
     observed: &[ObservedEffect],
     matched_cap: Option<&SourcedCapability>,
-    policy: &Phase21PolicyConfig,
+    policy: &CepPolicyConfig,
     effect_decl: &EffectDecl,
 ) -> Result<(), CepError> {
     let authorized = AuthorizedEffectRegion::from_matched_capability(matched_cap, policy);

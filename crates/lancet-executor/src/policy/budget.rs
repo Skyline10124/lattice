@@ -1,4 +1,4 @@
-//! Turn-scoped observation budget tracking for Phase 21 CEP handlers.
+//! Turn-scoped observation budget tracking for CEP CEP handlers.
 
 use lancet_protocol::error::ReservedErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -138,7 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phase21_budget_rejects_aggregate_observation_exhaustion() {
+    fn cep_budget_rejects_aggregate_observation_exhaustion() {
         let limits = BudgetLimits {
             max_turn_observation_bytes: 100,
             ..BudgetLimits::defaults()
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn phase21_budget_snapshot_without_audit_store() {
+    fn cep_budget_snapshot_without_audit_store() {
         let tracker = ObservationBudgetTracker::new(BudgetLimits::defaults());
         tracker.try_charge_observation(128).unwrap();
         tracker.try_charge_todo_ops(1).unwrap();
@@ -165,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn phase21_budget_todo_op_cap() {
+    fn cep_budget_todo_op_cap() {
         let limits = BudgetLimits {
             max_todo_ops: 2,
             ..BudgetLimits::defaults()
@@ -179,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn phase21_budget_todo_ops_charge_by_item_count() {
+    fn cep_budget_todo_ops_charge_by_item_count() {
         let limits = BudgetLimits {
             max_todo_ops: 1,
             ..BudgetLimits::defaults()

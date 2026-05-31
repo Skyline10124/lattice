@@ -1,4 +1,4 @@
-//! Native Phase 21 `web.fetch` CEP handler.
+//! Native CEP `web.fetch` CEP handler.
 
 use std::sync::OnceLock;
 
@@ -38,7 +38,7 @@ async fn handle_web_fetch(
 ) -> Result<FetchResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, Fetch::NAME, &params).await?;
 
-    let policy = &ctx.phase21.policy.network;
+    let policy = &ctx.cep_context.policy.network;
     let validated = match validate_fetch_url(&params.url, policy) {
         Ok(v) => v,
         Err(err) => {
@@ -66,7 +66,11 @@ async fn handle_web_fetch(
     };
 
     let bytes_returned = outcome.bytes_returned;
-    if let Err(budget_err) = ctx.phase21.budget.try_charge_observation(bytes_returned) {
+    if let Err(budget_err) = ctx
+        .cep_context
+        .budget
+        .try_charge_observation(bytes_returned)
+    {
         emit_budget_denial_metadata(&ctx, &params.url, &budget_err).await;
         return Err(budget_err.to_cep_error());
     }
@@ -183,7 +187,7 @@ async fn emit_budget_denial_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;
@@ -199,18 +203,18 @@ mod tests {
     }
 
     fn ctx_for(
-        phase21: Arc<Phase21TurnContext>,
+        cep_context: Arc<CepTurnContext>,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let policy_cfg = crate::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
-            command: phase21.policy.command.clone(),
-            network: phase21.policy.network.clone(),
-            budget: phase21.policy.budget.clone(),
-            observation: phase21.policy.observation.clone(),
-            project_root: phase21.policy.project_root.clone(),
+            command: cep_context.policy.command.clone(),
+            network: cep_context.policy.network.clone(),
+            budget: cep_context.policy.budget.clone(),
+            observation: cep_context.policy.observation.clone(),
+            project_root: cep_context.policy.project_root.clone(),
         };
         let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
         (
@@ -220,7 +224,7 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "web.fetch test")
                     .with_fetch_host("*"),
-                phase21,
+                cep_context,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
@@ -265,14 +269,14 @@ mod tests {
     #[tokio::test]
     async fn native_web_fetch_returns_real_status_not_hardcoded_200() {
         let url = spawn_echo_server("404 Not Found", "missing").await;
-        let mut policy = crate::policy::Phase21PolicyConfig::defaults_for_project_root(
+        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into()];
-        let phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
-        let (ctx, _events) = ctx_for(phase21);
+        let (ctx, _events) = ctx_for(cep_context);
 
         let result = registry
             .dispatch(
@@ -298,16 +302,16 @@ mod tests {
     async fn native_web_fetch_truncates_over_cap_response() {
         let big_body = "x".repeat(500);
         let url = spawn_echo_server("200 OK", &big_body).await;
-        let mut policy = crate::policy::Phase21PolicyConfig::defaults_for_project_root(
+        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into()];
         policy.network.max_web_response_bytes = 100;
         policy.budget.max_turn_observation_bytes = 10_000;
-        let phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
-        let (ctx, mut events) = ctx_for(phase21);
+        let (ctx, mut events) = ctx_for(cep_context);
 
         let result = registry
             .dispatch(
@@ -340,10 +344,10 @@ mod tests {
     #[tokio::test]
     async fn native_web_fetch_denies_localhost_by_default() {
         let registry = test_registry();
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         ));
-        let (ctx, mut events) = ctx_for(phase21);
+        let (ctx, mut events) = ctx_for(cep_context);
 
         let err = registry
             .dispatch(
@@ -368,15 +372,15 @@ mod tests {
     #[tokio::test]
     async fn native_web_fetch_turn_observation_budget_error() {
         let url = spawn_echo_server("200 OK", "payload").await;
-        let mut policy = crate::policy::Phase21PolicyConfig::defaults_for_project_root(
+        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;
         policy.network.allowed_hosts = vec!["127.0.0.1".into()];
         policy.budget.max_turn_observation_bytes = 4;
-        let phase21 = Arc::new(Phase21TurnContext::from_policy(policy));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let registry = test_registry();
-        let (ctx, _events) = ctx_for(phase21);
+        let (ctx, _events) = ctx_for(cep_context);
 
         let err = registry
             .dispatch(

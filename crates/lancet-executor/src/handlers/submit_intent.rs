@@ -42,7 +42,7 @@ async fn handle_submit_intent(
     let envelope = build_derived_envelope(&params, &analysis, &matched_cards);
 
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -120,7 +120,7 @@ fn validate_target(target: &str, ctx: &HandlerContext) -> Result<(), CepError> {
     }
 
     let project_root = ctx
-        .phase21
+        .cep_context
         .policy
         .project_root
         .to_string_lossy()
@@ -354,9 +354,9 @@ mod tests {
                     root,
                     "submit_intent test",
                 ),
-                phase21: Arc::new(
-                    crate::policy::Phase21TurnContext::defaults_for_project_root(root),
-                ),
+                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+                    root,
+                )),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),

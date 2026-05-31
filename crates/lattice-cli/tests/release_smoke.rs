@@ -1,4 +1,4 @@
-//! Phase 11 Plan 07: Isolated CLI release smoke tests (D-16).
+//! CLI Plan 07: Isolated CLI release smoke tests (D-16).
 //!
 //! Every smoke command sets temporary HOME, XDG_CONFIG_HOME, and project cwd
 //! to prevent reading real user ~/.lattice state or leaking credentials.
@@ -402,7 +402,7 @@ fn smoke_session_status_nonexistent_returns_error() {
     );
 }
 
-// ─── release gate wiring (Phase 20 Plan 05) ─────────────────────────────────
+// ─── release gate wiring ────────────────────────────────────────────────────
 
 #[test]
 fn release_smoke_release_gate_includes_cep_boundary_check() {

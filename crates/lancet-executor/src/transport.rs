@@ -7,7 +7,7 @@ use crate::audit::{
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::invariants::InvariantCardIndex;
 use crate::policy::default::DefaultPolicyHook;
-use crate::policy::Phase21TurnContext;
+use crate::policy::CepTurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
@@ -35,13 +35,9 @@ pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub base_envelope: BaseExecutionEnvelope,
-    pub phase21: Arc<Phase21TurnContext>,
-    /// Turn-scoped active envelope store for Phase 22 envelope lifecycle.
+    pub cep_context: Arc<CepTurnContext>,
+    /// Turn-scoped active envelope store for CEP envelope lifecycle.
     pub active_envelope: Arc<ActiveEnvelopeStore>,
-    /// Per-call audit metadata (bridge vs native); defaults to Phase 20 bridge.
-    pub call_audit_metadata: CallAuditMetadata,
-    /// When true, resolve audit metadata per method (Phase 21 native vs Phase 22 bridge).
-    pub production_audit_routing: bool,
     /// Pluggable policy hook for capability/command/network/budget decisions.
     pub policy_hook: Arc<dyn PolicyHook>,
     /// Executor-owned default hook for evidence capture when the default implementation is installed.
@@ -54,10 +50,10 @@ pub struct ServerRunConfig {
 }
 
 impl ServerRunConfig {
-    /// In-memory audit store with stable test identifiers and safe Phase 21 policy/budget defaults.
+    /// In-memory audit store with stable test identifiers and safe CEP policy/budget defaults.
     pub fn in_memory_for_tests() -> Self {
         let base_envelope = BaseExecutionEnvelope::for_workspace_root(".", "test turn observation");
-        let phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root("."));
+        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root("."));
         let default_hook = Arc::new(DefaultPolicyHook::new(
             crate::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from("."),
@@ -71,10 +67,8 @@ impl ServerRunConfig {
                 ..Default::default()
             })),
             base_envelope,
-            phase21,
+            cep_context,
             active_envelope: Arc::new(ActiveEnvelopeStore::new()),
-            call_audit_metadata: CallAuditMetadata::bridge_defaults(),
-            production_audit_routing: false,
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
@@ -400,10 +394,8 @@ async fn handle_request(
         audit,
         audit_context,
         base_envelope,
-        phase21,
+        cep_context,
         active_envelope,
-        call_audit_metadata,
-        production_audit_routing,
         policy_hook,
         default_policy_hook,
         cep_mode,
@@ -418,11 +410,7 @@ async fn handle_request(
         cancel_tx,
     } = request;
 
-    let call_audit_metadata = if production_audit_routing {
-        CallAuditMetadata::for_production_dispatch(&method)
-    } else {
-        call_audit_metadata
-    };
+    let call_audit_metadata = CallAuditMetadata::for_production_dispatch(&method);
 
     let ctx_snapshot = audit_context.read().await.clone();
     let audit_start = match audit.start_call(&ctx_snapshot, id, &method, &call_audit_metadata) {
@@ -452,7 +440,7 @@ async fn handle_request(
         events: EventSink::new(event_tx.clone(), id),
         cancellation: Cancellation::new(cancel_rx),
         base_envelope,
-        phase21: Arc::clone(&phase21),
+        cep_context: Arc::clone(&cep_context),
         active_envelope: Arc::clone(&active_envelope),
         turn_id,
         durable_metadata: durable_metadata.clone(),
@@ -652,7 +640,7 @@ fn finalize_audit_for_dispatch(
     } else if call_metadata.policy_enforced {
         "native_handler"
     } else {
-        "bridged_legacy_body"
+        "unrouted"
     };
     match dispatch_result {
         Ok(value) => {
@@ -673,10 +661,16 @@ fn finalize_audit_for_dispatch(
         Err(err) => {
             let code = format!("{:?}", err.code);
             let summary = compact_error_summary(err);
+            let semantic_status =
+                if call_metadata.semantic_stage == crate::audit::SEMANTIC_STAGE_UNROUTED {
+                    "method_not_found"
+                } else {
+                    "native_handler_denied"
+                };
             let _ = audit.finalize_call(
                 audit_start,
                 AuditOutcome::Error { code, summary },
-                Some("native_handler_denied"),
+                Some(semantic_status),
                 durable_metadata_json,
             );
         }
@@ -814,7 +808,7 @@ async fn emit_cep_call_finished(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::{GUARD_STAGE, SEMANTIC_STAGE};
+    use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
     use crate::registry::wire_code_for_error;
     use crate::registry::MethodRegistry;
     use lancet_protocol::error::{jsonrpc, method_not_found};
@@ -877,8 +871,7 @@ mod tests {
 
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap().to_string();
-        let envelope =
-            BaseExecutionEnvelope::for_workspace_root(&root, "phase20 handler observation");
+        let envelope = BaseExecutionEnvelope::for_workspace_root(&root, "handler observation");
         let expected_root = envelope.inner.scope.workspace_root.clone();
         let registry = todo_registry(move |_params, ctx| {
             let expected_root = expected_root.clone();
@@ -994,13 +987,13 @@ mod tests {
         let (client, server) = LancetTransport::pair(16);
         let registry = todo_registry(|params, ctx| async move {
             ctx.events
-                .emit("started", serde_json::json!({"phase": "begin"}))
+                .emit("started", serde_json::json!({"stage": "begin"}))
                 .await;
             ctx.events
                 .emit("progress", serde_json::json!({"step": 1}))
                 .await;
             ctx.events
-                .emit("finished", serde_json::json!({"phase": "end"}))
+                .emit("finished", serde_json::json!({"stage": "end"}))
                 .await;
             Ok(TodoWriteResult {
                 todos: params.todos,
@@ -1312,9 +1305,9 @@ mod tests {
         register_session_state_methods(&mut registry).unwrap();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.production_audit_routing = true;
-        config.phase21 =
-            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root));
+        config.cep_context = Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+            root,
+        ));
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "cap merge test").with_session_state();
         let audit = Arc::clone(&config.audit);
@@ -1358,9 +1351,9 @@ mod tests {
         let row = audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.method, TodoWrite::NAME);
         assert!(row.ended_at.is_some());
-        assert_eq!(row.semantic_stage, SEMANTIC_STAGE);
-        assert_eq!(row.guard_stage, GUARD_STAGE);
-        assert!(!row.policy_enforced);
+        assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
+        assert_eq!(row.guard_stage, GUARD_STAGE_NATIVE);
+        assert!(row.policy_enforced);
     }
 
     #[tokio::test]
@@ -1376,9 +1369,9 @@ mod tests {
         register_workspace_observation_methods(&mut registry).unwrap();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.production_audit_routing = true;
-        config.phase21 =
-            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root));
+        config.cep_context = Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+            root,
+        ));
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "native audit denial test");
         let audit = Arc::clone(&config.audit);
@@ -1694,8 +1687,9 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let canonical = std::fs::canonicalize(root.path()).unwrap();
         let root_str = canonical.to_str().unwrap();
-        config.phase21 =
-            Arc::new(crate::policy::Phase21TurnContext::defaults_for_project_root(root_str));
+        config.cep_context = Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
+            root_str,
+        ));
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root_str, "enforce test")
             .with_session_state();
         let policy_cfg =

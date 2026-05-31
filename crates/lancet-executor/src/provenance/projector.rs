@@ -260,7 +260,7 @@ mod tests {
             impact_kind: impact_kind_label(&ImpactKind::WorkspaceObservation).into(),
             turn_id: "turn-a".into(),
             session_id: "sess-1".into(),
-            semantic_stage: "phase21_native".into(),
+            semantic_stage: "cep_native".into(),
             semantic_status: Some("native_handler".into()),
             guard_stage: "cep_policy_lifecycle".into(),
             policy_enforced: true,

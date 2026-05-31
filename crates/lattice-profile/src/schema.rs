@@ -18,7 +18,7 @@ pub struct AgentProfile {
     pub cep: CepSection,
 }
 
-/// Phase 19 `[cep]` profile section with Phase 21 PROF-02 typed sub-tables.
+/// CEP `[cep]` profile section with CEP PROF-02 typed sub-tables.
 ///
 /// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
 /// typed fields. Other future sub-tables (e.g. `[cep.command]`) remain in
@@ -76,7 +76,7 @@ pub struct CepNetworkSection {
     pub max_web_response_bytes: Option<usize>,
 }
 
-/// `[cep.command]` — command execution policy overrides (Phase 22, PROF-03).
+/// `[cep.command]` — command execution policy overrides (CEP, PROF-03).
 ///
 /// All fields are `Option<T>` with `#[serde(default)]` so missing fields
 /// fall back to `CommandPolicy::defaults()`. Missing `[cep.command]` entirely
@@ -102,7 +102,7 @@ pub struct CepCommandSection {
     pub inherited_env: Option<Vec<String>>,
 }
 
-/// `[cep.policy]` — pointer to external structured TOML policy file (Phase 23, PROF-04).
+/// `[cep.policy]` — pointer to an external structured TOML policy file.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CepPolicySection {
@@ -110,7 +110,7 @@ pub struct CepPolicySection {
     pub path: Option<String>,
 }
 
-/// `[cep.invariants]` — invariant card directory configuration (Phase 25, PROF-05 / D-09).
+/// `[cep.invariants]` — invariant card directory configuration (CEP, PROF-05 / D-09).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CepInvariantsSection {

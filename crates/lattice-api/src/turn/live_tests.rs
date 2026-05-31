@@ -1,4 +1,4 @@
-//! Behavioral tests for the live `stream_turn` path (Phase 16 Plan 03, Phase 17 Plan 02).
+//! Behavioral tests for the live `stream_turn` path (live turn Plan 03, deadline Plan 02).
 //!
 //! These tests exercise the full live path: real SessionApi backed by SQLite,
 //! real AgentLoop with FakeStreamingLlmClient, and the live stream_turn_live_with_agent
@@ -163,7 +163,7 @@ impl LlmClient for BlockingLlmClient {
         let resume = self.resume.clone();
 
         // State machine: Pre -> (await notify) -> Post
-        enum Phase {
+        enum StreamState {
             Pre(
                 VecDeque<LlmEvent>,
                 Arc<tokio::sync::Notify>,
@@ -172,23 +172,24 @@ impl LlmClient for BlockingLlmClient {
             Post(VecDeque<LlmEvent>),
         }
 
-        let initial = Phase::Pre(VecDeque::from(pre), resume, VecDeque::from(post));
+        let initial = StreamState::Pre(VecDeque::from(pre), resume, VecDeque::from(post));
 
         let stream = futures::stream::unfold(initial, |state| async move {
             match state {
-                Phase::Pre(mut queue, notify, mut post) => {
+                StreamState::Pre(mut queue, notify, mut post) => {
                     if let Some(event) = queue.pop_front() {
-                        Some((event, Phase::Pre(queue, notify, post)))
+                        Some((event, StreamState::Pre(queue, notify, post)))
                     } else {
                         // All pre-block events emitted; block until notified
                         notify.notified().await;
-                        // Transition to Post phase
-                        post.pop_front().map(|event| (event, Phase::Post(post)))
+                        // Transition to Post state
+                        post.pop_front()
+                            .map(|event| (event, StreamState::Post(post)))
                     }
                 }
-                Phase::Post(mut queue) => {
-                    queue.pop_front().map(|event| (event, Phase::Post(queue)))
-                }
+                StreamState::Post(mut queue) => queue
+                    .pop_front()
+                    .map(|event| (event, StreamState::Post(queue))),
             }
         });
 

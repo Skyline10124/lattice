@@ -280,7 +280,7 @@ mod tests {
     use super::*;
     use crate::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use crate::native_registry::register_production_method_registry;
-    use crate::policy::Phase21TurnContext;
+    use crate::policy::CepTurnContext;
     use crate::transport::{LancetTransport, ServerRunConfig};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::methods::audit::{AuditTail, AuditTailParams};
@@ -331,8 +331,7 @@ mod tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "audit query test").with_read_audit();
-        config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-        config.production_audit_routing = true;
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
             snap.session_id = "sess-audit".into();
@@ -371,8 +370,7 @@ mod tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "audit replay test").with_read_audit();
-        config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-        config.production_audit_routing = true;
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
             snap.session_id = "sess-replay".into();
@@ -410,7 +408,7 @@ mod tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "audit replay empty").with_read_audit();
-        config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
             snap.session_id = "sess-empty".into();
@@ -479,8 +477,7 @@ mod tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope =
             BaseExecutionEnvelope::for_workspace_root(root, "audit tail test").with_read_audit();
-        config.phase21 = Arc::new(Phase21TurnContext::defaults_for_project_root(root));
-        config.production_audit_routing = true;
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
             snap.session_id = "sess-tail".into();

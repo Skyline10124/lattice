@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 /// `envelope.declare`
 ///
 /// Declares an execution envelope for subsequent mutation/command methods.
-/// Active-envelope storage is not implemented in Phase 19 — this method only
-/// defines the wire shape and catalog metadata for Phase 22 guard integration.
+/// Active-envelope storage is not implemented in CEP — this method only
+/// defines the wire shape and catalog metadata for CEP guard integration.
 pub struct Declare;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -43,7 +43,7 @@ impl CepMethod for Declare {
     type Params = DeclareParams;
     type Result = DeclareResult;
     // Session-state mutation: declaring an envelope updates guard/session context.
-    // Full active-envelope storage lands in Phase 22.
+    // Full active-envelope storage lands in CEP.
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
     const EFFECT: EffectDecl = EffectDecl {

@@ -18,32 +18,6 @@ pub(crate) struct WebFetchOutcome {
     pub truncated: bool,
 }
 
-pub(crate) async fn web_fetch(
-    http_client: &reqwest::Client,
-    limits: &lattice_tooling::ToolLimits,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
-    let outcome = fetch_url(
-        http_client,
-        url,
-        &BTreeMap::new(),
-        limits.max_http_response_size,
-        true,
-    )
-    .await?;
-    if outcome.truncated {
-        Ok(format!(
-            "{}{}[TRUNCATED: response exceeded {} bytes]",
-            outcome.body.trim_end(),
-            if outcome.body.is_empty() { "" } else { "\n" },
-            limits.max_http_response_size
-        ))
-    } else {
-        Ok(outcome.body)
-    }
-}
-
 /// Fetch `url` with redirect policy disabled and optional DNS pinning for public hosts.
 pub(crate) async fn fetch_url(
     http_client: &reqwest::Client,

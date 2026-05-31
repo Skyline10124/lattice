@@ -21,7 +21,7 @@ impl ScaffoldStubResult {
             semantic_stage: "scaffold".to_string(),
             routed: false,
             message: format!(
-                "{method} is registered as a Phase 21 scaffold stub and is not routed in v1.3-alpha"
+                "{method} is registered as a CEP scaffold stub and is not routed in v1.3-alpha"
             ),
         }
     }

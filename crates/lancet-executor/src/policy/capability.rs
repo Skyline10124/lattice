@@ -334,7 +334,7 @@ fn check_pattern_coverage(
             None
         }
         Capability::ReadAudit => {
-            // ReadAudit is pattern-less; session scope enforced at handler layer (Phase 26-03)
+            // ReadAudit is pattern-less; session scope enforced at handler layer (CEP-03)
             None
         }
     }

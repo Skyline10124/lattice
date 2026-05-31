@@ -23,6 +23,9 @@ cargo run -p lattice-cli -- session status
 cargo run -p lattice-cli -- session list
 cargo run -p lattice-cli -- session log <session_id>
 cargo run -p lattice-cli -- doctor
+cargo run -p lattice-cli -- lancet status
+cargo run -p lattice-cli -- lancet doctor
+cargo run -p lattice-cli -- audit
 ```
 
 ## Architecture
@@ -43,14 +46,14 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 | Crate | Role |
 |---|---|
 | `lancet-protocol` | Pure CEP data layer: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, typed method catalog (`CATALOG`), policy hook types. No I/O, no tokio. |
-| `lancet-executor` | CEP **server-side runtime**: in-process JSON-RPC `transport`, `MethodRegistry`, native method `handlers`, `policy` engine, `guard` (path-scope), `verify` (post-mutation), `audit` store, envelope store. Also bridges the legacy in-tree tool impls (`executor/`, `edit/`) behind a private backend. |
+| `lancet-executor` | CEP **server-side runtime**: in-process JSON-RPC `transport`, `MethodRegistry`, native method `handlers`, `policy` engine, `guard` (path-scope), `verify` (post-mutation), `audit` store, envelope store. Low-level `executor/` and `edit/` helpers are private implementation details behind native handlers. |
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[cep]` policy sections), discovery, defaults |
 | `lattice-tooling` | Tool `ToolExecutor` trait, `ToolLimits`, and enabled-tools resolution shared types |
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
 | `lattice-api` | Thin public facade for create/open/run/stream/session; composes the per-turn CEP runtime |
-| `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor) |
+| `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor, lancet, audit) |
 | `lattice-hooks` | Lifecycle hook vocabulary (turn/tool/inference/session points). **Currently has no internal consumers** — a leaf crate kept for the planned hook-dispatch integration. |
 
 ### Key Types
@@ -58,7 +61,7 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 - `ResolvedModel` — canonical model + provider + protocol + credential status
 - `LlmEvent` / `TurnEvent` — provider streaming events and public turn stream events
 - `AgentLoop` — multi-turn agent loop with tool execution and injectable `LlmClient`/`ToolCallExecutor`
-- `CepMethod` / `MethodDescriptor` / `CATALOG` — typed CEP methods and the static 10-method catalog
+- `CepMethod` / `MethodDescriptor` / `CATALOG` — typed CEP methods and the static 14-method catalog
 - `ExecutionEnvelope` / `Capability` / `GuardVerdict` — CEP capability/scope/guard model
 - `PolicyHook` / `PolicyDecision` — pluggable capability/command/network/budget policy
 - `LancetClient` / `LancetTransport` / `MethodRegistry` — CEP client + in-process transport + server registry
@@ -67,11 +70,12 @@ Layer 4:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 
 ### CEP Method Catalog
 
-The catalog is exactly 10 methods (`lancet-protocol/src/catalog.rs`):
+The catalog is exactly 14 methods (`lancet-protocol/src/catalog.rs`):
 
 `workspace.read_file`, `workspace.grep`, `workspace.list_directory`,
 `workspace.find_files`, `workspace.write_file`, `workspace.patch`, `web.fetch`,
-`session.todo_write`, `command.run`, `envelope.declare`.
+`session.todo_write`, `command.run`, `envelope.declare`,
+`envelope.submit_intent`, `audit.query`, `audit.tail`, `audit.replay`.
 
 LLM-facing tool schemas are generated **only** via `to_tool_definitions` from
 the catalog — there is no legacy `default_tool_definitions()` path.
@@ -91,7 +95,7 @@ The main agent turn path is:
 
 Safety is enforced by the CEP runtime, configured via profile `[cep]` sub-tables:
 
-- **`mode`** — `enforce` (default) vs permissive evaluation.
+- **`mode`** — `enforce` (default), `warn`, or `off` for effect-region enforcement. `off` skips the effect-region check only; policy, capability checks, and native CEP routing remain active.
 - **`[cep.project_root]`** — effective workspace scope; the `guard` enforces no escape and no `..` traversal.
 - **`[cep.observation]`** — read/grep/list/find/todo budgets and allowed roots.
 - **`[cep.network]`** — `web.fetch` host allow policy (public HTTPS / localhost / allowlist) and response size cap.
@@ -114,7 +118,7 @@ Use this table to skip the "which crate owns this?" exploration step.
 | CEP transport / registry / server wiring | `lancet-executor/src/` | `transport.rs`, `registry.rs`, `native_registry.rs` |
 | Policy engine (capability/command/network/budget) | `lancet-executor/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
 | Path guard / verify / audit | `lancet-executor/src/` | `guard.rs`, `verify.rs`, `audit.rs`, `envelope_store.rs` |
-| Legacy in-tree tool impls (bridged) | `lancet-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs`, `path_guard.rs`, `render.rs` |
+| Low-level executor helpers | `lancet-executor/src/executor/` | `fs.rs`, `shell.rs`, `web.rs`, `search.rs`, `path_guard.rs`, `render.rs` |
 | Edit/diff application logic | `lancet-executor/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
 | LLM-facing tool schema generation | `lancet-executor/src/` | `tool_definitions.rs` |
 | Enabled-tools resolution | `lattice-tooling/src/` | `enabled_tools.rs` |

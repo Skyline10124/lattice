@@ -148,7 +148,7 @@ mod tests {
     use super::{Cli, Commands};
     use clap::{CommandFactory, Parser};
 
-    // -- Positive parsing: Phase 10 supported commands --
+    // -- Positive parsing: CLI supported commands --
 
     #[test]
     fn cli_surface_run_parses_prompt() {

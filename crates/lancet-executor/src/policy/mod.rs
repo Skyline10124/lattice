@@ -1,4 +1,4 @@
-//! Phase 21 CEP policy and budget configuration (immutable per turn).
+//! CEP CEP policy and budget configuration (immutable per turn).
 
 pub mod budget;
 pub mod capability;
@@ -20,9 +20,9 @@ pub use command::{
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 
-/// Immutable Phase 21 policy limits and roots assembled once per turn.
+/// Immutable CEP policy limits and roots assembled once per turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Phase21PolicyConfig {
+pub struct CepPolicyConfig {
     pub project_root: PathBuf,
     pub observation: ObservationPolicyConfig,
     pub network: NetworkPolicyConfig,
@@ -30,7 +30,7 @@ pub struct Phase21PolicyConfig {
     pub command: CommandPolicy,
 }
 
-impl Phase21PolicyConfig {
+impl CepPolicyConfig {
     pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
         let project_root = project_root.into();
         let project_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
@@ -59,18 +59,18 @@ impl Phase21PolicyConfig {
 
 /// Turn-scoped policy and mutable budget state shared by handlers.
 #[derive(Clone, Debug)]
-pub struct Phase21TurnContext {
-    pub policy: Phase21PolicyConfig,
+pub struct CepTurnContext {
+    pub policy: CepPolicyConfig,
     pub budget: Arc<ObservationBudgetTracker>,
 }
 
-impl Phase21TurnContext {
-    pub fn from_policy(policy: Phase21PolicyConfig) -> Self {
+impl CepTurnContext {
+    pub fn from_policy(policy: CepPolicyConfig) -> Self {
         let budget = policy.new_budget_tracker();
         Self { policy, budget }
     }
 
     pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
-        Self::from_policy(Phase21PolicyConfig::defaults_for_project_root(project_root))
+        Self::from_policy(CepPolicyConfig::defaults_for_project_root(project_root))
     }
 }

@@ -23,14 +23,14 @@ pub use ledger::{AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffec
 pub use region::{AuthorizedEffectRegion, EffectiveEffect};
 
 #[cfg(test)]
-pub(crate) fn shared_test_policy() -> crate::policy::Phase21PolicyConfig {
+pub(crate) fn shared_test_policy() -> crate::policy::CepPolicyConfig {
     use crate::policy::command::CommandPolicy;
     use crate::policy::network::NetworkPolicyConfig;
     use crate::policy::observation::ObservationPolicyConfig;
     use crate::policy::BudgetLimits;
     use std::path::PathBuf;
 
-    crate::policy::Phase21PolicyConfig {
+    crate::policy::CepPolicyConfig {
         project_root: PathBuf::from("/project"),
         observation: ObservationPolicyConfig {
             allowed_roots: vec![PathBuf::from("/project")],
