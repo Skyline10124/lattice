@@ -150,7 +150,7 @@ fn envelope_already_active_error() -> CepError {
     )
 }
 
-fn validate_envelope_boundaries(
+pub(crate) fn validate_envelope_boundaries(
     envelope: &ExecutionEnvelope,
     project_root: &str,
 ) -> Result<(), CepError> {
@@ -229,8 +229,8 @@ mod tests {
     use crate::envelope_store::ActiveEnvelopeStore;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind,
-        Intent, Scope,
+        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
+        ImpactConfidence, ImpactKind, Intent, Scope,
     };
     use lancet_protocol::CepMethod;
     use std::collections::BTreeSet;
@@ -268,6 +268,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
         )
@@ -294,6 +296,9 @@ mod tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: "src/**".into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,

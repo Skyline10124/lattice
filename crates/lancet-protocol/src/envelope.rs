@@ -7,6 +7,7 @@ use crate::method::RequiredCapability;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 /// CEP enforcement mode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -160,10 +161,63 @@ pub struct Constraints {
 }
 
 /// An impact declaration.
+///
+/// New fields are additive per D-06 — old JSON without `scope` / `confidence` /
+/// `unknowns` deserializes cleanly with `#[serde(default)]` on each.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Impact {
     pub kind: ImpactKind,
     pub target: String,
+    /// Optional structural scope for the impact (D-07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ImpactScope>,
+    /// How certain the impact assessment is (D-08).
+    #[serde(default)]
+    pub confidence: ImpactConfidence,
+    /// Unknown or unclassified side-effects the analyzer could not resolve.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknowns: Vec<ImpactUnknown>,
+}
+
+/// Structural scope of an impact (D-07).
+///
+/// Describes what part of the system is affected. Based on a `PathSet`-style
+/// model: `ExactFile` and `Directory` are single-path, `FileSet` is a collection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactScope {
+    ExactFile(PathBuf),
+    Directory(PathBuf),
+    FileSet(Vec<PathBuf>),
+    Host(String),
+    SessionState,
+}
+
+impl Default for ImpactScope {
+    /// Unresolved scope defaults to `Directory(PathBuf::new())` — only triggered
+    /// by explicit `"scope": {}` in JSON (semantically "unresolved scope" per D-07).
+    fn default() -> Self {
+        Self::Directory(PathBuf::new())
+    }
+}
+
+/// Confidence level of an impact assessment (D-08).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactConfidence {
+    Complete,
+    #[default]
+    Conservative,
+    Partial,
+}
+
+/// An unknown or unclassified impact that the static analyzer could not resolve.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImpactUnknown {
+    pub kind: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }
 
 /// A verification command to run after execution.
@@ -243,6 +297,9 @@ impl BaseExecutionEnvelope {
                 impact: vec![Impact {
                     kind: ImpactKind::WorkspaceObservation,
                     target: root.to_string(),
+                    scope: None,
+                    confidence: ImpactConfidence::Conservative,
+                    unknowns: vec![],
                 }],
                 constraints: Constraints::default(),
                 verify: None,
@@ -338,6 +395,9 @@ mod tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceObservation,
                 target: "/tmp".into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -555,6 +615,104 @@ mod tests {
         assert_eq!(variants[2], "command_execution");
         assert_eq!(variants[3], "external_observation");
         assert_eq!(variants[4], "session_state_mutation");
+    }
+
+    #[test]
+    fn impact_deserializes_old_json_without_new_fields() {
+        let old_json = json!({"kind": "workspace_mutation", "target": "src/main.rs"});
+        let impact: Impact = serde_json::from_value(old_json).unwrap();
+        assert_eq!(impact.kind, ImpactKind::WorkspaceMutation);
+        assert_eq!(impact.target, "src/main.rs");
+        assert_eq!(impact.scope, None);
+        assert_eq!(impact.confidence, ImpactConfidence::Conservative);
+        assert!(impact.unknowns.is_empty());
+    }
+
+    #[test]
+    fn impact_round_trips_with_new_fields() {
+        let impact = Impact {
+            kind: ImpactKind::WorkspaceMutation,
+            target: "src/main.rs".to_string(),
+            scope: Some(ImpactScope::ExactFile(PathBuf::from("src/main.rs"))),
+            confidence: ImpactConfidence::Complete,
+            unknowns: vec![ImpactUnknown {
+                kind: "syscall".to_string(),
+                description: "unknown system call effect".to_string(),
+                location: Some("src/lib.rs:42".to_string()),
+            }],
+        };
+        let serialized = serde_json::to_string(&impact).unwrap();
+        let deserialized: Impact = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, impact);
+    }
+
+    #[test]
+    fn impact_with_partial_unknowns_round_trips() {
+        let impact = Impact {
+            kind: ImpactKind::CommandExecution,
+            target: "gcc".to_string(),
+            scope: Some(ImpactScope::Host("build-server".to_string())),
+            confidence: ImpactConfidence::Partial,
+            unknowns: vec![
+                ImpactUnknown {
+                    kind: "network".to_string(),
+                    description: "may fetch dependencies".to_string(),
+                    location: None,
+                },
+                ImpactUnknown {
+                    kind: "filesystem".to_string(),
+                    description: "writes object files".to_string(),
+                    location: Some("build/".to_string()),
+                },
+            ],
+        };
+        let serialized = serde_json::to_string(&impact).unwrap();
+        let deserialized: Impact = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, impact);
+    }
+
+    #[test]
+    fn impact_scope_file_set_round_trips() {
+        let scope = ImpactScope::FileSet(vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")]);
+        let json = serde_json::to_string(&scope).unwrap();
+        let parsed: ImpactScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, scope);
+    }
+
+    #[test]
+    fn impact_confidence_default_is_conservative() {
+        assert_eq!(ImpactConfidence::default(), ImpactConfidence::Conservative);
+    }
+
+    #[test]
+    fn impact_scope_default_is_empty_directory() {
+        assert_eq!(
+            ImpactScope::default(),
+            ImpactScope::Directory(PathBuf::new())
+        );
+    }
+
+    #[test]
+    fn impact_unknown_location_is_optional() {
+        let without_loc = ImpactUnknown {
+            kind: "filesystem".to_string(),
+            description: "unknown side effect".to_string(),
+            location: None,
+        };
+        let json = serde_json::to_string(&without_loc).unwrap();
+        let parsed: ImpactUnknown = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, without_loc);
+        // location should be absent, not null
+        assert!(!json.contains("location"));
+    }
+
+    #[test]
+    fn impact_scope_host_round_trips() {
+        let scope = ImpactScope::Host("api.github.com".to_string());
+        let json = serde_json::to_string(&scope).unwrap();
+        assert!(json.contains("api.github.com"));
+        let parsed: ImpactScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, scope);
     }
 
     #[test]

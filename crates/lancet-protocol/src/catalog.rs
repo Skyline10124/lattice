@@ -2,12 +2,13 @@
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
-    Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, TodoWrite, WriteFile,
+    Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, SubmitIntent, TodoWrite,
+    WriteFile,
 };
 use std::sync::LazyLock;
 
 /// Exhaustive Phase 19 method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 10]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 11]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ReadFile>(),
         MethodDescriptor::for_method::<Grep>(),
@@ -19,6 +20,7 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 10]> = LazyLock::new(|| {
         MethodDescriptor::for_method::<WriteFile>(),
         MethodDescriptor::for_method::<Patch>(),
         MethodDescriptor::for_method::<Declare>(),
+        MethodDescriptor::for_method::<SubmitIntent>(),
     ]
 });
 
@@ -53,10 +55,11 @@ mod tests {
     use crate::envelope::ImpactKind;
     use crate::method::{CepMethod, RequiredCapability};
     use crate::methods::{
-        Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, TodoWrite, WriteFile,
+        Declare, Fetch, FindFiles, Grep, ListDirectory, Patch, ReadFile, Run, SubmitIntent,
+        TodoWrite, WriteFile,
     };
 
-    const EXPECTED_ORDER: [&str; 10] = [
+    const EXPECTED_ORDER: [&str; 11] = [
         "workspace.read_file",
         "workspace.grep",
         "workspace.list_directory",
@@ -67,6 +70,7 @@ mod tests {
         "workspace.write_file",
         "workspace.patch",
         "envelope.declare",
+        "envelope.submit_intent",
     ];
 
     #[test]
@@ -126,7 +130,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 10] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 11] = [
             (&catalog[0], ReadFile::IMPACT, ReadFile::CAPABILITY),
             (&catalog[1], Grep::IMPACT, Grep::CAPABILITY),
             (
@@ -141,6 +145,7 @@ mod tests {
             (&catalog[7], WriteFile::IMPACT, WriteFile::CAPABILITY),
             (&catalog[8], Patch::IMPACT, Patch::CAPABILITY),
             (&catalog[9], Declare::IMPACT, Declare::CAPABILITY),
+            (&catalog[10], SubmitIntent::IMPACT, SubmitIntent::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -158,8 +163,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_ten() {
-        assert_eq!(catalog().len(), 10);
+    fn catalog_len_is_eleven() {
+        assert_eq!(catalog().len(), 11);
     }
 
     #[test]
@@ -224,7 +229,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 10);
+        assert_eq!(catalog().len(), 11);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -239,6 +244,7 @@ mod catalog_default_snapshot {
                 "workspace.write_file",
                 "workspace.patch",
                 "envelope.declare",
+                "envelope.submit_intent",
             ]
         );
         for descriptor in catalog() {

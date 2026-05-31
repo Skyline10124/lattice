@@ -84,10 +84,9 @@ pub struct CapabilityMatch {
 /// Identifies the session-state operation being performed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionStateOperation {
-    /// `session.todo_write` — writing todo items.
     TodoWrite,
-    /// `envelope.declare` — declaring a new envelope.
     EnvelopeDeclare,
+    SubmitIntent,
 }
 
 // ── Invocation facts ────────────────────────────────────────────────────
@@ -220,7 +219,9 @@ fn is_source_allowed_for_method(
         | "workspace.list_directory"
         | "workspace.find_files" => &source_policy.observation,
         "web.fetch" => &source_policy.external,
-        "session.todo_write" | "envelope.declare" => &source_policy.session_state,
+        "session.todo_write" | "envelope.declare" | "envelope.submit_intent" => {
+            &source_policy.session_state
+        }
         "workspace.write_file" | "workspace.patch" => &source_policy.mutation,
         "command.run" => &source_policy.command,
         _ => return false,

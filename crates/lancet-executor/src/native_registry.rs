@@ -2,7 +2,7 @@
 
 use crate::handlers::{
     register_command_methods, register_envelope_methods, register_external_methods,
-    register_mutation_methods, register_session_state_methods,
+    register_mutation_methods, register_session_state_methods, register_submit_intent,
     register_workspace_observation_methods,
 };
 use crate::registry::MethodRegistry;
@@ -48,16 +48,16 @@ pub fn register_phase22_native_mutation(registry: &mut MethodRegistry) -> Result
     register_mutation_methods(registry)
 }
 
-/// Production registry: all catalog methods served by Phase 21/22 native handlers.
-///
-/// Phase 21 native: `workspace.*` observation, `web.fetch`, `session.todo_write`.
-/// Phase 22 native: `envelope.declare`, `command.run`, `workspace.write_file`, `workspace.patch`.
-/// The legacy CEP bridge is no longer part of the production registry.
+pub fn register_phase25_submit_intent(registry: &mut MethodRegistry) -> Result<(), CepError> {
+    register_submit_intent(registry)
+}
+
 pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_phase21_native_methods(registry)?;
     register_phase22_native_envelope(registry)?;
     register_phase22_native_command(registry)?;
-    register_phase22_native_mutation(registry)
+    register_phase22_native_mutation(registry)?;
+    register_phase25_submit_intent(registry)
 }
 
 #[cfg(test)]
@@ -133,6 +133,8 @@ mod phase21_native_registry_tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = ReadFileParams {
@@ -266,6 +268,8 @@ mod phase21_native_registry_tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = ReadFileParams {

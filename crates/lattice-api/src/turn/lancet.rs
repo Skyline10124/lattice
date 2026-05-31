@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use lancet_executor::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
 use lancet_executor::{
-    impact_kind_for_method, impact_kind_label, register_production_method_registry,
+    impact_kind_for_method, impact_kind_label, invariants, register_production_method_registry,
     to_tool_definitions, wire_code_for_error, ActiveEnvelopeStore, BudgetLimits, CallAuditMetadata,
     CepAuditContext, CepAuditStore, CommandPolicy, LancetClient, LancetTransport, MethodRegistry,
     NetworkPolicyConfig, ObservationPolicyConfig, Phase21PolicyConfig, Phase21TurnContext,
@@ -564,6 +564,13 @@ pub(crate) fn build_production_turn_deps(
     };
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
 
+    let invariants_dir = cep
+        .and_then(|section| section.invariants.as_ref())
+        .and_then(|section| section.dir.as_deref());
+    let invariant_index = invariants::load_invariant_index_from_dir(
+        &invariants::resolve_invariants_dir(Path::new(project_root), invariants_dir),
+    );
+
     let server_config = ServerRunConfig {
         audit: Arc::clone(&audit),
         audit_context: Arc::clone(&audit_context),
@@ -577,6 +584,7 @@ pub(crate) fn build_production_turn_deps(
         cep_mode: cep
             .map(|c| c.mode.clone())
             .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
+        invariant_index,
     };
 
     let mut registry = MethodRegistry::new();

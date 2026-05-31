@@ -783,6 +783,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
         )
@@ -874,6 +876,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
         let params = ReadFileParams {
             path: "big.txt".into(),
@@ -919,6 +923,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
         let params = ReadFileParams {
             path: "a.txt".into(),
@@ -1118,6 +1124,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
         let params = GrepParams {
             pattern: "match".into(),

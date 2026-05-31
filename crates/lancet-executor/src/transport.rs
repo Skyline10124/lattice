@@ -5,6 +5,7 @@ use crate::audit::{
     CepAuditContext, CepAuditStore,
 };
 use crate::envelope_store::ActiveEnvelopeStore;
+use crate::invariants::InvariantCardIndex;
 use crate::policy::default::DefaultPolicyHook;
 use crate::policy::Phase21TurnContext;
 use crate::registry::{call_cancelled, Cancellation, EventSink, HandlerContext, MethodRegistry};
@@ -48,6 +49,8 @@ pub struct ServerRunConfig {
     /// CEP enforcement mode: Enforce overrides overreach with EffectViolation,
     /// Warn records the violation durably but passes, Off passes through.
     pub cep_mode: CepMode,
+    /// Invariant cards indexed for this turn/session (ENV-05).
+    pub invariant_index: Arc<InvariantCardIndex>,
 }
 
 impl ServerRunConfig {
@@ -74,6 +77,7 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
+            invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
         }
     }
 }
@@ -402,6 +406,7 @@ async fn handle_request(
         policy_hook,
         default_policy_hook,
         cep_mode,
+        invariant_index,
     } = config;
 
     let ServerRequest {
@@ -455,6 +460,8 @@ async fn handle_request(
         policy_hook: Arc::clone(&policy_hook),
         default_policy_hook: default_policy_hook.clone(),
         audit_context: Arc::clone(&audit_context),
+        invariant_index: Arc::clone(&invariant_index),
+        cep_mode: cep_mode.clone(),
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;

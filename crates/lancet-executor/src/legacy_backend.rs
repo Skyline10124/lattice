@@ -457,6 +457,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
         )
@@ -473,6 +475,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let registry = sample_registry(dir.path().to_str().unwrap());
         for descriptor in catalog() {
+            // SubmitIntent is a Phase 25 native handler, not in legacy backend
+            if descriptor.name == "envelope.submit_intent" {
+                continue;
+            }
             assert!(
                 registry.contains(descriptor.name),
                 "missing catalog method {}",

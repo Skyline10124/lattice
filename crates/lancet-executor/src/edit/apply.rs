@@ -403,7 +403,7 @@ fn validate_old_hash(
     Ok(())
 }
 
-fn apply_hunks(
+pub(crate) fn apply_hunks(
     path: &str,
     before: &str,
     hunks: &[PatchHunk],

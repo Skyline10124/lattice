@@ -76,7 +76,7 @@ fn run_cap() -> SourcedCapability {
 }
 
 fn declare_active_envelope(ctx: &lancet_executor::registry::HandlerContext, root: &str) {
-    use lancet_protocol::envelope::{Impact as EnvImpact, Scope as EnvScope};
+    use lancet_protocol::envelope::{Impact as EnvImpact, ImpactConfidence, Scope as EnvScope};
     let mut caps = std::collections::BTreeSet::new();
     caps.insert(Capability::WritePath {
         path_pattern: ".".to_string(),
@@ -96,6 +96,9 @@ fn declare_active_envelope(ctx: &lancet_executor::registry::HandlerContext, root
         impact: vec![EnvImpact {
             kind: ImpactKind::WorkspaceMutation,
             target: root.into(),
+            scope: None,
+            confidence: ImpactConfidence::Conservative,
+            unknowns: vec![],
         }],
         constraints: Constraints::default(),
         verify: None,

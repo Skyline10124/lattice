@@ -9,13 +9,15 @@
 //! D-43..D-52: Verify flow after successful mutations.
 
 use crate::edit::parser::parse_patch_document;
+use crate::edit::types::PatchOperation;
 use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use crate::guard::{check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns};
+use crate::guard_l2;
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::envelope::{CepMode, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::method::RequiredCapability;
 use lancet_protocol::methods::workspace::{
@@ -107,7 +109,31 @@ async fn handle_write_file(
         }
     }
 
-    // 6. Write file using the existing secure containment from fs.rs
+    // 6. Opaque invariant cards require human review before mutation (D-12).
+    let cards = ctx.invariant_index.match_target(&params.path);
+    if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
+        return Err(crate::invariants::opaque_human_review_error(
+            WriteFile::NAME,
+            &message,
+        ));
+    }
+
+    // 7. Guard L2: AST category check for .rs files with invariant cards
+    if params.path.ends_with(".rs") && !matches!(ctx.cep_mode, CepMode::Off) {
+        let _status = guard_l2::l2_status_for_method(WriteFile::NAME);
+        let has_forbidden = cards.iter().any(|c| !c.forbidden.is_empty());
+        if has_forbidden {
+            let result = guard_l2::check_l2(
+                &params.path,
+                params.content.as_bytes(),
+                &[(0, params.content.len())],
+                &cards,
+            );
+            enforce_l2_result(&ctx, WriteFile::NAME, &params.path, &result)?;
+        }
+    }
+
+    // 7. Write file using the existing secure containment from fs.rs
     // We call the legacy executor's write_file via a direct safe path
     let bytes_written = params.content.len() as u64;
     write_file_secure(&project_root, &params.path, &params.content).await?;
@@ -246,7 +272,30 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         ));
     }
 
-    // 6. Apply patch using existing edit/ machinery
+    // 6. Opaque cards require review before mutation. Structural L2 runs below
+    // against post-patch content so new files and introduced AST nodes are visible.
+    for operation in &document.operations {
+        let path = operation.path();
+        let cards = ctx.invariant_index.match_target(path);
+        if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
+            return Err(crate::invariants::opaque_human_review_error(
+                Patch::NAME,
+                &message,
+            ));
+        }
+        if path.ends_with(".rs")
+            && !matches!(ctx.cep_mode, CepMode::Off)
+            && cards.iter().any(|c| !c.forbidden.is_empty())
+        {
+            if let Some((before, after)) = projected_patch_content(&project_root, operation)? {
+                let ranges = changed_line_byte_ranges(before.as_deref(), &after);
+                let result = guard_l2::check_l2(path, after.as_bytes(), &ranges, &cards);
+                enforce_l2_result(&ctx, Patch::NAME, path, &result)?;
+            }
+        }
+    }
+
+    // 7. Apply patch using existing edit/ machinery
     let limits = lattice_tooling::ToolLimits::default();
     let result =
         crate::edit::apply_patch(std::path::Path::new(&project_root), &limits, &params.patch).await;
@@ -327,6 +376,170 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
     }));
 
     Ok(PatchResult { changed_files })
+}
+
+fn enforce_l2_result(
+    ctx: &HandlerContext,
+    method: &str,
+    path: &str,
+    result: &guard_l2::L2CheckResult,
+) -> Result<(), CepError> {
+    ctx.record_durable_metadata(json!({
+        "l2_status": result.status,
+        "l2_path": path,
+    }));
+
+    if result.violations.is_empty() {
+        return Ok(());
+    }
+
+    let reasons: Vec<String> = result
+        .violations
+        .iter()
+        .map(|v| format!("{} {} (card {})", v.category, v.reason, v.card_id))
+        .collect();
+
+    match ctx.cep_mode {
+        CepMode::Enforce => Err(CepError::new(
+            CepErrorCode::GuardDenied,
+            format!(
+                "L2 guard: forbidden categories in {}: {}",
+                path,
+                reasons.join("; ")
+            ),
+            CepErrorData::Guard(GuardErrorData {
+                method: method.into(),
+                reason: format!("L2 violations: {:?}", reasons),
+            }),
+            Retriability::Permanent,
+        )),
+        CepMode::Warn => {
+            tracing::warn!(
+                method = method,
+                path = path,
+                violations = ?reasons,
+                "L2 guard violations allowed in warn mode"
+            );
+            ctx.record_durable_metadata(json!({
+                "l2_warn_violations": reasons,
+                "l2_path": path,
+            }));
+            Ok(())
+        }
+        CepMode::Off => Ok(()),
+    }
+}
+
+fn projected_patch_content(
+    project_root: &str,
+    operation: &PatchOperation,
+) -> Result<Option<(Option<String>, String)>, CepError> {
+    match operation {
+        PatchOperation::AddFile { lines, .. } => {
+            let content = lines.join("\n");
+            let after = if lines.is_empty() {
+                String::new()
+            } else {
+                format!("{content}\n")
+            };
+            Ok(Some((None, after)))
+        }
+        PatchOperation::UpdateFile { path, hunks, .. } => {
+            let full_path = std::path::Path::new(project_root).join(path);
+            let before = std::fs::read_to_string(&full_path).map_err(|err| {
+                CepError::new(
+                    CepErrorCode::ExecutionFailed,
+                    format!("cannot read patch target '{path}' for L2 preflight: {err}"),
+                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                        command: "patch_l2_preflight".into(),
+                        exit_code: Some(1),
+                        stderr: Some(err.to_string()),
+                    }),
+                    Retriability::Permanent,
+                )
+            })?;
+            let after =
+                crate::edit::apply::apply_hunks(path, &before, hunks, 0).map_err(|diagnostic| {
+                    CepError::new(
+                        CepErrorCode::SchemaMismatch,
+                        format!("patch L2 preflight hunk error: {}", diagnostic.message),
+                        CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                            field: "patch".into(),
+                            reason: diagnostic.message,
+                        }),
+                        Retriability::Permanent,
+                    )
+                })?;
+            Ok(Some((Some(before), after)))
+        }
+        PatchOperation::DeleteFile { .. } => Ok(None),
+    }
+}
+
+fn changed_line_byte_ranges(before: Option<&str>, after: &str) -> Vec<(usize, usize)> {
+    let Some(before) = before else {
+        return if after.is_empty() {
+            vec![]
+        } else {
+            vec![(0, after.len())]
+        };
+    };
+
+    if before == after {
+        return vec![];
+    }
+
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let bounds = line_byte_bounds(after);
+    let mut ranges = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (idx, line) in after_lines.iter().enumerate() {
+        let changed = before_lines.get(idx).copied() != Some(*line);
+        if changed && current_start.is_none() {
+            current_start = Some(
+                bounds
+                    .get(idx)
+                    .map(|(start, _)| *start)
+                    .unwrap_or(after.len()),
+            );
+        } else if !changed && current_start.is_some() {
+            let start = current_start.take().unwrap_or(0);
+            let end = bounds
+                .get(idx.saturating_sub(1))
+                .map(|(_, end)| *end)
+                .unwrap_or(start);
+            ranges.push((start, end));
+        }
+    }
+
+    if let Some(start) = current_start {
+        let end = bounds.last().map(|(_, end)| *end).unwrap_or(after.len());
+        ranges.push((start, end));
+    }
+
+    if ranges.is_empty() && before != after && !after.is_empty() {
+        ranges.push((0, after.len()));
+    }
+
+    ranges
+}
+
+fn line_byte_bounds(source: &str) -> Vec<(usize, usize)> {
+    let mut bounds = Vec::new();
+    let mut offset = 0;
+    for line in source.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let start = offset;
+        let end = offset + line_without_newline.len();
+        bounds.push((start, end));
+        offset += line.len();
+    }
+    if !source.ends_with('\n') && source.is_empty() {
+        return vec![];
+    }
+    bounds
 }
 
 /// Write a file securely using the containment logic from fs.rs.
@@ -476,11 +689,14 @@ async fn emit_verify_failed(
 mod write_file_tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
+    use crate::handlers::register_submit_intent;
+    use crate::invariants::InvariantCardIndex;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind,
-        Intent, OnFailure, Scope,
+        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
+        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
     };
+    use lancet_protocol::methods::envelope::{SubmitIntent, SubmitIntentParams};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -514,6 +730,8 @@ mod write_file_tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
         )
@@ -522,6 +740,20 @@ mod write_file_tests {
     fn test_ctx_with_store(
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        test_ctx_with_store_and_index(
+            root,
+            store,
+            Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            lancet_protocol::envelope::CepMode::Off,
+        )
+    }
+
+    fn test_ctx_with_store_and_index(
+        root: &str,
+        store: Arc<ActiveEnvelopeStore>,
+        invariant_index: Arc<InvariantCardIndex>,
+        cep_mode: CepMode,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -550,6 +782,8 @@ mod write_file_tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index,
+                cep_mode,
             },
             event_rx,
         )
@@ -558,6 +792,12 @@ mod write_file_tests {
     fn mutation_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
         register_mutation_methods(&mut registry).unwrap();
+        registry
+    }
+
+    fn mutation_and_intent_registry() -> MethodRegistry {
+        let mut registry = mutation_registry();
+        register_submit_intent(&mut registry).unwrap();
         registry
     }
 
@@ -575,6 +815,9 @@ mod write_file_tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: pattern.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -683,6 +926,104 @@ mod write_file_tests {
     }
 
     #[tokio::test]
+    async fn test_replan_is_distinct_from_guard_denied() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let envelope = envelope_with_write_path("src/allowed/**");
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
+        let out_of_scope = WriteFileParams {
+            path: "src/other/file.rs".into(),
+            content: "fn main() {}\n".into(),
+        };
+        let replan = registry
+            .dispatch(
+                WriteFile::NAME,
+                serde_json::to_value(&out_of_scope).unwrap(),
+                ctx1,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(replan.code, CepErrorCode::ReplanRequired);
+
+        let (ctx2, _events2) = test_ctx_with_store(root, store);
+        let traversal = WriteFileParams {
+            path: "../../etc/passwd".into(),
+            content: "bad".into(),
+        };
+        let guard = registry
+            .dispatch(
+                WriteFile::NAME,
+                serde_json::to_value(&traversal).unwrap(),
+                ctx2,
+            )
+            .await
+            .unwrap_err();
+        assert_ne!(guard.code, CepErrorCode::ReplanRequired);
+    }
+
+    #[tokio::test]
+    async fn test_replan_flow_mutation_outside_scope_then_submit_intent_resumes() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/other")).unwrap();
+        let registry = mutation_and_intent_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let envelope = envelope_with_write_path("src/allowed/**");
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let write_params = WriteFileParams {
+            path: "src/other/file.rs".into(),
+            content: "fn main() {}\n".into(),
+        };
+
+        let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
+        let err = registry
+            .dispatch(
+                WriteFile::NAME,
+                serde_json::to_value(&write_params).unwrap(),
+                ctx1,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+
+        let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
+        let intent_params = SubmitIntentParams {
+            action: "write".into(),
+            target: "src/other/file.rs".into(),
+            params: None,
+            supersede: true,
+            reason: Some("expand scope for out-of-band file".into()),
+        };
+        registry
+            .dispatch(
+                SubmitIntent::NAME,
+                serde_json::to_value(&intent_params).unwrap(),
+                ctx2,
+            )
+            .await
+            .unwrap();
+
+        let (ctx3, _events3) = test_ctx_with_store(root, store);
+        registry
+            .dispatch(
+                WriteFile::NAME,
+                serde_json::to_value(&write_params).unwrap(),
+                ctx3,
+            )
+            .await
+            .unwrap();
+
+        assert!(dir.path().join("src/other/file.rs").exists());
+    }
+
+    #[tokio::test]
     async fn write_file_missing_parent_returns_error() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
@@ -730,10 +1071,11 @@ mod write_file_tests {
 mod patch_tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
+    use crate::invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind,
-        Intent, OnFailure, Scope,
+        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
+        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
     };
     use std::collections::BTreeSet;
     use std::sync::Arc;
@@ -743,6 +1085,20 @@ mod patch_tests {
     fn test_ctx_with_store(
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
+    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
+        test_ctx_with_store_and_index(
+            root,
+            store,
+            Arc::new(InvariantCardIndex::new(vec![])),
+            CepMode::Off,
+        )
+    }
+
+    fn test_ctx_with_store_and_index(
+        root: &str,
+        store: Arc<ActiveEnvelopeStore>,
+        invariant_index: Arc<InvariantCardIndex>,
+        cep_mode: CepMode,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -771,6 +1127,8 @@ mod patch_tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index,
+                cep_mode,
             },
             event_rx,
         )
@@ -796,6 +1154,9 @@ mod patch_tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: pattern.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -872,6 +1233,43 @@ mod patch_tests {
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
         // File should NOT exist (patch not applied)
         assert!(!dir.path().join("README.md").exists());
+    }
+
+    #[tokio::test]
+    async fn patch_l2_checks_post_patch_new_file_content() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("src/**"), 0, "test-turn")
+            .await
+            .unwrap();
+
+        let card = InvariantCard {
+            id: "INV-STRUCT".into(),
+            title: "No structs".into(),
+            anchor: CardAnchor::Glob("src/**/*.rs".into()),
+            forbidden: vec![ForbiddenEntry {
+                category: "struct_def".into(),
+                reason: "structs are frozen".into(),
+            }],
+            opaque: vec![],
+        };
+        let index = Arc::new(InvariantCardIndex::new(vec![card]));
+        let (ctx, _events) = test_ctx_with_store_and_index(root, store, index, CepMode::Enforce);
+
+        let params = PatchParams {
+            patch: "*** Begin Patch\n*** Add File: src/new.rs\n+struct Added {}\n*** End Patch"
+                .into(),
+        };
+        let err = registry
+            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(!dir.path().join("src/new.rs").exists());
     }
 
     #[tokio::test]

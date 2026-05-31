@@ -9,7 +9,7 @@ pub mod session;
 pub mod workspace;
 
 pub use command::Run;
-pub use envelope::Declare;
+pub use envelope::{Declare, SubmitIntent};
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile};
@@ -20,7 +20,7 @@ pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 mod sealed {
     use super::{
         command::Run,
-        envelope::Declare,
+        envelope::{Declare, SubmitIntent},
         external::Fetch,
         session::TodoWrite,
         workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile},
@@ -37,6 +37,7 @@ mod sealed {
     impl Sealed for TodoWrite {}
     impl Sealed for Run {}
     impl Sealed for Declare {}
+    impl Sealed for SubmitIntent {}
 }
 
 #[cfg(test)]
@@ -57,6 +58,7 @@ mod tests {
             WriteFile::NAME,
             Patch::NAME,
             Declare::NAME,
+            SubmitIntent::NAME,
         ];
         for name in names {
             assert!(name.contains('.'), "expected dotted name: {name}");
@@ -77,6 +79,7 @@ mod tests {
             WriteFile::NAME,
             Patch::NAME,
             Declare::NAME,
+            SubmitIntent::NAME,
         ];
         for name in names {
             assert_ne!(name, "session/create");

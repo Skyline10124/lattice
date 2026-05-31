@@ -151,6 +151,17 @@ fn capability_fixtures() -> Vec<CapabilityFixture> {
             base_verdict: CapabilityMatchVerdict::Satisfied,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
+        // envelope.submit_intent → MutateSessionState (handler in Phase 25 Plan 03)
+        CapabilityFixture {
+            method: "envelope.submit_intent",
+            required_capability: RequiredCapability::MutateSessionState,
+            invocation: InvocationFacts {
+                session_state_operation: Some(SessionStateOperation::SubmitIntent),
+                ..Default::default()
+            },
+            base_verdict: CapabilityMatchVerdict::Satisfied,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
     ]
 }
 

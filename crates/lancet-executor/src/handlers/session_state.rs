@@ -162,6 +162,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
         )

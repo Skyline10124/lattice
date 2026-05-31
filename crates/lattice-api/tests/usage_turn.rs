@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lancet_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, Intent, OnFailure, Scope,
+    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
+    OnFailure, Scope,
 };
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
@@ -300,6 +301,9 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         impact: vec![Impact {
             kind: ImpactKind::WorkspaceMutation,
             target: "src/lib.rs".into(),
+            scope: None,
+            confidence: ImpactConfidence::Conservative,
+            unknowns: vec![],
         }],
         constraints: Constraints::default(),
         verify: None,

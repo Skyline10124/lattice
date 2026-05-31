@@ -658,8 +658,8 @@ mod tests {
     use crate::policy::Phase21TurnContext;
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactKind,
-        Intent, OnFailure, Scope,
+        BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact,
+        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
@@ -700,6 +700,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
             cancel_tx,
@@ -740,6 +742,9 @@ mod tests {
             impact: vec![lancet_protocol::envelope::Impact {
                 kind: lancet_protocol::envelope::ImpactKind::CommandExecution,
                 target: root.into(),
+                scope: None,
+                confidence: lancet_protocol::envelope::ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: lancet_protocol::envelope::Constraints::default(),
             verify: None,
@@ -768,6 +773,8 @@ mod tests {
                     turn_id: "test-turn".into(),
                     session_id: "test-session".into(),
                 })),
+                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
             },
             event_rx,
             cancel_tx,
@@ -873,6 +880,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -902,6 +912,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {
@@ -947,6 +959,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -976,6 +991,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {
@@ -1022,6 +1039,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -1053,6 +1073,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {
@@ -1097,6 +1119,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -1130,6 +1155,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {
@@ -1207,6 +1234,9 @@ mod tests {
                 impact: vec![EnvImpact {
                     kind: ImpactKind::WorkspaceMutation,
                     target: root.into(),
+                    scope: None,
+                    confidence: ImpactConfidence::Conservative,
+                    unknowns: vec![],
                 }],
                 constraints: Constraints::default(),
                 verify: None,
@@ -1241,6 +1271,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {
@@ -1277,6 +1309,9 @@ mod tests {
                 impact: vec![EnvImpact {
                     kind: ImpactKind::WorkspaceMutation,
                     target: root.into(),
+                    scope: None,
+                    confidence: ImpactConfidence::Conservative,
+                    unknowns: vec![],
                 }],
                 constraints: Constraints::default(),
                 verify: None,
@@ -1444,6 +1479,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -1479,6 +1517,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let registry = native_command_registry(root);
@@ -1546,6 +1586,9 @@ mod tests {
             impact: vec![EnvImpact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -1577,6 +1620,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
         };
 
         let params = RunParams {

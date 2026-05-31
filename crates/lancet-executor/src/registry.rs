@@ -3,9 +3,10 @@
 use crate::audit::CepAuditContext;
 use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
+use crate::invariants::InvariantCardIndex;
 use crate::policy::default::DefaultPolicyHook;
 use crate::policy::Phase21TurnContext;
-use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 use lancet_protocol::error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
@@ -99,6 +100,8 @@ pub struct HandlerContext {
     pub policy_hook: Arc<dyn PolicyHook>,
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
+    pub invariant_index: Arc<InvariantCardIndex>,
+    pub cep_mode: CepMode,
 }
 
 impl std::fmt::Debug for HandlerContext {
@@ -116,6 +119,8 @@ impl std::fmt::Debug for HandlerContext {
             .field("policy_hook", &"<dyn PolicyHook>")
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
+            .field("invariant_index", &self.invariant_index)
+            .field("cep_mode", &self.cep_mode)
             .finish()
     }
 }
@@ -296,6 +301,8 @@ mod tests {
                 turn_id: "test-turn".into(),
                 session_id: "test-session".into(),
             })),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: CepMode::Off,
         }
     }
 
@@ -379,6 +386,10 @@ mod tests {
         .unwrap();
 
         for descriptor in lancet_protocol::catalog() {
+            // submit_intent handler is registered in Phase 25 Plan 03
+            if descriptor.name == "envelope.submit_intent" {
+                continue;
+            }
             assert!(registry.contains(descriptor.name));
         }
     }

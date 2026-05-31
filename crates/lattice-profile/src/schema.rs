@@ -37,6 +37,8 @@ pub struct CepSection {
     pub command: Option<CepCommandSection>,
     #[serde(default)]
     pub policy: Option<CepPolicySection>,
+    #[serde(default)]
+    pub invariants: Option<CepInvariantsSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -108,6 +110,14 @@ pub struct CepPolicySection {
     pub path: Option<String>,
 }
 
+/// `[cep.invariants]` — invariant card directory configuration (Phase 25, PROF-05 / D-09).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CepInvariantsSection {
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
 fn default_cep_mode() -> CepMode {
     CepMode::Enforce
 }
@@ -121,6 +131,7 @@ impl Default for CepSection {
             network: None,
             command: None,
             policy: None,
+            invariants: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -165,6 +176,10 @@ impl<'de> Deserialize<'de> for CepSection {
             .remove("policy")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let invariants = raw
+            .remove("invariants")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
 
         Ok(Self {
             mode,
@@ -173,6 +188,7 @@ impl<'de> Deserialize<'de> for CepSection {
             network,
             command,
             policy,
+            invariants,
             extensions: raw,
         })
     }
@@ -850,6 +866,7 @@ default_timeout_ms = 60000
             network: None,
             command: None,
             policy: None,
+            invariants: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
@@ -945,5 +962,49 @@ unknown = true
             err.to_string().contains("unknown"),
             "should reject unknown field, got: {err}"
         );
+    }
+
+    // ── CepInvariantsSection ──────────────────────────────────────────
+
+    #[test]
+    fn cep_section_parses_invariants_section() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep]
+mode = "enforce"
+
+[cep.invariants]
+dir = ".lancet/cards/"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let invariants = profile.cep.invariants.as_ref().unwrap();
+        assert_eq!(invariants.dir.as_deref(), Some(".lancet/cards/"));
+    }
+
+    #[test]
+    fn cep_section_absent_invariants_is_none() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(profile.cep.invariants.is_none());
+    }
+
+    #[test]
+    fn cep_invariants_does_not_leak_to_extensions() {
+        let toml = format!(
+            r#"{prefix}
+
+[cep.invariants]
+dir = "foo/"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert!(
+            !profile.cep.extensions.contains_key("invariants"),
+            "invariants must not leak to extensions"
+        );
+        assert!(profile.cep.invariants.is_some());
     }
 }

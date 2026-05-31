@@ -269,7 +269,9 @@ fn validate_write_path_pattern(pattern: &str) -> Result<(), CepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::envelope::{Constraints, Impact, ImpactKind, Intent, Scope};
+    use lancet_protocol::envelope::{
+        Constraints, Impact, ImpactConfidence, ImpactKind, Intent, Scope,
+    };
     use std::collections::BTreeSet;
 
     fn sample_envelope(description: &str) -> ExecutionEnvelope {
@@ -289,6 +291,9 @@ mod tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceMutation,
                 target: "src/**".into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
@@ -315,6 +320,9 @@ mod tests {
             impact: vec![Impact {
                 kind: ImpactKind::WorkspaceObservation,
                 target: "src/**".into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
             }],
             constraints: Constraints::default(),
             verify: None,
