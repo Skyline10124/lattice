@@ -10,7 +10,7 @@
 //! `observed ⊆ static EffectDecl`.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lattice_cep_protocol::envelope::{EffectKindSet, ImpactKind};
 
@@ -19,18 +19,28 @@ use lattice_cep_protocol::envelope::{EffectKindSet, ImpactKind};
 /// Strips `/**` suffix (Guard L1 `DirectoryGlob`) so that `"src/**"` becomes `"src"`,
 /// then resolves relative patterns against `project_root`.
 /// This ensures `Path::starts_with` containment checks work correctly.
-pub fn normalize_region_path(pattern: &str, project_root: &std::path::Path) -> PathBuf {
+pub fn normalize_region_path(pattern: &str, project_root: &Path) -> PathBuf {
     let base = pattern.strip_suffix("/**").unwrap_or(pattern);
-    if std::path::Path::new(base).is_relative() {
+    if Path::new(base).is_relative() {
         project_root.join(base)
     } else {
         PathBuf::from(base)
+    }
+}
+
+/// Normalize a WritePath pattern while preserving Guard L1's exact-file vs
+/// directory-prefix semantics.
+pub fn normalize_write_region_path(pattern: &str, project_root: &Path) -> Option<(PathBuf, bool)> {
+    match normalize_write_path_pattern(pattern).ok()? {
+        WritePathPattern::ExactFile(path) => Some((project_root.join(path), false)),
+        WritePathPattern::DirectoryGlob(path) => Some((project_root.join(path), true)),
     }
 }
 use lattice_cep_protocol::policy::SourcedCapability;
 use lattice_cep_protocol::CepError;
 
 use super::ledger::{ObservedEffect, ObservedScope};
+use crate::guard_l1::{normalize_write_path_pattern, WritePathPattern};
 use crate::policy::command::EffectiveImpact;
 use crate::policy::CepPolicyConfig;
 
@@ -107,8 +117,10 @@ pub struct AuthorizedEffectRegion {
     pub read_paths: Vec<PathBuf>,
     /// Authorized observation roots (from Inspect policy roots).
     pub observation_roots: Vec<PathBuf>,
-    /// Authorized write paths (from WritePath capability pattern).
+    /// Authorized exact write paths (from exact-file WritePath capability patterns).
     pub write_paths: Vec<PathBuf>,
+    /// Authorized write path prefixes (from directory-glob WritePath capability patterns).
+    pub write_path_prefixes: Vec<PathBuf>,
     /// Authorized external hosts (from FetchUrl capability pattern).
     pub hosts: Vec<String>,
     /// Whether session state mutation is authorized.
@@ -129,6 +141,7 @@ impl AuthorizedEffectRegion {
             read_paths: Vec::new(),
             observation_roots: Vec::new(),
             write_paths: Vec::new(),
+            write_path_prefixes: Vec::new(),
             hosts: Vec::new(),
             session_state_allowed: false,
             command_allowed: false,
@@ -173,6 +186,7 @@ impl AuthorizedEffectRegion {
                     read_paths: vec![normalize_region_path(path_pattern, &policy.project_root)],
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: false,
@@ -189,6 +203,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: policy.observation.allowed_roots.clone(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: false,
@@ -197,11 +212,18 @@ impl AuthorizedEffectRegion {
             Capability::WritePath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
                 kinds.insert(ImpactKind::WorkspaceMutation);
+                let (write_paths, write_path_prefixes) =
+                    match normalize_write_region_path(path_pattern, &policy.project_root) {
+                        Some((path, false)) => (vec![path], Vec::new()),
+                        Some((path, true)) => (Vec::new(), vec![path]),
+                        None => (Vec::new(), Vec::new()),
+                    };
                 Self {
                     kinds,
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
-                    write_paths: vec![normalize_region_path(path_pattern, &policy.project_root)],
+                    write_paths,
+                    write_path_prefixes,
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: false,
@@ -215,6 +237,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: Vec::new(),
                     session_state_allowed: false,
                     command_allowed: true,
@@ -228,6 +251,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: vec![host.clone()],
                     session_state_allowed: false,
                     command_allowed: false,
@@ -241,6 +265,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: Vec::new(),
                     session_state_allowed: true,
                     command_allowed: false,
@@ -254,6 +279,7 @@ impl AuthorizedEffectRegion {
                     read_paths: Vec::new(),
                     observation_roots: Vec::new(),
                     write_paths: Vec::new(),
+                    write_path_prefixes: Vec::new(),
                     hosts: Vec::new(),
                     session_state_allowed: true,
                     command_allowed: false,
@@ -269,6 +295,8 @@ impl AuthorizedEffectRegion {
         self.observation_roots
             .extend(other.observation_roots.iter().cloned());
         self.write_paths.extend(other.write_paths.iter().cloned());
+        self.write_path_prefixes
+            .extend(other.write_path_prefixes.iter().cloned());
         self.hosts.extend(other.hosts.iter().cloned());
         self.session_state_allowed |= other.session_state_allowed;
         self.command_allowed |= other.command_allowed;
@@ -299,8 +327,13 @@ impl AuthorizedEffectRegion {
                     .any(|r| root_path.starts_with(r))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Path(path)) => {
-                // Check write_paths (WritePath capability)
-                self.write_paths.iter().any(|wp| path.starts_with(wp))
+                // Exact-file WritePath grants authorize only the exact path. Directory-glob
+                // WritePath grants authorize descendants under the normalized prefix.
+                self.write_paths.iter().any(|wp| path == wp)
+                    || self
+                        .write_path_prefixes
+                        .iter()
+                        .any(|wp| path.starts_with(wp))
             }
             (ImpactKind::CommandExecution, ObservedScope::Root(_)) => {
                 // Command execution authorized at the project root level
@@ -345,6 +378,15 @@ mod tests {
     fn sourced_inspect_cap() -> SourcedCapability {
         SourcedCapability {
             capability: Capability::Inspect,
+            source: CapabilitySource::Base,
+        }
+    }
+
+    fn sourced_write_cap(pattern: &str) -> SourcedCapability {
+        SourcedCapability {
+            capability: Capability::WritePath {
+                path_pattern: pattern.to_string(),
+            },
             source: CapabilitySource::Base,
         }
     }
@@ -461,6 +503,21 @@ mod tests {
     }
 
     #[test]
+    fn read_path_directory_glob_region_allows_descendant() {
+        let policy = crate::effect::shared_test_policy();
+        let cap = sourced_read_cap("src/**");
+        let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
+
+        let effect = ObservedEffect {
+            kind: ImpactKind::WorkspaceObservation,
+            scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs")),
+            required_capability: RequiredCapability::ReadPath,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        };
+        assert!(region.contains(&effect));
+    }
+
+    #[test]
     fn read_path_region_rejects_out_of_scope_path() {
         let policy = crate::effect::shared_test_policy();
         let cap = sourced_read_cap("/project/src");
@@ -516,6 +573,36 @@ mod tests {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Root("/project/src".to_string()),
             required_capability: RequiredCapability::Inspect,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        };
+        assert!(region.contains(&effect));
+    }
+
+    #[test]
+    fn write_path_exact_file_region_rejects_descendant() {
+        let policy = crate::effect::shared_test_policy();
+        let cap = sourced_write_cap("src/main.rs");
+        let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
+
+        let effect = ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs/generated.txt")),
+            required_capability: RequiredCapability::WritePath,
+            source: crate::effect::ledger::EffectSource::HandlerBackend,
+        };
+        assert!(!region.contains(&effect));
+    }
+
+    #[test]
+    fn write_path_directory_glob_region_allows_descendant() {
+        let policy = crate::effect::shared_test_policy();
+        let cap = sourced_write_cap("src/**");
+        let region = AuthorizedEffectRegion::from_matched_capability(Some(&cap), &policy);
+
+        let effect = ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(PathBuf::from("/project/src/generated.txt")),
+            required_capability: RequiredCapability::WritePath,
             source: crate::effect::ledger::EffectSource::HandlerBackend,
         };
         assert!(region.contains(&effect));

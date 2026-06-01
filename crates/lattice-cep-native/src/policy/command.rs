@@ -186,14 +186,19 @@ pub fn validate_timeout(requested: Option<u64>, policy: &CommandPolicy) -> Resul
     Ok(effective)
 }
 
-/// Check if argv matches any prefix in the given list.
+/// Check if argv matches any valid prefix in the given list.
+///
+/// Empty prefixes are invalid and must not be treated as wildcards.
+/// Prefixes containing empty tokens are ignored because command policies are
+/// token-prefix allowlists, not glob patterns.
 fn matches_prefix(argv: &[String], prefixes: &[Vec<String>]) -> bool {
-    for prefix in prefixes {
-        if argv.len() >= prefix.len() && argv[..prefix.len()] == *prefix {
-            return true;
-        }
-    }
-    false
+    prefixes.iter().any(|prefix| {
+        is_valid_prefix(prefix) && argv.len() >= prefix.len() && argv[..prefix.len()] == **prefix
+    })
+}
+
+fn is_valid_prefix(prefix: &[String]) -> bool {
+    !prefix.is_empty() && prefix.iter().all(|token| !token.is_empty())
 }
 
 /// Check for built-in risky patterns that should always be HardDenied.
@@ -466,6 +471,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result, EffectiveImpact::Diagnostic);
+    }
+
+    #[test]
+    fn empty_diagnostic_prefix_does_not_match_arbitrary_command() {
+        let mut policy = default_policy();
+        policy.allowed_diagnostic_commands = vec![vec![]];
+
+        let err = classify_command(&["unknown-tool".into()], None, &policy).unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("declared_impact"));
+    }
+
+    #[test]
+    fn diagnostic_prefix_with_empty_token_is_ignored() {
+        let mut policy = default_policy();
+        policy.allowed_diagnostic_commands = vec![vec!["cargo".into(), "".into()]];
+
+        let err = classify_command(&["cargo".into(), "fmt".into()], None, &policy).unwrap_err();
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("declared_impact"));
     }
 
     // --- Env policy tests ---
