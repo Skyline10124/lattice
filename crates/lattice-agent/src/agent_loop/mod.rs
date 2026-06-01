@@ -12,6 +12,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
@@ -31,6 +32,7 @@ const MAX_TURN_ROUNDS: u32 = 200;
 pub use traits::{CepErrorPayload, LlmClient, ToolCallExecutor, ToolExecutionError};
 pub use types::{
     AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus,
+    LlmRetryConfig,
 };
 
 /// Configuration for an [`AgentLoop`] instance.
@@ -206,62 +208,124 @@ impl AgentLoop {
                 max_completion_tokens: None,
             };
 
-            emit_agent_event(
-                &mut all_events,
-                live_events,
-                AgentTurnEvent::ModelStarted {
-                    provider: request.provider.clone(),
-                    model: request.model.clone(),
-                },
-            )
-            .await;
+            let max_attempts = request.llm_retry.max_attempts();
+            let mut attempt = 1_u32;
+            let stream = loop {
+                emit_agent_event(
+                    &mut all_events,
+                    live_events,
+                    AgentTurnEvent::ModelStarted {
+                        provider: request.provider.clone(),
+                        model: request.model.clone(),
+                    },
+                )
+                .await;
 
-            // The awaited ModelStarted emission can yield; check cancellation
-            // here so a flip between the round-top check and stream opening is
-            // observed before opening the stream. No partial state exists yet.
-            if let Some(flag) = &request.cancel_flag {
-                if flag.load(Ordering::Relaxed) {
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Cancelled,
-                        terminal_reason: Some("cancelled by caller".to_string()),
-                        events: all_events,
-                    };
+                // The awaited ModelStarted emission can yield; check cancellation
+                // here so a flip between the round-top check and stream opening is
+                // observed before opening the stream. No partial state exists yet.
+                if let Some(flag) = &request.cancel_flag {
+                    if flag.load(Ordering::Relaxed) {
+                        return AgentTurnResult {
+                            messages: all_messages,
+                            assistant_output: String::new(),
+                            usage: accumulated_usage,
+                            tool_results: tool_summaries,
+                            status: AgentTurnStatus::Cancelled,
+                            terminal_reason: Some("cancelled by caller".to_string()),
+                            events: all_events,
+                        };
+                    }
                 }
-            }
 
-            let stream = match await_with_deadline(
-                self.config.llm.stream_chat(chat_request),
-                deadline,
-            )
-            .await
-            {
-                Ok(Ok(s)) => s,
-                Ok(Err(err)) => {
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Error,
-                        terminal_reason: Some(format!("LLM error: {err}")),
-                        events: all_events,
-                    };
-                }
-                Err(DeadlineElapsed) => {
-                    // Timeout before stream creation — preserve accumulated state.
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Error,
-                        terminal_reason: Some("timeout".to_string()),
-                        events: all_events,
-                    };
+                match await_with_deadline(
+                    self.config.llm.stream_chat(chat_request.clone()),
+                    deadline,
+                )
+                .await
+                {
+                    Ok(Ok(s)) => break s,
+                    Ok(Err(err)) => {
+                        let info = classify_llm_error(err.as_ref());
+                        let will_retry = info.retryable && attempt < max_attempts;
+                        let delay_ms =
+                            will_retry.then(|| request.llm_retry.delay_for_retry(attempt));
+                        emit_agent_event(
+                            &mut all_events,
+                            live_events,
+                            AgentTurnEvent::LlmRequestError {
+                                provider: request.provider.clone(),
+                                model: request.model.clone(),
+                                attempt,
+                                max_attempts,
+                                error_kind: info.kind.clone(),
+                                retryable: info.retryable,
+                                will_retry,
+                                delay_ms,
+                                status_code: info.status_code,
+                                message: info.message.clone(),
+                            },
+                        )
+                        .await;
+
+                        if !will_retry {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: String::new(),
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Error,
+                                terminal_reason: Some(format!("LLM error: {}", info.message)),
+                                events: all_events,
+                            };
+                        }
+
+                        match wait_retry_delay(
+                            delay_ms.unwrap_or(0),
+                            request.cancel_flag.as_ref(),
+                            deadline,
+                        )
+                        .await
+                        {
+                            RetryDelayOutcome::Ready => {
+                                attempt = attempt.saturating_add(1);
+                            }
+                            RetryDelayOutcome::Cancelled => {
+                                return AgentTurnResult {
+                                    messages: all_messages,
+                                    assistant_output: String::new(),
+                                    usage: accumulated_usage,
+                                    tool_results: tool_summaries,
+                                    status: AgentTurnStatus::Cancelled,
+                                    terminal_reason: Some("cancelled by caller".to_string()),
+                                    events: all_events,
+                                };
+                            }
+                            RetryDelayOutcome::Timeout => {
+                                return AgentTurnResult {
+                                    messages: all_messages,
+                                    assistant_output: String::new(),
+                                    usage: accumulated_usage,
+                                    tool_results: tool_summaries,
+                                    status: AgentTurnStatus::Error,
+                                    terminal_reason: Some("timeout".to_string()),
+                                    events: all_events,
+                                };
+                            }
+                        }
+                    }
+                    Err(DeadlineElapsed) => {
+                        // Timeout before stream creation — preserve accumulated state.
+                        return AgentTurnResult {
+                            messages: all_messages,
+                            assistant_output: String::new(),
+                            usage: accumulated_usage,
+                            tool_results: tool_summaries,
+                            status: AgentTurnStatus::Error,
+                            terminal_reason: Some("timeout".to_string()),
+                            events: all_events,
+                        };
+                    }
                 }
             };
 
@@ -988,6 +1052,74 @@ async fn emit_agent_event(
 }
 
 struct DeadlineElapsed;
+
+struct LlmFailureInfo {
+    kind: String,
+    retryable: bool,
+    status_code: Option<u16>,
+    message: String,
+}
+
+fn classify_llm_error(err: &(dyn std::error::Error + Send + Sync + 'static)) -> LlmFailureInfo {
+    if let Some(llm) = err.downcast_ref::<lattice_llm::LlmError>() {
+        return LlmFailureInfo {
+            kind: llm.kind().to_string(),
+            retryable: llm.retryable(),
+            status_code: llm.status_code(),
+            message: llm.to_string(),
+        };
+    }
+
+    LlmFailureInfo {
+        kind: "other".to_string(),
+        retryable: false,
+        status_code: None,
+        message: err.to_string(),
+    }
+}
+
+enum RetryDelayOutcome {
+    Ready,
+    Cancelled,
+    Timeout,
+}
+
+async fn wait_retry_delay(
+    delay_ms: u64,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+    deadline: Option<Instant>,
+) -> RetryDelayOutcome {
+    if delay_ms == 0 {
+        if cancel_flag
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            return RetryDelayOutcome::Cancelled;
+        }
+        return RetryDelayOutcome::Ready;
+    }
+
+    let end = Instant::now() + Duration::from_millis(delay_ms);
+    loop {
+        if cancel_flag
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            return RetryDelayOutcome::Cancelled;
+        }
+        let now = Instant::now();
+        if now >= end {
+            return RetryDelayOutcome::Ready;
+        }
+        let poll_at = std::cmp::min(now + Duration::from_millis(50), end);
+        if await_with_deadline(tokio::time::sleep_until(poll_at), deadline)
+            .await
+            .is_err()
+        {
+            return RetryDelayOutcome::Timeout;
+        }
+    }
+}
 
 async fn await_with_deadline<T>(
     fut: impl Future<Output = T>,

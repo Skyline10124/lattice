@@ -92,17 +92,21 @@ fn is_ipv4_mapped_private(v6: &Ipv6Addr) -> bool {
 /// `reqwest::RequestBuilder::resolve` to close DNS rebinding TOCTOU.
 pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, LlmError> {
     if host_is_dns_rebinding_domain(host) {
-        return Err(LlmError::Other(format!(
-            "hostname '{}' is a known DNS rebinding domain and is not allowed",
-            host
-        )));
+        return Err(LlmError::Config {
+            message: format!(
+                "hostname '{}' is a known DNS rebinding domain and is not allowed",
+                host
+            ),
+        });
     }
 
     if is_localhost_host(host) {
-        return Err(LlmError::Other(format!(
-            "hostname '{}' is localhost and cannot be resolved for remote pinning",
-            host
-        )));
+        return Err(LlmError::Config {
+            message: format!(
+                "hostname '{}' is localhost and cannot be resolved for remote pinning",
+                host
+            ),
+        });
     }
 
     if let Ok(ip) = host
@@ -111,33 +115,35 @@ pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAd
         .parse::<IpAddr>()
     {
         if is_private_or_reserved(ip) {
-            return Err(LlmError::Other(format!(
-                "hostname targets private/reserved IP {}",
-                ip
-            )));
+            return Err(LlmError::Config {
+                message: format!("hostname targets private/reserved IP {}", ip),
+            });
         }
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
     let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
-        .map_err(|e| LlmError::Other(format!("DNS resolution failed for '{}': {}", host, e)))?
+        .map_err(|e| LlmError::Dns {
+            message: format!("DNS resolution failed for '{}': {}", host, e),
+        })?
         .collect();
 
     if addrs.is_empty() {
-        return Err(LlmError::Other(format!(
-            "hostname '{}' did not resolve to any address",
-            host
-        )));
+        return Err(LlmError::Dns {
+            message: format!("hostname '{}' did not resolve to any address", host),
+        });
     }
 
     for addr in &addrs {
         if is_private_or_reserved(addr.ip()) {
-            return Err(LlmError::Other(format!(
-                "hostname '{}' resolves to private/reserved IP {}",
-                host,
-                addr.ip()
-            )));
+            return Err(LlmError::Config {
+                message: format!(
+                    "hostname '{}' resolves to private/reserved IP {}",
+                    host,
+                    addr.ip()
+                ),
+            });
         }
     }
 
@@ -147,57 +153,63 @@ pub fn resolve_public_socket_addrs(host: &str, port: u16) -> Result<Vec<SocketAd
 /// Validate a provider base URL.
 pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
     if url.is_empty() {
-        return Err(LlmError::Other("base_url must not be empty".to_string()));
+        return Err(LlmError::Config {
+            message: "base_url must not be empty".to_string(),
+        });
     }
 
-    let parsed =
-        url::Url::parse(url).map_err(|e| LlmError::Other(format!("invalid base_url: {}", e)))?;
+    let parsed = url::Url::parse(url).map_err(|e| LlmError::Config {
+        message: format!("invalid base_url: {}", e),
+    })?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
-        return Err(LlmError::Other(format!(
-            "scheme '{}' not allowed — only http:// and https:// are permitted",
-            scheme
-        )));
+        return Err(LlmError::Config {
+            message: format!(
+                "scheme '{}' not allowed — only http:// and https:// are permitted",
+                scheme
+            ),
+        });
     }
 
     let host_str = match parsed.host_str() {
         Some(h) if !h.is_empty() => h,
         _ => {
-            return Err(LlmError::Other(
-                "base_url has scheme but no host".to_string(),
-            ))
+            return Err(LlmError::Config {
+                message: "base_url has scheme but no host".to_string(),
+            })
         }
     };
 
     if scheme == "http" && host_str != "localhost" && host_str != "127.0.0.1" && host_str != "::1" {
-        return Err(LlmError::Other(
-            "HTTP is only allowed for localhost — use HTTPS for remote hosts".to_string(),
-        ));
+        return Err(LlmError::Config {
+            message: "HTTP is only allowed for localhost — use HTTPS for remote hosts".to_string(),
+        });
     }
 
     if parsed.username() != "" || parsed.password().is_some() {
-        return Err(LlmError::Other(
-            "base_url contains userinfo which is not allowed".to_string(),
-        ));
+        return Err(LlmError::Config {
+            message: "base_url contains userinfo which is not allowed".to_string(),
+        });
     }
 
     // Reject IP literals that are private/reserved regardless of scheme.
     let host_clean = host_str.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_clean.parse::<IpAddr>() {
         if is_private_or_reserved(ip) {
-            return Err(LlmError::Other(format!(
-                "base_url targets private/reserved IP {}",
-                ip
-            )));
+            return Err(LlmError::Config {
+                message: format!("base_url targets private/reserved IP {}", ip),
+            });
         }
     }
 
     if host_is_dns_rebinding_domain(host_str) {
-        return Err(LlmError::Other(format!(
-            "base_url hostname '{}' is a known DNS rebinding domain and is not allowed",
-            host_str
-        )));
+        return Err(LlmError::Config {
+            message: format!(
+                "base_url hostname '{}' is a known DNS rebinding domain and is not allowed",
+                host_str
+            ),
+        });
     }
 
     // Best-effort DNS check when resolution is available (offline CI may not resolve).
@@ -209,11 +221,13 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
         if let Ok(addrs) = (host_str, port).to_socket_addrs() {
             for addr in addrs {
                 if is_private_or_reserved(addr.ip()) {
-                    return Err(LlmError::Other(format!(
-                        "hostname '{}' resolves to private/reserved IP {}",
-                        host_str,
-                        addr.ip()
-                    )));
+                    return Err(LlmError::Config {
+                        message: format!(
+                            "hostname '{}' resolves to private/reserved IP {}",
+                            host_str,
+                            addr.ip()
+                        ),
+                    });
                 }
             }
         }

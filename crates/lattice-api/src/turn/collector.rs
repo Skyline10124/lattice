@@ -99,6 +99,7 @@ impl RunTurnCollector {
             }
             TurnEvent::TurnCommitting
             | TurnEvent::ModelStarted { .. }
+            | TurnEvent::LlmRequestError { .. }
             | TurnEvent::ReasoningDelta { .. }
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::CepCallStarted { .. }

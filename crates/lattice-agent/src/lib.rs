@@ -4,7 +4,7 @@ pub mod agent_loop;
 
 pub use agent_loop::{
     AgentLoop, AgentLoopConfig, AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest,
-    AgentTurnResult, AgentTurnStatus, CepErrorPayload, LlmClient, ToolCallExecutor,
+    AgentTurnResult, AgentTurnStatus, CepErrorPayload, LlmClient, LlmRetryConfig, ToolCallExecutor,
     ToolExecutionError,
 };
 

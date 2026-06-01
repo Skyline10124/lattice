@@ -7,9 +7,9 @@ use std::sync::Mutex;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
-    ToolCallExecutor, ToolExecutionError,
+    LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
-use lattice_llm::{LlmEvent, TokenUsage, ToolDefinition};
+use lattice_llm::{LlmError, LlmEvent, TokenUsage, ToolDefinition};
 use lattice_session::HeadTranscript;
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ fn make_request(user_input: &str, tool_definitions: Vec<ToolDefinition>) -> Agen
         tool_definitions,
         cancel_flag: None,
         timeout: None,
+        llm_retry: LlmRetryConfig::default(),
     }
 }
 
@@ -964,4 +965,170 @@ async fn streaming_backward_compat_fake_llm_chat_only_still_works() {
 
     assert_eq!(result.status, AgentTurnStatus::Completed);
     assert_eq!(result.assistant_output, "buffered");
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 14: stream-open LLM failures are classified and retried.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streaming_open_retries_retryable_transport_error_then_succeeds() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_llm_error(LlmError::Transport {
+                message: "connection reset".to_string(),
+                retryable: true,
+            })
+            .push_llm_error(LlmError::Transport {
+                message: "temporary eof".to_string(),
+                retryable: true,
+            })
+            .push_events(vec![
+                LlmEvent::Token {
+                    content: "ok".to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "stop".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm: llm.clone(),
+        tool_executor: executor,
+    });
+    let mut request = make_request("hello", vec![read_file_tool_definition()]);
+    request.llm_retry = LlmRetryConfig {
+        max_retries: 2,
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+
+    let result = loop_inst.run_turn(request).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Completed);
+    assert_eq!(result.assistant_output, "ok");
+    assert_eq!(llm.call_count(), 3);
+
+    let retry_events: Vec<_> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentTurnEvent::LlmRequestError {
+                attempt,
+                max_attempts,
+                error_kind,
+                retryable,
+                will_retry,
+                delay_ms,
+                ..
+            } => Some((
+                *attempt,
+                *max_attempts,
+                error_kind.as_str(),
+                *retryable,
+                *will_retry,
+                *delay_ms,
+            )),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        retry_events,
+        vec![
+            (1, 3, "transport", true, true, Some(1)),
+            (2, 3, "transport", true, true, Some(1))
+        ]
+    );
+}
+
+#[tokio::test]
+async fn streaming_open_retry_exhaustion_returns_structured_error() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_llm_error(LlmError::Transport {
+                message: "connection reset".to_string(),
+                retryable: true,
+            })
+            .push_llm_error(LlmError::Transport {
+                message: "connection reset again".to_string(),
+                retryable: true,
+            })
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm: llm.clone(),
+        tool_executor: executor,
+    });
+    let mut request = make_request("hello", vec![read_file_tool_definition()]);
+    request.llm_retry = LlmRetryConfig {
+        max_retries: 1,
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+
+    let result = loop_inst.run_turn(request).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert_eq!(llm.call_count(), 2);
+    assert!(result
+        .terminal_reason
+        .as_deref()
+        .unwrap_or_default()
+        .contains("transport error: connection reset again"));
+
+    let will_retry: Vec<bool> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentTurnEvent::LlmRequestError { will_retry, .. } => Some(*will_retry),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(will_retry, vec![true, false]);
+}
+
+#[tokio::test]
+async fn streaming_open_does_not_retry_non_retryable_provider_http_error() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_llm_error(LlmError::ProviderHttp {
+                status_code: 400,
+                message: "bad request".to_string(),
+            })
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm: llm.clone(),
+        tool_executor: executor,
+    });
+    let mut request = make_request("hello", vec![read_file_tool_definition()]);
+    request.llm_retry = LlmRetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+    };
+
+    let result = loop_inst.run_turn(request).await;
+
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert_eq!(llm.call_count(), 1);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentTurnEvent::LlmRequestError {
+            error_kind,
+            retryable: false,
+            will_retry: false,
+            status_code: Some(400),
+            ..
+        } if error_kind == "provider_http"
+    )));
 }

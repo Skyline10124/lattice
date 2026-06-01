@@ -15,18 +15,20 @@ use crate::types::{ChatRequest, LlmEvent};
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
     security::validate_base_url(&resolved.base_url)?;
 
-    let key = std::env::var(&resolved.api_key_env).map_err(|_| {
-        LlmError::Other(format!(
+    let key = std::env::var(&resolved.api_key_env).map_err(|_| LlmError::Credential {
+        message: format!(
             "missing API key: environment variable '{}' is not set",
             resolved.api_key_env
-        ))
+        ),
     })?;
 
     if key.is_empty() {
-        return Err(LlmError::Other(format!(
-            "missing API key: environment variable '{}' is empty",
-            resolved.api_key_env
-        )));
+        return Err(LlmError::Credential {
+            message: format!(
+                "missing API key: environment variable '{}' is empty",
+                resolved.api_key_env
+            ),
+        });
     }
 
     Ok(key)
@@ -201,10 +203,13 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                         state.finished = true;
                         return Some((
                             LlmEvent::Error {
-                                message: format!(
-                                    "SSE buffer size exceeded: {} bytes",
-                                    state.total_bytes
-                                ),
+                                message: LlmError::ProtocolLimit {
+                                    message: format!(
+                                        "SSE buffer size exceeded: {} bytes",
+                                        state.total_bytes
+                                    ),
+                                }
+                                .to_string(),
                             },
                             state,
                         ));
@@ -219,7 +224,10 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                     state.finished = true;
                     return Some((
                         LlmEvent::Error {
-                            message: format!("HTTP response read error: {}", e),
+                            message: LlmError::StreamRead {
+                                message: e.to_string(),
+                            }
+                            .to_string(),
                         },
                         state,
                     ));
@@ -269,7 +277,10 @@ fn drain_complete_events(state: &mut SseStreamState) {
         }
         if state.event_count >= sse::MAX_SSE_EVENTS {
             state.pending.push_back(LlmEvent::Error {
-                message: format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
+                message: LlmError::ProtocolLimit {
+                    message: format!("SSE event count exceeded: {}", sse::MAX_SSE_EVENTS),
+                }
+                .to_string(),
             });
             state.finished = true;
             return;
@@ -328,10 +339,12 @@ fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
     };
 
     if security::host_is_dns_rebinding_domain(&host) {
-        return Err(LlmError::Other(format!(
-            "hostname '{}' is a known DNS rebinding domain and is not allowed",
-            host
-        )));
+        return Err(LlmError::Config {
+            message: format!(
+                "hostname '{}' is a known DNS rebinding domain and is not allowed",
+                host
+            ),
+        });
     }
 
     if is_localhost_request_host(&host) {
@@ -342,7 +355,49 @@ fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
     reqwest::Client::builder()
         .resolve_to_addrs(host.as_str(), &pinned)
         .build()
-        .map_err(|e| LlmError::Other(format!("failed to build HTTP client: {}", e)))
+        .map_err(|e| LlmError::Config {
+            message: format!("failed to build HTTP client: {}", e),
+        })
+}
+
+fn llm_error_from_request(err: reqwest::Error) -> LlmError {
+    let message = err.to_string();
+    if err.is_timeout() {
+        LlmError::Timeout { message }
+    } else {
+        LlmError::Transport {
+            message,
+            retryable: true,
+        }
+    }
+}
+
+fn summarize_provider_body(body: &str) -> String {
+    const MAX_PROVIDER_ERROR_CHARS: usize = 2048;
+    let mut summary = body
+        .chars()
+        .take(MAX_PROVIDER_ERROR_CHARS)
+        .collect::<String>();
+    if body.chars().count() > MAX_PROVIDER_ERROR_CHARS {
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn llm_error_from_status(status: reqwest::StatusCode, body: String) -> LlmError {
+    let status_code = status.as_u16();
+    let message = summarize_provider_body(&body);
+    if status_code == 429 {
+        LlmError::RateLimited {
+            status_code,
+            message,
+        }
+    } else {
+        LlmError::ProviderHttp {
+            status_code,
+            message,
+        }
+    }
 }
 
 /// Dispatch a chat request to the appropriate provider and return a stream.
@@ -363,19 +418,12 @@ pub async fn dispatch_stream(
         req_builder = req_builder.header(name.as_str(), value.as_str());
     }
 
-    let response = req_builder
-        .send()
-        .await
-        .map_err(|e| LlmError::Other(format!("HTTP request failed: {}", e)))?;
+    let response = req_builder.send().await.map_err(llm_error_from_request)?;
 
     let status = response.status();
     if !status.is_success() {
         let status_text = response.text().await.unwrap_or_default();
-        return Err(LlmError::Other(format!(
-            "provider returned HTTP {}: {}",
-            status.as_u16(),
-            status_text
-        )));
+        return Err(llm_error_from_status(status, status_text));
     }
 
     let provider = resolved.provider.clone();

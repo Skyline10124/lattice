@@ -11,12 +11,78 @@ use std::pin::Pin;
 use thiserror::Error;
 
 /// Errors that can occur during LLM operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum LlmError {
     #[error("unknown model alias: '{0}'")]
     UnknownModel(String),
+
+    #[error("credential error: {message}")]
+    Credential { message: String },
+
+    #[error("configuration error: {message}")]
+    Config { message: String },
+
+    #[error("DNS error: {message}")]
+    Dns { message: String },
+
+    #[error("transport error: {message}")]
+    Transport { message: String, retryable: bool },
+
+    #[error("HTTP request timed out: {message}")]
+    Timeout { message: String },
+
+    #[error("provider rate limited with HTTP {status_code}: {message}")]
+    RateLimited { status_code: u16, message: String },
+
+    #[error("provider returned HTTP {status_code}: {message}")]
+    ProviderHttp { status_code: u16, message: String },
+
+    #[error("HTTP response read error: {message}")]
+    StreamRead { message: String },
+
+    #[error("protocol limit exceeded: {message}")]
+    ProtocolLimit { message: String },
+
     #[error("LLM error: {0}")]
     Other(String),
+}
+
+impl LlmError {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::UnknownModel(_) => "unknown_model",
+            Self::Credential { .. } => "credential",
+            Self::Config { .. } => "config",
+            Self::Dns { .. } => "dns",
+            Self::Transport { .. } => "transport",
+            Self::Timeout { .. } => "timeout",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::ProviderHttp { .. } => "provider_http",
+            Self::StreamRead { .. } => "stream_read",
+            Self::ProtocolLimit { .. } => "protocol_limit",
+            Self::Other(_) => "other",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Transport { retryable, .. } => *retryable,
+            Self::Timeout { .. } | Self::RateLimited { .. } => true,
+            Self::ProviderHttp { status_code, .. } => {
+                matches!(*status_code, 500 | 502 | 503 | 504)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn status_code(&self) -> Option<u16> {
+        match self {
+            Self::RateLimited { status_code, .. } | Self::ProviderHttp { status_code, .. } => {
+                Some(*status_code)
+            }
+            _ => None,
+        }
+    }
 }
 
 pub type LlmStream = Pin<Box<dyn Stream<Item = LlmEvent> + Send>>;

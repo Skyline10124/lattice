@@ -13,6 +13,7 @@ use std::sync::Mutex;
 enum FakeStreamingResponse {
     Events(Vec<LlmEvent>),
     Error(String),
+    LlmError(lattice_llm::LlmError),
 }
 
 /// Deterministic streaming LLM test double.
@@ -54,6 +55,11 @@ impl FakeStreamingLlmClientBuilder {
         self
     }
 
+    pub fn push_llm_error(mut self, error: lattice_llm::LlmError) -> Self {
+        self.queue.push_back(FakeStreamingResponse::LlmError(error));
+        self
+    }
+
     pub fn build(self) -> FakeStreamingLlmClient {
         FakeStreamingLlmClient {
             queue: Mutex::new(self.queue),
@@ -74,6 +80,7 @@ impl LlmClient for FakeStreamingLlmClient {
         match response {
             None => Err("no more fake responses".into()),
             Some(FakeStreamingResponse::Error(message)) => Err(message.into()),
+            Some(FakeStreamingResponse::LlmError(error)) => Err(Box::new(error)),
             Some(FakeStreamingResponse::Events(events)) => {
                 aggregate_events_to_chat_response(events, &request).map_err(Into::into)
             }
@@ -90,6 +97,7 @@ impl LlmClient for FakeStreamingLlmClient {
         match response {
             None => Err("no more fake responses".into()),
             Some(FakeStreamingResponse::Error(message)) => Err(message.into()),
+            Some(FakeStreamingResponse::LlmError(error)) => Err(Box::new(error)),
             Some(FakeStreamingResponse::Events(events)) => {
                 Ok(Box::pin(futures::stream::iter(events)))
             }

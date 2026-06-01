@@ -123,6 +123,7 @@ fn make_loaded_profile_with_tools(
             tools: lattice_profile::ToolsSection {
                 enabled: enabled_tools.to_vec(),
             },
+            llm: lattice_profile::LlmSection::default(),
             cep: lattice_profile::CepSection::default(),
         },
         system_prompt: system_prompt.to_string(),
@@ -729,6 +730,35 @@ fn turn_event_struct_variant_with_optional_none() {
         "Optional reason field should serialize as null when None, got {:?}",
         json["reason"]
     );
+}
+
+#[test]
+fn turn_event_llm_request_error_serializes_structured_fields() {
+    let event = TurnEvent::LlmRequestError {
+        provider: Some("deepseek".to_string()),
+        model: "deepseek-v4-pro".to_string(),
+        attempt: 1,
+        max_attempts: 4,
+        error_kind: "transport".to_string(),
+        retryable: true,
+        will_retry: true,
+        delay_ms: Some(500),
+        status_code: None,
+        message: "connection reset".to_string(),
+    };
+
+    let json = serde_json::to_value(&event).expect("LlmRequestError should serialize");
+    assert_eq!(json["type"], "llm_request_error");
+    assert_eq!(json["provider"], "deepseek");
+    assert_eq!(json["model"], "deepseek-v4-pro");
+    assert_eq!(json["attempt"], 1);
+    assert_eq!(json["max_attempts"], 4);
+    assert_eq!(json["error_kind"], "transport");
+    assert_eq!(json["retryable"], true);
+    assert_eq!(json["will_retry"], true);
+    assert_eq!(json["delay_ms"], 500);
+    assert!(json["status_code"].is_null());
+    assert_eq!(json["message"], "connection reset");
 }
 
 #[test]

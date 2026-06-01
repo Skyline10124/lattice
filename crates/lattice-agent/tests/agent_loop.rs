@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, CepErrorPayload, LlmClient,
-    ToolCallExecutor, ToolExecutionError,
+    LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::ToolDefinition;
 use lattice_session::{GraphMessage, HeadTranscript};
@@ -81,6 +81,7 @@ fn make_request(user_input: &str, tool_definitions: Vec<ToolDefinition>) -> Agen
         tool_definitions,
         cancel_flag: None,
         timeout: None,
+        llm_retry: LlmRetryConfig::default(),
     }
 }
 
@@ -103,6 +104,7 @@ fn make_request_with_transcript(
         tool_definitions,
         cancel_flag: None,
         timeout: None,
+        llm_retry: LlmRetryConfig::default(),
     }
 }
 

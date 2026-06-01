@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, AgentTurnRequest, AgentTurnStatus, LlmClient,
-    ToolCallExecutor, ToolExecutionError,
+    LlmRetryConfig, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::{LlmEvent, ToolCall, ToolDefinition};
 use lattice_session::HeadTranscript;
@@ -48,6 +48,7 @@ fn make_request(user_input: &str) -> AgentTurnRequest {
         tool_definitions: vec![read_file_tool_definition()],
         cancel_flag: None,
         timeout: None,
+        llm_retry: LlmRetryConfig::default(),
     }
 }
 
@@ -67,6 +68,7 @@ fn make_request_with_cancel(user_input: &str, flag: Arc<AtomicBool>) -> AgentTur
         tool_definitions: vec![read_file_tool_definition()],
         cancel_flag: Some(flag),
         timeout: None,
+        llm_retry: LlmRetryConfig::default(),
     }
 }
 

@@ -59,6 +59,7 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
                 system_path: None,
             },
             tools: lattice_profile::ToolsSection { enabled: vec![] },
+            llm: lattice_profile::LlmSection::default(),
             cep: lattice_profile::CepSection::default(),
         },
         system_prompt: String::new(),
@@ -262,6 +263,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 tools: lattice_profile::ToolsSection {
                     enabled: vec!["workspace.read_file".to_string()],
                 },
+                llm: lattice_profile::LlmSection::default(),
                 cep: lattice_profile::CepSection::default(),
             },
             system_prompt: String::new(),
@@ -329,6 +331,18 @@ fn render_json_event_roundtrips_every_variant() {
         TurnEvent::ModelStarted {
             provider: Some("anthropic".into()),
             model: "claude".into(),
+        },
+        TurnEvent::LlmRequestError {
+            provider: Some("anthropic".into()),
+            model: "claude".into(),
+            attempt: 1,
+            max_attempts: 4,
+            error_kind: "transport".into(),
+            retryable: true,
+            will_retry: true,
+            delay_ms: Some(500),
+            status_code: None,
+            message: "connection reset".into(),
         },
         TurnEvent::ReasoningDelta {
             content: "thinking".into(),
@@ -1085,7 +1099,7 @@ fn seq_stream_ends_without_terminal_is_protocol_violation() {
 
 #[test]
 fn seq_jsonl_round_trips_every_variant() {
-    // Build a Vec<TurnEvent> covering all 12 variants with representative field values
+    // Build a Vec<TurnEvent> covering every variant with representative field values.
     let events: Vec<TurnEvent> = vec![
         TurnEvent::TurnStarted {
             session_id: "s1".into(),
@@ -1095,6 +1109,18 @@ fn seq_jsonl_round_trips_every_variant() {
         TurnEvent::ModelStarted {
             provider: Some("anthropic".into()),
             model: "claude-3".into(),
+        },
+        TurnEvent::LlmRequestError {
+            provider: Some("anthropic".into()),
+            model: "claude-3".into(),
+            attempt: 1,
+            max_attempts: 4,
+            error_kind: "transport".into(),
+            retryable: true,
+            will_retry: true,
+            delay_ms: Some(500),
+            status_code: None,
+            message: "connection reset".into(),
         },
         TurnEvent::ReasoningDelta {
             content: "thinking deeply".into(),
@@ -1137,14 +1163,14 @@ fn seq_jsonl_round_trips_every_variant() {
             reason: "parent mismatch".into(),
         },
     ];
-    assert_eq!(events.len(), 12, "must cover all 12 TurnEvent variants");
+    assert_eq!(events.len(), 13, "must cover all 13 TurnEvent variants");
 
     let (out, _state) = fake_jsonl_loop(events.clone());
 
     // Split stdout buffer by \n; exclude trailing empty element after final newline
     let out_str = s(&out);
     let lines: Vec<&str> = out_str.split('\n').filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 12, "JSONL must produce exactly 12 lines");
+    assert_eq!(lines.len(), 13, "JSONL must produce exactly 13 lines");
 
     // Each line round-trips through serde_json::from_str back to the original event
     for (i, line) in lines.iter().enumerate() {

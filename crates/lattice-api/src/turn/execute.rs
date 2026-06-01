@@ -129,6 +129,29 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
         AgentTurnEvent::ModelStarted { provider, model } => {
             TurnEvent::ModelStarted { provider, model }
         }
+        AgentTurnEvent::LlmRequestError {
+            provider,
+            model,
+            attempt,
+            max_attempts,
+            error_kind,
+            retryable,
+            will_retry,
+            delay_ms,
+            status_code,
+            message,
+        } => TurnEvent::LlmRequestError {
+            provider,
+            model,
+            attempt,
+            max_attempts,
+            error_kind,
+            retryable,
+            will_retry,
+            delay_ms,
+            status_code,
+            message,
+        },
         AgentTurnEvent::ReasoningDelta { content } => TurnEvent::ReasoningDelta { content },
         AgentTurnEvent::TokenDelta { content } => TurnEvent::TokenDelta { content },
         AgentTurnEvent::ToolCallStarted { id, name } => TurnEvent::ToolCallStarted { id, name },

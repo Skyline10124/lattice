@@ -153,6 +153,19 @@ pub enum TurnEvent {
         provider: Option<String>,
         model: String,
     },
+    /// A model request failed before a stream opened.
+    LlmRequestError {
+        provider: Option<String>,
+        model: String,
+        attempt: u32,
+        max_attempts: u32,
+        error_kind: String,
+        retryable: bool,
+        will_retry: bool,
+        delay_ms: Option<u64>,
+        status_code: Option<u16>,
+        message: String,
+    },
     /// A chunk of reasoning/thinking text from the LLM.
     ReasoningDelta { content: String },
     /// A chunk of visible assistant text from the LLM.

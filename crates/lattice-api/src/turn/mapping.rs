@@ -1,4 +1,4 @@
-use lattice_agent::{AgentTurnRequest, AgentTurnStatus};
+use lattice_agent::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
 use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
 use lattice_session::HeadTranscript;
 
@@ -57,7 +57,23 @@ pub(crate) fn build_agent_request(
         tool_definitions,
         cancel_flag: request.cancel_flag.clone(),
         timeout: None,
+        llm_retry: llm_retry_config_from_request(request),
     }
+}
+
+fn llm_retry_config_from_request(request: &RunTurnRequest) -> LlmRetryConfig {
+    request
+        .loaded_profile
+        .as_ref()
+        .map(|loaded| {
+            let retry = &loaded.profile.llm.retry;
+            LlmRetryConfig {
+                max_retries: retry.max_retries,
+                initial_delay_ms: retry.initial_delay_ms,
+                max_delay_ms: retry.max_delay_ms,
+            }
+        })
+        .unwrap_or_default()
 }
 
 /// Map agent turn status to API turn status.

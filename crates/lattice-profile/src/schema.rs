@@ -15,6 +15,8 @@ pub struct AgentProfile {
     #[serde(default)]
     pub tools: ToolsSection,
     #[serde(default)]
+    pub llm: LlmSection,
+    #[serde(default)]
     pub cep: CepSection,
 }
 
@@ -222,6 +224,48 @@ pub struct ToolsSection {
     pub enabled: Vec<String>,
 }
 
+/// LLM provider execution settings.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LlmSection {
+    #[serde(default)]
+    pub retry: LlmRetrySection,
+}
+
+/// `[llm.retry]` — retry policy for opening provider streams.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LlmRetrySection {
+    #[serde(default = "default_llm_retry_max_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_llm_retry_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    #[serde(default = "default_llm_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+impl Default for LlmRetrySection {
+    fn default() -> Self {
+        Self {
+            max_retries: default_llm_retry_max_retries(),
+            initial_delay_ms: default_llm_retry_initial_delay_ms(),
+            max_delay_ms: default_llm_retry_max_delay_ms(),
+        }
+    }
+}
+
+fn default_llm_retry_max_retries() -> u32 {
+    3
+}
+
+fn default_llm_retry_initial_delay_ms() -> u64 {
+    500
+}
+
+fn default_llm_retry_max_delay_ms() -> u64 {
+    3_000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +313,11 @@ system_path = "prompt.md"
 
 [tools]
 enabled = ["workspace.grep", "workspace.read_file", "command.run"]
+
+[llm.retry]
+max_retries = 2
+initial_delay_ms = 250
+max_delay_ms = 1000
 "#;
         let profile = parse(toml).unwrap();
         assert_eq!(
@@ -281,6 +330,9 @@ enabled = ["workspace.grep", "workspace.read_file", "command.run"]
             tools.enabled,
             vec!["workspace.grep", "workspace.read_file", "command.run"]
         );
+        assert_eq!(profile.llm.retry.max_retries, 2);
+        assert_eq!(profile.llm.retry.initial_delay_ms, 250);
+        assert_eq!(profile.llm.retry.max_delay_ms, 1000);
     }
 
     // ── Top-level section rejection ───────────────────────────────────
@@ -893,6 +945,32 @@ system = "hi"
         assert!(profile.tools.enabled.is_empty());
     }
 
+    #[test]
+    fn llm_retry_defaults_when_section_absent() {
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert_eq!(profile.llm.retry.max_retries, 3);
+        assert_eq!(profile.llm.retry.initial_delay_ms, 500);
+        assert_eq!(profile.llm.retry.max_delay_ms, 3_000);
+    }
+
+    #[test]
+    fn llm_retry_parses_explicit_values() {
+        let toml = format!(
+            r#"{prefix}
+
+[llm.retry]
+max_retries = 0
+initial_delay_ms = 1
+max_delay_ms = 2
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert_eq!(profile.llm.retry.max_retries, 0);
+        assert_eq!(profile.llm.retry.initial_delay_ms, 1);
+        assert_eq!(profile.llm.retry.max_delay_ms, 2);
+    }
+
     /// Guard: no legacy symbols in production source.
     #[test]
     fn source_free_of_forbidden_symbols() {
@@ -905,7 +983,6 @@ system = "hi"
             "tags",
             "behavior_type",
             "confidence_threshold",
-            "max_retries",
             "enforce_sandbox",
             "code_agent",
             "code-agent",

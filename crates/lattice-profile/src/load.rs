@@ -59,6 +59,7 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
 
     // Validate prompt mutual exclusivity.
     let system_prompt = resolve_system_prompt(&path, &profile)?;
+    validate_llm_retry(&path, &profile)?;
 
     let package_dir = path
         .parent()
@@ -71,6 +72,51 @@ pub fn load_agent_profile(path: impl AsRef<Path>) -> Result<LoadedAgentProfile, 
         profile,
         system_prompt,
     })
+}
+
+fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
+    let retry = &profile.llm.retry;
+    if retry.max_retries > 10 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "max_retries".into(),
+            value: retry.max_retries.to_string().into_boxed_str(),
+            reason: "too many LLM retry attempts".into(),
+            expected: "max_retries must be <= 10".into(),
+        });
+    }
+    if retry.initial_delay_ms > 60_000 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "initial_delay_ms".into(),
+            value: retry.initial_delay_ms.to_string().into_boxed_str(),
+            reason: "initial delay is too large".into(),
+            expected: "initial_delay_ms must be <= 60000".into(),
+        });
+    }
+    if retry.max_delay_ms > 60_000 {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "max_delay_ms".into(),
+            value: retry.max_delay_ms.to_string().into_boxed_str(),
+            reason: "max delay is too large".into(),
+            expected: "max_delay_ms must be <= 60000".into(),
+        });
+    }
+    if retry.initial_delay_ms > retry.max_delay_ms {
+        return Err(ProfileError::InvalidField {
+            path: path.to_path_buf(),
+            section: "llm.retry".into(),
+            field: "initial_delay_ms".into(),
+            value: retry.initial_delay_ms.to_string().into_boxed_str(),
+            reason: "initial delay exceeds max delay".into(),
+            expected: "initial_delay_ms must be <= max_delay_ms".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Check raw TOML content for forbidden top-level sections.
@@ -503,6 +549,69 @@ x = 1
             assert!(
                 err.to_string().contains(section),
                 "expected '{section}' in error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn llm_retry_max_retries_zero_is_valid() {
+        let (_dir, path) = temp_profile(
+            r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm.retry]
+max_retries = 0
+initial_delay_ms = 1
+max_delay_ms = 1
+"#,
+        );
+        let loaded = load_agent_profile(&path).unwrap();
+        assert_eq!(loaded.profile.llm.retry.max_retries, 0);
+    }
+
+    #[test]
+    fn reject_invalid_llm_retry_bounds() {
+        let cases = [
+            (
+                "max_retries = 11\ninitial_delay_ms = 1\nmax_delay_ms = 1",
+                "max_retries",
+            ),
+            (
+                "max_retries = 1\ninitial_delay_ms = 60001\nmax_delay_ms = 60001",
+                "initial_delay_ms",
+            ),
+            (
+                "max_retries = 1\ninitial_delay_ms = 10\nmax_delay_ms = 5",
+                "initial_delay_ms",
+            ),
+        ];
+        for (retry, field) in cases {
+            let (_dir, path) = temp_profile(&format!(
+                r#"
+schema_version = 1
+
+[agent]
+name = "test"
+model = "sonnet"
+
+[prompt]
+system = "hi"
+
+[llm.retry]
+{retry}
+"#
+            ));
+            let err = load_agent_profile(&path).unwrap_err();
+            assert!(
+                err.to_string().contains(field),
+                "expected {field} in error, got: {err}"
             );
         }
     }

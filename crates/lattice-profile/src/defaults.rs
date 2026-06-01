@@ -17,6 +17,7 @@ pub fn default_agent_template(name: &str, model: &str) -> String {
 #   [agent]  — identity (name, model, optional description)
 #   [prompt] — system prompt (inline `system` or file `system_path`, not both)
 #   [tools]  — explicitly enabled tool names
+#   [llm.retry] — provider stream-open retry policy
 
 schema_version = 1
 
@@ -29,6 +30,11 @@ system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
 enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
+
+[llm.retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 3000
 "#
     )
 }
@@ -58,6 +64,11 @@ system = "You are a code reader and reviewer. Read and analyze code carefully. D
 
 [tools]
 enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
+
+[llm.retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 3000
 "#
     )
 }
@@ -87,6 +98,11 @@ system = "You are a code editor. Read, edit, and refactor code within the projec
 
 [tools]
 enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write"]
+
+[llm.retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 3000
 "#
     )
 }
@@ -114,6 +130,11 @@ system = "You are a full-stack developer. Read, write, edit, and refactor code. 
 
 [tools]
 enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write", "command.run", "web.fetch"]
+
+[llm.retry]
+max_retries = 3
+initial_delay_ms = 500
+max_delay_ms = 3000
 "#
     )
 }
@@ -192,7 +213,13 @@ mod tests {
     #[test]
     fn template_has_only_allowed_top_level_sections() {
         let toml_str = default_agent_template("t", "sonnet");
-        let allowed = ["schema_version", "[agent]", "[prompt]", "[tools]"];
+        let allowed = [
+            "schema_version",
+            "[agent]",
+            "[prompt]",
+            "[tools]",
+            "[llm.retry]",
+        ];
         for section in &allowed {
             assert!(
                 toml_str.contains(section),
@@ -232,7 +259,6 @@ mod tests {
             "tags",
             "behavior_type",
             "confidence_threshold",
-            "max_retries",
             "enforce_sandbox",
             "code_agent",
             "bundles =",
@@ -413,7 +439,6 @@ mod tests {
                 "tags",
                 "behavior_type",
                 "confidence_threshold",
-                "max_retries",
                 "enforce_sandbox",
                 "code_agent",
                 "bundles =",

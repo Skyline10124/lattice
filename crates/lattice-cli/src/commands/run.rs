@@ -197,6 +197,33 @@ fn render_human_event<WOut: Write, WErr: Write>(
                 }
             }
         }
+        TurnEvent::LlmRequestError {
+            attempt,
+            max_attempts,
+            error_kind,
+            will_retry,
+            delay_ms,
+            message,
+            ..
+        } => {
+            if verbose {
+                flush_before_status(out, err, state)?;
+                if *will_retry {
+                    let delay = delay_ms.unwrap_or(0);
+                    writeln!(
+                        err,
+                        "{} llm retry {attempt}/{max_attempts} after {delay}ms ({error_kind}): {message}",
+                        "·".dimmed()
+                    )?;
+                } else {
+                    writeln!(
+                        err,
+                        "{} llm failed {attempt}/{max_attempts} ({error_kind}): {message}",
+                        "✗".red()
+                    )?;
+                }
+            }
+        }
         TurnEvent::ReasoningDelta { content } => {
             if verbose {
                 flush_before_status(out, err, state)?;

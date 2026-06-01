@@ -7,6 +7,43 @@ use lattice_session::{GraphMessage, HeadTranscript, TurnUsage};
 
 use super::traits::CepErrorPayload;
 
+/// Retry policy for opening provider LLM streams.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlmRetryConfig {
+    /// Number of retries after the initial attempt.
+    pub max_retries: u32,
+    /// Initial backoff delay in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Maximum backoff delay in milliseconds.
+    pub max_delay_ms: u64,
+}
+
+impl Default for LlmRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            initial_delay_ms: 500,
+            max_delay_ms: 3_000,
+        }
+    }
+}
+
+impl LlmRetryConfig {
+    pub fn max_attempts(self) -> u32 {
+        self.max_retries.saturating_add(1)
+    }
+
+    pub fn delay_for_retry(self, retry_index: u32) -> u64 {
+        if self.max_retries == 0 {
+            return 0;
+        }
+        let multiplier = 3_u64.saturating_pow(retry_index.saturating_sub(1));
+        self.initial_delay_ms
+            .saturating_mul(multiplier)
+            .min(self.max_delay_ms)
+    }
+}
+
 /// Input for a single agent turn.
 #[derive(Debug, Clone)]
 pub struct AgentTurnRequest {
@@ -35,6 +72,8 @@ pub struct AgentTurnRequest {
     /// and events. Live-sink backpressure uses non-blocking `try_send`
     /// and is not covered by this deadline.
     pub timeout: Option<Duration>,
+    /// Retry policy for transient failures before a provider stream opens.
+    pub llm_retry: LlmRetryConfig,
 }
 
 /// Terminal status of an agent turn.
@@ -104,6 +143,19 @@ pub enum AgentTurnEvent {
     ModelStarted {
         provider: Option<String>,
         model: String,
+    },
+    /// A model request failed before a stream opened.
+    LlmRequestError {
+        provider: Option<String>,
+        model: String,
+        attempt: u32,
+        max_attempts: u32,
+        error_kind: String,
+        retryable: bool,
+        will_retry: bool,
+        delay_ms: Option<u64>,
+        status_code: Option<u16>,
+        message: String,
     },
     /// A chunk of reasoning/thinking text from the LLM.
     ReasoningDelta { content: String },
