@@ -192,7 +192,7 @@ cli_bypass_hits=$(
   printf '%s\n' "$cli_bypass_hits" | filter_allowlist
 )
 
-print_group "lattice-cli production legacy run-path bypass" "$cli_bypass_hits"
+print_group "lattice-cli production legacy executor bypass" "$cli_bypass_hits"
 
 # ── Final result ─────────────────────────────────────────────────────────────
 

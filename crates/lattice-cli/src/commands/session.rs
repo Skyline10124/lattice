@@ -1,6 +1,7 @@
 //! Singular `session` command over the session graph store.
 //!
-//! Supports exactly: status, list, log, checkout, branch, diff, reset.
+//! Supports session-first turn execution plus status, list, log, checkout,
+//! branch, diff, and reset.
 //! Does not import or call old session manager surfaces.
 
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use lattice_api::SessionApi;
+use lattice_api::{CreateSessionRequest, OpenSessionRequest, SessionApi};
 use lattice_session::GraphHead;
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -34,6 +35,29 @@ fn session_api() -> SessionApi {
 
 #[derive(Subcommand)]
 pub enum SessionAction {
+    /// Create a new session with an initial active agent.
+    New {
+        /// Agent profile name to use as the initial active agent.
+        #[arg(long)]
+        agent: String,
+        /// Optional session label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Change the active agent for the checked-out branch.
+    Agent {
+        /// Session id (required).
+        session_id: String,
+        /// Agent profile name.
+        agent: String,
+    },
+    /// Send a prompt to the active agent in an existing session.
+    Send {
+        /// Session id (required).
+        session_id: String,
+        /// Prompt text.
+        prompt: String,
+    },
     /// Show session store status or a specific session's status.
     Status {
         /// Optional session id to inspect.
@@ -82,9 +106,30 @@ pub enum SessionAction {
 }
 
 /// Run the `session` command.
-pub fn run(action: SessionAction, json: bool) -> Result<()> {
+pub async fn run(
+    action: SessionAction,
+    json: bool,
+    verbose: bool,
+) -> Result<std::process::ExitCode> {
     let api = session_api();
-    run_with_api(&api, action, json)
+    match action {
+        SessionAction::New { agent, label } => {
+            cmd_new_api(&api, &agent, label.as_deref(), json)?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        SessionAction::Agent { session_id, agent } => {
+            cmd_agent_api(&api, &session_id, &agent, json)?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+        SessionAction::Send { session_id, prompt } => {
+            let exit = cmd_send_api(&api, &session_id, prompt, json, verbose).await;
+            Ok(exit)
+        }
+        other => {
+            run_with_api(&api, other, json)?;
+            Ok(std::process::ExitCode::SUCCESS)
+        }
+    }
 }
 
 /// Run the `session` command with an explicit [`SessionApi`] instance.
@@ -93,6 +138,15 @@ pub fn run(action: SessionAction, json: bool) -> Result<()> {
 /// and delegates here. Tests pass a temp-backed `SessionApi` directly.
 pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) -> Result<()> {
     match action {
+        SessionAction::New { agent, label } => cmd_new_api(api, &agent, label.as_deref(), json)?,
+        SessionAction::Agent { session_id, agent } => {
+            cmd_agent_api(api, &session_id, &agent, json)?
+        }
+        SessionAction::Send { .. } => {
+            return Err(anyhow::anyhow!(
+                "session send requires the async production runner"
+            ));
+        }
         SessionAction::Status { session_id } => cmd_status_api(api, session_id.as_deref(), json)?,
         SessionAction::List => cmd_list_api(api, json)?,
         SessionAction::Log { session_id } => cmd_log_api(api, &session_id, json)?,
@@ -116,6 +170,92 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
     Ok(())
 }
 
+fn load_agent_checked(agent: &str) -> Result<lattice_profile::LoadedAgentProfile> {
+    let project_root = std::env::current_dir()?;
+    let loaded = crate::commands::run::load_named_profile(agent, &project_root)?;
+    if loaded.profile.agent.name != agent {
+        return Err(anyhow::anyhow!(
+            "agent profile '{}' declares agent.name='{}'; these must match",
+            agent,
+            loaded.profile.agent.name
+        ));
+    }
+    Ok(loaded)
+}
+
+fn cmd_new_api(api: &SessionApi, agent: &str, label: Option<&str>, json: bool) -> Result<()> {
+    let _loaded = load_agent_checked(agent)?;
+    let session = api.create_session(CreateSessionRequest {
+        label: label.map(str::to_string),
+        active_agent: agent.to_string(),
+    })?;
+    if json {
+        let value = serde_json::json!({
+            "session_id": session.session_id,
+            "label": session.label,
+            "active_agent": session.active_agent_name,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!(
+            "{} Created session {} with agent {}.",
+            "\u{2713}".green(),
+            display_id(&session.session_id).cyan(),
+            session.active_agent_name.bold()
+        );
+    }
+    Ok(())
+}
+
+fn cmd_agent_api(api: &SessionApi, session_id: &str, agent: &str, json: bool) -> Result<()> {
+    let _loaded = load_agent_checked(agent)?;
+    let session = api.set_active_agent(session_id, agent)?;
+    if json {
+        let value = serde_json::json!({
+            "session_id": session.session_id,
+            "active_agent": session.active_agent_name,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!(
+            "{} Active agent for session {} is now {}.",
+            "\u{2713}".green(),
+            display_id(&session.session_id).cyan(),
+            session.active_agent_name.bold()
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_send_api(
+    api: &SessionApi,
+    session_id: &str,
+    prompt: String,
+    json: bool,
+    verbose: bool,
+) -> std::process::ExitCode {
+    let session = match api.open_session(OpenSessionRequest {
+        id: session_id.to_string(),
+    }) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("{}: {}", "error".red(), error);
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    let loaded = match load_agent_checked(&session.active_agent_name) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("{}: {}", "error".red(), error);
+            return std::process::ExitCode::from(2);
+        }
+    };
+
+    crate::commands::run::run_session_prompt(prompt, session_id.to_string(), loaded, verbose, json)
+        .await
+}
+
 fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Result<()> {
     match session_id {
         Some(id) => {
@@ -125,6 +265,7 @@ fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Res
                     "session_id": status.session_id,
                     "head": status.head,
                     "current_commit_id": status.current_commit_id,
+                    "active_agent": status.active_agent_name,
                     "branches": status.branches,
                     "commit_count": status.commit_count,
                 });
@@ -146,6 +287,7 @@ fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Res
                 if let Some(cid) = &status.current_commit_id {
                     println!("  Commit:   {}", display_id(cid));
                 }
+                println!("  Agent:    {}", status.active_agent_name);
                 println!("  Branches: {}", status.branches.len());
                 println!("  Commits:  {}", status.commit_count);
             }
@@ -166,11 +308,12 @@ fn cmd_status_api(api: &SessionApi, session_id: Option<&str>, json: bool) -> Res
                     let label = s.label.as_deref().unwrap_or("(untitled)");
                     let branch = s.current_branch.as_deref().unwrap_or("main");
                     println!(
-                        "  {} {} msgs  {} [{}]",
+                        "  {} {} msgs  {} [{}] agent={}",
                         display_id(&s.session_id).cyan(),
                         s.commit_count,
                         label.dimmed(),
-                        branch
+                        branch,
+                        s.active_agent_name
                     );
                 }
             }
@@ -194,11 +337,12 @@ fn cmd_list_api(api: &SessionApi, json: bool) -> Result<()> {
             let branch = s.current_branch.as_deref().unwrap_or("main");
             let head = s.head_commit_id.as_deref().unwrap_or("");
             println!(
-                "  {}  {} msgs  {} [{}] head={}",
+                "  {}  {} msgs  {} [{}] agent={} head={}",
                 display_id(&s.session_id).cyan(),
                 s.commit_count,
                 label.dimmed(),
                 branch,
+                s.active_agent_name,
                 display_id(head)
             );
         }
@@ -223,6 +367,7 @@ fn cmd_log_api(api: &SessionApi, session_id: &str, json: bool) -> Result<()> {
             println!("{}", format!("turn {}", i).bold());
             println!("  {} {}", "commit:".green(), display_id(&entry.commit_id));
             println!("  {} {}", "status:".green(), entry.status.as_str());
+            println!("  {} {}", "agent:".green(), entry.agent_name);
             println!("  {} {}", "model:".green(), entry.model);
             println!("  {} {}", "provider:".green(), entry.provider);
             println!("  {} {}", "messages:".green(), entry.message_count);
@@ -287,6 +432,7 @@ fn cmd_branch_api(
                     "name": branch_ref.name,
                     "kind": branch_ref.kind,
                     "commit_id": branch_ref.commit_id,
+                    "active_agent": branch_ref.active_agent_name,
                     "updated_at": branch_ref.updated_at,
                 });
                 println!("{}", serde_json::to_string_pretty(&value)?);
@@ -323,10 +469,11 @@ fn cmd_branch_api(
                         .map(display_id)
                         .unwrap_or_default();
                     println!(
-                        "{} {}  {}",
+                        "{} {}  {}  agent={}",
                         current.green(),
                         branch.name.bold(),
-                        commit_label.cyan()
+                        commit_label.cyan(),
+                        branch.active_agent_name
                     );
                 }
             }
@@ -737,7 +884,7 @@ mod d25_scoped_session {
         label: Option<&str>,
     ) -> Vec<String> {
         store
-            .create_session(session_id, label, None, Some("sonnet"), Some("anthropic"))
+            .create_session(session_id, label, "coder")
             .expect("create_session");
 
         let mut commit_ids: Vec<String> = Vec::new();
@@ -769,7 +916,9 @@ mod d25_scoped_session {
                 session_id: session_id.to_string(),
                 parent_ids,
                 messages,
-                profile_snapshot_id: Some("test-profile".to_string()),
+                agent_name: "coder".to_string(),
+                profile_snapshot_hash: "test-profile".to_string(),
+                profile_snapshot_json: "{}".to_string(),
                 model: "sonnet".to_string(),
                 provider: "anthropic".to_string(),
                 status: TurnCommitStatus::Completed,

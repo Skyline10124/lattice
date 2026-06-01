@@ -2,7 +2,7 @@
 
 ![LATTICE banner](logo-banner.svg)
 
-LATTICE is a Rust LLM runtime for running one session-centered agent with simple model routing, direct profile loading, commit-backed session history, and a CLI surface that does not hide extra architecture. Tool execution runs over **CEP** (Controlled Execution Protocol) — a typed JSON-RPC method protocol with capability envelopes, policy gating, path guards, and an audit trail.
+LATTICE is a Rust LLM runtime for session-centered agent work: sessions own the active agent profile, profile changes are explicit session operations, and every turn lands as a commit-backed session history entry. Tool execution runs over **CEP** (Controlled Execution Protocol) — a typed JSON-RPC method protocol with capability envelopes, policy gating, path guards, and an audit trail.
 
 ## Workspace
 
@@ -19,8 +19,8 @@ lattice/
 │   ├── lattice-profile/     # Agent profile schema ([cep] policy sections), discovery, defaults
 │   ├── lattice-tooling/     # ToolExecutor trait, limits, enabled-tools resolution
 │   ├── lattice-agent/       # Multi-turn agent loop (AgentLoop), state machine
-│   ├── lattice-api/         # Public facade (run/stream/session); composes the per-turn CEP runtime
-│   └── lattice-cli/         # CLI (run, models, resolve, session, doctor)
+│   ├── lattice-api/         # Public facade (turn execution/session); composes the per-turn CEP runtime
+│   └── lattice-cli/         # CLI (session, models, resolve, doctor, cep, audit)
 ├── README.md
 ├── FINDINGS.md
 └── FIX.md
@@ -49,7 +49,9 @@ cargo fmt --all --check
 ## CLI
 
 ```sh
-cargo run -p lattice-cli -- run "1+1=?" -m sonnet
+cargo run -p lattice-cli -- session new --agent default
+cargo run -p lattice-cli -- session send <session_id> "1+1=?"
+cargo run -p lattice-cli -- session agent <session_id> reviewer
 cargo run -p lattice-cli -- resolve sonnet
 cargo run -p lattice-cli -- models --auth
 cargo run -p lattice-cli -- session status

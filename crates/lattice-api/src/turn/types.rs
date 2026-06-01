@@ -19,9 +19,7 @@ use lattice_profile::LoadedAgentProfile;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RunTurnRequest {
     pub input: String,
-    pub session_id: Option<String>,
-    pub profile: Option<String>,
-    pub model: Option<String>,
+    pub session_id: String,
     #[serde(skip)]
     pub loaded_profile: Option<LoadedAgentProfile>,
     /// Cooperative cancellation flag forwarded to the agent loop.
@@ -42,8 +40,6 @@ impl PartialEq for RunTurnRequest {
     fn eq(&self, other: &Self) -> bool {
         self.input == other.input
             && self.session_id == other.session_id
-            && self.profile == other.profile
-            && self.model == other.model
             && self.loaded_profile == other.loaded_profile
     }
 }

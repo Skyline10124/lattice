@@ -19,7 +19,7 @@ fn cli_cutover_help_contains_supported_commands() {
     let output = lattice().arg("--help").output().unwrap();
     assert!(output.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
+    for name in &["models", "resolve", "session", "doctor", "audit", "cep"] {
         assert!(
             stdout.contains(name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -46,7 +46,7 @@ fn cli_cutover_help_omits_removed_commands() {
         }
     }
 
-    for name in &["run", "models", "resolve", "session", "doctor", "audit"] {
+    for name in &["models", "resolve", "session", "doctor", "audit", "cep"] {
         assert!(
             command_names.iter().any(|candidate| candidate == name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -55,8 +55,8 @@ fn cli_cutover_help_omits_removed_commands() {
 
     assert_eq!(
         command_names.len(),
-        8,
-        "help should list only the final supported command surface (7 + clap 'help'), got:\n{stdout}"
+        7,
+        "help should list only the final supported command surface (6 + clap 'help'), got:\n{stdout}"
     );
     assert!(
         command_names.contains(&"help".to_string()),
@@ -75,10 +75,10 @@ fn cli_cutover_bare_lattice_prints_help_and_exits_zero() {
         output.status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Bare invocation should print help (which contains at least 'run').
+    // Bare invocation should print help (which contains at least 'session').
     assert!(
-        stdout.contains("run"),
-        "bare output should include help with 'run', got:\n{stdout}"
+        stdout.contains("session"),
+        "bare output should include help with 'session', got:\n{stdout}"
     );
 }
 
@@ -309,12 +309,10 @@ fn focused_tests_import_no_removed_crate_names() {
     );
 }
 
-// ─── Run missing prompt failure (T-10-05) ────────────────────────────────────
+// ─── Removed run command boundary ────────────────────────────────────────────
 
 #[test]
-fn cli_cutover_run_without_prompt_or_file_fails() {
-    // 'lattice run' with no prompt argument should fail.
-    // The Run command requires a prompt positional arg.
+fn cli_cutover_run_command_is_removed() {
     let output = lattice().arg("run").output().unwrap();
-    assert!(!output.status.success(), "run without prompt should fail");
+    assert!(!output.status.success(), "run command should be removed");
 }

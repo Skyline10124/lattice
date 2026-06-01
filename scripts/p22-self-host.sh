@@ -24,6 +24,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_SELF_HOST_MODEL:-compat:deepseek-v4-pro}"
+AGENT_NAME="p22-self-host"
 CLONE_URL="${P22_SELF_HOST_CLONE_URL:-https://github.com/Skyline10124/lattice.git}"
 CLONE_REF="${P22_SELF_HOST_BRANCH:-main}"
 BASE="${ROOT}/build/tmp/p22-self-host"
@@ -134,12 +135,12 @@ secret_leak_scan() {
 seed_profile() {
   local ws="$1"
   local system_prompt="$2"
-  mkdir -p "${ws}/.lattice/agents/default"
-  cat >"${ws}/.lattice/agents/default/agent.toml" <<EOF
+  mkdir -p "${ws}/.lattice/agents/${AGENT_NAME}"
+  cat >"${ws}/.lattice/agents/${AGENT_NAME}/agent.toml" <<EOF
 schema_version = 1
 
 [agent]
-name = "p22-self-host"
+name = "${AGENT_NAME}"
 model = "${MODEL}"
 
 [prompt]
@@ -165,16 +166,35 @@ run_lattice_inner() {
   TASK_WS="${ws}"
   TASK_JSONL="${ws}/events.jsonl"
   TASK_STDERR="${ws}/run.stderr"
-  TASK_CMD="cd ${ws} && HOME=${ws} XDG_CONFIG_HOME=${ws}/.config ${LATTICE[*]} --json run $(printf '%q' "${prompt}") -m ${MODEL}"
+  TASK_CMD="cd ${ws} && HOME=${ws} XDG_CONFIG_HOME=${ws}/.config ${LATTICE[*]} --json session new --agent ${AGENT_NAME} && ${LATTICE[*]} --json session send <session_id> $(printf '%q' "${prompt}")"
+  local session_json="${ws}/session.json"
+  local session_id=""
   set +e
   (
     cd "${ws}"
     export CARGO_TARGET_DIR="${ws}/target"
     export RUST_BACKTRACE=0
     HOME="${ws}" XDG_CONFIG_HOME="${ws}/.config" \
-      "${LATTICE[@]}" --json run "${prompt}" -m "${MODEL}" >"${TASK_JSONL}" 2>"${TASK_STDERR}"
+      "${LATTICE[@]}" --json session new --agent "${AGENT_NAME}" >"${session_json}" 2>"${TASK_STDERR}"
   )
   TASK_EXIT=$?
+  if [[ ${TASK_EXIT} -eq 0 ]]; then
+    session_id="$(jq -r '.session_id // empty' "${session_json}" 2>>"${TASK_STDERR}")"
+    if [[ -z "${session_id}" ]]; then
+      echo "FAIL: session new did not return a session_id" >>"${TASK_STDERR}"
+      TASK_EXIT=2
+    fi
+  fi
+  if [[ ${TASK_EXIT} -eq 0 ]]; then
+    (
+      cd "${ws}"
+      export CARGO_TARGET_DIR="${ws}/target"
+      export RUST_BACKTRACE=0
+      HOME="${ws}" XDG_CONFIG_HOME="${ws}/.config" \
+        "${LATTICE[@]}" --json session send "${session_id}" "${prompt}" >"${TASK_JSONL}" 2>>"${TASK_STDERR}"
+    )
+    TASK_EXIT=$?
+  fi
   set -e
   verify_outer_unchanged || TASK_FAIL=1
 }

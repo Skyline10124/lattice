@@ -56,7 +56,7 @@ impl<'a> std::ops::Deref for ConnHandle<'a> {
 impl SqliteSessionGraphStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
-        let db_path = dir.join("session_v11.db");
+        let db_path = dir.join("session_v12.db");
         Self {
             dir,
             db_path,

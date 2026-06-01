@@ -23,15 +23,7 @@ fn temp_dir(name: &str) -> PathBuf {
 /// Returns (store, last_commit_id).
 fn build_long_session(dir: PathBuf, n: usize) -> (SqliteSessionGraphStore, String) {
     let store = SqliteSessionGraphStore::new(dir);
-    store
-        .create_session(
-            "long",
-            None,
-            None,
-            Some("test-model"),
-            Some("test-provider"),
-        )
-        .expect("create");
+    store.create_session("long", None, "coder").expect("create");
 
     let mut parent_ids: Vec<String> = vec![];
     let mut last_commit_id = String::new();
@@ -46,7 +38,9 @@ fn build_long_session(dir: PathBuf, n: usize) -> (SqliteSessionGraphStore, Strin
             session_id: "long".to_string(),
             parent_ids: parent_ids.clone(),
             messages,
-            profile_snapshot_id: None,
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "test-model".to_string(),
             provider: "test-provider".to_string(),
             status: TurnCommitStatus::Completed,

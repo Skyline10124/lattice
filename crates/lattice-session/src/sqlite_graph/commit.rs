@@ -71,7 +71,7 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT commit_id, parents_json, status, model, provider, commit_message, created_at, message_ids_json, usage_json, terminal_reason
+                "SELECT commit_id, parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json, usage_json, terminal_reason
                  FROM graph_commits WHERE session_id=?1 ORDER BY created_at ASC",
             )
             .map_err(|source| SessionError::Database {
@@ -84,6 +84,8 @@ impl SqliteSessionGraphStore {
             commit_id: String,
             parent_ids: Vec<String>,
             status: TurnCommitStatus,
+            agent_name: String,
+            profile_snapshot_hash: String,
             model: String,
             provider: String,
             commit_message: String,
@@ -98,13 +100,15 @@ impl SqliteSessionGraphStore {
                 let commit_id: String = row.get(0)?;
                 let parents_json: String = row.get(1)?;
                 let status_str: String = row.get(2)?;
-                let model: String = row.get(3)?;
-                let provider: String = row.get(4)?;
-                let commit_message: String = row.get(5)?;
-                let created_at: String = row.get(6)?;
-                let message_ids_json: String = row.get(7)?;
-                let usage_json: Option<String> = row.get(8)?;
-                let terminal_reason: Option<String> = row.get(9)?;
+                let agent_name: String = row.get(3)?;
+                let profile_snapshot_hash: String = row.get(4)?;
+                let model: String = row.get(5)?;
+                let provider: String = row.get(6)?;
+                let commit_message: String = row.get(7)?;
+                let created_at: String = row.get(8)?;
+                let message_ids_json: String = row.get(9)?;
+                let usage_json: Option<String> = row.get(10)?;
+                let terminal_reason: Option<String> = row.get(11)?;
 
                 let parent_ids: Vec<String> =
                     serde_json::from_str(&parents_json).map_err(|err| {
@@ -141,6 +145,8 @@ impl SqliteSessionGraphStore {
                     commit_id,
                     parent_ids,
                     status,
+                    agent_name,
+                    profile_snapshot_hash,
                     model,
                     provider,
                     commit_message,
@@ -216,6 +222,8 @@ impl SqliteSessionGraphStore {
                     commit_id: r.commit_id,
                     parent_ids: r.parent_ids,
                     status: r.status,
+                    agent_name: r.agent_name,
+                    profile_snapshot_hash: r.profile_snapshot_hash,
                     model: r.model,
                     provider: r.provider,
                     commit_message: r.commit_message,
@@ -341,7 +349,8 @@ impl SqliteSessionGraphStore {
             &input.session_id,
             &input.parent_ids,
             &message_ids,
-            input.profile_snapshot_id.as_deref(),
+            &input.agent_name,
+            &input.profile_snapshot_hash,
             &input.model,
             &input.provider,
             &input.status,
@@ -361,14 +370,16 @@ impl SqliteSessionGraphStore {
             .map(|u| serde_json::to_string(u).unwrap_or_else(|_| "{}".to_string()));
 
         conn.execute(
-            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, profile_snapshot_id, model, provider, status, commit_message, usage_json, terminal_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, agent_name, profile_snapshot_hash, profile_snapshot_json, model, provider, status, commit_message, usage_json, terminal_reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 commit_id,
                 input.session_id,
                 parents_json,
                 message_ids_json,
-                input.profile_snapshot_id,
+                input.agent_name,
+                input.profile_snapshot_hash,
+                input.profile_snapshot_json,
                 input.model,
                 input.provider,
                 input.status.as_str(),
@@ -422,7 +433,9 @@ impl SqliteSessionGraphStore {
             session_id: input.session_id.clone(),
             parent_ids: input.parent_ids.clone(),
             message_ids,
-            profile_snapshot_id: input.profile_snapshot_id.clone(),
+            agent_name: input.agent_name.clone(),
+            profile_snapshot_hash: input.profile_snapshot_hash.clone(),
+            profile_snapshot_json: input.profile_snapshot_json.clone(),
             model: input.model.clone(),
             provider: input.provider.clone(),
             status: input.status.clone(),

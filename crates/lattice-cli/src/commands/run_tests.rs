@@ -38,41 +38,31 @@ async fn stream_timeout_fires_after_duration() {
 }
 
 #[test]
-fn run_profile_source_none_is_default() {
-    assert!(matches!(
-        profile_source_from_profile_arg(None),
-        ProfileSource::Default
-    ));
-}
-
-#[test]
-fn run_profile_source_name() {
-    match profile_source_from_profile_arg(Some("reader")) {
-        ProfileSource::Name(name) => assert_eq!(name, "reader"),
-        other => panic!("expected Name, got {other:?}"),
-    }
-}
-
-#[test]
-fn run_profile_source_path() {
-    assert!(matches!(
-        profile_source_from_profile_arg(Some("./agent.toml")),
-        ProfileSource::Path(_)
-    ));
-}
-
-#[test]
-fn run_missing_default_message_references_profile_path() {
-    let dir = Path::new("/tmp/.lattice/agents/default");
-    let msg = missing_default_message(dir);
-    assert!(msg.contains("agent.toml"));
-    assert!(msg.contains("/tmp/.lattice/agents/default"));
-}
-
-#[test]
 fn run_validate_agents_dir_rejects_parent_components() {
     let err = validate_agents_dir(Path::new(".lattice/../agents")).unwrap_err();
     assert!(err.contains("path traversal"));
+}
+
+fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
+    lattice_profile::LoadedAgentProfile {
+        path: std::path::PathBuf::from("/tmp/test/agent.toml"),
+        package_dir: std::path::PathBuf::from("/tmp/test"),
+        profile: lattice_profile::AgentProfile {
+            schema_version: 1,
+            agent: lattice_profile::AgentSection {
+                name: "test".to_string(),
+                model: model.to_string(),
+                description: None,
+            },
+            prompt: lattice_profile::PromptSection {
+                system: None,
+                system_path: None,
+            },
+            tools: lattice_profile::ToolsSection { enabled: vec![] },
+            cep: lattice_profile::CepSection::default(),
+        },
+        system_prompt: String::new(),
+    }
 }
 
 #[cfg(unix)]
@@ -147,17 +137,21 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
 }
 
 #[tokio::test]
-async fn run_integration_creates_session_and_returns_commit() {
+async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
     let session_api = lattice_api::SessionApi::sqlite(temp.path());
+    let created = session_api
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "test".to_string(),
+        })
+        .expect("create session");
     let llm = std::sync::Arc::new(StubLlmClient);
 
     let request = lattice_api::RunTurnRequest {
         input: "hello".to_string(),
-        session_id: None,
-        profile: None,
-        model: Some("stub-model".to_string()),
-        loaded_profile: None,
+        session_id: created.session_id,
+        loaded_profile: Some(loaded_profile("stub-model")),
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
@@ -187,10 +181,8 @@ async fn run_integration_missing_session_returns_not_found() {
 
     let request = lattice_api::RunTurnRequest {
         input: "hello".to_string(),
-        session_id: Some("nonexistent-session-id".to_string()),
-        profile: None,
-        model: Some("stub-model".to_string()),
-        loaded_profile: None,
+        session_id: "nonexistent-session-id".to_string(),
+        loaded_profile: Some(loaded_profile("stub-model")),
         cancel_flag: None,
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
@@ -222,6 +214,12 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
     std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
 
     let session_api = lattice_api::SessionApi::sqlite(ws.join("sessions"));
+    let created = session_api
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "test".to_string(),
+        })
+        .expect("create session");
     let llm: std::sync::Arc<dyn lattice_agent::LlmClient> = std::sync::Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
             .push_events(vec![
@@ -246,9 +244,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
 
     let request = lattice_api::RunTurnRequest {
         input: "read file".to_string(),
-        session_id: None,
-        profile: None,
-        model: Some("stub-model".to_string()),
+        session_id: created.session_id,
         loaded_profile: Some(lattice_profile::LoadedAgentProfile {
             path: profile_dir.join("agent.toml"),
             package_dir: profile_dir.clone(),

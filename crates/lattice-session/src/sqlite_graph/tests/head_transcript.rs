@@ -31,7 +31,9 @@ fn commit_input_with_usage(
         session_id: session_id.to_string(),
         parent_ids,
         messages: messages.clone(),
-        profile_snapshot_id: Some("test-profile".to_string()),
+        agent_name: "coder".to_string(),
+        profile_snapshot_hash: "test-profile".to_string(),
+        profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
         status,
@@ -47,7 +49,7 @@ fn head_transcript_empty_session_has_no_parent_and_no_messages() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     let transcript = store.head_transcript("sess-1").expect("head_transcript");
@@ -69,7 +71,7 @@ fn head_transcript_reads_current_branch_history_in_commit_order() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // First commit: user + assistant.
@@ -148,7 +150,7 @@ fn head_transcript_respects_checkout_or_branch_head() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // First commit on main.
@@ -211,7 +213,7 @@ fn commit_turn_persists_usage_and_terminal_reason() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // Completed turn with usage.
@@ -317,7 +319,7 @@ fn head_transcript_uses_detached_head_commit_id() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // Commit first turn on main.
@@ -378,7 +380,7 @@ fn user_contents(messages: &[GraphMessage]) -> Vec<&str> {
 /// Build A → B on main, C on side branch, M merge(parents: [B, C]).
 fn setup_merge_graph(store: &SqliteSessionGraphStore) -> (String, String, String, String) {
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     let commit_a = store
@@ -434,7 +436,7 @@ fn head_transcript_linear_history_unchanged_by_topological_traversal() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     let commit1 = store

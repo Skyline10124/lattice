@@ -123,14 +123,13 @@ allowed_diagnostic_commands = [["echo"], ["grep"]]
 fn make_release_e2e_request(
     ws: &ReleaseE2eWorkspace,
     input: &str,
+    session_id: &str,
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
     RunTurnRequest {
         input: input.to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
+        session_id: session_id.to_string(),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
         test_llm: Some(llm),
@@ -261,10 +260,22 @@ async fn release_e2e_criterion_8() {
     // ── Execute the single turn ──────────────────────────────────────────
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "default".to_string(),
+        })
+        .expect("create session")
+        .session_id;
 
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_release_e2e_request(&ws, "Run release criterion-8 sequence", fake_llm),
+        make_release_e2e_request(
+            &ws,
+            "Run release criterion-8 sequence",
+            &session_id,
+            fake_llm,
+        ),
     )
     .await
     .expect("run_turn must succeed");
@@ -420,7 +431,18 @@ async fn release_e2e_criterion_8() {
         "first patch must precede second patch in audit; order: {methods:?}"
     );
 
-    // ── 6. Tool results: first patch ok=false, second ok=true ─────────────
+    // ── 6. Tool results: declare ok=true, first patch ok=false, second ok=true ─────────
+    let declare_result = result
+        .tool_results
+        .iter()
+        .find(|t| t.name == "envelope.declare")
+        .expect("must have envelope.declare tool result");
+    assert!(
+        declare_result.ok,
+        "envelope.declare must succeed before mutation; error: {:?}",
+        declare_result.error_summary
+    );
+
     let patch_results: Vec<_> = result
         .tool_results
         .iter()

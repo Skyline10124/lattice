@@ -735,7 +735,8 @@ mod write_file_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
+                    .with_session_state(),
                 cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
                     root,
                 )),
@@ -796,7 +797,8 @@ mod write_file_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
+                    .with_session_state(),
                 cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
                     root,
                 )),

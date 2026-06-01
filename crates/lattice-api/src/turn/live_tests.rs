@@ -19,6 +19,8 @@ use crate::session::SessionApi;
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+const TEST_SESSION_ID: &str = "test-session";
+
 /// No-op tool executor that rejects all calls (tests don't invoke tools
 /// unless explicitly configured).
 struct NoOpToolExecutor;
@@ -36,7 +38,9 @@ impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
 }
 
 fn make_session(dir: &std::path::Path) -> SessionApi {
-    SessionApi::sqlite(dir)
+    let api = SessionApi::sqlite(dir);
+    let _ = api.store().create_session(TEST_SESSION_ID, None, "test");
+    api
 }
 
 fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<AgentLoop> {
@@ -49,10 +53,8 @@ fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<AgentLoop> {
 fn make_request(input: &str) -> RunTurnRequest {
     RunTurnRequest {
         input: input.to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
-        loaded_profile: None,
+        session_id: TEST_SESSION_ID.to_string(),
+        loaded_profile: Some(make_loaded_profile("sonnet", "System from profile.")),
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
@@ -63,14 +65,34 @@ fn make_request(input: &str) -> RunTurnRequest {
 fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
     RunTurnRequest {
         input: input.to_string(),
-        session_id: Some(session_id.to_string()),
-        profile: None,
-        model: None,
-        loaded_profile: None,
+        session_id: session_id.to_string(),
+        loaded_profile: Some(make_loaded_profile("sonnet", "System from profile.")),
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+    }
+}
+
+fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::LoadedAgentProfile {
+    lattice_profile::LoadedAgentProfile {
+        path: std::path::PathBuf::from("/tmp/test/agent.toml"),
+        package_dir: std::env::current_dir().unwrap_or_else(|_| "/tmp".into()),
+        profile: lattice_profile::AgentProfile {
+            schema_version: 1,
+            agent: lattice_profile::AgentSection {
+                name: "test".to_string(),
+                model: model.to_string(),
+                description: None,
+            },
+            prompt: lattice_profile::PromptSection {
+                system: Some(system_prompt.to_string()),
+                system_path: None,
+            },
+            tools: lattice_profile::ToolsSection { enabled: vec![] },
+            cep: lattice_profile::CepSection::default(),
+        },
+        system_prompt: system_prompt.to_string(),
     }
 }
 
@@ -610,8 +632,7 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
     // Create a session manually so we can manipulate it
     let create_req = crate::session::CreateSessionRequest {
         label: None,
-        profile: None,
-        model: None,
+        active_agent: "test".to_string(),
     };
     let created = session.create_session(create_req).expect("create session");
     let session_id = created.session_id.clone();
@@ -685,7 +706,9 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
             tool_call_id: None,
             name: None,
         }],
-        profile_snapshot_id: None,
+        agent_name: "coder".to_string(),
+        profile_snapshot_hash: "test-profile".to_string(),
+        profile_snapshot_json: "{}".to_string(),
         model: "sonnet".to_string(),
         provider: "anthropic".to_string(),
         status: lattice_session::TurnCommitStatus::Completed,

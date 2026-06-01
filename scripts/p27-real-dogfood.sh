@@ -25,6 +25,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P27_MODEL:-sonnet}"
+AGENT_NAME="p27-dogfood"
 BASE="${ROOT}/build/tmp/p27-dogfood"
 REPORT="${P27_DOGFOOD_REPORT:-${BASE}/report.md}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -63,13 +64,13 @@ echo ""
 # ── Workspace setup ───────────────────────────────────────────────────────────
 mkdir -p "${RUN_DIR}"
 WS="${RUN_DIR}/workspace"
-mkdir -p "${WS}/.lattice/agents/default"
+mkdir -p "${WS}/.lattice/agents/${AGENT_NAME}"
 
-cat >"${WS}/.lattice/agents/default/agent.toml" <<EOF
+cat >"${WS}/.lattice/agents/${AGENT_NAME}/agent.toml" <<EOF
 schema_version = 1
 
 [agent]
-name = "p27-dogfood"
+name = "${AGENT_NAME}"
 model = "${MODEL}"
 
 [tools]
@@ -118,6 +119,41 @@ log "- workspace: ${WS}"
 log "- binary: ${LATTICE}"
 log ""
 
+run_dogfood_turn() {
+  local jsonl="$1"
+  local stderr="$2"
+  local prompt="$3"
+  local session_json="${jsonl%.jsonl}.session.json"
+  local session_id=""
+  local status=0
+
+  (
+    cd "${WS}"
+    HOME="${WS}" XDG_CONFIG_HOME="${WS}/.config" \
+      "${LATTICE}" --json session new --agent "${AGENT_NAME}" >"${session_json}" 2>"${stderr}"
+  )
+  status=$?
+
+  if [[ ${status} -eq 0 ]]; then
+    session_id="$(jq -r '.session_id // empty' "${session_json}" 2>>"${stderr}")"
+    if [[ -z "${session_id}" ]]; then
+      echo "FAIL: session new did not return a session_id" >>"${stderr}"
+      status=2
+    fi
+  fi
+
+  if [[ ${status} -eq 0 ]]; then
+    (
+      cd "${WS}"
+      HOME="${WS}" XDG_CONFIG_HOME="${WS}/.config" \
+        "${LATTICE}" --json session send "${session_id}" "${prompt}" >"${jsonl}" 2>>"${stderr}"
+    )
+    status=$?
+  fi
+
+  return "${status}"
+}
+
 # ── Scenario 1: CEP declare + read + patch ────────────────────────────────────
 log "## Scenario 1: declare + workspace.patch (CEP mutation path)"
 log ""
@@ -129,13 +165,10 @@ JSONL1="${RUN_DIR}/s1.jsonl"
 STDERR1="${RUN_DIR}/s1.stderr"
 
 set +e
-(
-  cd "${WS}"
-  "${LATTICE}" --json run \
-    'Use CEP tools. envelope.declare with intent "p27 patch counter", WritePath ["src/counter.rs"], verify command "cargo check --manifest-path Cargo.toml", expected_exit_code 0, on_failure retain_diff. Then workspace.patch to add a /// doc comment above the count function. Final message: P27_SCENARIO_1_DONE' \
-    -m "${MODEL}" \
-    >"${JSONL1}" 2>"${STDERR1}"
-)
+run_dogfood_turn \
+  "${JSONL1}" \
+  "${STDERR1}" \
+  'Use CEP tools. envelope.declare with intent "p27 patch counter", WritePath ["src/counter.rs"], verify command "cargo check --manifest-path Cargo.toml", expected_exit_code 0, on_failure retain_diff. Then workspace.patch to add a /// doc comment above the count function. Final message: P27_SCENARIO_1_DONE'
 S1_EXIT=$?
 set -e
 
@@ -155,13 +188,10 @@ JSONL2="${RUN_DIR}/s2.jsonl"
 STDERR2="${RUN_DIR}/s2.stderr"
 
 set +e
-(
-  cd "${WS}"
-  "${LATTICE}" --json run \
-    'Use CEP tools. envelope.declare with intent "p27 run echo", RunCommand ["echo p27-ok"], verify command "echo p27-ok", expected_exit_code 0, on_failure retain_diff. Then command.run "echo p27-ok". Final message: P27_SCENARIO_2_DONE' \
-    -m "${MODEL}" \
-    >"${JSONL2}" 2>"${STDERR2}"
-)
+run_dogfood_turn \
+  "${JSONL2}" \
+  "${STDERR2}" \
+  'Use CEP tools. envelope.declare with intent "p27 run echo", RunCommand ["echo p27-ok"], verify command "echo p27-ok", expected_exit_code 0, on_failure retain_diff. Then command.run "echo p27-ok". Final message: P27_SCENARIO_2_DONE'
 S2_EXIT=$?
 set -e
 

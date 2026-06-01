@@ -125,13 +125,26 @@ enabled = {enabled:?}
     }
 }
 
-fn make_request(ws: &Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurnRequest {
+fn create_default_session(sessions_path: &std::path::Path) -> String {
+    SessionApi::sqlite(sessions_path)
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "default".to_string(),
+        })
+        .expect("create session")
+        .session_id
+}
+
+fn make_request(
+    ws: &Workspace,
+    input: &str,
+    session_id: &str,
+    llm: Arc<dyn LlmClient>,
+) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
     RunTurnRequest {
         input: input.to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
+        session_id: session_id.to_string(),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
         test_llm: Some(llm),
@@ -166,7 +179,13 @@ async fn assert_run_equals_collector(
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_request = make_request(ws, input, llm_with_events(llm_events.clone()));
+    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_request = make_request(
+        ws,
+        input,
+        &stream_session_id,
+        llm_with_events(llm_events.clone()),
+    );
 
     let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
@@ -180,7 +199,8 @@ async fn assert_run_equals_collector(
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_request = make_request(ws, input, llm_with_events(llm_events));
+    let run_session_id = create_default_session(&run_sessions_path);
+    let run_request = make_request(ws, input, &run_session_id, llm_with_events(llm_events));
     let run_result = run_turn(run_session, run_request)
         .await
         .expect("run_turn must succeed");
@@ -252,7 +272,13 @@ async fn consistency_error_after_partial_token() {
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_request = make_request(&ws, "hello", llm_with_events(streaming_events.clone()));
+    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_request = make_request(
+        &ws,
+        "hello",
+        &stream_session_id,
+        llm_with_events(streaming_events.clone()),
+    );
 
     let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
@@ -265,7 +291,13 @@ async fn consistency_error_after_partial_token() {
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_request = make_request(&ws, "hello", llm_with_events(streaming_events));
+    let run_session_id = create_default_session(&run_sessions_path);
+    let run_request = make_request(
+        &ws,
+        "hello",
+        &run_session_id,
+        llm_with_events(streaming_events),
+    );
     let run_result = run_turn(run_session, run_request).await.unwrap();
 
     assert_run_results_equivalent(&collected, &run_result);
@@ -329,7 +361,13 @@ async fn consistency_tool_call_path() {
     let stream_sessions_path = stream_dir.path().join("sessions");
     let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
     let stream_session = SessionApi::sqlite(&stream_sessions_path);
-    let stream_request = make_request(&ws, "Read src/lib.rs", llm_with_rounds(all_events.clone()));
+    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_request = make_request(
+        &ws,
+        "Read src/lib.rs",
+        &stream_session_id,
+        llm_with_rounds(all_events.clone()),
+    );
 
     let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
         .await
@@ -342,7 +380,13 @@ async fn consistency_tool_call_path() {
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
     let run_session = SessionApi::sqlite(&run_sessions_path);
-    let run_request = make_request(&ws, "Read src/lib.rs", llm_with_rounds(all_events));
+    let run_session_id = create_default_session(&run_sessions_path);
+    let run_request = make_request(
+        &ws,
+        "Read src/lib.rs",
+        &run_session_id,
+        llm_with_rounds(all_events),
+    );
     let run_result = run_turn(run_session, run_request).await.unwrap();
 
     assert_run_results_equivalent(&collected, &run_result);
@@ -375,7 +419,8 @@ async fn stream_turn_emits_activity_before_commit() {
     let sessions_path = session_dir.path().join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
     let llm = llm_with_events(streaming_events);
-    let request = make_request(&ws, "hi", llm);
+    let session_id = create_default_session(&sessions_path);
+    let request = make_request(&ws, "hi", &session_id, llm);
 
     let events: Vec<TurnEvent> = stream_turn(session_api, request)
         .await

@@ -1,4 +1,4 @@
-//! `lattice run` command built on `lattice_api::stream_turn`.
+//! Session turn execution renderer built on `lattice_api::stream_turn`.
 //!
 //! Consumes a live `TurnEventStream` and renders events incrementally:
 //! `TokenDelta` content goes to stdout, all status/lifecycle/error lines
@@ -16,12 +16,12 @@
 //!
 //! - 0: Turn committed successfully (`RunTurnStatus::Completed`)
 //! - 1:  Provider/API/tool failure, commit failure, terminal without commit, or protocol violation
-//! - 2: Input/configuration error (missing profile, missing credentials, missing session)
+//! - 2: Input/configuration error (missing agent profile, missing credentials, missing session)
 
 use anyhow::Result;
 use colored::Colorize;
-use lattice_profile::{ProfileError, ProfileSource};
-use std::io::{IsTerminal, Write};
+use lattice_profile::ProfileSource;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use std::time::Duration;
@@ -406,16 +406,15 @@ fn render_verbose_epilogue<WErr: Write>(
     Ok(())
 }
 
-/// Execute the `run` command.
-pub async fn run(
+/// Execute one prompt in an existing session with a resolved active agent.
+pub async fn run_session_prompt(
     prompt: String,
-    model: Option<String>,
-    profile: Option<&str>,
-    session_id: Option<String>,
+    session_id: String,
+    loaded_profile: lattice_profile::LoadedAgentProfile,
     verbose: bool,
     json: bool,
 ) -> std::process::ExitCode {
-    match run_inner(prompt, model, profile, session_id, verbose, json).await {
+    match run_inner(prompt, session_id, loaded_profile, verbose, json).await {
         Ok(exit_code) => exit_code,
         Err(error) => {
             eprintln!("{}: {}", "error".red(), error);
@@ -426,22 +425,11 @@ pub async fn run(
 
 async fn run_inner(
     prompt: String,
-    model: Option<String>,
-    profile: Option<&str>,
-    session_id: Option<String>,
+    session_id: String,
+    loaded_profile: lattice_profile::LoadedAgentProfile,
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let project_root = std::env::current_dir()?;
-    let source = profile_source_from_profile_arg(profile);
-
-    let loaded_profile = match load_profile(&source, &project_root) {
-        Ok(lp) => lp,
-        Err(error) => {
-            return handle_profile_error(error, &source, &project_root);
-        }
-    };
-
     if verbose {
         eprintln!(
             "{}",
@@ -456,8 +444,6 @@ async fn run_inner(
     let request = RunTurnRequest {
         input: prompt,
         session_id,
-        profile: profile.map(str::to_string),
-        model,
         loaded_profile: Some(loaded_profile),
         cancel_flag: None,
         test_llm: None,
@@ -536,25 +522,8 @@ async fn run_inner(
     Ok(exit_code_from_state(&state))
 }
 
-fn profile_source_from_profile_arg(profile: Option<&str>) -> ProfileSource {
-    let Some(value) = profile.map(str::trim).filter(|v| !v.is_empty()) else {
-        return ProfileSource::Default;
-    };
-    let has_path_separator = value.contains('/') || (cfg!(windows) && value.contains('\\'));
-    let is_path = Path::new(value).is_absolute()
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || has_path_separator
-        || value.ends_with(".toml");
-    if is_path {
-        ProfileSource::Path(PathBuf::from(value))
-    } else {
-        ProfileSource::Name(value.to_string())
-    }
-}
-
-fn load_profile(
-    source: &ProfileSource,
+pub(crate) fn load_named_profile(
+    agent_name: &str,
     project_root: &Path,
 ) -> std::result::Result<lattice_profile::LoadedAgentProfile, anyhow::Error> {
     let global_agents_dir = safe_agents_dir(None).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -562,68 +531,11 @@ fn load_profile(
         project_root: project_root.to_path_buf(),
         global_agents_dir,
     };
-    lattice_profile::resolve_agent_profile(source.clone(), &paths).map_err(Into::into)
+    lattice_profile::resolve_agent_profile(ProfileSource::Name(agent_name.to_string()), &paths)
+        .map_err(Into::into)
 }
 
-fn handle_profile_error(
-    error: anyhow::Error,
-    _source: &ProfileSource,
-    project_root: &PathBuf,
-) -> Result<std::process::ExitCode> {
-    let Some(profile_error) = error.downcast_ref::<ProfileError>() else {
-        return Err(error);
-    };
-
-    match profile_error {
-        ProfileError::MissingDefault { dir, template } => {
-            if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
-                eprintln!("{}: {}", "error".red(), missing_default_message(dir));
-                return Ok(std::process::ExitCode::from(2));
-            }
-            eprint!(
-                "No default agent profile exists. Create .lattice/agents/default/agent.toml now? [y/N] "
-            );
-            std::io::stderr().flush()?;
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer)?;
-            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                eprintln!("{}: {}", "error".red(), missing_default_message(dir));
-                return Ok(std::process::ExitCode::from(2));
-            }
-            let path = create_default_profile(dir, template)?;
-            eprintln!(
-                "Created {}. Edit it if needed, then re-run the command.",
-                path.strip_prefix(project_root).unwrap_or(&path).display()
-            );
-            Err(anyhow::anyhow!(
-                "profile created at {}; please re-run the command",
-                path.display()
-            ))
-        }
-        _ => Err(error),
-    }
-}
-
-fn missing_default_message(default_agent_dir: &Path) -> String {
-    let profile_path = default_agent_dir.join("agent.toml");
-    format!(
-        "No default agent profile found at {}. Create one before running non-interactively.",
-        profile_path.display()
-    )
-}
-
-fn create_default_profile(dir: &Path, template: &str) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join("agent.toml");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut file = options.open(&path)?;
-    use std::io::Write as _;
-    file.write_all(template.as_bytes())?;
-    Ok(path)
-}
-
-fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
+pub(crate) fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
     let path = if let Some(p) = override_path {
         PathBuf::from(p)
     } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
@@ -638,7 +550,7 @@ fn safe_agents_dir(override_path: Option<&str>) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn validate_agents_dir(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_agents_dir(path: &Path) -> Result<(), String> {
     let canonical = canonicalize_agents_dir_prefix(path)?;
 
     let dangerous_prefixes = [
@@ -675,7 +587,7 @@ fn validate_agents_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn canonicalize_agents_dir_prefix(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonicalize_agents_dir_prefix(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty() {
         return Ok(PathBuf::new());
     }

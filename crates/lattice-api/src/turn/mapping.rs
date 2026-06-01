@@ -9,11 +9,7 @@ pub(crate) fn resolve_model_and_prompt(
     request: &RunTurnRequest,
 ) -> (String, Option<String>, String) {
     let (model, system_prompt) = if let Some(ref lp) = request.loaded_profile {
-        // Model override: request.model takes precedence over profile default
-        let model = request
-            .model
-            .clone()
-            .unwrap_or_else(|| lp.profile.agent.model.clone());
+        let model = lp.profile.agent.model.clone();
         let system_prompt = if lp.system_prompt.is_empty() {
             None
         } else {
@@ -21,13 +17,7 @@ pub(crate) fn resolve_model_and_prompt(
         };
         (model, system_prompt)
     } else {
-        (
-            request
-                .model
-                .clone()
-                .unwrap_or_else(|| "sonnet".to_string()),
-            None,
-        )
+        ("sonnet".to_string(), None)
     };
 
     let provider = ModelRouter::new()

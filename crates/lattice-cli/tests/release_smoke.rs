@@ -3,7 +3,7 @@
 //! Every smoke command sets temporary HOME, XDG_CONFIG_HOME, and project cwd
 //! to prevent reading real user ~/.lattice state or leaking credentials.
 //!
-//! Coverage: run, models --auth, resolve sonnet, session status,
+//! Coverage: session-first execution, models --auth, resolve sonnet, session status,
 //! session log, and doctor.
 //!
 //! Threat model: T-11-20 (information disclosure), T-11-21 (tampering).
@@ -42,13 +42,7 @@ fn seed_session(temp_home: &Path, session_id: &str) {
 
     let store = lattice_session::SqliteSessionGraphStore::new(&session_dir);
     store
-        .create_session(
-            session_id,
-            Some("Smoke test session"),
-            None,
-            Some("sonnet"),
-            Some("anthropic"),
-        )
+        .create_session(session_id, Some("Smoke test session"), "default")
         .expect("create session");
 
     let messages = vec![
@@ -73,7 +67,9 @@ fn seed_session(temp_home: &Path, session_id: &str) {
         session_id: session_id.to_string(),
         parent_ids: vec![],
         messages,
-        profile_snapshot_id: None,
+        agent_name: "default".to_string(),
+        profile_snapshot_hash: "test-profile".to_string(),
+        profile_snapshot_json: "{}".to_string(),
         model: "sonnet".to_string(),
         provider: "anthropic".to_string(),
         status: lattice_session::TurnCommitStatus::Completed,
@@ -321,61 +317,58 @@ fn smoke_doctor_json_does_not_leak_secrets() {
     );
 }
 
-// ─── run ─────────────────────────────────────────────────────────────────────
+// ─── session send ────────────────────────────────────────────────────────────
 
 #[test]
-fn smoke_run_missing_credentials_fails_with_env_var_name() {
-    let home = temp_home("run-missing-creds");
+fn smoke_session_send_missing_credentials_fails_without_secrets() {
+    let home = temp_home("send-missing-creds");
+    let session_id = "smoke-send-missing-creds";
     seed_default_profile(&home);
+    seed_session(&home, session_id);
 
     let output = lattice(&home)
-        .args(["run", "hello world", "-m", "sonnet"])
+        .args(["session", "send", session_id, "hello world"])
         .env_remove("ANTHROPIC_API_KEY")
         .output()
-        .expect("lattice run should execute");
+        .expect("lattice session send should execute");
 
-    // Run should fail because no credentials are available
     assert!(
         !output.status.success(),
-        "run without credentials should fail"
+        "session send without credentials should fail"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // The error should be about missing credentials, not a cryptic failure.
-    // It should not contain any fake secret values.
     assert!(
         !stderr.contains("sk-"),
-        "run error must not contain secret values, got:\n{stderr}"
+        "session send error must not contain secret values, got:\n{stderr}"
     );
 }
 
 #[test]
-fn smoke_run_no_profile_fails_with_clear_message() {
-    let home = temp_home("run-no-profile");
-    // No .lattice/agents/default/agent.toml seeded
-    // HOME is set to temp, LATTICE_AGENTS_DIR is empty, so no global profile either
+fn smoke_session_send_no_profile_fails_with_clear_message() {
+    let home = temp_home("send-no-profile");
+    let session_id = "smoke-send-no-profile";
+    seed_session(&home, session_id);
 
     let output = lattice(&home)
-        .args(["run", "hello", "-m", "sonnet"])
-        .env("ANTHROPIC_API_KEY", "sk-smoke-run-noprofile")
+        .args(["session", "send", session_id, "hello"])
+        .env("ANTHROPIC_API_KEY", "sk-smoke-send-noprofile")
         .output()
-        .expect("lattice run should execute");
+        .expect("lattice session send should execute");
 
-    // Should fail because no profile exists
-    assert!(!output.status.success(), "run without profile should fail");
+    assert!(
+        !output.status.success(),
+        "session send without profile should fail"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Error should mention the profile path or agent.toml
     assert!(
-        stderr.contains("agent.toml")
-            || stderr.contains("profile")
-            || stderr.contains("No default"),
-        "run error should mention missing profile, got:\n{stderr}"
+        stderr.contains("agent.toml") || stderr.contains("profile") || stderr.contains("not found"),
+        "session send error should mention missing profile, got:\n{stderr}"
     );
-    // Must not leak the fake secret
     assert!(
-        !stderr.contains("sk-smoke-run-noprofile"),
-        "run error must not leak secret value"
+        !stderr.contains("sk-smoke-send-noprofile"),
+        "session send error must not leak secret value"
     );
 }
 

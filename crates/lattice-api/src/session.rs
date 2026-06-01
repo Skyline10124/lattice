@@ -32,8 +32,7 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct CreateSessionRequest {
     pub label: Option<String>,
-    pub profile: Option<String>,
-    pub model: Option<String>,
+    pub active_agent: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -64,13 +63,7 @@ impl SessionApi {
     pub fn create_session(&self, request: CreateSessionRequest) -> Result<GraphSession> {
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
-            .create_session(
-                &session_id,
-                request.label.as_deref(),
-                request.profile.as_deref(),
-                request.model.as_deref(),
-                None,
-            )
+            .create_session(&session_id, request.label.as_deref(), &request.active_agent)
             .map_err(map_session_error)
     }
 
@@ -104,6 +97,12 @@ impl SessionApi {
     pub fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> Result<GraphRef> {
         self.store
             .branch(session_id, name, from)
+            .map_err(map_session_error)
+    }
+
+    pub fn set_active_agent(&self, session_id: &str, agent_name: &str) -> Result<GraphSession> {
+        self.store
+            .set_active_agent(session_id, agent_name)
             .map_err(map_session_error)
     }
 
@@ -192,7 +191,7 @@ mod session_graph {
         label: Option<&str>,
     ) -> Vec<String> {
         api.store()
-            .create_session(session_id, label, None, Some("sonnet"), Some("anthropic"))
+            .create_session(session_id, label, "coder")
             .expect("create");
 
         let mut commit_ids: Vec<String> = Vec::new();
@@ -210,7 +209,9 @@ mod session_graph {
                 session_id: session_id.to_string(),
                 parent_ids,
                 messages: messages.clone(),
-                profile_snapshot_id: Some("test-profile".to_string()),
+                agent_name: "coder".to_string(),
+                profile_snapshot_hash: "test-profile".to_string(),
+                profile_snapshot_json: "{}".to_string(),
                 model: "sonnet".to_string(),
                 provider: "anthropic".to_string(),
                 status: TurnCommitStatus::Completed,
@@ -231,14 +232,13 @@ mod session_graph {
         let created = api
             .create_session(CreateSessionRequest {
                 label: Some("my session".into()),
-                profile: Some("default".into()),
-                model: Some("sonnet".into()),
+                active_agent: "coder".into(),
             })
             .expect("create_session");
 
         assert!(!created.session_id.is_empty());
         assert_eq!(created.label, Some("my session".to_string()));
-        assert_eq!(created.model, Some("sonnet".to_string()));
+        assert_eq!(created.active_agent_name, "coder");
 
         // Reopen by ID.
         let opened = api
@@ -354,7 +354,9 @@ mod session_graph {
             session_id: "sess-diff".to_string(),
             parent_ids: vec![base_id.clone()],
             messages: feature_messages,
-            profile_snapshot_id: Some("test-profile".to_string()),
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
@@ -395,8 +397,7 @@ mod session_graph {
         fn _assert_api_surface(api: &SessionApi) {
             let _ = api.create_session(CreateSessionRequest {
                 label: None,
-                profile: None,
-                model: None,
+                active_agent: "coder".into(),
             });
             let _ = api.open_session(OpenSessionRequest { id: String::new() });
             let _ = api.status("");
@@ -404,6 +405,7 @@ mod session_graph {
             let _ = api.log("");
             let _ = api.checkout("", "");
             let _ = api.branch("", "", None);
+            let _ = api.set_active_agent("", "");
             let _ = api.diff("", "", "");
             let _ = api.reset("", "");
         }

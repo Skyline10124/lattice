@@ -12,6 +12,8 @@ use super::execute::{run_turn, stream_turn};
 use super::types::{RunTurnRequest, RunTurnStage, RunTurnStatus, TurnEvent, TurnUsageSummary};
 use crate::session::{CreateSessionRequest, SessionApi};
 
+const TEST_SESSION_ID: &str = "test-session";
+
 struct TestFixture {
     _dir: tempfile::TempDir,
     project_root: String,
@@ -47,6 +49,9 @@ fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> TestFixture
     let sessions_path = root.join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
     let store = SqliteSessionGraphStore::new(&sessions_path);
+    store
+        .create_session(TEST_SESSION_ID, None, "test")
+        .expect("create default test session");
 
     TestFixture {
         _dir: dir,
@@ -71,10 +76,8 @@ fn setup_with_events(events: Vec<LlmEvent>, enabled_tools: &[&str]) -> TestFixtu
 fn make_request(input: &str) -> RunTurnRequest {
     RunTurnRequest {
         input: input.to_string(),
-        session_id: None,
-        profile: None,
-        model: Some("sonnet".to_string()),
-        loaded_profile: None,
+        session_id: TEST_SESSION_ID.to_string(),
+        loaded_profile: Some(make_loaded_profile("sonnet", "System from profile.")),
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
@@ -85,10 +88,8 @@ fn make_request(input: &str) -> RunTurnRequest {
 fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
     RunTurnRequest {
         input: input.to_string(),
-        session_id: Some(session_id.to_string()),
-        profile: None,
-        model: Some("sonnet".to_string()),
-        loaded_profile: None,
+        session_id: session_id.to_string(),
+        loaded_profile: Some(make_loaded_profile("sonnet", "System from profile.")),
         cancel_flag: None,
         test_llm: None,
         test_project_root: None,
@@ -136,7 +137,7 @@ fn with_test_llm(
 ) -> RunTurnRequest {
     request.test_llm = Some(llm);
     request.test_project_root = Some(project_root.to_string());
-    if request.loaded_profile.is_none() && !enabled_tools.is_empty() {
+    if request.loaded_profile.is_none() || !enabled_tools.is_empty() {
         request.loaded_profile = Some(make_loaded_profile_with_tools(
             "sonnet",
             "System from profile.",
@@ -243,7 +244,7 @@ impl LlmClient for CancelOnDoneLlm {
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn run_turn_auto_creates_session_and_returns_session_id() {
+async fn run_turn_uses_required_session_and_returns_session_id() {
     let fixture = setup_with_events(happy_events(), &[]);
     let result = run_turn(
         fixture.session_api,
@@ -294,8 +295,7 @@ async fn run_turn_uses_existing_session_transcript() {
         .session_api
         .create_session(CreateSessionRequest {
             label: None,
-            profile: None,
-            model: Some("sonnet".to_string()),
+            active_agent: "test".to_string(),
         })
         .unwrap();
     let session_id = created.session_id.clone();
@@ -435,14 +435,12 @@ async fn run_turn_cancelled_outcome_is_committed() {
 }
 
 #[tokio::test]
-async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
+async fn run_cutover_uses_loaded_profile_model() {
     let fixture = setup_with_events(happy_events(), &[]);
     let request = with_test_llm(
         RunTurnRequest {
             input: "test".to_string(),
-            session_id: None,
-            profile: None,
-            model: Some("override-model".to_string()),
+            session_id: TEST_SESSION_ID.to_string(),
             loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
             cancel_flag: None,
             test_llm: None,
@@ -458,7 +456,7 @@ async fn run_cutover_model_override_takes_precedence_over_loaded_profile() {
     assert_eq!(result.status, RunTurnStatus::Completed);
 
     let entry = last_log_entry(&fixture.store, &result.session_id);
-    assert_eq!(entry.model, "override-model");
+    assert_eq!(entry.model, "profile-model");
 }
 
 #[tokio::test]
@@ -467,9 +465,7 @@ async fn run_cutover_profile_model_used_when_no_override() {
     let request = with_test_llm(
         RunTurnRequest {
             input: "test".to_string(),
-            session_id: None,
-            profile: None,
-            model: None,
+            session_id: TEST_SESSION_ID.to_string(),
             loaded_profile: Some(make_loaded_profile("profile-model", "System from profile.")),
             cancel_flag: None,
             test_llm: None,
@@ -494,10 +490,11 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
     let request = with_test_llm(
         RunTurnRequest {
             input: "test".to_string(),
-            session_id: None,
-            profile: None,
-            model: Some("compat:deepseek-chat".to_string()),
-            loaded_profile: None,
+            session_id: TEST_SESSION_ID.to_string(),
+            loaded_profile: Some(make_loaded_profile(
+                "compat:deepseek-chat",
+                "System from profile.",
+            )),
             cancel_flag: None,
             test_llm: None,
             test_project_root: None,

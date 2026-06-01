@@ -409,16 +409,27 @@ impl SqliteSessionGraphStore {
             // Only include commits not in the other side's ancestors.
             if !other_set.contains(&cid) {
                 // Read commit data.
-                let (parents_json, status_str, model, provider, commit_message, created_at, message_ids_json): (
-                    String, String, String, String, String, String, String,
+                let (
+                    parents_json,
+                    status_str,
+                    agent_name,
+                    profile_snapshot_hash,
+                    model,
+                    provider,
+                    commit_message,
+                    created_at,
+                    message_ids_json,
+                ): (
+                    String, String, String, String, String, String, String, String, String,
                 ) = conn
                     .query_row(
-                        "SELECT parents_json, status, model, provider, commit_message, created_at, message_ids_json
+                        "SELECT parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json
                          FROM graph_commits WHERE commit_id=?1 AND session_id=?2",
                         params![cid, session_id],
                         |row| Ok((
                             row.get(0)?, row.get(1)?, row.get(2)?,
                             row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
+                            row.get(7)?, row.get(8)?,
                         )),
                     )
                     .map_err(|_| SessionError::MissingCommit(cid.clone()))?;
@@ -438,6 +449,8 @@ impl SqliteSessionGraphStore {
                     commit_id: cid,
                     parent_ids: parent_ids.clone(),
                     status,
+                    agent_name,
+                    profile_snapshot_hash,
                     model,
                     provider,
                     commit_message,

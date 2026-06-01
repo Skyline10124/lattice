@@ -77,7 +77,7 @@ check_docs() {
   fi
 
   xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/phases/**' \
-    "$old_any|sessions list|debug \"test prompt\"|config show|tui -m|--agent|--trace|run-v11|run_v11" \
+    "$old_any|sessions list|debug \"test prompt\"|config show|tui -m|--trace|run-v11|run_v11" \
     < "$targets_tmp" > "$docs_tmp" 2>/dev/null || true
 
   xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/phases/**' \

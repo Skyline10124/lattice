@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
 use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
+use sha2::{Digest, Sha256};
 
 use super::cep::build_production_turn_deps;
 use super::collector::RunTurnCollector;
@@ -18,7 +19,9 @@ pub(super) struct TurnCommitContext {
     pub parent_ids: Vec<String>,
     pub model: String,
     pub provider: String,
-    pub profile_snapshot_id: Option<String>,
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
+    pub profile_snapshot_json: String,
 }
 
 /// Build a [`TurnCommitInput`] from the user input, commit context, and agent
@@ -48,7 +51,9 @@ pub(super) fn build_commit_input(
         session_id: ctx.session_id.clone(),
         parent_ids: ctx.parent_ids.clone(),
         messages: commit_messages,
-        profile_snapshot_id: ctx.profile_snapshot_id.clone(),
+        agent_name: ctx.agent_name.clone(),
+        profile_snapshot_hash: ctx.profile_snapshot_hash.clone(),
+        profile_snapshot_json: ctx.profile_snapshot_json.clone(),
         model: ctx.model.clone(),
         provider: ctx.provider.clone(),
         status: commit_status,
@@ -56,6 +61,34 @@ pub(super) fn build_commit_input(
         usage: Some(agent_result.usage.clone()),
         terminal_reason: agent_result.terminal_reason.clone(),
     }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ProfileSnapshotMetadata {
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
+    pub profile_snapshot_json: String,
+}
+
+pub(super) fn build_profile_snapshot_metadata(
+    loaded: &lattice_profile::LoadedAgentProfile,
+) -> Result<ProfileSnapshotMetadata> {
+    let value = serde_json::json!({
+        "agent_profile": loaded.profile,
+        "system_prompt": loaded.system_prompt,
+    });
+    let profile_snapshot_json = serde_json::to_string(&value).map_err(|err| {
+        crate::session::ApiError::Internal(format!("failed to serialize profile snapshot: {err}"))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(profile_snapshot_json.as_bytes());
+    let profile_snapshot_hash = format!("{:x}", hasher.finalize());
+
+    Ok(ProfileSnapshotMetadata {
+        agent_name: loaded.profile.agent.name.clone(),
+        profile_snapshot_hash,
+        profile_snapshot_json,
+    })
 }
 
 /// Derive the terminal [`TurnEvent`] from the agent result status.
@@ -218,6 +251,11 @@ fn production_llm(request: &RunTurnRequest) -> Arc<dyn lattice_agent::LlmClient>
 
 /// Execute a turn and return its events as a live stream.
 pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result<TurnEventStream> {
+    if request.loaded_profile.is_none() {
+        return Err(crate::session::ApiError::BadRequest(
+            "loaded active agent profile is required".to_string(),
+        ));
+    }
     let project_root = resolve_project_root(&request);
     let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.cep);
     let (model_id, _, _) = resolve_model_and_prompt(&request);

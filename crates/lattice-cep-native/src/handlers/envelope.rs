@@ -2,11 +2,15 @@
 //!
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
 
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use crate::guard_l1::evaluate_and_enforce_policy;
 use crate::guard_l1::{normalize_write_path_pattern, WritePathPattern};
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{extract_verify_command, validate_verify_command};
+use lattice_cep_catalog::method::RequiredCapability;
 use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams, DeclareResult};
-use lattice_cep_protocol::envelope::{Capability, ExecutionEnvelope};
+use lattice_cep_catalog::CepMethod;
+use lattice_cep_protocol::envelope::{Capability, ExecutionEnvelope, ImpactKind};
 use lattice_cep_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lattice_cep_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
@@ -36,6 +40,8 @@ async fn handle_declare(
         return Err(envelope_already_active_error());
     }
 
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Declare::NAME, &params).await?;
+
     validate_envelope_boundaries(&params.envelope, &project_root)?;
 
     // Validate the verify command at declare time if present.
@@ -54,6 +60,8 @@ async fn handle_declare(
                 params.reason.clone(),
             )
             .await?;
+
+        record_session_state_effect(&ctx);
 
         // Emit superseded event if there was a previous envelope
         if let Some(ref old_id) = outcome.superseded_envelope_id {
@@ -104,6 +112,8 @@ async fn handle_declare(
             .declare(params.envelope.clone(), ctx.call_id, turn_id)
             .await?;
 
+        record_session_state_effect(&ctx);
+
         // Emit declared event
         ctx.events
             .emit(
@@ -133,6 +143,15 @@ async fn handle_declare(
             superseded_envelope_id: None,
         })
     }
+}
+
+fn record_session_state_effect(ctx: &HandlerContext) {
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::SessionStateMutation,
+        scope: ObservedScope::SessionState,
+        required_capability: RequiredCapability::MutateSessionState,
+        source: EffectSource::HandlerBackend,
+    });
 }
 
 fn envelope_already_active_error() -> CepError {
@@ -249,7 +268,8 @@ mod tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "declare test"),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "declare test")
+                    .with_session_state(),
                 cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
                     root,
                 )),

@@ -32,7 +32,9 @@ fn commit_input(
         session_id: session_id.to_string(),
         parent_ids,
         messages: messages.clone(),
-        profile_snapshot_id: Some("test-profile".to_string()),
+        agent_name: "coder".to_string(),
+        profile_snapshot_hash: "test-profile".to_string(),
+        profile_snapshot_json: "{}".to_string(),
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
         status,
@@ -50,7 +52,7 @@ fn setup_session_with_commits(
     label: Option<&str>,
 ) -> Vec<TurnCommit> {
     store
-        .create_session(session_id, label, None, Some("sonnet"), Some("anthropic"))
+        .create_session(session_id, label, "coder")
         .expect("create");
 
     let mut commits: Vec<TurnCommit> = Vec::new();
@@ -68,7 +70,9 @@ fn setup_session_with_commits(
             session_id: session_id.to_string(),
             parent_ids,
             messages: messages.clone(),
-            profile_snapshot_id: Some("test-profile".to_string()),
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "test-profile".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
@@ -161,7 +165,7 @@ fn log_is_one_entry_per_turn_commit() {
 
     // Create session with tool messages too.
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // First turn: user + assistant.
@@ -288,6 +292,73 @@ fn branch_refs_point_to_commit_ids() {
 }
 
 #[test]
+fn active_agent_is_branch_local_and_checkout_refreshes_session_cache() {
+    let dir = temp_dir("active_agent_branch_local");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    let commits = setup_session_with_commits(&store, "sess-1", 1, None);
+    let first_commit_id = commits[0].commit_id.clone();
+
+    let feature_ref = store
+        .branch("sess-1", "feature", Some(&first_commit_id))
+        .expect("create feature");
+    assert_eq!(feature_ref.active_agent_name, "coder");
+
+    store
+        .set_active_agent("sess-1", "reviewer")
+        .expect("switch main agent");
+    let main_status = store.status("sess-1").expect("main status");
+    assert_eq!(main_status.active_agent_name, "reviewer");
+    assert!(
+        main_status
+            .branches
+            .iter()
+            .any(|branch| branch.name == "main" && branch.active_agent_name == "reviewer"),
+        "main branch should carry reviewer agent"
+    );
+
+    store
+        .checkout("sess-1", "feature")
+        .expect("checkout feature");
+    let feature_status = store.status("sess-1").expect("feature status");
+    assert_eq!(
+        feature_status.active_agent_name, "coder",
+        "checkout should refresh the cached session active agent from the branch"
+    );
+
+    store.checkout("sess-1", "main").expect("checkout main");
+    let main_status = store.status("sess-1").expect("main status again");
+    assert_eq!(main_status.active_agent_name, "reviewer");
+}
+
+#[test]
+fn updating_existing_branch_preserves_its_active_agent_in_returned_ref() {
+    let dir = temp_dir("active_agent_branch_update_return");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    let commits = setup_session_with_commits(&store, "sess-1", 2, None);
+    let first_commit_id = commits[0].commit_id.clone();
+    let second_commit_id = commits[1].commit_id.clone();
+
+    store
+        .branch("sess-1", "feature", Some(&first_commit_id))
+        .expect("create feature");
+    store
+        .set_active_agent("sess-1", "reviewer")
+        .expect("switch main agent");
+
+    let updated = store
+        .branch("sess-1", "feature", Some(&second_commit_id))
+        .expect("move existing feature");
+
+    assert_eq!(updated.commit_id, Some(second_commit_id));
+    assert_eq!(
+        updated.active_agent_name, "coder",
+        "moving an existing branch must not overwrite or misreport its active agent"
+    );
+}
+
+#[test]
 fn reset_returns_old_head_and_preserves_commits() {
     let dir = temp_dir("reset_preserves");
     let store = SqliteSessionGraphStore::new(dir);
@@ -334,7 +405,9 @@ fn diff_reports_unique_commit_paths() {
         session_id: "sess-1".to_string(),
         parent_ids: vec![base_id.clone()],
         messages: feature_messages.clone(),
-        profile_snapshot_id: Some("test-profile".to_string()),
+        agent_name: "coder".to_string(),
+        profile_snapshot_hash: "test-profile".to_string(),
+        profile_snapshot_json: "{}".to_string(),
         model: "sonnet".to_string(),
         provider: "anthropic".to_string(),
         status: TurnCommitStatus::Completed,
@@ -377,7 +450,7 @@ fn checkout_existing_empty_branch_succeeds() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // main branch was created by create_session with NULL commit_id.
@@ -449,7 +522,7 @@ fn commit_turn_while_detached_does_not_move_main_branch() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // Commit A on main.
@@ -540,7 +613,7 @@ fn commit_turn_allows_repeated_identical_user_message_across_turns() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("sess-1", None, "coder")
         .expect("create");
 
     // First turn with user "hello" and assistant "hi".

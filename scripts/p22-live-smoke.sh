@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_SMOKE_MODEL:-compat:deepseek-v4-pro}"
+AGENT_NAME="p22-smoke"
 # Use a non-world-writable path (lattice-cli rejects /tmp for agent profiles).
 SMOKE_BASE="${ROOT}/build/tmp/p22-smoke"
 mkdir -p "${SMOKE_BASE}"
@@ -47,14 +48,14 @@ require_env OPENAI_COMPATIBLE_BASE_URL
 echo "Model target: ${MODEL}"
 echo "Workspace: ${SMOKE_HOME}"
 
-mkdir -p "${SMOKE_HOME}/smoke" "${SMOKE_HOME}/.lattice/agents/default"
+mkdir -p "${SMOKE_HOME}/smoke" "${SMOKE_HOME}/.lattice/agents/${AGENT_NAME}"
 printf 'version: 1\n' >"${SMOKE_HOME}/smoke/fixture.txt"
 
-cat >"${SMOKE_HOME}/.lattice/agents/default/agent.toml" <<EOF
+cat >"${SMOKE_HOME}/.lattice/agents/${AGENT_NAME}/agent.toml" <<EOF
 schema_version = 1
 
 [agent]
-name = "p22-smoke"
+name = "${AGENT_NAME}"
 model = "${MODEL}"
 
 [prompt]
@@ -98,17 +99,33 @@ fi
 echo "== CEP live smoke: resolve =="
 "${LATTICE[@]}" resolve "${MODEL}" --verbose
 
-echo "== CEP live smoke: run (JSONL) =="
+echo "== CEP live smoke: session send (JSONL) =="
 set +e
 (
   cd "${SMOKE_HOME}"
   HOME="${SMOKE_HOME}" XDG_CONFIG_HOME="${SMOKE_HOME}/.config" \
-    "${LATTICE[@]}" --json run "${PROMPT}" -m "${MODEL}" >"${JSONL}" 2>"${SMOKE_HOME}/run.stderr"
+    "${LATTICE[@]}" --json session new --agent "${AGENT_NAME}" >"${SMOKE_HOME}/session.json" 2>"${SMOKE_HOME}/run.stderr"
 )
 RUN_EXIT=$?
+SESSION_ID=""
+if [[ ${RUN_EXIT} -eq 0 ]]; then
+  SESSION_ID="$(jq -r '.session_id // empty' "${SMOKE_HOME}/session.json" 2>>"${SMOKE_HOME}/run.stderr")"
+  if [[ -z "${SESSION_ID}" ]]; then
+    echo "FAIL: session new did not return a session_id" >>"${SMOKE_HOME}/run.stderr"
+    RUN_EXIT=2
+  fi
+fi
+if [[ ${RUN_EXIT} -eq 0 ]]; then
+  (
+    cd "${SMOKE_HOME}"
+    HOME="${SMOKE_HOME}" XDG_CONFIG_HOME="${SMOKE_HOME}/.config" \
+      "${LATTICE[@]}" --json session send "${SESSION_ID}" "${PROMPT}" >"${JSONL}" 2>>"${SMOKE_HOME}/run.stderr"
+  )
+  RUN_EXIT=$?
+fi
 set -e
 
-echo "lattice run exit code: ${RUN_EXIT}"
+echo "lattice session send exit code: ${RUN_EXIT}"
 echo "--- stderr (last 40 lines) ---"
 tail -n 40 "${SMOKE_HOME}/run.stderr" || true
 

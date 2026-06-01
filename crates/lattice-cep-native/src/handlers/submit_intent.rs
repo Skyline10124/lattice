@@ -1,10 +1,14 @@
+use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use crate::guard_l1::evaluate_and_enforce_policy;
 use crate::handlers::envelope::validate_envelope_boundaries;
 use crate::impact::{AnalysisResult, ImpactAnalyzer};
 use crate::invariants::{opaque_notes, InvariantCard};
 use crate::registry::{HandlerContext, MethodRegistry};
+use lattice_cep_catalog::method::RequiredCapability;
 use lattice_cep_catalog::methods::envelope::{
     L2Status, SubmitIntent, SubmitIntentParams, SubmitIntentResult,
 };
+use lattice_cep_catalog::CepMethod;
 use lattice_cep_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
@@ -26,6 +30,8 @@ async fn handle_submit_intent(
     let turn_id = &ctx.turn_id;
 
     validate_target(&params.target, &ctx)?;
+
+    let _evaluation = evaluate_and_enforce_policy(&ctx, SubmitIntent::NAME, &params).await?;
 
     let method_name = resolve_method_name(&params.action, &params.target);
 
@@ -60,6 +66,8 @@ async fn handle_submit_intent(
             .declare(envelope, ctx.call_id, turn_id)
             .await?
     };
+
+    record_session_state_effect(&ctx);
 
     ctx.events
         .emit(
@@ -307,6 +315,15 @@ fn build_structural_constraints(matched_cards: &[&InvariantCard]) -> Constraints
     }
 }
 
+fn record_session_state_effect(ctx: &HandlerContext) {
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::SessionStateMutation,
+        scope: ObservedScope::SessionState,
+        required_capability: RequiredCapability::MutateSessionState,
+        source: EffectSource::HandlerBackend,
+    });
+}
+
 fn envelope_already_active_error() -> CepError {
     CepError::new(
         CepErrorCode::EnvelopeAlreadyActive,
@@ -360,7 +377,8 @@ mod tests {
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(
                     root,
                     "submit_intent test",
-                ),
+                )
+                .with_session_state(),
                 cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
                     root,
                 )),

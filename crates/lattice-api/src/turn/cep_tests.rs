@@ -342,6 +342,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
+    use lattice_cep_catalog::methods::envelope::{Declare, SubmitIntent};
     use lattice_cep_catalog::methods::external::Fetch;
     use lattice_cep_catalog::methods::session::TodoWrite;
     use lattice_cep_catalog::methods::workspace::ReadFile;
@@ -381,6 +382,22 @@ mod cep_native_registry {
                 .iter()
                 .any(|c| matches!(c, Capability::ReadAudit)),
             "base envelope must grant ReadAudit for audit.query/replay"
+        );
+    }
+
+    #[test]
+    fn production_base_envelope_grants_session_state_for_envelope_methods() {
+        let dir = TempDir::new().unwrap();
+        let enabled = vec![Declare::NAME.to_string(), SubmitIntent::NAME.to_string()];
+        let envelope =
+            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
+        assert!(
+            envelope
+                .inner
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::MutateSessionState)),
+            "base envelope must grant MutateSessionState for envelope session-state methods"
         );
     }
 
@@ -465,7 +482,6 @@ mod attestation_and_dispatch {
     use lattice_cep_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
     use lattice_cep_catalog::methods::workspace::{ReadFile, ReadFileParams};
     use lattice_cep_native::canonicalize_in_toto_statement;
-    use lattice_cep_protocol::error::jsonrpc;
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
@@ -511,16 +527,12 @@ mod attestation_and_dispatch {
                 .unwrap(),
             },
         };
-        let err = adapter
+        let output = adapter
             .execute(&call)
             .await
-            .expect_err("submit without session cap");
-        let code = err.cep_error.as_ref().map(|p| p.code).unwrap_or(0);
-        assert_ne!(
-            code,
-            jsonrpc::METHOD_NOT_FOUND,
-            "SubmitIntent must be routed, not method_not_found"
-        );
+            .expect("SubmitIntent must route through the typed CEP adapter");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("json result");
+        assert_eq!(result["accepted"], true);
     }
 
     #[tokio::test]

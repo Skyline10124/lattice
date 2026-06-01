@@ -106,13 +106,26 @@ enabled = {enabled:?}
     }
 }
 
-fn make_request(ws: &Workspace, input: &str, llm: Arc<dyn LlmClient>) -> RunTurnRequest {
+fn create_default_session(sessions_path: &std::path::Path) -> String {
+    lattice_api::SessionApi::sqlite(sessions_path)
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "default".to_string(),
+        })
+        .expect("create session")
+        .session_id
+}
+
+fn make_request(
+    ws: &Workspace,
+    input: &str,
+    session_id: &str,
+    llm: Arc<dyn LlmClient>,
+) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
     RunTurnRequest {
         input: input.to_string(),
-        session_id: None,
-        profile: None,
-        model: None,
+        session_id: session_id.to_string(),
         loaded_profile: Some(ws.loaded.clone()),
         cancel_flag: None,
         test_llm: Some(llm),
@@ -140,10 +153,11 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Read src/lib.rs", fake_llm),
+        make_request(&ws, "Read src/lib.rs", &session_id, fake_llm),
     )
     .await
     .expect("run_turn must succeed");
@@ -195,10 +209,11 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Hello", fake_llm),
+        make_request(&ws, "Hello", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -236,10 +251,11 @@ async fn rejects_profile_disabled_command_run() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Try command.run", fake_llm),
+        make_request(&ws, "Try command.run", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -336,9 +352,10 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     );
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Change the answer to 42", fake_llm),
+        make_request(&ws, "Change the answer to 42", &session_id, fake_llm),
     )
     .await
     .expect("run_turn must succeed");
@@ -357,6 +374,17 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         .log(&result.session_id)
         .expect("log must succeed");
     assert_eq!(log.len(), 1);
+
+    let declare_result = result
+        .tool_results
+        .iter()
+        .find(|t| t.name == "envelope.declare")
+        .expect("should have an envelope.declare tool result");
+    assert!(
+        declare_result.ok,
+        "envelope.declare must succeed before patching; error: {:?}",
+        declare_result.error_summary
+    );
 
     assert!(
         result
@@ -382,18 +410,16 @@ async fn usage_resume_session_includes_previous_turn_context() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let result1 = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Hello", fake_llm.clone()),
+        make_request(&ws, "Hello", &session_id, fake_llm.clone()),
     )
     .await
     .expect("turn 1 must succeed");
     assert_eq!(result1.status, RunTurnStatus::Completed);
-    let session_id = result1.session_id.clone();
-
-    let mut request2 = make_request(&ws, "Follow up", fake_llm);
-    request2.session_id = Some(session_id.clone());
+    let request2 = make_request(&ws, "Follow up", &session_id, fake_llm);
     let result2 = lattice_api::run_turn(lattice_api::SessionApi::sqlite(&sessions_path), request2)
         .await
         .expect("turn 2 must succeed");
@@ -503,10 +529,11 @@ async fn public_https_policy_requires_fetch_capability() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Fetch example.com", fake_llm),
+        make_request(&ws, "Fetch example.com", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -563,10 +590,11 @@ async fn rejects_profile_disabled_web_fetch() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Try web.fetch", fake_llm),
+        make_request(&ws, "Try web.fetch", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")

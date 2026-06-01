@@ -52,12 +52,7 @@ pub struct GraphSession {
     pub session_id: String,
     #[serde(default)]
     pub label: Option<String>,
-    #[serde(default)]
-    pub profile_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
+    pub active_agent_name: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -77,6 +72,7 @@ pub struct GraphRef {
     pub kind: GraphRefKind,
     #[serde(default)]
     pub commit_id: Option<String>,
+    pub active_agent_name: String,
     pub updated_at: String,
 }
 
@@ -113,7 +109,9 @@ pub struct TurnCommitInput {
     pub session_id: String,
     pub parent_ids: Vec<String>,
     pub messages: Vec<GraphMessage>,
-    pub profile_snapshot_id: Option<String>,
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
+    pub profile_snapshot_json: String,
     pub model: String,
     pub provider: String,
     pub status: TurnCommitStatus,
@@ -131,8 +129,9 @@ pub struct TurnCommit {
     pub session_id: String,
     pub parent_ids: Vec<String>,
     pub message_ids: Vec<String>,
-    #[serde(default)]
-    pub profile_snapshot_id: Option<String>,
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
+    pub profile_snapshot_json: String,
     pub model: String,
     pub provider: String,
     pub status: TurnCommitStatus,
@@ -150,6 +149,8 @@ pub struct TurnLogEntry {
     pub commit_id: String,
     pub parent_ids: Vec<String>,
     pub status: TurnCommitStatus,
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
     pub model: String,
     pub provider: String,
     pub commit_message: String,
@@ -169,6 +170,7 @@ pub struct SessionStatus {
     pub head: GraphHead,
     #[serde(default)]
     pub current_commit_id: Option<String>,
+    pub active_agent_name: String,
     pub branches: Vec<GraphRef>,
     pub commit_count: usize,
 }
@@ -179,6 +181,7 @@ pub struct SessionGraphSummary {
     pub session_id: String,
     #[serde(default)]
     pub label: Option<String>,
+    pub active_agent_name: String,
     #[serde(default)]
     pub current_branch: Option<String>,
     #[serde(default)]
@@ -214,9 +217,7 @@ pub trait SessionGraphStore: Send + Sync {
         &self,
         session_id: &str,
         label: Option<&str>,
-        profile_id: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
+        active_agent_name: &str,
     ) -> crate::Result<GraphSession>;
 
     fn open_session(&self, session_id: &str) -> crate::Result<GraphSession>;
@@ -234,6 +235,8 @@ pub trait SessionGraphStore: Send + Sync {
     fn checkout(&self, session_id: &str, target: &str) -> crate::Result<GraphHead>;
 
     fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> crate::Result<GraphRef>;
+
+    fn set_active_agent(&self, session_id: &str, agent_name: &str) -> crate::Result<GraphSession>;
 
     fn diff(&self, session_id: &str, from: &str, to: &str) -> crate::Result<GraphDiff>;
 
@@ -304,7 +307,8 @@ pub fn canonical_turn_commit_id(
     session_id: &str,
     parent_ids: &[String],
     message_ids: &[String],
-    profile_snapshot_id: Option<&str>,
+    agent_name: &str,
+    profile_snapshot_hash: &str,
     model: &str,
     provider: &str,
     status: &TurnCommitStatus,
@@ -316,7 +320,8 @@ pub fn canonical_turn_commit_id(
         "session_id": session_id,
         "parent_ids": parent_ids,
         "message_ids": message_ids,
-        "profile_snapshot_id": profile_snapshot_id,
+        "agent_name": agent_name,
+        "profile_snapshot_hash": profile_snapshot_hash,
         "model": model,
         "provider": provider,
         "status": status.as_str(),
@@ -387,9 +392,7 @@ mod graph_contract {
         let session = GraphSession {
             session_id: "sess-1".to_string(),
             label: Some("test".to_string()),
-            profile_id: None,
-            model: Some("sonnet".to_string()),
-            provider: Some("anthropic".to_string()),
+            active_agent_name: "coder".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -400,6 +403,7 @@ mod graph_contract {
             name: "main".to_string(),
             kind: GraphRefKind::Branch,
             commit_id: Some("abc123".to_string()),
+            active_agent_name: "coder".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         };
         assert_eq!(graph_ref.kind, GraphRefKind::Branch);
@@ -434,7 +438,9 @@ mod graph_contract {
                 tool_call_id: None,
                 name: None,
             }],
-            profile_snapshot_id: Some("profile-hash".to_string()),
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "profile-hash".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
@@ -444,14 +450,16 @@ mod graph_contract {
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("session_id"));
-        assert!(json.contains("profile_snapshot_id"));
+        assert!(json.contains("profile_snapshot_hash"));
 
         let commit = TurnCommit {
             commit_id: "commit-abc".to_string(),
             session_id: "sess-1".to_string(),
             parent_ids: vec![],
             message_ids: vec!["msg-1".to_string()],
-            profile_snapshot_id: Some("profile-hash".to_string()),
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "profile-hash".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
@@ -471,6 +479,7 @@ mod graph_contract {
                 name: "main".to_string(),
             },
             current_commit_id: Some("abc".to_string()),
+            active_agent_name: "coder".to_string(),
             branches: vec![],
             commit_count: 5,
         };
@@ -480,6 +489,7 @@ mod graph_contract {
         let summary = SessionGraphSummary {
             session_id: "sess-1".to_string(),
             label: Some("test".to_string()),
+            active_agent_name: "coder".to_string(),
             current_branch: Some("main".to_string()),
             head_commit_id: Some("abc".to_string()),
             commit_count: 5,
@@ -515,6 +525,8 @@ mod graph_contract {
             commit_id: "abc".to_string(),
             parent_ids: vec!["parent".to_string()],
             status: TurnCommitStatus::Completed,
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "profile-hash".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             commit_message: "Hello world".to_string(),
@@ -586,7 +598,8 @@ mod graph_contract {
             "sess-1",
             &["parent-1".to_string()],
             &["msg-1".to_string(), "msg-2".to_string()],
-            Some("profile-hash"),
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             &TurnCommitStatus::Completed,
@@ -604,7 +617,8 @@ mod graph_contract {
             "sess-1",
             vec!["parent-1".to_string()],
             vec!["msg-1".to_string()],
-            Some("profile-hash"),
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             TurnCommitStatus::Completed,
@@ -612,10 +626,10 @@ mod graph_contract {
             "2026-01-01T00:00:00Z",
         );
         let id1 = canonical_turn_commit_id(
-            args.0, &args.1, &args.2, args.3, args.4, args.5, &args.6, args.7, args.8,
+            args.0, &args.1, &args.2, args.3, args.4, args.5, args.6, &args.7, args.8, args.9,
         );
         let id2 = canonical_turn_commit_id(
-            args.0, &args.1, &args.2, args.3, args.4, args.5, &args.6, args.7, args.8,
+            args.0, &args.1, &args.2, args.3, args.4, args.5, args.6, &args.7, args.8, args.9,
         );
         assert_eq!(id1, id2);
     }
@@ -626,7 +640,8 @@ mod graph_contract {
             "sess-1",
             &[],
             &["msg-1".to_string()],
-            None,
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             &TurnCommitStatus::Completed,
@@ -638,7 +653,8 @@ mod graph_contract {
             "sess-1",
             &[],
             &["msg-1".to_string()],
-            None,
+            "coder",
+            "profile-hash",
             "opus",
             "anthropic",
             &TurnCommitStatus::Completed,
@@ -652,7 +668,8 @@ mod graph_contract {
             "sess-1",
             &[],
             &["msg-1".to_string()],
-            None,
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             &TurnCommitStatus::Error,
@@ -666,7 +683,8 @@ mod graph_contract {
             "sess-1",
             &["other-parent".to_string()],
             &["msg-1".to_string()],
-            None,
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             &TurnCommitStatus::Completed,
@@ -687,7 +705,8 @@ mod graph_contract {
             "sess-1",
             &[],
             &[],
-            None,
+            "coder",
+            "profile-hash",
             "sonnet",
             "anthropic",
             &TurnCommitStatus::Completed,
@@ -808,7 +827,9 @@ mod graph_contract {
             session_id: "sess-1".to_string(),
             parent_ids: vec![],
             messages: vec![user_msg("Hello")],
-            profile_snapshot_id: Some("profile-hash".to_string()),
+            agent_name: "coder".to_string(),
+            profile_snapshot_hash: "profile-hash".to_string(),
+            profile_snapshot_json: "{}".to_string(),
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,

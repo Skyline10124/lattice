@@ -7,7 +7,7 @@ use commands::{audit, cep as cep_cmd, doctor, models, resolve, session as sessio
 
 #[derive(Parser)]
 #[command(name = "lattice")]
-#[command(about = "LATTICE — model-centric LLM engine")]
+#[command(about = "LATTICE — session-centric LLM engine")]
 #[command(version = "0.1.0")]
 struct Cli {
     #[command(subcommand)]
@@ -32,20 +32,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a prompt through an agent profile.
-    Run {
-        /// Prompt text.
-        prompt: String,
-        /// Model alias or canonical ID.
-        #[arg(short = 'm', long = "model")]
-        model: Option<String>,
-        /// Agent profile name or path.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Session id to resume.
-        #[arg(long)]
-        session: Option<String>,
-    },
     /// List available models.
     Models {
         /// Only show authenticated models.
@@ -85,37 +71,17 @@ async fn main() -> std::process::ExitCode {
         let _ = lattice_llm::init_logging(false);
     }
 
-    // Run command uses the live stream path with ExitCode semantics.
-    if let Some(Commands::Run {
-        prompt,
-        model,
-        profile,
-        session,
-    }) = cli.command
-    {
-        return commands::run::run(
-            prompt,
-            model,
-            profile.as_deref(),
-            session,
-            cli.verbose,
-            cli.json,
-        )
-        .await;
-    }
-
-    // All other commands use the Result<()> path.
-    if let Err(e) = run_other_commands(cli) {
-        eprintln!("{}: {}", "error".red(), e);
-        std::process::ExitCode::from(1)
-    } else {
-        std::process::ExitCode::SUCCESS
+    match run_commands(cli).await {
+        Ok(exit_code) => exit_code,
+        Err(e) => {
+            eprintln!("{}: {}", "error".red(), e);
+            std::process::ExitCode::from(1)
+        }
     }
 }
 
-fn run_other_commands(cli: Cli) -> Result<()> {
+async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
     match cli.command {
-        Some(Commands::Run { .. }) => unreachable!("handled above"),
         Some(Commands::Models { auth }) => {
             models::run(auth, cli.json)?;
         }
@@ -123,7 +89,7 @@ fn run_other_commands(cli: Cli) -> Result<()> {
             resolve::run(&model, cli.verbose, cli.json)?;
         }
         Some(Commands::Session { action }) => {
-            session_cmd::run(action, cli.json)?;
+            return session_cmd::run(action, cli.json, cli.verbose).await;
         }
         Some(Commands::Doctor) => {
             doctor::run(cli.json)?;
@@ -140,7 +106,7 @@ fn run_other_commands(cli: Cli) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 #[cfg(test)]
@@ -151,25 +117,19 @@ mod tests {
     // -- Positive parsing: CLI supported commands --
 
     #[test]
-    fn cli_surface_run_parses_prompt() {
-        let cli = Cli::try_parse_from(["lattice", "run", "hello"]).unwrap();
+    fn cli_surface_run_is_not_exposed() {
+        assert!(Cli::try_parse_from(["lattice", "run", "hello"]).is_err());
+    }
+
+    #[test]
+    fn cli_surface_session_new_agent() {
+        let cli = Cli::try_parse_from(["lattice", "session", "new", "--agent", "coder"]).unwrap();
         assert!(cli.command.is_some());
     }
 
     #[test]
-    fn cli_surface_run_with_model_profile_session() {
-        let cli = Cli::try_parse_from([
-            "lattice",
-            "run",
-            "hello",
-            "-m",
-            "sonnet",
-            "--profile",
-            "default",
-            "--session",
-            "sess1",
-        ])
-        .unwrap();
+    fn cli_surface_session_send() {
+        let cli = Cli::try_parse_from(["lattice", "session", "send", "sess1", "hello"]).unwrap();
         assert!(cli.command.is_some());
     }
 
@@ -241,9 +201,7 @@ mod tests {
     fn cli_surface_help_contains_supported_commands() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
-        for name in &[
-            "run", "models", "resolve", "session", "doctor", "audit", "cep",
-        ] {
+        for name in &["models", "resolve", "session", "doctor", "audit", "cep"] {
             assert!(
                 help.contains(name),
                 "help should contain supported command '{name}'"
@@ -259,7 +217,7 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["run", "models", "resolve", "session", "doctor", "audit", "cep"]
+            vec!["models", "resolve", "session", "doctor", "audit", "cep"]
         );
     }
 

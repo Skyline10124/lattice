@@ -24,11 +24,11 @@ impl SqliteSessionGraphStore {
 
         // Try target as a branch name first.
         // Distinguish "branch exists with NULL commit_id" from "branch missing".
-        let branch_row: Option<Option<String>> = conn
+        let branch_row: Option<(Option<String>, String)> = conn
             .query_row(
-                "SELECT commit_id FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
+                "SELECT commit_id, active_agent_name FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
                 params![session_id, target],
-                |row| row.get::<_, Option<String>>(0),
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|source| SessionError::Database {
@@ -36,11 +36,11 @@ impl SqliteSessionGraphStore {
                 source,
             })?;
 
-        if let Some(commit_id) = branch_row {
+        if let Some((commit_id, active_agent_name)) = branch_row {
             // Branch exists (commit_id may be NULL).
             conn.execute(
-                "UPDATE graph_sessions SET head_ref=?1, head_commit_id=?2, updated_at=?3 WHERE session_id=?4",
-                params![target, commit_id, now, session_id],
+                "UPDATE graph_sessions SET head_ref=?1, head_commit_id=?2, active_agent_name=?3, updated_at=?4 WHERE session_id=?5",
+                params![target, commit_id, active_agent_name, now, session_id],
             )
             .map_err(|source| SessionError::Database {
                 path: self.db_path.clone(),
@@ -122,12 +122,20 @@ impl SqliteSessionGraphStore {
             }
         };
 
+        let inherited_agent: String = conn
+            .query_row(
+                "SELECT active_agent_name FROM graph_sessions WHERE session_id=?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| SessionError::NotFound(session_id.to_string()))?;
+
         // Insert or update the branch ref.
         conn.execute(
-            "INSERT INTO graph_refs (session_id, name, kind, commit_id, updated_at)
-             VALUES (?1, ?2, 'branch', ?3, ?4)
-             ON CONFLICT(session_id, kind, name) DO UPDATE SET commit_id=?3, updated_at=?4",
-            params![session_id, name, commit_id, now],
+            "INSERT INTO graph_refs (session_id, name, kind, commit_id, active_agent_name, updated_at)
+             VALUES (?1, ?2, 'branch', ?3, ?4, ?5)
+             ON CONFLICT(session_id, kind, name) DO UPDATE SET commit_id=?3, updated_at=?5",
+            params![session_id, name, commit_id, inherited_agent, now],
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
@@ -145,12 +153,24 @@ impl SqliteSessionGraphStore {
             source,
         })?;
 
-        Ok(GraphRef {
-            session_id: session_id.to_string(),
-            name: name.to_string(),
-            kind: GraphRefKind::Branch,
-            commit_id: Some(commit_id),
-            updated_at: now,
+        conn.query_row(
+            "SELECT commit_id, active_agent_name, updated_at
+             FROM graph_refs WHERE session_id=?1 AND kind='branch' AND name=?2",
+            params![session_id, name],
+            |row| {
+                Ok(GraphRef {
+                    session_id: session_id.to_string(),
+                    name: name.to_string(),
+                    kind: GraphRefKind::Branch,
+                    commit_id: row.get(0)?,
+                    active_agent_name: row.get(1)?,
+                    updated_at: row.get(2)?,
+                })
+            },
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
         })
     }
 

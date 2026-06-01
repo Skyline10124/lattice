@@ -184,14 +184,19 @@ async fn full_turn_audit_rows_and_replay_fragment() {
 
     let session_dir = TempDir::new().unwrap();
     let sessions_path = session_dir.path().join("sessions");
+    let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
+        .create_session(lattice_api::CreateSessionRequest {
+            label: None,
+            active_agent: "default".to_string(),
+        })
+        .expect("create session")
+        .session_id;
 
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
         RunTurnRequest {
             input: "audit turn provenance".into(),
-            session_id: None,
-            profile: None,
-            model: None,
+            session_id,
             loaded_profile: Some(ws.loaded.clone()),
             cancel_flag: None,
             test_llm: Some(fake_llm),

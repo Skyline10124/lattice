@@ -479,7 +479,10 @@ fn production_base_envelope_from_policy(
 ) -> Result<BaseExecutionEnvelope, ApiError> {
     let mut base_envelope =
         BaseExecutionEnvelope::for_workspace_root(project_root, "cep_context turn observation");
-    if enabled_tools.iter().any(|name| name == TodoWrite::NAME) {
+    if enabled_tools
+        .iter()
+        .any(|name| name == TodoWrite::NAME || name == Declare::NAME || name == SubmitIntent::NAME)
+    {
         base_envelope = base_envelope.with_session_state();
     }
     if enabled_tools.iter().any(|name| name == Fetch::NAME) {

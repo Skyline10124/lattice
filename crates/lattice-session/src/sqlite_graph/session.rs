@@ -16,17 +16,15 @@ impl SqliteSessionGraphStore {
         &self,
         session_id: &str,
         label: Option<&str>,
-        profile_id: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
+        active_agent_name: &str,
     ) -> Result<GraphSession> {
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO graph_sessions (session_id, label, profile_id, model, provider, head_ref, head_commit_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)",
-            params![session_id, label, profile_id, model, provider, DEFAULT_BRANCH, now, now],
+            "INSERT INTO graph_sessions (session_id, label, active_agent_name, head_ref, head_commit_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            params![session_id, label, active_agent_name, DEFAULT_BRANCH, now, now],
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
@@ -35,9 +33,9 @@ impl SqliteSessionGraphStore {
 
         // Insert initial main branch ref with no commit yet.
         conn.execute(
-            "INSERT INTO graph_refs (session_id, name, kind, commit_id, updated_at)
-             VALUES (?1, ?2, 'branch', NULL, ?3)",
-            params![session_id, DEFAULT_BRANCH, now],
+            "INSERT INTO graph_refs (session_id, name, kind, commit_id, active_agent_name, updated_at)
+             VALUES (?1, ?2, 'branch', NULL, ?3, ?4)",
+            params![session_id, DEFAULT_BRANCH, active_agent_name, now],
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
@@ -47,9 +45,7 @@ impl SqliteSessionGraphStore {
         Ok(GraphSession {
             session_id: session_id.to_string(),
             label: label.map(|s| s.to_string()),
-            profile_id: profile_id.map(|s| s.to_string()),
-            model: model.map(|s| s.to_string()),
-            provider: provider.map(|s| s.to_string()),
+            active_agent_name: active_agent_name.to_string(),
             created_at: now.clone(),
             updated_at: now,
         })
@@ -59,18 +55,16 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
         let session = conn
             .query_row(
-                "SELECT session_id, label, profile_id, model, provider, created_at, updated_at
+                "SELECT session_id, label, active_agent_name, created_at, updated_at
                  FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
                 |row| {
                     Ok(GraphSession {
                         session_id: row.get(0)?,
                         label: row.get(1)?,
-                        profile_id: row.get(2)?,
-                        model: row.get(3)?,
-                        provider: row.get(4)?,
-                        created_at: row.get(5)?,
-                        updated_at: row.get(6)?,
+                        active_agent_name: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
                     })
                 },
             )
@@ -86,11 +80,15 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
 
         // Read session row.
-        let (head_ref, head_commit_id): (Option<String>, Option<String>) = conn
+        let (head_ref, head_commit_id, active_agent_name): (
+            Option<String>,
+            Option<String>,
+            String,
+        ) = conn
             .query_row(
-                "SELECT head_ref, head_commit_id FROM graph_sessions WHERE session_id=?1",
+                "SELECT head_ref, head_commit_id, active_agent_name FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|_| SessionError::NotFound(session_id.to_string()))?;
 
@@ -110,7 +108,7 @@ impl SqliteSessionGraphStore {
         // All branch refs for this session.
         let mut ref_stmt = conn
             .prepare(
-                "SELECT session_id, name, kind, commit_id, updated_at
+                "SELECT session_id, name, kind, commit_id, active_agent_name, updated_at
                  FROM graph_refs WHERE session_id=?1",
             )
             .map_err(|source| SessionError::Database {
@@ -124,7 +122,8 @@ impl SqliteSessionGraphStore {
                     name: row.get(1)?,
                     kind: GraphRefKind::Branch,
                     commit_id: row.get(3)?,
-                    updated_at: row.get(4)?,
+                    active_agent_name: row.get(4)?,
+                    updated_at: row.get(5)?,
                 })
             })
             .map_err(|source| SessionError::Database {
@@ -153,6 +152,7 @@ impl SqliteSessionGraphStore {
             session_id: session_id.to_string(),
             head,
             current_commit_id: head_commit_id,
+            active_agent_name,
             branches,
             commit_count: commit_count as usize,
         })
@@ -163,7 +163,7 @@ impl SqliteSessionGraphStore {
 
         let mut stmt = conn
             .prepare(
-                "SELECT s.session_id, s.label, s.head_ref, s.head_commit_id, s.updated_at,
+                "SELECT s.session_id, s.label, s.active_agent_name, s.head_ref, s.head_commit_id, s.updated_at,
                         (SELECT COUNT(*) FROM graph_commits c WHERE c.session_id = s.session_id) as commit_count
                  FROM graph_sessions s",
             )
@@ -177,10 +177,11 @@ impl SqliteSessionGraphStore {
                 Ok(SessionGraphSummary {
                     session_id: row.get(0)?,
                     label: row.get(1)?,
-                    current_branch: row.get(2)?,
-                    head_commit_id: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    commit_count: row.get::<_, i64>(5)? as usize,
+                    active_agent_name: row.get(2)?,
+                    current_branch: row.get(3)?,
+                    head_commit_id: row.get(4)?,
+                    updated_at: row.get(5)?,
+                    commit_count: row.get::<_, i64>(6)? as usize,
                 })
             })
             .map_err(|source| SessionError::Database {
@@ -195,6 +196,56 @@ impl SqliteSessionGraphStore {
 
         Ok(summaries)
     }
+
+    pub(super) fn set_active_agent_impl(
+        &self,
+        session_id: &str,
+        agent_name: &str,
+    ) -> Result<GraphSession> {
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+
+        let head_ref: Option<String> = conn
+            .query_row(
+                "SELECT head_ref FROM graph_sessions WHERE session_id=?1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?
+            .ok_or_else(|| SessionError::NotFound(session_id.to_string()))?;
+
+        let branch_name = head_ref.ok_or_else(|| {
+            SessionError::Conflict(
+                "cannot set active agent while HEAD is detached; checkout a branch first"
+                    .to_string(),
+            )
+        })?;
+
+        conn.execute(
+            "UPDATE graph_refs SET active_agent_name=?1, updated_at=?2 WHERE session_id=?3 AND kind='branch' AND name=?4",
+            params![agent_name, now, session_id, branch_name],
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
+        })?;
+
+        conn.execute(
+            "UPDATE graph_sessions SET active_agent_name=?1, updated_at=?2 WHERE session_id=?3",
+            params![agent_name, now, session_id],
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
+        })?;
+
+        drop(conn);
+        self.open_session_impl(session_id)
+    }
 }
 
 impl SessionGraphStore for SqliteSessionGraphStore {
@@ -202,11 +253,9 @@ impl SessionGraphStore for SqliteSessionGraphStore {
         &self,
         session_id: &str,
         label: Option<&str>,
-        profile_id: Option<&str>,
-        model: Option<&str>,
-        provider: Option<&str>,
+        active_agent_name: &str,
     ) -> Result<GraphSession> {
-        self.create_session_impl(session_id, label, profile_id, model, provider)
+        self.create_session_impl(session_id, label, active_agent_name)
     }
 
     fn open_session(&self, session_id: &str) -> Result<GraphSession> {
@@ -242,6 +291,10 @@ impl SessionGraphStore for SqliteSessionGraphStore {
 
     fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> Result<GraphRef> {
         self.branch_impl(session_id, name, from)
+    }
+
+    fn set_active_agent(&self, session_id: &str, agent_name: &str) -> Result<GraphSession> {
+        self.set_active_agent_impl(session_id, agent_name)
     }
 
     fn diff(&self, session_id: &str, from: &str, to: &str) -> Result<crate::graph::GraphDiff> {

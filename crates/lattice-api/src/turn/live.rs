@@ -21,11 +21,12 @@ use lattice_session::GraphHead;
 
 use super::cep::{generate_and_store_attestation, map_cep_tool_event, ProductionTurnDeps};
 use super::execute::{
-    build_commit_input, derive_terminal_event, map_agent_event, TurnCommitContext,
+    build_commit_input, build_profile_snapshot_metadata, derive_terminal_event, map_agent_event,
+    TurnCommitContext,
 };
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
-use crate::session::{CreateSessionRequest, OpenSessionRequest, Result, SessionApi};
+use crate::session::{OpenSessionRequest, Result, SessionApi};
 
 /// Bounded channel capacity for the turn event stream.
 pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -46,31 +47,23 @@ pub(crate) struct PreparedTurn {
     pub provider: String,
     pub system_prompt: Option<String>,
     pub transcript: lattice_session::HeadTranscript,
-    pub profile_snapshot_id: Option<String>,
+    pub agent_name: String,
+    pub profile_snapshot_hash: String,
+    pub profile_snapshot_json: String,
 }
 
 /// Perform all startup validation for a live turn.
 ///
-/// Resolves model/provider, creates or opens the session, reads the HEAD
-/// transcript, and extracts branch information. Any failure here is returned
-/// as `Result::Err` before the stream is created.
+/// Resolves model/provider, opens the required session, reads the HEAD
+/// transcript, snapshots the active profile, and extracts branch information.
+/// Any failure here is returned as `Result::Err` before the stream is created.
 fn prepare_live_turn(session: &SessionApi, request: &RunTurnRequest) -> Result<PreparedTurn> {
     let (model, system_prompt, provider) = resolve_model_and_prompt(request);
 
-    let session_id = match &request.session_id {
-        Some(id) => {
-            let s = session.open_session(OpenSessionRequest { id: id.clone() })?;
-            s.session_id
-        }
-        None => {
-            let s = session.create_session(CreateSessionRequest {
-                label: None,
-                profile: request.profile.clone(),
-                model: request.model.clone(),
-            })?;
-            s.session_id
-        }
-    };
+    let s = session.open_session(OpenSessionRequest {
+        id: request.session_id.clone(),
+    })?;
+    let session_id = s.session_id;
 
     let transcript = session.head_transcript(&session_id)?;
     let parent_commit_id = transcript.parent_commit_id.clone();
@@ -81,10 +74,10 @@ fn prepare_live_turn(session: &SessionApi, request: &RunTurnRequest) -> Result<P
         GraphHead::Detached { .. } => None,
     };
 
-    let profile_snapshot_id = request
-        .loaded_profile
-        .as_ref()
-        .map(|lp| lp.profile.agent.name.clone());
+    let loaded_profile = request.loaded_profile.as_ref().ok_or_else(|| {
+        crate::session::ApiError::BadRequest("loaded active agent profile is required".to_string())
+    })?;
+    let profile_snapshot = build_profile_snapshot_metadata(loaded_profile)?;
 
     Ok(PreparedTurn {
         session_id,
@@ -95,7 +88,9 @@ fn prepare_live_turn(session: &SessionApi, request: &RunTurnRequest) -> Result<P
         provider,
         system_prompt,
         transcript,
-        profile_snapshot_id,
+        agent_name: profile_snapshot.agent_name,
+        profile_snapshot_hash: profile_snapshot.profile_snapshot_hash,
+        profile_snapshot_json: profile_snapshot.profile_snapshot_json,
     })
 }
 
@@ -263,7 +258,9 @@ async fn run_live_turn_task(
         parent_ids: prepared.parent_ids,
         model: prepared.model,
         provider: prepared.provider,
-        profile_snapshot_id: prepared.profile_snapshot_id,
+        agent_name: prepared.agent_name,
+        profile_snapshot_hash: prepared.profile_snapshot_hash,
+        profile_snapshot_json: prepared.profile_snapshot_json,
     };
 
     let commit_input = build_commit_input(&request.input, &ctx, &agent_result);

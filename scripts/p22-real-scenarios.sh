@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Real-world supervision harness for production `lattice run`.
+# Real-world supervision harness for production session turns.
 #
-# Cursor supervises; Lattice (inner agent) performs work via production `lattice run`.
+# Cursor supervises; Lattice (inner agent) performs work via `lattice session send`.
 # Disposable workspaces only — never mutates the lattice repository source tree.
 #
 # Required env (values never printed):
@@ -21,6 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_REAL_MODEL:-compat:deepseek-v4-pro}"
+AGENT_NAME="p22-real"
 BASE="${ROOT}/build/tmp/p22-real-scenarios"
 REPORT="${P22_REAL_REPORT:-${BASE}/report.md}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -78,12 +79,12 @@ ensure_lattice() {
 seed_profile() {
   local ws="$1"
   local system_prompt="$2"
-  mkdir -p "${ws}/.lattice/agents/default"
-  cat >"${ws}/.lattice/agents/default/agent.toml" <<EOF
+  mkdir -p "${ws}/.lattice/agents/${AGENT_NAME}"
+  cat >"${ws}/.lattice/agents/${AGENT_NAME}/agent.toml" <<EOF
 schema_version = 1
 
 [agent]
-name = "p22-real"
+name = "${AGENT_NAME}"
 model = "${MODEL}"
 
 [prompt]
@@ -113,6 +114,8 @@ run_lattice() {
   local prompt="$2"
   SCENARIO_JSONL="${ws}/events.jsonl"
   SCENARIO_STDERR="${ws}/run.stderr"
+  local session_json="${ws}/session.json"
+  local session_id=""
   set +e
   (
     cd "${ws}"
@@ -121,9 +124,27 @@ run_lattice() {
     # Prevent inheriting the lattice repo workspace when fixtures live under build/tmp/.
     export CARGO_MANIFEST_DIR="${ws}"
     HOME="${ws}" XDG_CONFIG_HOME="${ws}/.config" \
-      "${LATTICE[@]}" --json run "${prompt}" -m "${MODEL}" >"${SCENARIO_JSONL}" 2>"${SCENARIO_STDERR}"
+      "${LATTICE[@]}" --json session new --agent "${AGENT_NAME}" >"${session_json}" 2>"${SCENARIO_STDERR}"
   )
   SCENARIO_EXIT=$?
+  if [[ ${SCENARIO_EXIT} -eq 0 ]]; then
+    session_id="$(jq -r '.session_id // empty' "${session_json}" 2>>"${SCENARIO_STDERR}")"
+    if [[ -z "${session_id}" ]]; then
+      echo "FAIL: session new did not return a session_id" >>"${SCENARIO_STDERR}"
+      SCENARIO_EXIT=2
+    fi
+  fi
+  if [[ ${SCENARIO_EXIT} -eq 0 ]]; then
+    (
+      cd "${ws}"
+      export CARGO_TARGET_DIR="${ws}/target"
+      export RUST_BACKTRACE=0
+      export CARGO_MANIFEST_DIR="${ws}"
+      HOME="${ws}" XDG_CONFIG_HOME="${ws}/.config" \
+        "${LATTICE[@]}" --json session send "${session_id}" "${prompt}" >"${SCENARIO_JSONL}" 2>>"${SCENARIO_STDERR}"
+    )
+    SCENARIO_EXIT=$?
+  fi
   set -e
 }
 

@@ -16,7 +16,9 @@ cargo bench                     # benchmarks
 ## CLI
 
 ```sh
-cargo run -p lattice-cli -- run "1+1=?" -m sonnet
+cargo run -p lattice-cli -- session new --agent default
+cargo run -p lattice-cli -- session send <session_id> "1+1=?"
+cargo run -p lattice-cli -- session agent <session_id> reviewer
 cargo run -p lattice-cli -- resolve sonnet
 cargo run -p lattice-cli -- models --auth
 cargo run -p lattice-cli -- session status
@@ -30,7 +32,7 @@ cargo run -p lattice-cli -- audit
 
 ## Architecture
 
-LATTICE is a model-centric LLM runtime. Tool execution flows through **CEP**
+LATTICE is a session-centric LLM runtime. Tool execution flows through **CEP**
 (Controlled Execution Protocol) — a JSON-RPC method protocol with capability
 envelopes, policy gating, path guards, and an audit trail. The workspace
 enforces a layered internal dependency flow:
@@ -56,8 +58,8 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[cep]` policy sections), discovery, defaults |
 | `lattice-tooling` | Tool `ToolExecutor` trait, `ToolLimits`, and enabled-tools resolution shared types |
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
-| `lattice-api` | Thin public facade for create/open/run/stream/session; composes the per-turn CEP runtime |
-| `lattice-cli` | Binary entry point, subcommands (run, models, resolve, session, doctor, cep, audit) |
+| `lattice-api` | Thin public facade for create/open/turn execution/session; composes the per-turn CEP runtime |
+| `lattice-cli` | Binary entry point, subcommands (session, models, resolve, doctor, cep, audit) |
 
 ### Key Types
 
@@ -164,7 +166,7 @@ The following capabilities are deferred beyond the current release:
 - **No external services needed**: All tests use mock/fake LLM clients. `cargo test` passes without any API keys or network access.
 - **Lint note**: `cargo clippy --all-targets -- -D warnings` may flag new lints as Rust stable advances (e.g. `clippy::io_other_error` on 1.95). `cargo fmt --all --check` may also report diffs if rustfmt formatting rules have evolved since the code was last formatted.
 - **CLI demo commands** (no API key required): `cargo run -p lattice-cli -- doctor`, `resolve <alias>`, `models`, `session status`.
-- **Running the `run` subcommand** requires: (1) an agent profile at `.lattice/agents/default/agent.toml` in the working directory, and (2) the relevant provider API key env var (e.g. `ANTHROPIC_API_KEY`).
+- **Running `session send`** requires: (1) an existing session created with `session new --agent <name>`, (2) a matching agent profile at `.lattice/agents/<name>/agent.toml` whose `[agent].name` is `<name>`, and (3) the relevant provider API key env var (e.g. `ANTHROPIC_API_KEY`).
 
 ## License
 
