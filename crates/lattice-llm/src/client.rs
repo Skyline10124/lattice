@@ -1,6 +1,7 @@
 //! Concrete provider dispatch for LLM execution.
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
@@ -10,6 +11,15 @@ use crate::security;
 use crate::sse;
 use crate::stub::{LlmError, LlmStream};
 use crate::types::{ChatRequest, LlmEvent};
+
+/// Maximum time a provider request may remain open, including the streaming body.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Maximum idle time allowed while connecting to, or reading from, a provider.
+const HTTP_IO_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of bytes included from a non-success provider response body.
+const MAX_ERROR_BODY_SIZE: usize = 64 * 1024;
 
 /// Validate base URL and read the API key from the environment.
 pub fn validate_and_read_key(resolved: &ResolvedModel) -> Result<String, LlmError> {
@@ -322,9 +332,18 @@ fn is_localhost_request_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
+fn http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .connect_timeout(HTTP_IO_TIMEOUT)
+        .read_timeout(HTTP_IO_TIMEOUT)
+}
+
 fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
     let Some((host, port)) = parsed_request_host_port(url) else {
-        return Ok(reqwest::Client::new());
+        return http_client_builder()
+            .build()
+            .map_err(|e| LlmError::Other(format!("failed to build HTTP client: {}", e)));
     };
 
     if security::host_is_dns_rebinding_domain(&host) {
@@ -335,14 +354,61 @@ fn build_http_client_for_url(url: &str) -> Result<reqwest::Client, LlmError> {
     }
 
     if is_localhost_request_host(&host) {
-        return Ok(reqwest::Client::new());
+        return http_client_builder()
+            .build()
+            .map_err(|e| LlmError::Other(format!("failed to build HTTP client: {}", e)));
     }
 
     let pinned = security::resolve_public_socket_addrs(&host, port)?;
-    reqwest::Client::builder()
+    http_client_builder()
         .resolve_to_addrs(host.as_str(), &pinned)
         .build()
         .map_err(|e| LlmError::Other(format!("failed to build HTTP client: {}", e)))
+}
+
+fn append_bounded_error_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    let remaining = MAX_ERROR_BODY_SIZE.saturating_sub(body.len());
+    if chunk.len() <= remaining {
+        body.extend_from_slice(chunk);
+        false
+    } else {
+        body.extend_from_slice(&chunk[..remaining]);
+        true
+    }
+}
+
+async fn read_error_body_capped(response: reqwest::Response) -> String {
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    let mut truncated = false;
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => {
+                if append_bounded_error_chunk(&mut body, &chunk) {
+                    truncated = true;
+                    break;
+                }
+            }
+            Err(e) => {
+                let mut text = String::from_utf8_lossy(&body).into_owned();
+                if !text.is_empty() {
+                    text.push_str("; ");
+                }
+                text.push_str(&format!("failed to read provider error body: {}", e));
+                return text;
+            }
+        }
+    }
+
+    let mut text = String::from_utf8_lossy(&body).into_owned();
+    if truncated {
+        text.push_str(&format!(
+            "... [provider error body truncated at {} bytes]",
+            MAX_ERROR_BODY_SIZE
+        ));
+    }
+    text
 }
 
 /// Dispatch a chat request to the appropriate provider and return a stream.
@@ -370,7 +436,7 @@ pub async fn dispatch_stream(
 
     let status = response.status();
     if !status.is_success() {
-        let status_text = response.text().await.unwrap_or_default();
+        let status_text = read_error_body_capped(response).await;
         return Err(LlmError::Other(format!(
             "provider returned HTTP {}: {}",
             status.as_u16(),
@@ -589,6 +655,23 @@ mod tests {
         let url = build_endpoint_url(&resolved);
         assert!(url.contains("streamGenerateContent"));
         assert!(url.contains("alt=sse"));
+    }
+
+    #[test]
+    fn bounded_error_chunk_reports_truncation() {
+        let mut body = vec![b'a'; MAX_ERROR_BODY_SIZE - 1];
+        let truncated = append_bounded_error_chunk(&mut body, b"bc");
+        assert!(truncated);
+        assert_eq!(body.len(), MAX_ERROR_BODY_SIZE);
+        assert_eq!(body[MAX_ERROR_BODY_SIZE - 1], b'b');
+    }
+
+    #[test]
+    fn bounded_error_chunk_accepts_limit_exactly() {
+        let mut body = vec![b'a'; MAX_ERROR_BODY_SIZE - 1];
+        let truncated = append_bounded_error_chunk(&mut body, b"b");
+        assert!(!truncated);
+        assert_eq!(body.len(), MAX_ERROR_BODY_SIZE);
     }
 
     #[test]
