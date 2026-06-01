@@ -11,6 +11,7 @@ use crate::graph::{
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
+use crate::SessionError;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = env::temp_dir()
@@ -301,6 +302,59 @@ fn commit_turn_rejects_stale_parent() {
         )
         .expect("count");
     assert_eq!(commit_count, 1, "failed commit should not persist");
+}
+
+#[test]
+fn commit_turn_rejects_cross_session_secondary_parent() {
+    let dir = temp_dir("commit_cross_session_secondary_parent");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    store
+        .create_session("victim", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create victim");
+    let victim_commit = store
+        .commit_turn(commit_input(
+            "victim",
+            vec![],
+            vec![user_msg("VICTIM_SECRET_TOKEN_12345")],
+            TurnCommitStatus::Completed,
+        ))
+        .expect("victim commit");
+
+    store
+        .create_session("attacker", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create attacker");
+    let attacker_commit = store
+        .commit_turn(commit_input(
+            "attacker",
+            vec![],
+            vec![user_msg("attacker base")],
+            TurnCommitStatus::Completed,
+        ))
+        .expect("attacker commit");
+
+    let result = store.commit_turn(commit_input(
+        "attacker",
+        vec![attacker_commit.commit_id, victim_commit.commit_id.clone()],
+        vec![user_msg("attacker merge")],
+        TurnCommitStatus::Completed,
+    ));
+
+    assert!(
+        matches!(result, Err(SessionError::MissingCommit(id)) if id == victim_commit.commit_id),
+        "cross-session secondary parent must be rejected before it can poison attacker history"
+    );
+
+    let transcript = store
+        .head_transcript("attacker")
+        .expect("attacker transcript");
+    assert!(
+        transcript
+            .messages
+            .iter()
+            .all(|message| message.content != "VICTIM_SECRET_TOKEN_12345"),
+        "attacker transcript must not include victim messages"
+    );
 }
 
 #[test]
