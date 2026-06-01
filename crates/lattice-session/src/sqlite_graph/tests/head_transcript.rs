@@ -438,7 +438,7 @@ fn head_transcript_rejects_corrupt_cross_session_parent_without_leaking_messages
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("victim", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("victim", None, "coder")
         .expect("create victim");
     let victim_commit = store
         .commit_turn(commit_input(
@@ -452,7 +452,7 @@ fn head_transcript_rejects_corrupt_cross_session_parent_without_leaking_messages
         .expect("victim commit");
 
     store
-        .create_session("attacker", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("attacker", None, "coder")
         .expect("create attacker");
     let attacker_base = store
         .commit_turn(commit_input(

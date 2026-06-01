@@ -300,7 +300,7 @@ fn commit_turn_rejects_cross_session_secondary_parent() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("victim", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("victim", None, "coder")
         .expect("create victim");
     let victim_commit = store
         .commit_turn(commit_input(
@@ -312,7 +312,7 @@ fn commit_turn_rejects_cross_session_secondary_parent() {
         .expect("victim commit");
 
     store
-        .create_session("attacker", None, None, Some("sonnet"), Some("anthropic"))
+        .create_session("attacker", None, "coder")
         .expect("create attacker");
     let attacker_commit = store
         .commit_turn(commit_input(
