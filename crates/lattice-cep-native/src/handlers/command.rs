@@ -246,10 +246,9 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                         }
 
                         if !out_of_scope.is_empty() {
-                            // Record out-of-scope paths; the effect checker enforces the final verdict.
                             ctx.events
                                 .emit(
-                                    "cep.effect_observed_out_of_scope",
+                                    "cep.replan_required",
                                     json!({
                                         "method": Run::NAME,
                                         "active_envelope_id": env_id,
@@ -267,6 +266,22 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                 "backend_invoked": true,
                                 "policy_enforced": true,
                             }));
+
+                            return Err(CepError::new(
+                                CepErrorCode::ReplanRequired,
+                                format!(
+                                    "command.run changed out-of-scope paths: {:?}",
+                                    out_of_scope
+                                ),
+                                CepErrorData::Guard(GuardErrorData {
+                                    method: Run::NAME.into(),
+                                    reason: format!(
+                                        "ReplanRequired: out-of-scope paths {:?}",
+                                        out_of_scope
+                                    ),
+                                }),
+                                Retriability::RequiresReplan,
+                            ));
                         }
                     }
 
@@ -1104,7 +1119,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_mutation_hidden_project_path_outside_scope_records_effect_and_succeeds() {
+    async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_required() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
@@ -1179,12 +1194,11 @@ mod tests {
             timeout_ms: Some(5000),
             declared_impact: Some(ImpactKind::WorkspaceMutation),
         };
-        let result = registry
+        let err = registry
             .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
-            .unwrap();
-        let parsed: RunResult = serde_json::from_value(result).unwrap();
-        assert_eq!(parsed.exit_code, 0);
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
 
         let effects = ledger_clone.snapshot();
         let mutation_effects: Vec<_> = effects
@@ -1209,7 +1223,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn workspace_mutation_post_check_records_effects_and_succeeds_after_supersede() {
+    async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -1336,9 +1350,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = command_task.await.unwrap().unwrap();
-        let parsed: RunResult = serde_json::from_value(result).unwrap();
-        assert_eq!(parsed.exit_code, 0);
+        let err = command_task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
 
         let effects = ledger_clone.snapshot();
         let cmd_exec: Vec<_> = effects
