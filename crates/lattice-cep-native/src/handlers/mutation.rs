@@ -192,8 +192,9 @@ async fn handle_write_file(
 /// Handle `workspace.patch` with Guard L1 preflight scope enforcement and verify flow.
 ///
 /// Flow:
-/// 1. Check active envelope exists -> else EnvelopeMissing
-/// 2. Parse patch, extract all changed paths
+/// 1. Parse patch, extract all changed paths; malformed patch text is schema
+///    error, not a capability/scope failure.
+/// 2. Check active envelope exists -> else EnvelopeMissing
 /// 3. Check ALL paths against WritePath scope (preflight, before apply)
 /// 4. If any out-of-scope -> ReplanRequired, patch NOT applied
 /// 5. Apply patch using existing edit/ machinery
@@ -201,6 +202,18 @@ async fn handle_write_file(
 /// 7. If verify fails -> VerifyFailed, retain diff
 /// 8. Return PatchResult with changed_files
 async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchResult, CepError> {
+    let document = parse_patch_document(&params.patch).map_err(|parse_err| {
+        CepError::new(
+            CepErrorCode::SchemaMismatch,
+            format!("patch parse error: {}", parse_err),
+            CepErrorData::Validation(lattice_cep_protocol::error::ValidationErrorData {
+                field: "patch".into(),
+                reason: parse_err.to_string(),
+            }),
+            Retriability::Permanent,
+        )
+    })?;
+
     let _evaluation = evaluate_and_enforce_policy(&ctx, Patch::NAME, &params).await?;
 
     // 1. Check active envelope
@@ -226,19 +239,6 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         .project_root
         .to_string_lossy()
         .to_string();
-
-    // 4. Parse patch and extract changed paths (preflight)
-    let document = parse_patch_document(&params.patch).map_err(|parse_err| {
-        CepError::new(
-            CepErrorCode::SchemaMismatch,
-            format!("patch parse error: {}", parse_err),
-            CepErrorData::Validation(lattice_cep_protocol::error::ValidationErrorData {
-                field: "patch".into(),
-                reason: parse_err.to_string(),
-            }),
-            Retriability::Permanent,
-        )
-    })?;
 
     let changed_paths: Vec<String> = document
         .operations
@@ -1224,6 +1224,29 @@ mod patch_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+    }
+
+    #[tokio::test]
+    async fn malformed_patch_returns_schema_mismatch_before_capability_check() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let (ctx, _events) = test_ctx_with_store(root, store);
+
+        let params = PatchParams {
+            patch: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new".into(),
+        };
+        let err = registry
+            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
+        assert!(
+            err.message.contains("*** Begin Patch") || err.message.contains("patch parse error"),
+            "malformed patch should report patch syntax, got: {}",
+            err.message
+        );
     }
 
     #[tokio::test]

@@ -40,8 +40,7 @@ pub struct RunResult {
 
 impl CepMethod for Run {
     const NAME: &'static str = "command.run";
-    const DESCRIPTION: &'static str =
-        "Run a command with argv, optional cwd/env/timeout, and declared impact metadata.";
+    const DESCRIPTION: &'static str = "Run a command with argv, optional cwd/env/timeout, and declared_impact metadata. Use JSON argv arrays, never shell strings. Diagnostic commands such as cargo check/test/clippy/doc and git diff/status/log/show should use declared_impact workspace_observation or omit it. Unknown or possibly mutating commands must declare workspace_mutation and require an active envelope with RunCommand plus any needed WritePath scope. Do not use command_execution to claim an unknown command is read-only; policy rejects that as too weak.";
     type Params = RunParams;
     type Result = RunResult;
     const IMPACT: ImpactKind = ImpactKind::CommandExecution;
@@ -72,5 +71,13 @@ mod tests {
         assert_eq!(Run::NAME, "command.run");
         assert!(Run::NAME.contains('.'));
         assert!(!Run::NAME.contains('/'));
+    }
+
+    #[test]
+    fn command_run_description_guides_declared_impact() {
+        assert!(Run::DESCRIPTION.contains("declared_impact"));
+        assert!(Run::DESCRIPTION.contains("workspace_observation"));
+        assert!(Run::DESCRIPTION.contains("workspace_mutation"));
+        assert!(Run::DESCRIPTION.contains("never shell strings"));
     }
 }

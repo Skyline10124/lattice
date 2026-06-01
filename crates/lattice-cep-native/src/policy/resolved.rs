@@ -486,13 +486,16 @@ mod tests {
         let resolver = test_resolver();
         let input = PolicyInput {
             method: "workspace.patch".into(),
-            params: json!({"patch": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new"}),
+            params: json!({"patch": "*** Begin Patch\n*** Update File: src/main.rs\n*** Old Hash: blake3:0000000000000000000000000000000000000000000000000000000000000000\n@@\n-old\n+new\n*** End Patch"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
         assert_eq!(resolved.required_capability, RequiredCapability::WritePath);
         assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceMutation);
+        let target = resolved.resolved_target.unwrap();
+        assert_eq!(target.request_path, "src/main.rs");
+        assert_eq!(target.normalized_path, PathBuf::from("src/main.rs"));
     }
 
     #[test]
