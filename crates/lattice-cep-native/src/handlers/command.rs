@@ -534,10 +534,21 @@ fn capture_recursive(
 }
 
 fn is_snapshot_skipped_path(relative: &str) -> bool {
-    relative == ".git"
-        || relative.starts_with(".git/")
-        || relative == "target"
-        || relative.starts_with("target/")
+    if relative == "target" || relative.starts_with("target/") {
+        return true;
+    }
+
+    // Allow descent into the hook directory while pruning the rest of .git.
+    if relative == ".git" || relative == ".git/hooks" {
+        return false;
+    }
+
+    // Track active hooks, but skip Git's inert sample templates.
+    if let Some(hook) = relative.strip_prefix(".git/hooks/") {
+        return hook.ends_with(".sample");
+    }
+
+    relative.starts_with(".git/")
 }
 
 /// Compute changed paths between pre and post snapshots.
@@ -1863,6 +1874,29 @@ mod tests {
         assert!(snapshot.contains_key(".github/workflows/ci.yml"));
         assert!(!snapshot.contains_key(".git/config"));
         assert!(!snapshot.contains_key("target/debug/out"));
+    }
+
+    #[test]
+    fn capture_snapshot_tracks_active_git_hooks_but_skips_samples_and_objects() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+        std::fs::write(
+            dir.path().join(".git/hooks/pre-commit.sample"),
+            "#!/bin/sh\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".git/hooks/post-checkout"), "#!/bin/sh\n# evil\n")
+            .unwrap();
+        std::fs::write(dir.path().join(".git/objects/whatever"), "x").unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]").unwrap();
+
+        let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
+
+        assert!(snapshot.contains_key(".git/hooks/post-checkout"));
+        assert!(!snapshot.contains_key(".git/hooks/pre-commit.sample"));
+        assert!(!snapshot.contains_key(".git/objects/whatever"));
+        assert!(!snapshot.contains_key(".git/config"));
     }
 
     #[test]
