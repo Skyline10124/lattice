@@ -354,6 +354,16 @@ fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
 /// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
 ///
 /// Merge precedence: compiled defaults < profile inline `[cep.*]` < external policy file.
+fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
+    CepPolicyConfig {
+        project_root: config.project_root.clone(),
+        observation: config.observation.clone(),
+        network: config.network.clone(),
+        budget: config.budget.clone(),
+        command: config.command.clone(),
+    }
+}
+
 pub(crate) fn load_policy_config(
     cep: &CepSection,
     runtime_project_root: &Path,
@@ -601,10 +611,11 @@ pub(crate) fn build_production_turn_deps(
         .and_then(|p| p.to_str().map(str::to_owned));
     let project_root = canonical_root.as_deref().unwrap_or(project_root);
 
-    let cep_policy = match cep {
-        Some(cep_section) => cep_policy_from_profile(cep_section, Path::new(project_root))?,
-        None => CepPolicyConfig::defaults_for_project_root(project_root),
+    let policy_config = match cep {
+        Some(cep_section) => load_policy_config(cep_section, Path::new(project_root))?,
+        None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
     };
+    let cep_policy = cep_policy_from_policy_config(&policy_config);
     let base_envelope =
         production_base_envelope_from_policy(project_root, enabled_tools, &cep_policy)?;
 
@@ -637,10 +648,6 @@ pub(crate) fn build_production_turn_deps(
     let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
     let active_envelope = Arc::new(ActiveEnvelopeStore::new());
 
-    let policy_config = match cep {
-        Some(cep_section) => load_policy_config(cep_section, Path::new(project_root))?,
-        None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
-    };
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
 
     let invariants_dir = cep
@@ -836,7 +843,13 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
+    use lattice_cep_catalog::methods::command::RunParams;
+    use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
+    use lattice_cep_protocol::envelope::{
+        Capability, CepMode, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
+    };
     use lattice_profile::CepSection;
+    use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 
     #[test]
@@ -983,5 +996,113 @@ mod cep_context_profile_policy {
         let cep = CepSection::default();
         let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.command, CommandPolicy::defaults());
+    }
+
+    #[test]
+    fn cep_policy_from_policy_config_preserves_external_command_overrides() {
+        let dir = TempDir::new().unwrap();
+        let external_path = dir.path().join("policy.toml");
+        std::fs::write(
+            &external_path,
+            r#"
+[command]
+default_timeout_ms = 1000
+max_timeout_ms = 1000
+max_output_bytes = 64
+allowed_env = []
+inherited_env = []
+"#,
+        )
+        .unwrap();
+
+        let cep = CepSection {
+            policy: Some(lattice_profile::CepPolicySection {
+                path: Some("policy.toml".into()),
+            }),
+            ..Default::default()
+        };
+        let policy_config = load_policy_config(&cep, dir.path()).expect("external policy");
+        let cep_policy = cep_policy_from_policy_config(&policy_config);
+
+        assert_eq!(cep_policy.command.max_timeout_ms, 1000);
+        assert_eq!(cep_policy.command.max_output_bytes, 64);
+        assert!(cep_policy.command.allowed_env.is_empty());
+        assert!(cep_policy.command.inherited_env.is_empty());
+    }
+
+    #[tokio::test]
+    async fn command_run_enforces_external_timeout_policy() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("policy.toml"),
+            r#"
+[command]
+max_timeout_ms = 1
+allowed_diagnostic_commands = [["echo"]]
+"#,
+        )
+        .unwrap();
+
+        let cep = CepSection {
+            mode: CepMode::Off,
+            policy: Some(lattice_profile::CepPolicySection {
+                path: Some("policy.toml".into()),
+            }),
+            ..Default::default()
+        };
+        let enabled = vec![Run::NAME.to_string(), Declare::NAME.to_string()];
+        let fake_llm = Arc::new(lattice_agent::testing::FakeStreamingLlmClient::builder().build());
+        let mut deps = build_production_turn_deps(
+            dir.path().to_str().unwrap(),
+            &enabled,
+            fake_llm,
+            true,
+            Some(&cep),
+            "test-model",
+            "test-runtime",
+        )
+        .expect("turn deps");
+
+        deps.cep_client
+            .call::<Declare>(DeclareParams {
+                envelope: ExecutionEnvelope {
+                    intent: Intent {
+                        description: "external policy command timeout test".into(),
+                    },
+                    capabilities: BTreeSet::from([Capability::RunCommand {
+                        argv_allowlist: vec!["echo".into()],
+                    }]),
+                    scope: Scope::default(),
+                    impact: vec![],
+                    constraints: Constraints::default(),
+                    verify: None,
+                    on_failure: None,
+                    extensions: serde_json::Map::new(),
+                },
+                supersede: false,
+                reason: Some("external policy command timeout test".into()),
+            })
+            .await
+            .expect("declare RunCommand envelope");
+
+        let params = RunParams {
+            argv: vec!["echo".into(), "external-policy-timeout".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(150_000),
+            declared_impact: Some(ImpactKind::CommandExecution),
+        };
+        let err = deps
+            .cep_client
+            .call::<Run>(params)
+            .await
+            .expect_err("external max_timeout_ms must be enforced");
+        assert!(
+            err.message.contains("timeout") || err.message.contains("exceeds"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        deps.runtime.shutdown().await;
     }
 }
