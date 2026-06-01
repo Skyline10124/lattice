@@ -208,7 +208,7 @@ async fn handle_find_files(
 
     let (paths, paths_visited, truncated) = find_files_at(
         &target.canonical_target,
-        &policy.project_root,
+        &target.allowed_root,
         &params.pattern,
         limit,
     )
@@ -275,7 +275,7 @@ async fn run_grep(
 
     let (matches, bytes_scanned, truncated) = grep_at(
         &target.canonical_target,
-        &policy.project_root,
+        &target.allowed_root,
         &re,
         max_results,
         policy.observation.max_single_read_bytes,
@@ -421,7 +421,7 @@ async fn list_directory_entries(dir: &Path) -> Result<Vec<DirectoryEntry>, CepEr
 
 async fn grep_at(
     root: &Path,
-    project_root: &Path,
+    allowed_root: &Path,
     pattern: &Regex,
     max_results: usize,
     max_read_bytes: usize,
@@ -432,7 +432,7 @@ async fn grep_at(
     let mut truncated = false;
     let mut ctx = GrepWalkContext {
         pattern,
-        project_root,
+        allowed_root,
         matches: &mut matches,
         visited: &mut visited,
         max_results,
@@ -446,7 +446,7 @@ async fn grep_at(
 
 struct GrepWalkContext<'a> {
     pattern: &'a Regex,
-    project_root: &'a Path,
+    allowed_root: &'a Path,
     matches: &'a mut Vec<GrepMatch>,
     visited: &'a mut HashSet<PathBuf>,
     max_results: usize,
@@ -470,7 +470,7 @@ async fn grep_recursive(ctx: &mut GrepWalkContext<'_>, path: &Path, depth: u32) 
     if !ctx.visited.insert(resolved.clone()) {
         return;
     }
-    if resolved != ctx.project_root && !resolved.starts_with(ctx.project_root) {
+    if resolved != ctx.allowed_root && !resolved.starts_with(ctx.allowed_root) {
         return;
     }
 
@@ -488,7 +488,7 @@ async fn grep_recursive(ctx: &mut GrepWalkContext<'_>, path: &Path, depth: u32) 
                 return;
             }
             *ctx.bytes_scanned += content.len();
-            let rel = path_relative(&resolved, ctx.project_root);
+            let rel = path_relative(&resolved, ctx.allowed_root);
             for (line_num, line) in content.lines().enumerate() {
                 if ctx.pattern.is_match(line) {
                     if ctx.matches.len() >= ctx.max_results {
@@ -517,7 +517,7 @@ async fn grep_recursive(ctx: &mut GrepWalkContext<'_>, path: &Path, depth: u32) 
 
 async fn find_files_at(
     root: &Path,
-    project_root: &Path,
+    allowed_root: &Path,
     pattern: &str,
     max_results: usize,
 ) -> (Vec<String>, usize, bool) {
@@ -527,7 +527,7 @@ async fn find_files_at(
     let mut truncated = false;
     let mut ctx = FindWalkContext {
         root,
-        project_root,
+        allowed_root,
         matches: &mut matches,
         pattern,
         visited: &mut visited,
@@ -541,7 +541,7 @@ async fn find_files_at(
 
 struct FindWalkContext<'a> {
     root: &'a Path,
-    project_root: &'a Path,
+    allowed_root: &'a Path,
     matches: &'a mut Vec<String>,
     pattern: &'a str,
     visited: &'a mut HashSet<PathBuf>,
@@ -566,7 +566,7 @@ async fn find_files_recursive(ctx: &mut FindWalkContext<'_>, path: &Path, depth:
         return;
     }
     *ctx.paths_visited += 1;
-    if resolved != ctx.project_root && !resolved.starts_with(ctx.project_root) {
+    if resolved != ctx.allowed_root && !resolved.starts_with(ctx.allowed_root) {
         return;
     }
 
@@ -744,9 +744,19 @@ mod tests {
         HandlerContext,
         mpsc::Receiver<lattice_cep_protocol::ToolEvent>,
     ) {
+        ctx_for_policy(CepPolicyConfig::defaults_for_project_root(root), root)
+    }
+
+    fn ctx_for_policy(
+        policy: CepPolicyConfig,
+        envelope_root: &str,
+    ) -> (
+        HandlerContext,
+        mpsc::Receiver<lattice_cep_protocol::ToolEvent>,
+    ) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        let cep_context = Arc::new(CepTurnContext::from_policy(policy));
         let policy_cfg = crate::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
@@ -757,7 +767,7 @@ mod tests {
             project_root: cep_context.policy.project_root.clone(),
         };
         let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
-        let mut base = BaseExecutionEnvelope::for_workspace_root(root, "native obs test");
+        let mut base = BaseExecutionEnvelope::for_workspace_root(envelope_root, "native obs test");
         base.inner.capabilities = base
             .inner
             .capabilities
@@ -1078,6 +1088,73 @@ mod tests {
             .unwrap();
         let find: FindFilesResult = serde_json::from_value(find_val).unwrap();
         assert!(!find.paths.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_recursive_observation_does_not_follow_symlink_outside_allowed_root() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("allowed.txt"), "SECRET_ALLOWED=yes\n").unwrap();
+        fs::write(dir.path().join("secret.txt"), "SECRET_FORBIDDEN=yes\n").unwrap();
+        std::os::unix::fs::symlink("../secret.txt", src.join("link_to_secret.txt")).unwrap();
+
+        let root = dir.path().to_str().unwrap();
+        let registry = native_registry(root);
+        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
+        policy.observation.allowed_roots = vec![src.canonicalize().unwrap()];
+        let (ctx, _events) = ctx_for_policy(policy, root);
+
+        let read_params = ReadFileParams {
+            path: "secret.txt".into(),
+            offset: None,
+            limit: None,
+            line_numbers: None,
+        };
+        let read_err = registry
+            .dispatch(
+                ReadFile::NAME,
+                serde_json::to_value(&read_params).unwrap(),
+                ctx.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(read_err.code, CepErrorCode::ProjectRootViolation);
+
+        let grep_params = GrepParams {
+            pattern: "SECRET".into(),
+            path: Some("src".into()),
+            max_results: Some(10),
+        };
+        let grep_val = registry
+            .dispatch(
+                Grep::NAME,
+                serde_json::to_value(&grep_params).unwrap(),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let grep: GrepResult = serde_json::from_value(grep_val).unwrap();
+        assert_eq!(grep.matches.len(), 1);
+        assert_eq!(grep.matches[0].path, "allowed.txt");
+        assert_eq!(grep.matches[0].text, "SECRET_ALLOWED=yes");
+
+        let find_params = FindFilesParams {
+            pattern: "*secret*.txt".into(),
+            path: Some("src".into()),
+            limit: Some(10),
+        };
+        let find_val = registry
+            .dispatch(
+                FindFiles::NAME,
+                serde_json::to_value(&find_params).unwrap(),
+                ctx,
+            )
+            .await
+            .unwrap();
+        let find: FindFilesResult = serde_json::from_value(find_val).unwrap();
+        assert!(find.paths.is_empty(), "unexpected paths: {:?}", find.paths);
     }
 
     #[tokio::test]
