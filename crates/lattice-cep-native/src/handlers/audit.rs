@@ -1,6 +1,6 @@
 //! Native `audit.query` and `audit.replay` handlers (PROV-02 / PROV-04).
 
-use crate::audit::{AuditError, AuditQueryFilters};
+use crate::audit::{AuditError, AuditQueryFilters, AUDIT_QUERY_MAX_ROWS};
 use crate::guard_l1::evaluate_and_enforce_policy;
 use crate::provenance::{project_rows, project_turn_trace};
 use crate::registry::{HandlerContext, MethodRegistry};
@@ -34,7 +34,8 @@ async fn handle_audit_query(
     let _evaluation = evaluate_and_enforce_policy(&ctx, AuditQuery::NAME, &params).await?;
 
     let session_id = effective_session_id(&ctx, params.session_id.as_deref()).await;
-    let filters = audit_query_filters_from_params(&params, &session_id);
+    let mut filters = audit_query_filters_from_params(&params, &session_id);
+    filters.limit = Some(AUDIT_QUERY_MAX_ROWS);
 
     let rows = ctx.audit.query_rows(&filters).map_err(audit_error_to_cep)?;
 
@@ -83,16 +84,12 @@ async fn handle_audit_tail(
     let filters = AuditQueryFilters {
         session_id: Some(session_id.clone()),
         since_audit_id: since_filter,
+        exclude_method_prefix: Some("audit.".into()),
+        limit: Some(AUDIT_TAIL_MAX_ROWS + 1),
         ..Default::default()
     };
 
-    let rows: Vec<_> = ctx
-        .audit
-        .query_rows(&filters)
-        .map_err(audit_error_to_cep)?
-        .into_iter()
-        .filter(|row| !row.method.starts_with("audit."))
-        .collect();
+    let rows = ctx.audit.query_rows(&filters).map_err(audit_error_to_cep)?;
 
     let capped = rows.len() > AUDIT_TAIL_MAX_ROWS;
     let emit_rows = if capped {
@@ -161,6 +158,7 @@ async fn handle_audit_replay(
     let filters = AuditQueryFilters {
         session_id: Some(session_id.clone()),
         turn_id: Some(params.turn_id.clone()),
+        limit: Some(AUDIT_QUERY_MAX_ROWS),
         ..Default::default()
     };
 
@@ -237,6 +235,8 @@ fn audit_query_filters_from_params(
         envelope_id: params.envelope_id.clone(),
         started_after: None,
         started_before: None,
+        exclude_method_prefix: None,
+        limit: None,
     }
 }
 

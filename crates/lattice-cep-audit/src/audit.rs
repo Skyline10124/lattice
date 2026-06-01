@@ -20,6 +20,9 @@ pub const SEMANTIC_STAGE_UNROUTED: &str = "unrouted";
 /// Feature-gated scaffold methods (not in default `CATALOG` or production registry).
 pub const SCAFFOLD_METHODS: [&str; 2] = ["workspace.inspect", "workspace.navigate"];
 
+/// Hard upper bound for filtered audit reads requested through CEP-facing helpers.
+pub const AUDIT_QUERY_MAX_ROWS: usize = 10_000;
+
 /// Returns true when `method` is an inspect/navigate scaffold stub.
 pub fn is_scaffold_method(method: &str) -> bool {
     SCAFFOLD_METHODS.contains(&method)
@@ -138,6 +141,10 @@ pub struct AuditQueryFilters {
     pub envelope_id: Option<String>,
     pub started_after: Option<String>,
     pub started_before: Option<String>,
+    /// Exclude methods with this prefix before applying any row limit.
+    pub exclude_method_prefix: Option<String>,
+    /// Database-level row cap for this query, clamped to [`AUDIT_QUERY_MAX_ROWS`].
+    pub limit: Option<usize>,
 }
 
 /// Stored unsigned in-toto-shaped attestation for a turn.
@@ -487,6 +494,10 @@ impl CepAuditStore {
             sql.push_str(" AND json_extract(metadata_json, '$.envelope_id') = ?");
             bind.push(Box::new(envelope_id.clone()));
         }
+        if let Some(exclude_prefix) = &filters.exclude_method_prefix {
+            sql.push_str(" AND method NOT LIKE ?");
+            bind.push(Box::new(format!("{exclude_prefix}%")));
+        }
         if let Some(verdict) = &filters.verdict {
             match verdict.as_str() {
                 "success" => {
@@ -514,7 +525,13 @@ impl CepAuditStore {
             }
         }
 
+        let effective_limit = filters.limit.map(|limit| limit.min(AUDIT_QUERY_MAX_ROWS));
+
         sql.push_str(" ORDER BY audit_id ASC");
+        if let Some(limit) = effective_limit {
+            sql.push_str(" LIMIT ?");
+            bind.push(Box::new(limit as i64));
+        }
 
         let conn = self.conn.lock().expect("audit mutex poisoned");
         let mut stmt = conn.prepare(&sql).map_err(|source| AuditError::Database {
@@ -1310,6 +1327,53 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].audit_id, with_cap.audit_id);
+    }
+
+    #[test]
+    fn query_rows_applies_database_limit_and_excluded_method_prefix() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let ctx = test_context();
+        for (idx, method) in [
+            "workspace.read_file",
+            "audit.query",
+            "workspace.grep",
+            "workspace.list_directory",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let start = store
+                .start_call(
+                    &ctx,
+                    idx as u64 + 1,
+                    method,
+                    &CallAuditMetadata::native_policy_enforced(None),
+                )
+                .unwrap();
+            store
+                .finalize_call(
+                    start,
+                    AuditOutcome::Success {
+                        summary: "ok".into(),
+                    },
+                    Some("native_handler"),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let rows = store
+            .query_rows(&AuditQueryFilters {
+                session_id: Some(ctx.session_id.clone()),
+                exclude_method_prefix: Some("audit.".into()),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].method, "workspace.read_file");
+        assert_eq!(rows[1].method, "workspace.grep");
     }
 
     #[test]
