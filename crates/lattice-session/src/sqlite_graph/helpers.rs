@@ -148,11 +148,33 @@ impl SqliteSessionGraphStore {
         Err(SessionError::MissingCommit(target.to_string()))
     }
 
-    pub(super) fn get_parent_ids(&self, conn: &Connection, commit_id: &str) -> Result<Vec<String>> {
+    pub(super) fn commit_exists_in_session(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        commit_id: &str,
+    ) -> Result<bool> {
+        conn.query_row(
+            "SELECT COUNT(*) FROM graph_commits WHERE commit_id=?1 AND session_id=?2",
+            params![commit_id, session_id],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
+        )
+        .map_err(|source| SessionError::Database {
+            path: self.db_path.clone(),
+            source,
+        })
+    }
+
+    pub(super) fn get_parent_ids(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        commit_id: &str,
+    ) -> Result<Vec<String>> {
         let parents_json: String = conn
             .query_row(
-                "SELECT parents_json FROM graph_commits WHERE commit_id=?1",
-                params![commit_id],
+                "SELECT parents_json FROM graph_commits WHERE commit_id=?1 AND session_id=?2",
+                params![commit_id, session_id],
                 |row| row.get(0),
             )
             .map_err(|_| SessionError::MissingCommit(commit_id.to_string()))?;
@@ -174,8 +196,8 @@ impl SqliteSessionGraphStore {
         }
     }
 
-    /// Collect all commits reachable from `head_commit_id` in stable topological
-    /// order (every parent before its child).
+    /// Collect all same-session commits reachable from `head_commit_id` in stable
+    /// topological order (every parent before its child).
     ///
     /// Parent visit order follows `parents_json` array order: `parent_ids[0]`
     /// (first parent / mainline) is traversed before additional merge parents.
@@ -183,6 +205,7 @@ impl SqliteSessionGraphStore {
     pub(super) fn collect_reachable_commits_topological(
         &self,
         conn: &Connection,
+        session_id: &str,
         head_commit_id: &str,
     ) -> Result<Vec<String>> {
         enum Frame {
@@ -205,7 +228,7 @@ impl SqliteSessionGraphStore {
                         return Err(self.graph_cycle_error(&cid));
                     }
                     stack.push(Frame::Exit(cid.clone()));
-                    let parents = self.get_parent_ids(conn, &cid)?;
+                    let parents = self.get_parent_ids(conn, session_id, &cid)?;
                     for parent in parents.into_iter().rev() {
                         if !visited.contains(&parent) {
                             stack.push(Frame::Enter(parent));
@@ -229,6 +252,7 @@ impl SqliteSessionGraphStore {
     pub(super) fn commit_message_ids_batch(
         &self,
         conn: &Connection,
+        session_id: &str,
         commit_ids: &[String],
     ) -> Result<HashMap<String, Vec<String>>> {
         if commit_ids.is_empty() {
@@ -241,12 +265,12 @@ impl SqliteSessionGraphStore {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "SELECT commit_id, message_ids_json FROM graph_commits WHERE commit_id IN ({placeholders})"
+                "SELECT commit_id, message_ids_json FROM graph_commits WHERE session_id=? AND commit_id IN ({placeholders})"
             );
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = chunk
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
+            let mut param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(chunk.len() + 1);
+            param_refs.push(&session_id);
+            param_refs.extend(chunk.iter().map(|s| s as &dyn rusqlite::types::ToSql));
 
             let mut stmt = conn
                 .prepare(&sql)
@@ -283,6 +307,7 @@ impl SqliteSessionGraphStore {
     pub(super) fn load_graph_messages_by_id(
         &self,
         conn: &Connection,
+        session_id: &str,
         message_ids: &[&str],
     ) -> Result<HashMap<String, GraphMessage>> {
         if message_ids.is_empty() {
@@ -296,13 +321,17 @@ impl SqliteSessionGraphStore {
                 .join(",");
             let sql = format!(
                 "SELECT message_id, role, content, reasoning_content, tool_call_id, name, tool_calls_json
-                 FROM graph_messages WHERE message_id IN ({placeholders})"
+                 FROM graph_messages WHERE session_id=? AND message_id IN ({placeholders})"
             );
             let param_values: Vec<String> = chunk.iter().map(|s| (*s).to_string()).collect();
-            let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
-                .iter()
-                .map(|s| s as &dyn rusqlite::types::ToSql)
-                .collect();
+            let mut param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                Vec::with_capacity(param_values.len() + 1);
+            param_refs.push(&session_id);
+            param_refs.extend(
+                param_values
+                    .iter()
+                    .map(|s| s as &dyn rusqlite::types::ToSql),
+            );
 
             let mut stmt = conn
                 .prepare(&sql)
@@ -370,6 +399,7 @@ impl SqliteSessionGraphStore {
     pub(super) fn collect_ancestors(
         &self,
         conn: &Connection,
+        session_id: &str,
         start: &str,
     ) -> Result<std::collections::HashSet<String>> {
         let mut visited = std::collections::HashSet::new();
@@ -378,7 +408,7 @@ impl SqliteSessionGraphStore {
         visited.insert(start.to_string());
 
         while let Some(current) = queue.pop_front() {
-            let parents = self.get_parent_ids(conn, &current)?;
+            let parents = self.get_parent_ids(conn, session_id, &current)?;
             for parent in parents {
                 if visited.insert(parent.clone()) {
                     queue.push_back(parent);

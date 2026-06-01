@@ -32,11 +32,12 @@ impl SqliteSessionGraphStore {
 
         // All reachable commits in topological order (M-11): includes merge
         // parents, not just first-parent ancestry.
-        let commit_ids = self.collect_reachable_commits_topological(&conn, &parent_commit_id)?;
+        let commit_ids =
+            self.collect_reachable_commits_topological(&conn, session_id, &parent_commit_id)?;
 
         // Batch-load message IDs per commit, then all messages in two queries
         // (same pattern as log_impl tool_message_count resolution).
-        let commit_message_ids = self.commit_message_ids_batch(&conn, &commit_ids)?;
+        let commit_message_ids = self.commit_message_ids_batch(&conn, session_id, &commit_ids)?;
         let mut ordered_message_ids: Vec<String> = Vec::new();
         for cid in &commit_ids {
             let message_ids = commit_message_ids
@@ -46,7 +47,7 @@ impl SqliteSessionGraphStore {
         }
 
         let ordered_refs: Vec<&str> = ordered_message_ids.iter().map(String::as_str).collect();
-        let messages_by_id = self.load_graph_messages_by_id(&conn, &ordered_refs)?;
+        let messages_by_id = self.load_graph_messages_by_id(&conn, session_id, &ordered_refs)?;
 
         let mut all_messages: Vec<GraphMessage> = Vec::with_capacity(ordered_message_ids.len());
         for mid in &ordered_message_ids {
@@ -299,6 +300,12 @@ impl SqliteSessionGraphStore {
                         expected_parent
                     )));
                 }
+            }
+        }
+
+        for parent_id in &input.parent_ids {
+            if !self.commit_exists_in_session(conn, &input.session_id, parent_id)? {
+                return Err(SessionError::MissingCommit(parent_id.clone()));
             }
         }
 

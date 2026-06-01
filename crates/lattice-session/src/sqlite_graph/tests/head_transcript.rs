@@ -4,6 +4,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+use rusqlite::Connection;
+
 use crate::graph::{
     derive_commit_message, GraphHead, GraphMessage, SessionGraphStore, TurnCommitInput,
     TurnCommitStatus, TurnUsage,
@@ -428,6 +430,64 @@ fn setup_merge_graph(store: &SqliteSessionGraphStore) -> (String, String, String
         commit_c.commit_id,
         commit_m.commit_id,
     )
+}
+
+#[test]
+fn head_transcript_rejects_corrupt_cross_session_parent_without_leaking_messages() {
+    let dir = temp_dir("cross_session_parent_transcript");
+    let store = SqliteSessionGraphStore::new(dir);
+
+    store
+        .create_session("victim", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create victim");
+    let victim_commit = store
+        .commit_turn(commit_input(
+            "victim",
+            vec![],
+            vec![
+                user_msg("VICTIM_SECRET_TOKEN_12345"),
+                assistant_msg("victim answer"),
+            ],
+        ))
+        .expect("victim commit");
+
+    store
+        .create_session("attacker", None, None, Some("sonnet"), Some("anthropic"))
+        .expect("create attacker");
+    let attacker_base = store
+        .commit_turn(commit_input(
+            "attacker",
+            vec![],
+            vec![user_msg("attacker base")],
+        ))
+        .expect("attacker base");
+    let attacker_head = store
+        .commit_turn(commit_input(
+            "attacker",
+            vec![attacker_base.commit_id],
+            vec![user_msg("attacker head")],
+        ))
+        .expect("attacker head");
+
+    let parents_json = serde_json::to_string(&vec![
+        attacker_head.parent_ids[0].clone(),
+        victim_commit.commit_id.clone(),
+    ])
+    .expect("parents json");
+    let conn = Connection::open(store.db_path()).expect("raw conn");
+    conn.execute(
+        "UPDATE graph_commits SET parents_json=?1 WHERE session_id='attacker' AND commit_id=?2",
+        (&parents_json, &attacker_head.commit_id),
+    )
+    .expect("corrupt attacker parents");
+
+    let err = store
+        .head_transcript("attacker")
+        .expect_err("cross-session parent should make traversal fail closed");
+    assert!(
+        matches!(err, crate::SessionError::MissingCommit(id) if id == victim_commit.commit_id),
+        "transcript traversal must not resolve commits outside the requested session"
+    );
 }
 
 #[test]

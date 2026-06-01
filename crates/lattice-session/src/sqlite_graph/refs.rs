@@ -182,8 +182,8 @@ impl SqliteSessionGraphStore {
         let to_id = self.resolve_target_to_commit_id(&conn, session_id, to)?;
 
         // Build ancestor set for `from` (including from itself).
-        let from_ancestors = self.collect_ancestors(&conn, &from_id)?;
-        let to_ancestors = self.collect_ancestors(&conn, &to_id)?;
+        let from_ancestors = self.collect_ancestors(&conn, session_id, &from_id)?;
+        let to_ancestors = self.collect_ancestors(&conn, session_id, &to_id)?;
 
         // Find common ancestor: walk from `from` towards root, first commit
         // that appears in to_ancestors.
@@ -196,7 +196,10 @@ impl SqliteSessionGraphStore {
                     break;
                 }
                 // Get parent of current.
-                current = self.get_parent_ids(&conn, &cid)?.into_iter().next();
+                current = self
+                    .get_parent_ids(&conn, session_id, &cid)?
+                    .into_iter()
+                    .next();
             }
             found
         };
