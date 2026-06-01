@@ -40,10 +40,10 @@ enforces a layered internal dependency flow:
 ```
 Layer 0 (leaf):  lattice-cep-protocol   lattice-llm   lattice-session
 Layer 1:         lattice-cep-catalog(→protocol)  lattice-profile(→protocol)  lattice-tooling(→llm)  lattice-agent(→llm,session)
-Layer 2:         lattice-cep-dispatch(→protocol,catalog)  lattice-cep-audit(→protocol,catalog)
-Layer 3:         lattice-cep-native(→protocol,catalog,dispatch,audit,llm,tooling)
+Layer 2:         lattice-cep-dispatch(→protocol,catalog)  lattice-cep-audit(→protocol,catalog)  lattice-cep-authority(→protocol,catalog,llm)  lattice-cep-invariants(→catalog)
+Layer 3:         lattice-cep-native(→protocol,catalog,dispatch,audit,authority,invariants,llm,tooling)
 Layer 4:         lattice-api(→ all of the above)
-Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling)
+Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authority/invariants)
 ```
 
 | Crate | Role |
@@ -52,7 +52,9 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling)
 | `lattice-cep-catalog` | Typed CEP methods: `CepMethod`, params/results, `MethodDescriptor`, static 14-method `CATALOG`, and schema data needed for catalog projection. |
 | `lattice-cep-dispatch` | CEP typed dispatch and in-process transport: generic `MethodRegistry`, `CepClient`/`CepTransport`, cancellation, and event sink. Does not depend on native policy/audit/effect implementations. |
 | `lattice-cep-audit` | Audit persistence: `CepAuditStore`, query filters, row model, stage labels, impact/capability labels, PROV projection, and attestation persistence. SQLite dependency is kept here. |
-| `lattice-cep-native` | Production native handlers plus the native policy, guard, effect, verify, edit, shell/web helper, envelope store, invariants, and LLM-facing tool definition projection. Low-level helpers remain crate-internal implementation details behind native handlers. |
+| `lattice-cep-authority` | CEP authority semantics: default policy, capability matching, command/network/observation/budget policy, Guard L1 path/scope checks, active envelope store, effect ledger, authorized effect regions, and effect-region checker. |
+| `lattice-cep-invariants` | CEP invariant card model, loading/index/review helpers, opaque-human-review helpers, `.cep/invariants` resolution, and Guard L2 AST checks. |
+| `lattice-cep-native` | Production native handlers plus native transport/lifecycle integration, verify, edit, shell/web helpers, and LLM-facing tool definition projection. It keeps compatibility re-exports for authority/invariant types; low-level helpers remain crate-internal behind native handlers. |
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[cep]` policy sections), discovery, defaults |
@@ -90,9 +92,9 @@ the catalog — there is no legacy `default_tool_definitions()` path.
 The main agent turn path is:
 
 1. `lattice-api` exposes `run_turn` / `stream_turn`; `stream_turn` is the single live execution core and `run_turn` drains it via `RunTurnCollector`.
-2. `turn/cep.rs` composes a **turn-scoped CEP runtime**: it builds a native `MethodRegistry` (`register_production_method_registry`), a dispatch `CepTransport` server + `CepClient`, installs the policy hook from the profile `[cep]` sections, runs the server with `run_native`, and wraps the client in a `CepExecutorAdapter`.
+2. `turn/cep.rs` composes a **turn-scoped CEP runtime**: it builds a native `MethodRegistry` (`register_production_method_registry`), a dispatch `CepTransport` server + `CepClient`, installs the authority policy hook from the profile `[cep]` sections, runs the server with `run_native`, and wraps the client in a `CepExecutorAdapter`.
 3. `AgentLoop` reads session state, builds messages, calls the LLM via `LlmClient`, and for each requested tool call invokes the adapter, which sends a typed CEP JSON-RPC frame over the transport.
-4. The native server lifecycle records audit start/finish and effect checks; native handlers run policy → guard (path scope) → execution → verify (post-mutation). Mutating methods require a prior `envelope.declare` authority.
+4. The native server lifecycle records audit start/finish and effect checks; native handlers invoke authority policy/Guard L1/effect helpers and invariant Guard L2 checks around execution and verify. Mutating methods require a prior `envelope.declare` authority.
 5. Turn outcomes are persisted as commits in the session graph via `SessionGraphStore`.
 6. CLI renders events and requires successful completion (exit-code semantics).
 
@@ -121,9 +123,10 @@ Use this table to skip the "which crate owns this?" exploration step.
 | CEP method definitions / catalog | `lattice-cep-catalog/src/` | `catalog.rs`, `method.rs`, `methods/{workspace,command,external,session,envelope,audit}.rs` |
 | CEP generic dispatch / transport | `lattice-cep-dispatch/src/` | `registry.rs`, `transport.rs` |
 | CEP audit persistence / provenance projection | `lattice-cep-audit/src/` | `audit.rs`, `provenance/{attestation,canonicalize,projector}.rs` |
+| CEP authority semantics (policy/capability/network/command/observation/budget, Guard L1, active envelope store, effect ledger/checker) | `lattice-cep-authority/src/` | `policy/`, `guard.rs`, `envelope_store.rs`, `effect/` |
+| CEP invariant cards and Guard L2 AST checks | `lattice-cep-invariants/src/` | `invariants/`, `guard_l2.rs` |
 | Native CEP method handlers (server impls) | `lattice-cep-native/src/handlers/` | `mutation.rs`, `command.rs`, `external.rs`, `observation.rs`, `session_state.rs`, `envelope.rs`, `audit.rs` |
-| Policy engine (capability/command/network/budget) | `lattice-cep-native/src/policy/` | `default.rs`, `command.rs`, `network.rs`, `observation.rs`, `budget.rs`, `capability.rs`, `resolved.rs` |
-| Path guard / verify / effect / envelope lifecycle | `lattice-cep-native/src/` | `guard_l1.rs`, `verify.rs`, `effect/`, `envelope_store.rs`, `transport.rs` |
+| Native policy/guard bridge, verify, and transport lifecycle | `lattice-cep-native/src/` | `guard_l1.rs`, `verify.rs`, `transport.rs`, `registry.rs`, `native_registry.rs` |
 | Low-level native helpers | `lattice-cep-native/src/executor/` | `shell.rs`, `web.rs`, `render.rs` |
 | Edit/diff application logic | `lattice-cep-native/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
 | LLM-facing tool schema generation | `lattice-cep-native/src/` | `tool_definitions.rs` |

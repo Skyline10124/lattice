@@ -18,6 +18,8 @@ lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
 lattice-cep-protocol = { workspace = true }
 lattice-cep-catalog = { workspace = true }
+lattice-cep-authority = { workspace = true }
+lattice-cep-invariants = { workspace = true }
 lattice-cep-native = { workspace = true }
 lattice-llm = { workspace = true }
 async-trait = { workspace = true }

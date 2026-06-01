@@ -11,13 +11,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
+use lattice_cep_authority::CepTurnContext;
 use lattice_cep_catalog::catalog::catalog;
 use lattice_cep_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
-use lattice_cep_native::invariants::loader::load_cards_from_dir;
-use lattice_cep_native::invariants::resolve_invariants_dir;
+use lattice_cep_invariants::invariants::loader::load_cards_from_dir;
+use lattice_cep_invariants::resolve_invariants_dir;
 use lattice_cep_native::{
     register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
-    CepTurnContext, MethodRegistry, ServerRunConfig,
+    MethodRegistry, ServerRunConfig,
 };
 use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
 
@@ -398,6 +399,7 @@ async fn submit_intent_smoke_async() -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+    use lattice_cep_invariants::invariants::types::CardAnchor;
     use lattice_cep_native::audit::{AuditOutcome, CallAuditMetadata};
     use lattice_cep_native::{CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
@@ -622,10 +624,7 @@ mod tests {
             !wire_freeze.forbidden.is_empty(),
             "wire-freeze card should have forbidden entries"
         );
-        assert!(matches!(
-            wire_freeze.anchor,
-            lattice_cep_native::invariants::types::CardAnchor::Glob(_)
-        ));
+        assert!(matches!(wire_freeze.anchor, CardAnchor::Glob(_)));
 
         // no-legacy-public-expansion card
         let legacy_card = cards
@@ -636,10 +635,7 @@ mod tests {
             !legacy_card.forbidden.is_empty(),
             "no-legacy-expansion card should have forbidden entries"
         );
-        assert!(matches!(
-            legacy_card.anchor,
-            lattice_cep_native::invariants::types::CardAnchor::Glob(_)
-        ));
+        assert!(matches!(legacy_card.anchor, CardAnchor::Glob(_)));
     }
 
     #[test]

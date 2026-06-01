@@ -1,0 +1,22 @@
+[package]
+name = "lattice-cep-invariants"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "CEP invariant card loading, matching, review helpers, and L2 structural checks"
+
+[dependencies]
+lattice-cep-catalog = { workspace = true }
+lattice-cep-protocol = { workspace = true }
+globset = "0.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+
+[dev-dependencies]
+tempfile = { workspace = true }

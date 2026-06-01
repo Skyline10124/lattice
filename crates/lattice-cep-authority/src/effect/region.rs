@@ -40,7 +40,7 @@ use lattice_cep_protocol::policy::SourcedCapability;
 use lattice_cep_protocol::CepError;
 
 use super::ledger::{ObservedEffect, ObservedScope};
-use crate::guard_l1::{normalize_write_path_pattern, WritePathPattern};
+use crate::guard::{normalize_write_path_pattern, WritePathPattern};
 use crate::policy::command::EffectiveImpact;
 use crate::policy::CepPolicyConfig;
 

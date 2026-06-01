@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 use tempfile::TempDir;
 
+use lattice_cep_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lattice_cep_authority::effect::region::AuthorizedEffectRegion;
 use lattice_cep_catalog::methods::command::RunParams;
 use lattice_cep_catalog::methods::external::FetchParams;
 use lattice_cep_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
@@ -18,8 +20,6 @@ use lattice_cep_catalog::methods::workspace::{
 };
 use lattice_cep_catalog::methods::*;
 use lattice_cep_catalog::CepMethod;
-use lattice_cep_native::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
-use lattice_cep_native::effect::region::AuthorizedEffectRegion;
 use lattice_cep_native::testing::effect_harness::{
     assert_negative_no_backend_effects, assert_positive, build_test_context,
     effect_contract_harness, rt,
@@ -29,7 +29,7 @@ use lattice_cep_protocol::envelope::{
 };
 use lattice_cep_protocol::policy::{CapabilitySource, SourcedCapability};
 
-use lattice_cep_native::policy::NetworkPolicyConfig;
+use lattice_cep_authority::NetworkPolicyConfig;
 
 // ── Helper builders ────────────────────────────────────────────────────
 

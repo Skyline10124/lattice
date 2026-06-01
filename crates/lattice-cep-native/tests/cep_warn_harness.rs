@@ -24,6 +24,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lattice_cep_authority::effect::{
+    ledger::{EffectSource, ObservedEffect, ObservedScope},
+    region::AuthorizedEffectRegion,
+};
+use lattice_cep_authority::CepTurnContext;
 use lattice_cep_catalog::method::RequiredCapability;
 use lattice_cep_catalog::methods::audit::{
     AuditQuery, AuditQueryParams, AuditReplay, AuditReplayParams, AuditTail, AuditTailParams,
@@ -40,13 +45,9 @@ use lattice_cep_catalog::methods::workspace::{
     ReadFileParams, ReadFileResult, WriteFile, WriteFileParams, WriteFileResult,
 };
 use lattice_cep_catalog::{CatalogMethod, CepMethod};
-use lattice_cep_native::effect::{
-    ledger::{EffectSource, ObservedEffect, ObservedScope},
-    region::AuthorizedEffectRegion,
-};
 use lattice_cep_native::{
-    register_production_method_registry, CepAuditStore, CepTransport, CepTurnContext,
-    MethodRegistry, ServerRunConfig,
+    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
+    ServerRunConfig,
 };
 use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
 use tempfile::TempDir;

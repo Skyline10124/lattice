@@ -371,9 +371,9 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
+    use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lattice_cep_authority::{CepPolicyConfig, CepTurnContext};
     use lattice_cep_catalog::methods::session::TodoWrite;
-    use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use lattice_cep_native::{CepPolicyConfig, CepTurnContext};
     use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");

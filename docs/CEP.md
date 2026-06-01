@@ -16,7 +16,9 @@ The documented public CEP contract is split across **`lattice-cep-protocol`** an
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lattice-cep-protocol` |
 | Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lattice-cep-protocol`; audit rows, filters, and attestation persistence in `lattice-cep-audit` |
 
-**Not public surface:** `lattice-cep-native` handler internals, private low-level executor helpers, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native CEP server.
+Internal implementation is split across `lattice-cep-authority` (default policy, Guard L1, active envelope, effect-region semantics), `lattice-cep-invariants` (invariant cards and Guard L2), and `lattice-cep-native` (production handlers, transport lifecycle, verify/edit/shell/web integration).
+
+**Not public surface:** `lattice-cep-native` handler internals, private low-level executor helpers, authority/invariant implementation details, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native CEP server.
 
 ### Release gate and self-check
 

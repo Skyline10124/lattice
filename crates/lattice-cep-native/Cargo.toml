@@ -4,7 +4,7 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "CEP native production handlers and native policy, guard, effect, verify, edit, shell, web, and invariant implementation"
+description = "CEP native production handlers, transport integration, verify, edit, shell, web, and tool projection"
 
 [dependencies]
 lattice-llm = { workspace = true }
@@ -13,10 +13,11 @@ lattice-cep-protocol = { workspace = true }
 lattice-cep-catalog = { workspace = true }
 lattice-cep-dispatch = { workspace = true }
 lattice-cep-audit = { workspace = true }
+lattice-cep-authority = { workspace = true }
+lattice-cep-invariants = { workspace = true }
 schemars = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }
-globset = "0.4"
 indexmap = { workspace = true }
 libc = { workspace = true }
 regex = { workspace = true }
@@ -24,10 +25,7 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-toml = { workspace = true }
 tracing = { workspace = true }
-tree-sitter = "0.26"
-tree-sitter-rust = "0.24"
 thiserror = { workspace = true }
 url = { workspace = true }
 

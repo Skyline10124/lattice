@@ -44,11 +44,11 @@ use tempfile::TempDir;
 // so the policy check passes. The overreach is in the effect region check.
 
 fn overreach_todo_handler() -> MethodRegistry {
-    use lattice_cep_catalog::method::RequiredCapability;
-    use lattice_cep_native::effect::{
+    use lattice_cep_authority::effect::{
         ledger::{EffectSource, ObservedEffect, ObservedScope},
         region::AuthorizedEffectRegion,
     };
+    use lattice_cep_catalog::method::RequiredCapability;
 
     let mut registry = MethodRegistry::new();
     registry
@@ -197,13 +197,13 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // Set up a proper policy hook for the workspace root.
     {
-        use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
+        use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+        use lattice_cep_authority::CepTurnContext;
         let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
         config.default_policy_hook = Some(hook);
-        config.cep_context =
-            Arc::new(lattice_cep_native::CepTurnContext::defaults_for_project_root(canonical_str));
+        config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(canonical_str));
     }
 
     let (client, server) = CepTransport::pair(8);

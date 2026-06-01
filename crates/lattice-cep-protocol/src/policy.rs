@@ -202,7 +202,7 @@ pub enum PolicyDecision {
 /// Must be synchronous and deterministic — no I/O, no time-dependence,
 /// no mutable state access. This is the future integration point for
 /// Cedar/OPA/Rego external policy engines; this crate ships the seam and the
-/// default in-process hook lives in `lattice-cep-native`.
+/// default in-process hook lives in `lattice-cep-authority`.
 pub trait PolicyHook: Send + Sync {
     /// Evaluate the policy for the given input and return a decision.
     fn decide(&self, input: &PolicyInput) -> PolicyDecision;

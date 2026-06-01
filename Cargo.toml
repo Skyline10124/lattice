@@ -10,6 +10,8 @@ members = [
     "crates/lattice-cep-catalog",
     "crates/lattice-cep-dispatch",
     "crates/lattice-cep-audit",
+    "crates/lattice-cep-authority",
+    "crates/lattice-cep-invariants",
     "crates/lattice-cep-native",
     "crates/lattice-cli",
     "crates/lattice-profile",
@@ -33,6 +35,8 @@ lattice-cep-protocol = { path = "crates/lattice-cep-protocol" }
 lattice-cep-catalog  = { path = "crates/lattice-cep-catalog" }
 lattice-cep-dispatch = { path = "crates/lattice-cep-dispatch" }
 lattice-cep-audit    = { path = "crates/lattice-cep-audit" }
+lattice-cep-authority = { path = "crates/lattice-cep-authority" }
+lattice-cep-invariants = { path = "crates/lattice-cep-invariants" }
 lattice-cep-native   = { path = "crates/lattice-cep-native" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }

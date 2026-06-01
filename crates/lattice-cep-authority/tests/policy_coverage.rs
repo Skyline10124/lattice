@@ -7,10 +7,10 @@ use lattice_cep_catalog::method::RequiredCapability;
 use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, Capability};
 use lattice_cep_protocol::policy::{CapabilitySource, SourcedCapability};
 
-use lattice_cep_native::policy::capability::{
+use lattice_cep_authority::policy::capability::{
     match_capability, CapabilityMatchVerdict, InvocationFacts, SessionStateOperation,
 };
-use lattice_cep_native::policy::default::CapabilitySourcePolicy;
+use lattice_cep_authority::policy::default::CapabilitySourcePolicy;
 
 /// Fixture row describing expected capability behavior for a catalog method.
 struct CapabilityFixture {

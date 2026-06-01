@@ -8,6 +8,11 @@ use async_trait::async_trait;
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
 };
+use lattice_cep_authority::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use lattice_cep_authority::{
+    ActiveEnvelopeStore, BudgetLimits, CepPolicyConfig, CepTurnContext, CommandPolicy,
+    NetworkPolicyConfig, ObservationPolicyConfig,
+};
 use lattice_cep_catalog::catalog;
 use lattice_cep_catalog::methods::audit::{AuditQuery, AuditReplay, AuditTail};
 use lattice_cep_catalog::methods::command::Run;
@@ -18,13 +23,12 @@ use lattice_cep_catalog::methods::workspace::{
     FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
 };
 use lattice_cep_catalog::{CatalogMethod, CepMethod};
-use lattice_cep_native::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use lattice_cep_invariants as invariants;
 use lattice_cep_native::{
-    build_in_toto_statement, impact_kind_for_method, impact_kind_label, invariants,
+    build_in_toto_statement, impact_kind_for_method, impact_kind_label,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
-    wire_code_for_error, ActiveEnvelopeStore, AttestationRecord, AuditQueryFilters, BudgetLimits,
-    CepAuditContext, CepAuditStore, CepClient, CepPolicyConfig, CepTransport, CepTurnContext,
-    CommandPolicy, MethodRegistry, NetworkPolicyConfig, ObservationPolicyConfig, ServerRunConfig,
+    wire_code_for_error, AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore,
+    CepClient, CepTransport, MethodRegistry, ServerRunConfig,
 };
 use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
 use lattice_cep_protocol::error::{

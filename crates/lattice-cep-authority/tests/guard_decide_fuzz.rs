@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lattice_cep_protocol::envelope::Capability;
 use lattice_cep_protocol::policy::{
     CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyBudgetSnapshot,

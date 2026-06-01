@@ -1015,7 +1015,9 @@ dependencies = [
  "blake3",
  "futures",
  "lattice-agent",
+ "lattice-cep-authority",
  "lattice-cep-catalog",
+ "lattice-cep-invariants",
  "lattice-cep-native",
  "lattice-cep-protocol",
  "lattice-llm",
@@ -1049,6 +1051,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cep-authority"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lattice-cep-catalog",
+ "lattice-cep-protocol",
+ "lattice-llm",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "lattice-cep-catalog"
 version = "0.1.0"
 dependencies = [
@@ -1070,16 +1090,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-cep-invariants"
+version = "0.1.0"
+dependencies = [
+ "globset",
+ "lattice-cep-catalog",
+ "lattice-cep-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
 name = "lattice-cep-native"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "futures",
- "globset",
  "indexmap",
  "lattice-cep-audit",
+ "lattice-cep-authority",
  "lattice-cep-catalog",
  "lattice-cep-dispatch",
+ "lattice-cep-invariants",
  "lattice-cep-protocol",
  "lattice-llm",
  "lattice-tooling",
@@ -1095,8 +1133,6 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "tree-sitter",
- "tree-sitter-rust",
  "url",
  "uuid",
 ]
@@ -1126,7 +1162,9 @@ dependencies = [
  "futures",
  "lattice-agent",
  "lattice-api",
+ "lattice-cep-authority",
  "lattice-cep-catalog",
+ "lattice-cep-invariants",
  "lattice-cep-native",
  "lattice-cep-protocol",
  "lattice-llm",

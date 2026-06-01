@@ -13,7 +13,9 @@ lattice/
 │   ├── lattice-cep-catalog/  # CEP typed methods, params/results, descriptors, static catalog
 │   ├── lattice-cep-dispatch/ # CEP typed dispatch, client/transport, cancellation, event sinks
 │   ├── lattice-cep-audit/    # CEP audit store, query filters, rows, stages, attestations
-│   ├── lattice-cep-native/   # CEP native handlers plus policy, guard, effect, verify, edit helpers
+│   ├── lattice-cep-authority/ # CEP policy, Guard L1, envelope store, and effect-region semantics
+│   ├── lattice-cep-invariants/ # CEP invariant cards and Guard L2 AST checks
+│   ├── lattice-cep-native/   # CEP native handlers, transport integration, verify, edit, shell/web helpers
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
 │   ├── lattice-profile/     # Agent profile schema ([cep] policy sections), discovery, defaults
@@ -31,7 +33,7 @@ Internal dependency flow:
 ```
 lattice-cep-protocol ─┬─> lattice-cep-catalog ─┬─> lattice-cep-dispatch ─┐
                       ├─> lattice-profile       ├─> lattice-cep-audit     ├─> lattice-cep-native
-                      └─────────────────────────┘                         ┘
+                      └─> lattice-cep-authority └─> lattice-cep-invariants┘
 lattice-llm ─────────────> lattice-tooling ───────────────┐
                                                            ├─> lattice-api ─> lattice-cli
 lattice-session ─────────> lattice-agent <─────────────────┘

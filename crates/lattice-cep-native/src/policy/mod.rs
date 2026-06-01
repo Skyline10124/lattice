@@ -1,76 +1,62 @@
-//! CEP CEP policy and budget configuration (immutable per turn).
+//! Compatibility re-exports for CEP authority policy.
 
-pub mod budget;
-pub mod capability;
-pub mod command;
-pub mod default;
-pub mod network;
-pub mod observation;
-pub mod resolved;
-
-use std::path::PathBuf;
-use std::sync::Arc;
-
-pub use budget::{
-    BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
-};
-pub use command::{
-    build_effective_env, classify_command, validate_timeout, CommandPolicy, EffectiveImpact,
-};
-pub use network::NetworkPolicyConfig;
-pub use observation::ObservationPolicyConfig;
-
-/// Immutable CEP policy limits and roots assembled once per turn.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CepPolicyConfig {
-    pub project_root: PathBuf,
-    pub observation: ObservationPolicyConfig,
-    pub network: NetworkPolicyConfig,
-    pub budget: BudgetLimits,
-    pub command: CommandPolicy,
+pub mod budget {
+    pub use lattice_cep_authority::policy::budget::{
+        BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
+    };
 }
+pub mod capability {
+    pub use lattice_cep_authority::policy::capability::{
+        match_capability, CapabilityActionRequired, CapabilityFailureReason, CapabilityMatch,
+        CapabilityMatchVerdict, InvocationFacts, SessionStateOperation,
+    };
+}
+pub mod command {
+    pub use lattice_cep_authority::policy::command::{
+        build_effective_env, classify_command, validate_timeout, CommandPolicy, EffectiveImpact,
+    };
+}
+pub mod default {
+    pub use lattice_cep_authority::policy::default::{
+        CapabilitySourceClass, CapabilitySourcePolicy, DefaultPolicyHook, ExternalBudgetPolicy,
+        ExternalCapabilitySourcePolicy, ExternalCommandPolicy, ExternalMethodPolicy,
+        ExternalNetworkPolicy, ExternalObservationPolicy, ExternalPolicyFile, MethodPolicy,
+        PolicyConfig, PolicyEvidence, RichPolicyOutcome,
+    };
+}
+pub mod network {
+    pub use lattice_cep_authority::policy::network::{
+        validate_fetch_url, NetworkPolicyConfig, ValidatedFetchUrl,
+    };
+}
+pub mod observation {
+    pub use lattice_cep_authority::policy::observation::{
+        backend_safety_net_denial, reject_parent_traversal, resolve_observation_target,
+        ObservationPolicyConfig, ResolvedObservationTarget,
+    };
 
-impl CepPolicyConfig {
-    pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
-        let project_root = project_root.into();
-        let project_root = std::fs::canonicalize(&project_root).unwrap_or(project_root);
-        let observation = ObservationPolicyConfig::defaults_for_root(&project_root);
-        let budget = BudgetLimits {
-            max_single_read_bytes: observation.max_single_read_bytes,
-            max_turn_observation_bytes: observation.max_turn_observation_bytes,
-            max_grep_matches: observation.max_grep_matches,
-            max_list_entries: observation.max_list_entries,
-            max_find_paths: observation.max_find_paths,
-            max_todo_ops: observation.max_todo_ops,
-        };
-        Self {
-            project_root,
-            observation,
-            network: NetworkPolicyConfig::safe_defaults(),
-            budget,
-            command: CommandPolicy::defaults(),
+    #[cfg(test)]
+    pub(crate) const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
+
+    /// Test-only hook simulating a backend-time denial after CEP policy allowed the path.
+    #[cfg(test)]
+    pub(crate) fn check_backend_safety_net(path: &str) -> Option<lattice_cep_protocol::CepError> {
+        if path == BACKEND_SAFETY_NET_TEST_PATH {
+            Some(backend_safety_net_denial(path))
+        } else {
+            None
         }
     }
-
-    pub fn new_budget_tracker(&self) -> Arc<ObservationBudgetTracker> {
-        ObservationBudgetTracker::new(self.budget.clone())
-    }
+}
+pub mod resolved {
+    pub use lattice_cep_authority::policy::resolved::{
+        PolicyResolver, ResolvedCommand, ResolvedNetwork, ResolvedPath, ResolvedPolicyInput,
+        ResolvedSessionState,
+    };
 }
 
-/// Turn-scoped policy and mutable budget state shared by handlers.
-#[derive(Clone, Debug)]
-pub struct CepTurnContext {
-    pub policy: CepPolicyConfig,
-    pub budget: Arc<ObservationBudgetTracker>,
-}
-
-impl CepTurnContext {
-    pub fn from_policy(policy: CepPolicyConfig) -> Self {
-        let budget = policy.new_budget_tracker();
-        Self { policy, budget }
-    }
-
-    pub fn defaults_for_project_root(project_root: impl Into<PathBuf>) -> Self {
-        Self::from_policy(CepPolicyConfig::defaults_for_project_root(project_root))
-    }
-}
+pub use lattice_cep_authority::policy::{
+    build_effective_env, classify_command, validate_timeout, BudgetExhausted, BudgetLimits,
+    CepPolicyConfig, CepTurnContext, CommandPolicy, EffectiveImpact, NetworkPolicyConfig,
+    ObservationBudgetSnapshot, ObservationBudgetTracker, ObservationPolicyConfig,
+};

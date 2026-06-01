@@ -16,6 +16,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lattice_cep_authority::{CepPolicyConfig, CepTurnContext};
 use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
 use lattice_cep_catalog::methods::command::{Run, RunParams};
 use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
@@ -23,10 +25,9 @@ use lattice_cep_catalog::methods::external::{Fetch, FetchParams};
 use lattice_cep_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lattice_cep_catalog::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
 use lattice_cep_native::audit::CepAuditContext;
-use lattice_cep_native::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lattice_cep_native::{
-    register_production_method_registry, CepAuditStore, CepPolicyConfig, CepTransport,
-    CepTurnContext, MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
+    ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use lattice_cep_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
