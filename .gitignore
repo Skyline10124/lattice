@@ -11,6 +11,7 @@ target/
 .pytest_cache/
 .worktrees/
 .cargo/
+benchmarks/**/benchmark.env
 __pycache__/
 *.py[cod]
 book/

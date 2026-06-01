@@ -218,8 +218,7 @@ pub struct PatchResult {
 
 impl CepMethod for Patch {
     const NAME: &'static str = "workspace.patch";
-    const DESCRIPTION: &'static str =
-        "Apply structured patch text with multi-file add, update, and delete operations.";
+    const DESCRIPTION: &'static str = "Apply LATTICE structured patch text with multi-file add, update, and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Add File: path / *** Update File: path / *** Delete File: path operations, then *** End Patch. Update and delete operations require *** Old Hash: blake3:<64 hex> from workspace.read_file content_hash. Hunk lines after @@ use a leading space for context, - for removals, and + for additions. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
     type Params = PatchParams;
     type Result = PatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
