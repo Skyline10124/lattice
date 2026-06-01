@@ -332,9 +332,16 @@ fn finalize_audit_for_dispatch(
     match dispatch_result {
         Ok(value) => {
             let summary = compact_success_summary(method, value);
-            let metadata = durable_metadata_json
-                .map(str::to_string)
-                .or_else(|| compact_success_metadata(method, value, call_metadata));
+            let metadata = if call_metadata.semantic_stage == SEMANTIC_STAGE_SCAFFOLD {
+                merge_scaffold_success_metadata(
+                    durable_metadata_json,
+                    compact_success_metadata(method, value, call_metadata).as_deref(),
+                )
+            } else {
+                durable_metadata_json
+                    .map(str::to_string)
+                    .or_else(|| compact_success_metadata(method, value, call_metadata))
+            };
             let _ = audit.finalize_call(
                 audit_start,
                 AuditOutcome::Success { summary },
@@ -361,6 +368,32 @@ fn finalize_audit_for_dispatch(
             );
         }
     }
+}
+
+fn merge_scaffold_success_metadata(
+    durable_metadata_json: Option<&str>,
+    compact_metadata_json: Option<&str>,
+) -> Option<String> {
+    let mut merged = compact_metadata_json
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .unwrap_or_else(|| json!({}));
+
+    let Some(merged_obj) = merged.as_object_mut() else {
+        return durable_metadata_json
+            .or(compact_metadata_json)
+            .map(str::to_string);
+    };
+
+    if let Some(durable) = durable_metadata_json
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| v.as_object().cloned())
+    {
+        for (key, value) in durable {
+            merged_obj.insert(key, value);
+        }
+    }
+
+    serde_json::to_string(&merged).ok()
 }
 
 fn compact_success_summary(method: &str, value: &Value) -> String {

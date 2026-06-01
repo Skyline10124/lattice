@@ -63,14 +63,12 @@ async fn emit_scaffold_metadata(ctx: &HandlerContext, method: &str, result: &Sca
 #[cfg(all(test, feature = "inspect-scaffold"))]
 mod scaffold_tests {
     use super::*;
-    use crate::audit::{
-        CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD,
-    };
+    use crate::audit::{CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD};
     use crate::invariants::InvariantCardIndex;
     use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
     use crate::policy::CepTurnContext;
-    use crate::registry::wire_code_for_error;
     use crate::registry::{Cancellation, EventSink};
+    use crate::wire_code_for_error;
     use crate::{CepTransport, ServerRunConfig};
     use lattice_cep_catalog::methods::scaffold::InspectParams;
     use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, CepMode};
@@ -193,9 +191,11 @@ mod scaffold_tests {
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_SCAFFOLD);
         assert!(row.policy_enforced);
         let metadata = row.metadata_json.expect("scaffold metadata");
-        assert!(metadata.contains("\"routed\":false"));
-        assert!(metadata.contains("\"budget_charged\":0"));
-        assert!(metadata.contains("\"observation_payload_bytes\":0"));
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("metadata should be JSON");
+        assert_eq!(metadata["routed"], false);
+        assert_eq!(metadata["budget_charged"], 0);
+        assert_eq!(metadata["observation_payload_bytes"], 0);
 
         drop(client);
         server_task.abort();
