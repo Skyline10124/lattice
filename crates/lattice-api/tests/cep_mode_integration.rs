@@ -23,14 +23,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lattice_cep_native::{
+use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
-use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
-use lattice_cep_protocol::CepErrorCode;
-use lattice_profile::CepSection;
+use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use lancet_protocol::CepErrorCode;
+use lattice_profile::LancetSection;
 use tempfile::TempDir;
 
 // ── Shared overreach handler ───────────────────────────────────────────
@@ -44,11 +44,11 @@ use tempfile::TempDir;
 // so the policy check passes. The overreach is in the effect region check.
 
 fn overreach_todo_handler() -> MethodRegistry {
-    use lattice_cep_authority::effect::{
+    use lancet_authority::effect::{
         ledger::{EffectSource, ObservedEffect, ObservedScope},
         region::AuthorizedEffectRegion,
     };
-    use lattice_cep_catalog::method::RequiredCapability;
+    use lancet_catalog::method::RequiredCapability;
 
     let mut registry = MethodRegistry::new();
     registry
@@ -197,8 +197,8 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // Set up a proper policy hook for the workspace root.
     {
-        use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-        use lattice_cep_authority::CepTurnContext;
+        use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+        use lancet_authority::CepTurnContext;
         let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
@@ -212,7 +212,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // workspace.write_file without WritePath in any envelope → policy denial.
     // Off mode does NOT bypass the policy check.
-    use lattice_cep_catalog::methods::workspace::{WriteFile, WriteFileParams};
+    use lancet_catalog::methods::workspace::{WriteFile, WriteFileParams};
     let err = client
         .call::<WriteFile>(WriteFileParams {
             path: "should_be_denied.txt".into(),
@@ -248,36 +248,36 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
 // ── Default enforce test ───────────────────────────────────────────────
 
-/// Profile default: `CepSection::default()` must yield `CepMode::Enforce`.
+/// Profile default: `LancetSection::default()` must yield `CepMode::Enforce`.
 ///
 /// Documents that the effective default mode is Enforce
-/// when no `[cep]` section is present in agent.toml.
+/// when no `[lancet]` section is present in agent.toml.
 #[test]
 fn cep_mode_default_enforce_from_profile_schema() {
-    let section = CepSection::default();
+    let section = LancetSection::default();
     assert_eq!(
         section.mode,
         CepMode::Enforce,
-        "CepSection::default() must produce CepMode::Enforce, got {:?}",
+        "LancetSection::default() must produce CepMode::Enforce, got {:?}",
         section.mode
     );
 }
 
-/// CepSection deserialization: omitting `mode` from `[cep]` table preserves Enforce default.
+/// LancetSection deserialization: omitting `mode` from `[lancet]` table preserves Enforce default.
 ///
-/// Documents the serialization guarantee: the TOML `[cep]` section
+/// Documents the serialization guarantee: the TOML `[lancet]` section
 /// without a `mode` key deserializes to `CepMode::Enforce`.
 #[test]
 fn cep_mode_enforce_when_cep_section_mode_absent() {
-    // Deserialize a bare [cep] table (no mode field) → Enforce.
+    // Deserialize a bare [lancet] table (no mode field) → Enforce.
     let cep_toml = r#"
 # No mode key — must default to Enforce
 "#;
-    let section: CepSection = toml::from_str(cep_toml).expect("parse CepSection toml");
+    let section: LancetSection = toml::from_str(cep_toml).expect("parse LancetSection toml");
     assert_eq!(
         section.mode,
         CepMode::Enforce,
-        "CepSection without mode must default to Enforce, got {:?}",
+        "LancetSection without mode must default to Enforce, got {:?}",
         section.mode
     );
 }

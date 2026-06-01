@@ -2,27 +2,27 @@
 
 ![LATTICE banner](logo-banner.svg)
 
-LATTICE is a Rust LLM runtime for session-centered agent work: sessions own the active agent profile, profile changes are explicit session operations, and every turn lands as a commit-backed session history entry. Tool execution runs over **CEP** (Controlled Execution Protocol) — a typed JSON-RPC method protocol with capability envelopes, policy gating, path guards, and an audit trail.
+LATTICE is a Rust LLM runtime for session-centered agent work: sessions own the active agent profile, profile changes are explicit session operations, and every turn lands as a commit-backed session history entry. Tool execution runs through **LANCET**, which uses CEP (Controlled Execution Protocol) internally for typed JSON-RPC methods, capability envelopes, policy gating, path guards, and audit trails.
 
 ## Workspace
 
 ```
 lattice/
 ├── crates/
-│   ├── lattice-cep-protocol/ # CEP wire/data contracts: JSON-RPC, envelopes, errors, policy seam
-│   ├── lattice-cep-catalog/  # CEP typed methods, params/results, descriptors, static catalog
-│   ├── lattice-cep-dispatch/ # CEP typed dispatch, client/transport, cancellation, event sinks
-│   ├── lattice-cep-audit/    # CEP audit store, query filters, rows, stages, attestations
-│   ├── lattice-cep-authority/ # CEP policy, Guard L1, envelope store, and effect-region semantics
-│   ├── lattice-cep-invariants/ # CEP invariant cards and Guard L2 AST checks
-│   ├── lattice-cep-native/   # CEP native handlers, transport integration, verify, edit, shell/web helpers
+│   ├── lancet-protocol/ # CEP wire/data contracts: JSON-RPC, envelopes, errors, policy seam
+│   ├── lancet-catalog/  # CEP typed methods, params/results, descriptors, static catalog
+│   ├── lancet-dispatch/ # CEP typed dispatch, client/transport, cancellation, event sinks
+│   ├── lancet-audit/    # LANCET audit store, query filters, rows, stages, attestations
+│   ├── lancet-authority/ # CEP policy, Guard L1, envelope store, and effect-region semantics
+│   ├── lancet-invariants/ # LANCET invariant cards and Guard L2 AST checks
+│   ├── lancet-native/   # LANCET native handlers, transport integration, verify, edit, shell/web helpers
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
-│   ├── lattice-profile/     # Agent profile schema ([cep] policy sections), discovery, defaults
+│   ├── lattice-profile/     # Agent profile schema ([lancet] policy sections), discovery, defaults
 │   ├── lattice-tooling/     # ToolExecutor trait, limits, enabled-tools resolution
 │   ├── lattice-agent/       # Multi-turn agent loop (AgentLoop), state machine
-│   ├── lattice-api/         # Public facade (turn execution/session); composes the per-turn CEP runtime
-│   └── lattice-cli/         # CLI (session, models, resolve, doctor, cep, audit)
+│   ├── lattice-api/         # Public facade (turn execution/session); composes the per-turn LANCET runtime
+│   └── lattice-cli/         # CLI (session, models, resolve, doctor, lancet, audit)
 ├── README.md
 ├── FINDINGS.md
 └── FIX.md
@@ -31,9 +31,9 @@ lattice/
 Internal dependency flow:
 
 ```
-lattice-cep-protocol ─┬─> lattice-cep-catalog ─┬─> lattice-cep-dispatch ─┐
-                      ├─> lattice-profile       ├─> lattice-cep-audit     ├─> lattice-cep-native
-                      └─> lattice-cep-authority └─> lattice-cep-invariants┘
+lancet-protocol ─┬─> lancet-catalog ─┬─> lancet-dispatch ─┐
+                      ├─> lattice-profile       ├─> lancet-audit     ├─> lancet-native
+                      └─> lancet-authority └─> lancet-invariants┘
 lattice-llm ─────────────> lattice-tooling ───────────────┐
                                                            ├─> lattice-api ─> lattice-cli
 lattice-session ─────────> lattice-agent <─────────────────┘
@@ -60,6 +60,8 @@ cargo run -p lattice-cli -- session status
 cargo run -p lattice-cli -- session list
 cargo run -p lattice-cli -- session log <session_id>
 cargo run -p lattice-cli -- doctor
+cargo run -p lattice-cli -- lancet status
+cargo run -p lattice-cli -- lancet doctor
 ```
 
 ## Future Work
@@ -68,7 +70,7 @@ The following capabilities are deferred beyond the current release:
 
 - **TUI (deferred)** — A minimal terminal UI will be rebuilt on top of the `lattice-api` facade in a later milestone.
 - **Rich prompt compilation (deferred)** — Layer priorities, token budgets, and provider-specific prompt assembly will be reintroduced after the main path is small and stable.
-- **Sandbox & interactive approval (deferred)** — CEP now provides the capability/policy/guard/verify layer over tool execution; OS-level sandboxing and interactive approval prompts are still future work.
+- **Sandbox & interactive approval (deferred)** — LANCET now provides the capability/policy/guard/verify layer over tool execution; OS-level sandboxing and interactive approval prompts are still future work.
 - **Lifecycle hooks (deferred)** — The unused `lattice-hooks` leaf crate was removed. Reintroduce hooks with a concrete hook-dispatch integration point and internal consumer rather than as a standalone vocabulary crate.
 - **Plugins and orchestration (deferred)** — Plugin contracts and DAG runners will be reconsidered after the session and API boundaries are stable.
 - **Swarm and multi-agent collaboration (deferred)** — Coordination features will use the session graph as a foundation in a later milestone.

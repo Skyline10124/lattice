@@ -1,4 +1,4 @@
-use lattice_cep_protocol::CepMode;
+use lancet_protocol::CepMode;
 use serde::{de, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -17,46 +17,46 @@ pub struct AgentProfile {
     #[serde(default)]
     pub llm: LlmSection,
     #[serde(default)]
-    pub cep: CepSection,
+    pub lancet: LancetSection,
 }
 
-/// CEP `[cep]` profile section with typed policy sub-tables.
+/// LANCET `[lancet]` profile section with typed policy sub-tables.
 ///
 /// Known sub-tables (`project_root`, `observation`, `network`) deserialize into
-/// typed fields. Other future sub-tables (e.g. `[cep.command]`) remain in
+/// typed fields. Other future sub-tables (e.g. `[lancet.command]`) remain in
 /// `extensions`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct CepSection {
-    #[serde(default = "default_cep_mode")]
+pub struct LancetSection {
+    #[serde(default = "default_lancet_mode")]
     pub mode: CepMode,
     #[serde(default)]
-    pub project_root: Option<CepProjectRootSection>,
+    pub project_root: Option<LancetProjectRootSection>,
     #[serde(default)]
-    pub observation: Option<CepObservationSection>,
+    pub observation: Option<LancetObservationSection>,
     #[serde(default)]
-    pub network: Option<CepNetworkSection>,
+    pub network: Option<LancetNetworkSection>,
     #[serde(default)]
-    pub command: Option<CepCommandSection>,
+    pub command: Option<LancetCommandSection>,
     #[serde(default)]
-    pub policy: Option<CepPolicySection>,
+    pub policy: Option<LancetPolicySection>,
     #[serde(default)]
-    pub invariants: Option<CepInvariantsSection>,
+    pub invariants: Option<LancetInvariantsSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
 
-/// `[cep.project_root]` — effective workspace scope for observation policy.
+/// `[lancet.project_root]` — effective workspace scope for observation policy.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepProjectRootSection {
+pub struct LancetProjectRootSection {
     #[serde(default)]
     pub root: Option<String>,
 }
 
-/// `[cep.observation]` — path allow roots and observation/todo budget limits.
+/// `[lancet.observation]` — path allow roots and observation/todo budget limits.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepObservationSection {
+pub struct LancetObservationSection {
     #[serde(default)]
     pub allowed_roots: Vec<String>,
     pub max_single_read_bytes: Option<usize>,
@@ -67,10 +67,10 @@ pub struct CepObservationSection {
     pub max_todo_ops: Option<usize>,
 }
 
-/// `[cep.network]` — `web.fetch` host policy and response size cap.
+/// `[lancet.network]` — `web.fetch` host policy and response size cap.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepNetworkSection {
+pub struct LancetNetworkSection {
     pub allow_public_https: Option<bool>,
     pub allow_localhost: Option<bool>,
     #[serde(default)]
@@ -78,14 +78,14 @@ pub struct CepNetworkSection {
     pub max_web_response_bytes: Option<usize>,
 }
 
-/// `[cep.command]` — command execution policy overrides.
+/// `[lancet.command]` — command execution policy overrides.
 ///
 /// All fields are `Option<T>` with `#[serde(default)]` so missing fields
-/// fall back to `CommandPolicy::defaults()`. Missing `[cep.command]` entirely
-/// uses all defaults. Older profiles without `[cep.command]` still parse.
+/// fall back to `CommandPolicy::defaults()`. Missing `[lancet.command]` entirely
+/// uses all defaults. Older profiles without `[lancet.command]` still parse.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepCommandSection {
+pub struct LancetCommandSection {
     #[serde(default)]
     pub default_timeout_ms: Option<u64>,
     #[serde(default)]
@@ -104,30 +104,30 @@ pub struct CepCommandSection {
     pub inherited_env: Option<Vec<String>>,
 }
 
-/// `[cep.policy]` — pointer to an external structured TOML policy file.
+/// `[lancet.policy]` — pointer to an external structured TOML policy file.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepPolicySection {
+pub struct LancetPolicySection {
     #[serde(default)]
     pub path: Option<String>,
 }
 
-/// `[cep.invariants]` — invariant card directory configuration.
+/// `[lancet.invariants]` — invariant card directory configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct CepInvariantsSection {
+pub struct LancetInvariantsSection {
     #[serde(default)]
     pub dir: Option<String>,
 }
 
-fn default_cep_mode() -> CepMode {
+fn default_lancet_mode() -> CepMode {
     CepMode::Enforce
 }
 
-impl Default for CepSection {
+impl Default for LancetSection {
     fn default() -> Self {
         Self {
-            mode: default_cep_mode(),
+            mode: default_lancet_mode(),
             project_root: None,
             observation: None,
             network: None,
@@ -139,7 +139,7 @@ impl Default for CepSection {
     }
 }
 
-impl<'de> Deserialize<'de> for CepSection {
+impl<'de> Deserialize<'de> for LancetSection {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -147,13 +147,13 @@ impl<'de> Deserialize<'de> for CepSection {
         let mut raw = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
         let mode = match raw.remove("mode") {
             Some(value) => value.try_into().map_err(de::Error::custom)?,
-            None => default_cep_mode(),
+            None => default_lancet_mode(),
         };
 
         for (key, value) in &raw {
             if !matches!(value, toml::Value::Table(_)) {
                 return Err(de::Error::custom(format!(
-                    "unknown scalar field `cep.{key}`; only `mode` and future sub-tables are supported"
+                    "unknown scalar field `lancet.{key}`; only `mode` and future sub-tables are supported"
                 )));
             }
         }
@@ -597,8 +597,8 @@ system = "hi"
     #[test]
     fn cep_defaults_to_enforce_when_section_absent() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Enforce);
-        assert!(profile.cep.extensions.is_empty());
+        assert_eq!(profile.lancet.mode, CepMode::Enforce);
+        assert!(profile.lancet.extensions.is_empty());
     }
 
     #[test]
@@ -606,13 +606,13 @@ system = "hi"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Enforce);
+        assert_eq!(profile.lancet.mode, CepMode::Enforce);
     }
 
     #[test]
@@ -620,13 +620,13 @@ mode = "enforce"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "warn"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Warn);
+        assert_eq!(profile.lancet.mode, CepMode::Warn);
     }
 
     #[test]
@@ -634,13 +634,13 @@ mode = "warn"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "off"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Off);
+        assert_eq!(profile.lancet.mode, CepMode::Off);
     }
 
     #[test]
@@ -648,7 +648,7 @@ mode = "off"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "permissive"
 "#,
             prefix = minimal_profile_prefix()
@@ -661,13 +661,13 @@ mode = "permissive"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mod = "off"
 "#,
             prefix = minimal_profile_prefix()
         );
         let err = parse(&toml).unwrap_err();
-        assert!(err.to_string().contains("cep.mod"), "got: {err}");
+        assert!(err.to_string().contains("lancet.mod"), "got: {err}");
     }
 
     #[test]
@@ -675,13 +675,13 @@ mod = "off"
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.project_root]
+[lancet.project_root]
 root = "."
 
-[cep.observation]
+[lancet.observation]
 allowed_roots = ["."]
 max_single_read_bytes = 4096
 max_turn_observation_bytes = 8192
@@ -690,7 +690,7 @@ max_list_entries = 300
 max_find_paths = 400
 max_todo_ops = 10
 
-[cep.network]
+[lancet.network]
 allow_public_https = true
 allow_localhost = false
 allowed_hosts = ["example.com"]
@@ -699,15 +699,15 @@ max_web_response_bytes = 2048
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Enforce);
-        let project_root = profile.cep.project_root.as_ref().unwrap();
+        assert_eq!(profile.lancet.mode, CepMode::Enforce);
+        let project_root = profile.lancet.project_root.as_ref().unwrap();
         assert_eq!(project_root.root.as_deref(), Some("."));
-        let observation = profile.cep.observation.as_ref().unwrap();
+        let observation = profile.lancet.observation.as_ref().unwrap();
         assert_eq!(observation.allowed_roots, vec!["."]);
         assert_eq!(observation.max_single_read_bytes, Some(4096));
         assert_eq!(observation.max_turn_observation_bytes, Some(8192));
         assert_eq!(observation.max_grep_matches, Some(500));
-        let network = profile.cep.network.as_ref().unwrap();
+        let network = profile.lancet.network.as_ref().unwrap();
         assert_eq!(network.allow_public_https, Some(true));
         assert_eq!(network.allow_localhost, Some(false));
         assert_eq!(network.allowed_hosts, vec!["example.com"]);
@@ -719,21 +719,21 @@ max_web_response_bytes = 2048
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.future_table]
+[lancet.future_table]
 some_field = true
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Enforce);
-        assert!(profile.cep.extensions.contains_key("future_table"));
-        assert!(profile.cep.project_root.is_none());
-        assert!(profile.cep.observation.is_none());
-        assert!(profile.cep.network.is_none());
-        assert!(profile.cep.command.is_none());
+        assert_eq!(profile.lancet.mode, CepMode::Enforce);
+        assert!(profile.lancet.extensions.contains_key("future_table"));
+        assert!(profile.lancet.project_root.is_none());
+        assert!(profile.lancet.observation.is_none());
+        assert!(profile.lancet.network.is_none());
+        assert!(profile.lancet.command.is_none());
     }
 
     #[test]
@@ -741,16 +741,16 @@ some_field = true
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.cep.mode, CepMode::Enforce);
-        assert!(profile.cep.project_root.is_none());
-        assert!(profile.cep.observation.is_none());
-        assert!(profile.cep.network.is_none());
+        assert_eq!(profile.lancet.mode, CepMode::Enforce);
+        assert!(profile.lancet.project_root.is_none());
+        assert!(profile.lancet.observation.is_none());
+        assert!(profile.lancet.network.is_none());
     }
 
     #[test]
@@ -758,7 +758,7 @@ mode = "enforce"
         let toml = format!(
             r#"{prefix}
 
-[cep.observation]
+[lancet.observation]
 max_web_response_bytes = 1024
 "#,
             prefix = minimal_profile_prefix()
@@ -770,17 +770,17 @@ max_web_response_bytes = 1024
         );
     }
 
-    // ── CepCommandSection ────────────────────────────────────────────
+    // ── LancetCommandSection ────────────────────────────────────────────
 
     #[test]
     fn cep_command_section_parses_all_fields() {
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.command]
+[lancet.command]
 default_timeout_ms = 60000
 max_timeout_ms = 180000
 max_output_bytes = 100000
@@ -793,7 +793,7 @@ inherited_env = ["PATH", "HOME"]
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let cmd = profile.cep.command.as_ref().unwrap();
+        let cmd = profile.lancet.command.as_ref().unwrap();
         assert_eq!(cmd.default_timeout_ms, Some(60000));
         assert_eq!(cmd.max_timeout_ms, Some(180000));
         assert_eq!(cmd.max_output_bytes, Some(100000));
@@ -822,7 +822,7 @@ inherited_env = ["PATH", "HOME"]
     #[test]
     fn cep_command_section_defaults_when_absent() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.cep.command.is_none());
+        assert!(profile.lancet.command.is_none());
     }
 
     #[test]
@@ -830,16 +830,16 @@ inherited_env = ["PATH", "HOME"]
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.command]
+[lancet.command]
 default_timeout_ms = 30000
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let cmd = profile.cep.command.as_ref().unwrap();
+        let cmd = profile.lancet.command.as_ref().unwrap();
         assert_eq!(cmd.default_timeout_ms, Some(30000));
         assert!(cmd.max_timeout_ms.is_none());
         assert!(cmd.allow_inline_shell.is_none());
@@ -851,10 +851,10 @@ default_timeout_ms = 30000
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.command]
+[lancet.command]
 unknown_field = true
 "#,
             prefix = minimal_profile_prefix()
@@ -871,17 +871,17 @@ unknown_field = true
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.observation]
+[lancet.observation]
 allowed_roots = ["."]
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert!(profile.cep.command.is_none());
-        assert!(profile.cep.observation.is_some());
+        assert!(profile.lancet.command.is_none());
+        assert!(profile.lancet.observation.is_some());
     }
 
     #[test]
@@ -889,18 +889,18 @@ allowed_roots = ["."]
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.command]
+[lancet.command]
 default_timeout_ms = 60000
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
         // Should be in typed field, NOT in extensions
-        assert!(profile.cep.command.is_some());
-        assert!(!profile.cep.extensions.contains_key("command"));
+        assert!(profile.lancet.command.is_some());
+        assert!(!profile.lancet.extensions.contains_key("command"));
     }
 
     #[test]
@@ -911,7 +911,7 @@ default_timeout_ms = 60000
         let mut extensions = BTreeMap::new();
         extensions.insert("future_table".into(), toml::Value::Table(future));
 
-        let section = CepSection {
+        let section = LancetSection {
             mode: CepMode::Warn,
             project_root: None,
             observation: None,
@@ -1001,27 +1001,27 @@ max_delay_ms = 2
         }
     }
 
-    // ── CepPolicySection ────────────────────────────────────────────────
+    // ── LancetPolicySection ────────────────────────────────────────────────
 
     #[test]
     fn cep_policy_section_parses_path() {
         let toml = format!(
             r#"{prefix}
 
-[cep.policy]
+[lancet.policy]
 path = "policy.toml"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let policy = profile.cep.policy.as_ref().unwrap();
+        let policy = profile.lancet.policy.as_ref().unwrap();
         assert_eq!(policy.path.as_deref(), Some("policy.toml"));
     }
 
     #[test]
     fn cep_section_without_policy_defaults_to_none() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.cep.policy.is_none());
+        assert!(profile.lancet.policy.is_none());
     }
 
     #[test]
@@ -1029,7 +1029,7 @@ path = "policy.toml"
         let toml = format!(
             r#"{prefix}
 
-[cep.policy]
+[lancet.policy]
 unknown = true
 "#,
             prefix = minimal_profile_prefix()
@@ -1041,30 +1041,30 @@ unknown = true
         );
     }
 
-    // ── CepInvariantsSection ──────────────────────────────────────────
+    // ── LancetInvariantsSection ──────────────────────────────────────────
 
     #[test]
     fn cep_section_parses_invariants_section() {
         let toml = format!(
             r#"{prefix}
 
-[cep]
+[lancet]
 mode = "enforce"
 
-[cep.invariants]
-dir = ".cep/cards/"
+[lancet.invariants]
+dir = ".lancet/cards/"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        let invariants = profile.cep.invariants.as_ref().unwrap();
-        assert_eq!(invariants.dir.as_deref(), Some(".cep/cards/"));
+        let invariants = profile.lancet.invariants.as_ref().unwrap();
+        assert_eq!(invariants.dir.as_deref(), Some(".lancet/cards/"));
     }
 
     #[test]
     fn cep_section_absent_invariants_is_none() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.cep.invariants.is_none());
+        assert!(profile.lancet.invariants.is_none());
     }
 
     #[test]
@@ -1072,16 +1072,16 @@ dir = ".cep/cards/"
         let toml = format!(
             r#"{prefix}
 
-[cep.invariants]
+[lancet.invariants]
 dir = "foo/"
 "#,
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
         assert!(
-            !profile.cep.extensions.contains_key("invariants"),
+            !profile.lancet.extensions.contains_key("invariants"),
             "invariants must not leak to extensions"
         );
-        assert!(profile.cep.invariants.is_some());
+        assert!(profile.lancet.invariants.is_some());
     }
 }

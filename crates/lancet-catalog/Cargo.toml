@@ -1,0 +1,17 @@
+[package]
+name = "lancet-catalog"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET CEP method contracts, method params/results, descriptors, and static catalog"
+
+[features]
+default = []
+inspect-scaffold = []
+
+[dependencies]
+lancet-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }

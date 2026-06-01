@@ -8,13 +8,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::LlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
-use lattice_cep_protocol::envelope::{
+use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope,
 };
+use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_agent::LlmClient;
+use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
@@ -513,7 +513,7 @@ async fn public_https_policy_requires_fetch_capability() {
     let ws = setup_workspace_with_cep_network(
         "fn main() {}",
         &["web.fetch"],
-        "[cep.network]\nallow_public_https = true\nallow_localhost = false\n",
+        "[lancet.network]\nallow_public_https = true\nallow_localhost = false\n",
     );
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(

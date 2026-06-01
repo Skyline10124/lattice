@@ -280,7 +280,7 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
         ));
     }
     let project_root = resolve_project_root(&request);
-    let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.cep);
+    let cep = request.loaded_profile.as_ref().map(|lp| &lp.profile.lancet);
     let (model_id, _, _) = resolve_model_and_prompt(&request);
     let runtime_version = env!("CARGO_PKG_VERSION");
     let deps = build_production_turn_deps(

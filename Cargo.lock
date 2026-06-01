@@ -996,53 +996,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "lattice-llm",
- "lattice-session",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "lattice-api"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "futures",
- "lattice-agent",
- "lattice-cep-authority",
- "lattice-cep-catalog",
- "lattice-cep-invariants",
- "lattice-cep-native",
- "lattice-cep-protocol",
- "lattice-llm",
- "lattice-profile",
- "lattice-session",
- "lattice-tooling",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "toml",
- "uuid",
-]
-
-[[package]]
-name = "lattice-cep-audit"
+name = "lancet-audit"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "lattice-cep-catalog",
- "lattice-cep-protocol",
+ "lancet-catalog",
+ "lancet-protocol",
  "rusqlite",
  "serde_json",
  "thiserror 2.0.18",
@@ -1051,12 +1010,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-cep-authority"
+name = "lancet-authority"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "lattice-cep-catalog",
- "lattice-cep-protocol",
+ "lancet-catalog",
+ "lancet-protocol",
  "lattice-llm",
  "proptest",
  "serde",
@@ -1069,33 +1028,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-cep-catalog"
+name = "lancet-catalog"
 version = "0.1.0"
 dependencies = [
- "lattice-cep-protocol",
+ "lancet-protocol",
  "schemars",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "lattice-cep-dispatch"
+name = "lancet-dispatch"
 version = "0.1.0"
 dependencies = [
- "lattice-cep-catalog",
- "lattice-cep-protocol",
+ "lancet-catalog",
+ "lancet-protocol",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "lattice-cep-invariants"
+name = "lancet-invariants"
 version = "0.1.0"
 dependencies = [
  "globset",
- "lattice-cep-catalog",
- "lattice-cep-protocol",
+ "lancet-catalog",
+ "lancet-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -1107,18 +1066,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-cep-native"
+name = "lancet-native"
 version = "0.1.0"
 dependencies = [
  "blake3",
  "futures",
  "indexmap",
- "lattice-cep-audit",
- "lattice-cep-authority",
- "lattice-cep-catalog",
- "lattice-cep-dispatch",
- "lattice-cep-invariants",
- "lattice-cep-protocol",
+ "lancet-audit",
+ "lancet-authority",
+ "lancet-catalog",
+ "lancet-dispatch",
+ "lancet-invariants",
+ "lancet-protocol",
  "lattice-llm",
  "lattice-tooling",
  "libc",
@@ -1138,13 +1097,54 @@ dependencies = [
 ]
 
 [[package]]
-name = "lattice-cep-protocol"
+name = "lancet-protocol"
 version = "0.1.0"
 dependencies = [
  "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lattice-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "lattice-llm",
+ "lattice-session",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "lattice-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "futures",
+ "lancet-authority",
+ "lancet-catalog",
+ "lancet-invariants",
+ "lancet-native",
+ "lancet-protocol",
+ "lattice-agent",
+ "lattice-llm",
+ "lattice-profile",
+ "lattice-session",
+ "lattice-tooling",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -1160,13 +1160,13 @@ dependencies = [
  "dirs",
  "dotenvy",
  "futures",
+ "lancet-authority",
+ "lancet-catalog",
+ "lancet-invariants",
+ "lancet-native",
+ "lancet-protocol",
  "lattice-agent",
  "lattice-api",
- "lattice-cep-authority",
- "lattice-cep-catalog",
- "lattice-cep-invariants",
- "lattice-cep-native",
- "lattice-cep-protocol",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
@@ -1204,7 +1204,7 @@ dependencies = [
 name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
- "lattice-cep-protocol",
+ "lancet-protocol",
  "serde",
  "serde_json",
  "tempfile",

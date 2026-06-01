@@ -8,7 +8,7 @@
 #
 # NOT CALLED: scripts/release-gate.sh
 #   The older gate targets stale package names. This gate supersedes it by
-#   targeting the current LATTICE and CEP crates explicitly.
+#   targeting the current LATTICE and LANCET crates explicitly.
 #
 # LOC BUDGET: source-loc-budget.sh is called with --max 60000.
 #   Current measured source LOC is ~52-53k. The older default of 20k is far below
@@ -39,39 +39,39 @@ echo "==> [2/9] cargo clippy --workspace --all-targets --all-features -- -D warn
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 echo ""
 
-# ── Step 3: CEP crate tests ────────────────────────────────────────────────
+# ── Step 3: LANCET crate tests ─────────────────────────────────────────────
 # Explicit per-crate targets. Does NOT use `cargo test --workspace` so test
 # scope is deterministic. `lattice-tools` is the old stale name — this gate
 # always uses the correct package name `lattice-tooling`.
 
-echo "==> [3/9] CEP crate tests"
+echo "==> [3/9] LANCET crate tests"
 
-echo "  --> lattice-cep-protocol"
-cargo test -p lattice-cep-protocol
+echo "  --> lancet-protocol"
+cargo test -p lancet-protocol
 echo ""
 
-echo "  --> lattice-cep-catalog"
-cargo test -p lattice-cep-catalog
+echo "  --> lancet-catalog"
+cargo test -p lancet-catalog
 echo ""
 
-echo "  --> lattice-cep-dispatch"
-cargo test -p lattice-cep-dispatch
+echo "  --> lancet-dispatch"
+cargo test -p lancet-dispatch
 echo ""
 
-echo "  --> lattice-cep-audit"
-cargo test -p lattice-cep-audit
+echo "  --> lancet-audit"
+cargo test -p lancet-audit
 echo ""
 
-echo "  --> lattice-cep-native: guard_decide_fuzz"
-cargo test -p lattice-cep-native guard_decide_fuzz
+echo "  --> lancet-native: guard_decide_fuzz"
+cargo test -p lancet-native guard_decide_fuzz
 echo ""
 
-echo "  --> lattice-cep-native: cep_warn_harness"
-cargo test -p lattice-cep-native cep_warn_harness
+echo "  --> lancet-native: cep_warn_harness"
+cargo test -p lancet-native cep_warn_harness
 echo ""
 
-echo "  --> lattice-cep-native: remaining tests"
-cargo test -p lattice-cep-native
+echo "  --> lancet-native: remaining tests"
+cargo test -p lancet-native
 echo ""
 
 # ── Step 4: lattice-agent ─────────────────────────────────────────────────────
@@ -101,11 +101,11 @@ echo "  --> lattice-api: remaining tests"
 cargo test -p lattice-api
 echo ""
 
-# ── Step 6: lattice-cli cep tests ─────────────────────────────────────────
-echo "==> [6/9] lattice-cli (cep_* unit tests + full suite)"
+# ── Step 6: lattice-cli LANCET tests ──────────────────────────────────────
+echo "==> [6/9] lattice-cli (lancet_* unit tests + full suite)"
 
-echo "  --> cep_* unit tests"
-cargo test -p lattice-cli cep
+echo "  --> lancet_* unit tests"
+cargo test -p lattice-cli lancet
 echo ""
 
 echo "  --> lattice-cli: remaining tests"
@@ -130,10 +130,10 @@ cargo test -p lattice-profile
 echo ""
 
 # ── Step 8: Sub-check scripts ─────────────────────────────────────────────────
-echo "==> [8/9] Sub-check scripts (CEP boundary + LOC budget)"
+echo "==> [8/9] Sub-check scripts (LANCET boundary + LOC budget)"
 
-echo "  --> scripts/cep-boundary-check.sh"
-scripts/cep-boundary-check.sh
+echo "  --> scripts/lancet-boundary-check.sh"
+scripts/lancet-boundary-check.sh
 echo ""
 
 # LOC budget: raised cap from 20k default to 60k to reflect actual alpha codebase
@@ -142,9 +142,9 @@ echo "  --> scripts/source-loc-budget.sh --max 60000 (advisory)"
 scripts/source-loc-budget.sh --max 60000 || true
 echo ""
 
-# ── Step 9: cep doctor self-check ─────────────────────────────────────────
-echo "==> [9/9] cargo run -p lattice-cli -- cep doctor"
-cargo run -p lattice-cli -- cep doctor
+# ── Step 9: LANCET doctor self-check ──────────────────────────────────────
+echo "==> [9/9] cargo run -p lattice-cli -- lancet doctor"
+cargo run -p lattice-cli -- lancet doctor
 echo ""
 
 # ── Done ──────────────────────────────────────────────────────────────────────

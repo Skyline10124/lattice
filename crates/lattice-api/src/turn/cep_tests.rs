@@ -1,25 +1,25 @@
 use std::sync::Arc;
 
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
-use lattice_cep_catalog::catalog;
-use lattice_cep_catalog::methods::command::Run;
-use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lattice_cep_catalog::methods::workspace::{ReadFile, ReadFileResult};
-use lattice_cep_catalog::CepMethod;
-use lattice_cep_native::{CepTransport, MethodRegistry, ServerRunConfig};
-use lattice_cep_protocol::envelope::ImpactKind;
-use lattice_cep_protocol::error::{
+use lancet_catalog::catalog;
+use lancet_catalog::methods::command::Run;
+use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lancet_catalog::methods::workspace::{ReadFile, ReadFileResult};
+use lancet_catalog::CepMethod;
+use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
+use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::error::{
     jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
     PermissionErrorData, StateErrorData, ValidationErrorData,
 };
-use lattice_cep_protocol::{CepError, CepErrorCode, Retriability};
+use lancet_protocol::{CepError, CepErrorCode, Retriability};
+use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_llm::{FunctionCall, ToolCall};
 
 use super::cep::CepExecutorAdapter;
 
 fn todo_registry<F, Fut>(handler: F) -> MethodRegistry
 where
-    F: Fn(TodoWriteParams, lattice_cep_native::HandlerContext) -> Fut + Send + Sync + 'static,
+    F: Fn(TodoWriteParams, lancet_native::HandlerContext) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<TodoWriteResult, CepError>> + Send + 'static,
 {
     let mut registry = MethodRegistry::new();
@@ -342,13 +342,13 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lattice_cep_catalog::methods::envelope::{Declare, SubmitIntent};
-    use lattice_cep_catalog::methods::external::Fetch;
-    use lattice_cep_catalog::methods::session::TodoWrite;
-    use lattice_cep_catalog::methods::workspace::ReadFile;
-    use lattice_cep_native::SEMANTIC_STAGE_NATIVE;
-    use lattice_cep_protocol::envelope::Capability;
-    use lattice_profile::CepNetworkSection;
+    use lancet_catalog::methods::envelope::{Declare, SubmitIntent};
+    use lancet_catalog::methods::external::Fetch;
+    use lancet_catalog::methods::session::TodoWrite;
+    use lancet_catalog::methods::workspace::ReadFile;
+    use lancet_native::SEMANTIC_STAGE_NATIVE;
+    use lancet_protocol::envelope::Capability;
+    use lattice_profile::LancetNetworkSection;
     use tempfile::TempDir;
 
     use crate::turn::cep::production_base_envelope;
@@ -404,8 +404,8 @@ mod cep_native_registry {
     #[test]
     fn cep_native_registry_allowed_hosts_become_fetch_capabilities() {
         let dir = TempDir::new().unwrap();
-        let cep = lattice_profile::CepSection {
-            network: Some(CepNetworkSection {
+        let cep = lattice_profile::LancetSection {
+            network: Some(LancetNetworkSection {
                 allowed_hosts: vec!["api.example.com".into()],
                 ..Default::default()
             }),
@@ -422,9 +422,9 @@ mod cep_native_registry {
 
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
+        use lancet_catalog::methods::workspace::ReadFileParams;
         use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;
-        use lattice_cep_catalog::methods::workspace::ReadFileParams;
 
         use crate::turn::cep::build_production_turn_deps;
 
@@ -476,12 +476,12 @@ mod cep_native_registry {
 #[cfg(test)]
 mod attestation_and_dispatch {
     use super::*;
+    use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+    use lancet_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
+    use lancet_catalog::methods::workspace::{ReadFile, ReadFileParams};
+    use lancet_native::canonicalize_in_toto_statement;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
-    use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-    use lattice_cep_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
-    use lattice_cep_catalog::methods::workspace::{ReadFile, ReadFileParams};
-    use lattice_cep_native::canonicalize_in_toto_statement;
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
@@ -594,7 +594,7 @@ mod attestation_and_dispatch {
             .attestation_for_turn(&turn_id)
             .expect("lookup")
             .expect("stored row");
-        let stored_stmt: lattice_cep_protocol::provenance::InTotoStatement =
+        let stored_stmt: lancet_protocol::provenance::InTotoStatement =
             serde_json::from_str(&stored.statement_json).expect("stored json");
         let replay_stmt = replay.statement.expect("replay statement");
 

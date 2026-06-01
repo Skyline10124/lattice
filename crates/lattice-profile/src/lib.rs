@@ -17,7 +17,7 @@ pub use discovery::{resolve_agent_profile, DiscoveryPaths, ProfileSource};
 pub use error::ProfileError;
 pub use load::{load_agent_profile, LoadedAgentProfile};
 pub use schema::{
-    AgentProfile, AgentSection, CepCommandSection, CepNetworkSection, CepObservationSection,
-    CepPolicySection, CepProjectRootSection, CepSection, LlmRetrySection, LlmSection,
-    PromptSection, ToolsSection,
+    AgentProfile, AgentSection, LancetCommandSection, LancetNetworkSection,
+    LancetObservationSection, LancetPolicySection, LancetProjectRootSection, LancetSection,
+    LlmRetrySection, LlmSection, PromptSection, ToolsSection,
 };

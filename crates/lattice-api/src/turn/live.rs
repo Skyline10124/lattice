@@ -321,14 +321,12 @@ pub(super) async fn stream_turn_live_with_agent(
         tool_definitions,
         runtime: super::cep::CepTurnRuntime::dummy(),
         cep_client: {
-            let (client, _server) = lattice_cep_native::CepTransport::pair(1);
+            let (client, _server) = lancet_native::CepTransport::pair(1);
             client
         },
-        audit: Arc::new(
-            lattice_cep_native::CepAuditStore::in_memory().expect("in-memory audit store"),
-        ),
+        audit: Arc::new(lancet_native::CepAuditStore::in_memory().expect("in-memory audit store")),
         audit_context: Arc::new(tokio::sync::RwLock::new(
-            lattice_cep_native::CepAuditContext::default(),
+            lancet_native::CepAuditContext::default(),
         )),
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,

@@ -220,7 +220,7 @@ summarize_phase() {
         | select(.type == "tool_call_finished")
         | {name, ok, error_summary}
       ],
-      cep: {
+      lancet: {
         call_started: ([.[] | select(.type == "cep_call_started")] | length),
         call_finished: ([.[] | select(.type == "cep_call_finished")] | length),
         envelope_declared: ([.[] | select(.type == "cep_envelope_declared")] | length),
@@ -292,7 +292,7 @@ final_report() {
       commits: (map(.commits // 0) | add // 0),
       llm_request_errors: (map(.llm_request_errors | length) | add // 0),
       tool_calls: (map(.tool_calls | length) | add // 0),
-      cep_calls: (map(.cep.call_finished // 0) | add // 0),
+      cep_calls: (map(.lancet.call_finished // 0) | add // 0),
       usage: {
         prompt_tokens: (map(.usage.prompt_tokens // 0) | add // 0),
         completion_tokens: (map(.usage.completion_tokens // 0) | add // 0),

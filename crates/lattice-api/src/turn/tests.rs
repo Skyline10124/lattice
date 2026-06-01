@@ -124,7 +124,7 @@ fn make_loaded_profile_with_tools(
                 enabled: enabled_tools.to_vec(),
             },
             llm: lattice_profile::LlmSection::default(),
-            cep: lattice_profile::CepSection::default(),
+            lancet: lattice_profile::LancetSection::default(),
         },
         system_prompt: system_prompt.to_string(),
     }
@@ -920,8 +920,8 @@ async fn stream_turn_error_after_partial_commits_error() {
 
 #[tokio::test]
 async fn stream_turn_emits_cep_lifecycle_events() {
-    use lattice_cep_catalog::methods::TodoWrite;
-    use lattice_cep_catalog::CepMethod;
+    use lancet_catalog::methods::TodoWrite;
+    use lancet_catalog::CepMethod;
 
     let tool_events = vec![
         LlmEvent::ToolCallStart {

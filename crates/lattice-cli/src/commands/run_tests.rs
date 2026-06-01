@@ -60,7 +60,7 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
             },
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
-            cep: lattice_profile::CepSection::default(),
+            lancet: lattice_profile::LancetSection::default(),
         },
         system_prompt: String::new(),
     }
@@ -264,7 +264,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                     enabled: vec!["workspace.read_file".to_string()],
                 },
                 llm: lattice_profile::LlmSection::default(),
-                cep: lattice_profile::CepSection::default(),
+                lancet: lattice_profile::LancetSection::default(),
             },
             system_prompt: String::new(),
         }),

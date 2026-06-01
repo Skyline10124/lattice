@@ -31,7 +31,7 @@ cargo test -p lattice-api
 echo "==> cargo test -p lattice-cli"
 cargo test -p lattice-cli
 
-echo "==> scripts/cep-boundary-check.sh"
-scripts/cep-boundary-check.sh
+echo "==> scripts/lancet-boundary-check.sh"
+scripts/lancet-boundary-check.sh
 
 echo "==> release gate passed"

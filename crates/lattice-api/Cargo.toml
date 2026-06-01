@@ -8,11 +8,11 @@ description = "LATTICE thin public API facade for session creation, turn executi
 
 [dependencies]
 async-trait = { workspace = true }
-lattice-cep-protocol = { workspace = true }
-lattice-cep-catalog = { workspace = true }
-lattice-cep-authority = { workspace = true }
-lattice-cep-invariants = { workspace = true }
-lattice-cep-native = { workspace = true }
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+lancet-authority = { workspace = true }
+lancet-invariants = { workspace = true }
+lancet-native = { workspace = true }
 lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }

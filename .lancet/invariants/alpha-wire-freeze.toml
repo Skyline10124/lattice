@@ -1,0 +1,14 @@
+id = "ALPHA-WIRE-FREEZE"
+title = "Alpha wire freeze — no new struct/enum definitions in lancet-protocol"
+anchor = { type = "glob", value = "crates/lancet-protocol/src/**/*.rs" }
+
+[[forbidden]]
+category = "struct_def"
+reason = "Alpha wire format is frozen; adding a new struct type changes the JSON schema and requires a protocol versioning review before merge"
+
+[[forbidden]]
+category = "enum_def"
+reason = "Alpha wire format is frozen; adding a new enum variant changes the JSON schema and requires a protocol versioning review before merge"
+
+[[opaque]]
+text = "When changing existing field names or types, increment the schema version in catalog.rs and confirm all provider adapters (anthropic.rs, openai.rs, gemini.rs) handle the new shape"

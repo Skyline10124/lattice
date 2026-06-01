@@ -6,13 +6,13 @@ members = [
     "crates/lattice-session",
     "crates/lattice-agent",
     "crates/lattice-tooling",
-    "crates/lattice-cep-protocol",
-    "crates/lattice-cep-catalog",
-    "crates/lattice-cep-dispatch",
-    "crates/lattice-cep-audit",
-    "crates/lattice-cep-authority",
-    "crates/lattice-cep-invariants",
-    "crates/lattice-cep-native",
+    "crates/lancet-protocol",
+    "crates/lancet-catalog",
+    "crates/lancet-dispatch",
+    "crates/lancet-audit",
+    "crates/lancet-authority",
+    "crates/lancet-invariants",
+    "crates/lancet-native",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -31,13 +31,13 @@ lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lattice-tooling  = { path = "crates/lattice-tooling" }
-lattice-cep-protocol = { path = "crates/lattice-cep-protocol" }
-lattice-cep-catalog  = { path = "crates/lattice-cep-catalog" }
-lattice-cep-dispatch = { path = "crates/lattice-cep-dispatch" }
-lattice-cep-audit    = { path = "crates/lattice-cep-audit" }
-lattice-cep-authority = { path = "crates/lattice-cep-authority" }
-lattice-cep-invariants = { path = "crates/lattice-cep-invariants" }
-lattice-cep-native   = { path = "crates/lattice-cep-native" }
+lancet-protocol = { path = "crates/lancet-protocol" }
+lancet-catalog  = { path = "crates/lancet-catalog" }
+lancet-dispatch = { path = "crates/lancet-dispatch" }
+lancet-audit    = { path = "crates/lancet-audit" }
+lancet-authority = { path = "crates/lancet-authority" }
+lancet-invariants = { path = "crates/lancet-invariants" }
+lancet-native   = { path = "crates/lancet-native" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 

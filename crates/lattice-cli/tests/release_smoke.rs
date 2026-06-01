@@ -398,13 +398,13 @@ fn smoke_session_status_nonexistent_returns_error() {
 // ─── release gate wiring ────────────────────────────────────────────────────
 
 #[test]
-fn release_smoke_release_gate_includes_cep_boundary_check() {
+fn release_smoke_release_gate_includes_lancet_boundary_check() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let gate_path = manifest_dir.join("../../scripts/release-gate.sh");
     let gate = std::fs::read_to_string(&gate_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", gate_path.display()));
     assert!(
-        gate.contains("scripts/cep-boundary-check.sh"),
-        "release gate must invoke CEP boundary check"
+        gate.contains("scripts/lancet-boundary-check.sh"),
+        "release gate must invoke LANCET boundary check"
     );
 }

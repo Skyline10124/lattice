@@ -10,14 +10,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::LlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus};
-use lattice_cep_native::{AuditQueryFilters, CepAuditStore};
-use lattice_cep_protocol::envelope::{
+use lancet_native::{AuditQueryFilters, CepAuditStore};
+use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope, VerifyCommand,
 };
+use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_agent::LlmClient;
+use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
@@ -74,7 +74,7 @@ struct ReleaseE2eWorkspace {
 
 /// Build a temp workspace with a src/lib.rs seed and a custom profile.
 ///
-/// The `[cep.command]` section adds `grep` to `allowed_diagnostic_commands`
+/// The `[lancet.command]` section adds `grep` to `allowed_diagnostic_commands`
 /// so the `grep -q RELEASE_E2E_OK src/lib.rs` verify command passes policy validation.
 fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
     let ws = tempfile::tempdir().unwrap();
@@ -86,7 +86,7 @@ fn setup_release_e2e_workspace(src_content: &str) -> ReleaseE2eWorkspace {
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
 
-    // The [cep.command] section overrides allowed_diagnostic_commands so that
+    // The [lancet.command] section overrides allowed_diagnostic_commands so that
     // "grep" is classified as Diagnostic — required by validate_verify_command.
     let toml_content = r#"schema_version = 1
 [agent]
@@ -96,7 +96,7 @@ model = "sonnet"
 system = "You are a test agent."
 [tools]
 enabled = ["envelope.declare", "command.run", "workspace.patch"]
-[cep.command]
+[lancet.command]
 allowed_diagnostic_commands = [["echo"], ["grep"]]
 "#;
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();

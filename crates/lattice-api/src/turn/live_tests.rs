@@ -91,7 +91,7 @@ fn make_loaded_profile(model: &str, system_prompt: &str) -> lattice_profile::Loa
             },
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
-            cep: lattice_profile::CepSection::default(),
+            lancet: lattice_profile::LancetSection::default(),
         },
         system_prompt: system_prompt.to_string(),
     }

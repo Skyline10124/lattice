@@ -1,0 +1,14 @@
+[package]
+name = "lancet-dispatch"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET CEP typed dispatch, in-process JSON-RPC transport, cancellation, and event sinks"
+
+[dependencies]
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

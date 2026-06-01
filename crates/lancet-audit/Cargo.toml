@@ -1,0 +1,17 @@
+[package]
+name = "lancet-audit"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET CEP audit store, query filters, row model, stage labels, and attestation persistence"
+
+[dependencies]
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+blake3 = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

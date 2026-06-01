@@ -1,0 +1,40 @@
+[package]
+name = "lancet-native"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET native production handlers, transport integration, verify, edit, shell, web, and tool projection"
+
+[dependencies]
+lattice-llm = { workspace = true }
+lattice-tooling = { workspace = true }
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+lancet-dispatch = { workspace = true }
+lancet-audit = { workspace = true }
+lancet-authority = { workspace = true }
+lancet-invariants = { workspace = true }
+schemars = { workspace = true }
+blake3 = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+libc = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+tempfile = { workspace = true }
+toml = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+default = []
+inspect-scaffold = ["lancet-catalog/inspect-scaffold"]

@@ -85,7 +85,7 @@ enabled = [
   "command.run",
 ]
 
-[cep]
+[lancet]
 mode = "enforce"
 EOF
 

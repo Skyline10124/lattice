@@ -4,24 +4,24 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lattice_agent::{ToolCallExecutor, ToolExecutionError};
-use lattice_api::CepExecutorAdapter;
-use lattice_cep_catalog::catalog;
-use lattice_cep_catalog::methods::command::Run;
-use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
-use lattice_cep_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lattice_cep_catalog::methods::session::{TodoWrite, TodoWriteParams};
-use lattice_cep_catalog::methods::workspace::{ReadFile, WriteFile};
-use lattice_cep_catalog::CepMethod;
-use lattice_cep_native::{
+use lancet_catalog::catalog;
+use lancet_catalog::methods::command::Run;
+use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
+use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
+use lancet_catalog::methods::workspace::{ReadFile, WriteFile};
+use lancet_catalog::CepMethod;
+use lancet_native::{
     register_production_method_registry, to_tool_definitions, CepAuditStore, CepTransport,
     MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use lattice_cep_protocol::envelope::{
+use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use lattice_cep_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
-use lattice_cep_protocol::{CepError, CepErrorCode, Retriability};
+use lancet_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
+use lancet_protocol::{CepError, CepErrorCode, Retriability};
+use lattice_agent::{ToolCallExecutor, ToolExecutionError};
+use lattice_api::CepExecutorAdapter;
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -371,10 +371,10 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
-    use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use lattice_cep_authority::{CepPolicyConfig, CepTurnContext};
-    use lattice_cep_catalog::methods::session::TodoWrite;
-    use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lancet_authority::{CepPolicyConfig, CepTurnContext};
+    use lancet_catalog::methods::session::TodoWrite;
+    use lancet_protocol::envelope::BaseExecutionEnvelope;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
     let root = canonical_root.to_str().expect("utf-8 production root");

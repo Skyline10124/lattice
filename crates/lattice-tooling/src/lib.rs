@@ -1,8 +1,8 @@
 //! Shared tool types (`ToolCallExecutor`, `ToolLimits`) used by the CEP
 //! executor bridge and the agent loop.
 //!
-//! The **public tool contract** is split between `lattice-cep-catalog`
-//! (CATALOG plus params/result schemas) and `lattice-cep-protocol`
+//! The **public tool contract** is split between `lancet-catalog`
+//! (CATALOG plus params/result schemas) and `lancet-protocol`
 //! (errors, envelope/policy, and provenance wire schemas). This crate is an
 //! internal shared-types layer, not the public API surface for callers building
 //! on CEP.

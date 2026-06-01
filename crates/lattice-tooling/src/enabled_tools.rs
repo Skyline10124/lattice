@@ -2,7 +2,7 @@
 //!
 //! Resolves a list of tool names against a provided inventory of definitions.
 //! The protocol layer does not own tool definitions — it receives them from
-//! the implementor (e.g., lattice-cep-native).
+//! the implementor (e.g., lancet-native).
 
 use std::collections::BTreeSet;
 

@@ -5,38 +5,38 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lattice_agent::{
-    AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
-};
-use lattice_cep_authority::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
-use lattice_cep_authority::{
+use lancet_authority::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use lancet_authority::{
     ActiveEnvelopeStore, BudgetLimits, CepPolicyConfig, CepTurnContext, CommandPolicy,
     NetworkPolicyConfig, ObservationPolicyConfig,
 };
-use lattice_cep_catalog::catalog;
-use lattice_cep_catalog::methods::audit::{AuditQuery, AuditReplay, AuditTail};
-use lattice_cep_catalog::methods::command::Run;
-use lattice_cep_catalog::methods::envelope::{Declare, SubmitIntent};
-use lattice_cep_catalog::methods::external::Fetch;
-use lattice_cep_catalog::methods::session::TodoWrite;
-use lattice_cep_catalog::methods::workspace::{
+use lancet_catalog::catalog;
+use lancet_catalog::methods::audit::{AuditQuery, AuditReplay, AuditTail};
+use lancet_catalog::methods::command::Run;
+use lancet_catalog::methods::envelope::{Declare, SubmitIntent};
+use lancet_catalog::methods::external::Fetch;
+use lancet_catalog::methods::session::TodoWrite;
+use lancet_catalog::methods::workspace::{
     FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
 };
-use lattice_cep_catalog::{CatalogMethod, CepMethod};
-use lattice_cep_invariants as invariants;
-use lattice_cep_native::{
+use lancet_catalog::{CatalogMethod, CepMethod};
+use lancet_invariants as invariants;
+use lancet_native::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
     wire_code_for_error, AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore,
     CepClient, CepTransport, MethodRegistry, ServerRunConfig,
 };
-use lattice_cep_protocol::envelope::BaseExecutionEnvelope;
-use lattice_cep_protocol::error::{
+use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::error::{
     invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
 };
-use lattice_cep_protocol::{CepError, Retriability, ToolEvent};
+use lancet_protocol::{CepError, Retriability, ToolEvent};
+use lattice_agent::{
+    AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
+};
 use lattice_llm::ToolCall;
-use lattice_profile::{CepNetworkSection, CepObservationSection, CepSection};
+use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
 use lattice_tooling::resolve_enabled_tools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -208,9 +208,9 @@ pub(crate) fn resolve_catalog_tool_definitions(
     Ok(resolved.definitions)
 }
 
-/// Build executor-facing CEP policy from profile `[cep]` and the runtime project root.
+/// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
 pub(crate) fn cep_policy_from_profile(
-    cep: &CepSection,
+    lancet: &LancetSection,
     runtime_project_root: &Path,
 ) -> Result<CepPolicyConfig, ApiError> {
     let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
@@ -220,28 +220,28 @@ pub(crate) fn cep_policy_from_profile(
         ))
     })?;
 
-    let effective_root = match cep.project_root.as_ref().and_then(|s| s.root.as_deref()) {
+    let effective_root = match lancet.project_root.as_ref().and_then(|s| s.root.as_deref()) {
         Some(profile_root) => {
             let resolved = resolve_profile_path(&runtime_root, profile_root)?;
-            canonicalize_existing(&resolved, "cep.project_root.root")?
+            canonicalize_existing(&resolved, "lancet.project_root.root")?
         }
         None => runtime_root.clone(),
     };
 
     if !effective_root.starts_with(&runtime_root) {
         return Err(ApiError::BadRequest(format!(
-            "cep.project_root.root '{}' resolves outside runtime project root",
+            "lancet.project_root.root '{}' resolves outside runtime project root",
             effective_root.display()
         )));
     }
 
     let mut observation = ObservationPolicyConfig::defaults_for_root(&effective_root);
-    if let Some(section) = cep.observation.as_ref() {
+    if let Some(section) = lancet.observation.as_ref() {
         apply_observation_profile(section, &mut observation, &effective_root)?;
     }
 
     let mut network = NetworkPolicyConfig::safe_defaults();
-    if let Some(section) = cep.network.as_ref() {
+    if let Some(section) = lancet.network.as_ref() {
         apply_network_profile(section, &mut network);
     }
 
@@ -259,12 +259,12 @@ pub(crate) fn cep_policy_from_profile(
         observation,
         network,
         budget,
-        command: command_policy_from_profile(cep),
+        command: command_policy_from_profile(lancet),
     })
 }
 
 fn apply_observation_profile(
-    section: &CepObservationSection,
+    section: &LancetObservationSection,
     observation: &mut ObservationPolicyConfig,
     effective_root: &Path,
 ) -> Result<(), ApiError> {
@@ -272,10 +272,10 @@ fn apply_observation_profile(
         let mut roots = Vec::with_capacity(section.allowed_roots.len());
         for root in &section.allowed_roots {
             let resolved = resolve_profile_path(effective_root, root)?;
-            let canonical = canonicalize_existing(&resolved, "cep.observation.allowed_roots")?;
+            let canonical = canonicalize_existing(&resolved, "lancet.observation.allowed_roots")?;
             if !canonical.starts_with(effective_root) {
                 return Err(ApiError::BadRequest(format!(
-                    "cep.observation.allowed_roots entry '{}' is outside effective project root",
+                    "lancet.observation.allowed_roots entry '{}' is outside effective project root",
                     root
                 )));
             }
@@ -304,7 +304,7 @@ fn apply_observation_profile(
     Ok(())
 }
 
-fn apply_network_profile(section: &CepNetworkSection, network: &mut NetworkPolicyConfig) {
+fn apply_network_profile(section: &LancetNetworkSection, network: &mut NetworkPolicyConfig) {
     if let Some(value) = section.allow_public_https {
         network.allow_public_https = value;
     }
@@ -319,13 +319,13 @@ fn apply_network_profile(section: &CepNetworkSection, network: &mut NetworkPolic
     }
 }
 
-/// Build `CommandPolicy` from the profile `[cep.command]` section.
+/// Build `CommandPolicy` from the profile `[lancet.command]` section.
 ///
-/// Missing `[cep.command]` falls back to `CommandPolicy::defaults()`.
+/// Missing `[lancet.command]` falls back to `CommandPolicy::defaults()`.
 /// Partial fields use defaults for the unspecified ones.
-fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
+fn command_policy_from_profile(lancet: &LancetSection) -> CommandPolicy {
     let defaults = CommandPolicy::defaults();
-    match cep.command.as_ref() {
+    match lancet.command.as_ref() {
         Some(section) => CommandPolicy {
             default_timeout_ms: section
                 .default_timeout_ms
@@ -357,7 +357,7 @@ fn command_policy_from_profile(cep: &CepSection) -> CommandPolicy {
 
 /// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
 ///
-/// Merge precedence: compiled defaults < profile inline `[cep.*]` < external policy file.
+/// Merge precedence: compiled defaults < profile inline `[lancet.*]` < external policy file.
 fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
     CepPolicyConfig {
         project_root: config.project_root.clone(),
@@ -369,7 +369,7 @@ fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
 }
 
 pub(crate) fn load_policy_config(
-    cep: &CepSection,
+    lancet: &LancetSection,
     runtime_project_root: &Path,
 ) -> Result<PolicyConfig, ApiError> {
     let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
@@ -379,22 +379,22 @@ pub(crate) fn load_policy_config(
         ))
     })?;
 
-    let effective_root = match cep.project_root.as_ref().and_then(|s| s.root.as_deref()) {
+    let effective_root = match lancet.project_root.as_ref().and_then(|s| s.root.as_deref()) {
         Some(profile_root) => {
             let resolved = resolve_profile_path(&runtime_root, profile_root)?;
-            canonicalize_existing(&resolved, "cep.project_root.root")?
+            canonicalize_existing(&resolved, "lancet.project_root.root")?
         }
         None => runtime_root.clone(),
     };
 
     if !effective_root.starts_with(&runtime_root) {
         return Err(ApiError::BadRequest(format!(
-            "cep.project_root.root '{}' resolves outside runtime project root",
+            "lancet.project_root.root '{}' resolves outside runtime project root",
             effective_root.display()
         )));
     }
 
-    let cep_context = cep_policy_from_profile(cep, runtime_project_root)?;
+    let cep_context = cep_policy_from_profile(lancet, runtime_project_root)?;
     let mut config = PolicyConfig {
         capability_sources: Default::default(),
         methods: Default::default(),
@@ -405,33 +405,33 @@ pub(crate) fn load_policy_config(
         project_root: cep_context.project_root,
     };
 
-    if let Some(policy_section) = &cep.policy {
+    if let Some(policy_section) = &lancet.policy {
         if let Some(path) = &policy_section.path {
             if path.contains('\0') {
                 return Err(ApiError::BadRequest(
-                    "cep.policy.path must not contain NUL bytes".into(),
+                    "lancet.policy.path must not contain NUL bytes".into(),
                 ));
             }
             if Path::new(path).is_absolute() {
                 return Err(ApiError::BadRequest(format!(
-                    "cep.policy.path must be relative, got absolute path: '{path}'"
+                    "lancet.policy.path must be relative, got absolute path: '{path}'"
                 )));
             }
             if path.contains("..") {
                 return Err(ApiError::BadRequest(format!(
-                    "cep.policy.path must not contain '..' components: '{path}'"
+                    "lancet.policy.path must not contain '..' components: '{path}'"
                 )));
             }
             let resolved = runtime_root.join(path);
             let canonical = std::fs::canonicalize(&resolved).map_err(|err| {
                 ApiError::BadRequest(format!(
-                    "cannot canonicalize cep.policy.path '{}': {err}",
+                    "cannot canonicalize lancet.policy.path '{}': {err}",
                     resolved.display()
                 ))
             })?;
             if !canonical.starts_with(&runtime_root) {
                 return Err(ApiError::BadRequest(format!(
-                    "cep.policy.path '{}' resolves outside runtime project root",
+                    "lancet.policy.path '{}' resolves outside runtime project root",
                     canonical.display()
                 )));
             }
@@ -519,10 +519,10 @@ fn production_base_envelope_from_policy(
 pub(crate) fn production_base_envelope(
     project_root: &str,
     enabled_tools: &[String],
-    cep: Option<&CepSection>,
+    lancet: Option<&LancetSection>,
 ) -> Result<BaseExecutionEnvelope, ApiError> {
-    let policy = match cep {
-        Some(cep_section) => cep_policy_from_profile(cep_section, Path::new(project_root))?,
+    let policy = match lancet {
+        Some(lancet_section) => cep_policy_from_profile(lancet_section, Path::new(project_root))?,
         None => CepPolicyConfig::defaults_for_project_root(project_root),
     };
     production_base_envelope_from_policy(project_root, enabled_tools, &policy)
@@ -597,7 +597,7 @@ pub(crate) fn build_production_turn_deps(
     enabled_tools: &[String],
     llm: Arc<dyn lattice_agent::LlmClient>,
     in_memory_audit: bool,
-    cep: Option<&CepSection>,
+    lancet: Option<&LancetSection>,
     model_id: &str,
     runtime_version: &str,
 ) -> Result<ProductionTurnDeps, ApiError> {
@@ -615,8 +615,8 @@ pub(crate) fn build_production_turn_deps(
         .and_then(|p| p.to_str().map(str::to_owned));
     let project_root = canonical_root.as_deref().unwrap_or(project_root);
 
-    let policy_config = match cep {
-        Some(cep_section) => load_policy_config(cep_section, Path::new(project_root))?,
+    let policy_config = match lancet {
+        Some(lancet_section) => load_policy_config(lancet_section, Path::new(project_root))?,
         None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
     };
     let cep_policy = cep_policy_from_policy_config(&policy_config);
@@ -654,7 +654,7 @@ pub(crate) fn build_production_turn_deps(
 
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
 
-    let invariants_dir = cep
+    let invariants_dir = lancet
         .and_then(|section| section.invariants.as_ref())
         .and_then(|section| section.dir.as_deref());
     let invariant_index = invariants::load_invariant_index_from_dir(
@@ -669,9 +669,9 @@ pub(crate) fn build_production_turn_deps(
         active_envelope,
         policy_hook: default_hook.clone(),
         default_policy_hook: Some(default_hook),
-        cep_mode: cep
+        cep_mode: lancet
             .map(|c| c.mode.clone())
-            .unwrap_or(lattice_cep_protocol::envelope::CepMode::Enforce),
+            .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
         invariant_index,
     };
 
@@ -847,19 +847,20 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
-    use lattice_cep_catalog::methods::command::RunParams;
-    use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
-    use lattice_cep_protocol::envelope::{
+    use lancet_catalog::methods::command::RunParams;
+    use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+    use lancet_protocol::envelope::{
         Capability, CepMode, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
     };
-    use lattice_profile::CepSection;
+    use lattice_profile::LancetSection;
     use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 
     #[test]
     fn cep_context_profile_policy_defaults_when_cep_absent() {
         let dir = TempDir::new().unwrap();
-        let policy = cep_policy_from_profile(&CepSection::default(), dir.path()).expect("defaults");
+        let policy =
+            cep_policy_from_profile(&LancetSection::default(), dir.path()).expect("defaults");
         assert_eq!(policy.project_root, dir.path().canonicalize().unwrap());
         assert_eq!(
             policy.budget.max_turn_observation_bytes,
@@ -872,8 +873,8 @@ mod cep_context_profile_policy {
         let dir = TempDir::new().unwrap();
         let sub = dir.path().join("src");
         std::fs::create_dir_all(&sub).unwrap();
-        let cep = CepSection {
-            observation: Some(CepObservationSection {
+        let cep = LancetSection {
+            observation: Some(LancetObservationSection {
                 allowed_roots: vec!["src".into()],
                 ..Default::default()
             }),
@@ -890,8 +891,8 @@ mod cep_context_profile_policy {
     fn cep_context_profile_policy_rejects_roots_outside_project() {
         let dir = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
-        let cep = CepSection {
-            observation: Some(CepObservationSection {
+        let cep = LancetSection {
+            observation: Some(LancetObservationSection {
                 allowed_roots: vec![outside.path().to_string_lossy().into_owned()],
                 ..Default::default()
             }),
@@ -904,8 +905,8 @@ mod cep_context_profile_policy {
     #[test]
     fn cep_context_profile_policy_network_max_web_response_bytes() {
         let dir = TempDir::new().unwrap();
-        let cep = CepSection {
-            network: Some(CepNetworkSection {
+        let cep = LancetSection {
+            network: Some(LancetNetworkSection {
                 max_web_response_bytes: Some(2048),
                 ..Default::default()
             }),
@@ -917,7 +918,7 @@ mod cep_context_profile_policy {
 
     #[test]
     fn command_policy_from_profile_defaults_when_absent() {
-        let cep = CepSection::default();
+        let cep = LancetSection::default();
         let policy = command_policy_from_profile(&cep);
         let defaults = CommandPolicy::defaults();
         assert_eq!(policy.default_timeout_ms, defaults.default_timeout_ms);
@@ -927,8 +928,8 @@ mod cep_context_profile_policy {
 
     #[test]
     fn command_policy_from_profile_applies_custom_values() {
-        let cep = CepSection {
-            command: Some(lattice_profile::CepCommandSection {
+        let cep = LancetSection {
+            command: Some(lattice_profile::LancetCommandSection {
                 default_timeout_ms: Some(30_000),
                 max_timeout_ms: Some(60_000),
                 max_output_bytes: Some(50_000),
@@ -962,8 +963,8 @@ mod cep_context_profile_policy {
 
     #[test]
     fn command_policy_from_profile_partial_uses_defaults_for_missing() {
-        let cep = CepSection {
-            command: Some(lattice_profile::CepCommandSection {
+        let cep = LancetSection {
+            command: Some(lattice_profile::LancetCommandSection {
                 default_timeout_ms: Some(10_000),
                 ..Default::default()
             }),
@@ -983,8 +984,8 @@ mod cep_context_profile_policy {
     #[test]
     fn cep_policy_from_profile_uses_command_policy_from_profile() {
         let dir = TempDir::new().unwrap();
-        let cep = CepSection {
-            command: Some(lattice_profile::CepCommandSection {
+        let cep = LancetSection {
+            command: Some(lattice_profile::LancetCommandSection {
                 default_timeout_ms: Some(45_000),
                 ..Default::default()
             }),
@@ -997,7 +998,7 @@ mod cep_context_profile_policy {
     #[test]
     fn cep_policy_from_profile_older_profile_uses_command_defaults() {
         let dir = TempDir::new().unwrap();
-        let cep = CepSection::default();
+        let cep = LancetSection::default();
         let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.command, CommandPolicy::defaults());
     }
@@ -1019,8 +1020,8 @@ inherited_env = []
         )
         .unwrap();
 
-        let cep = CepSection {
-            policy: Some(lattice_profile::CepPolicySection {
+        let cep = LancetSection {
+            policy: Some(lattice_profile::LancetPolicySection {
                 path: Some("policy.toml".into()),
             }),
             ..Default::default()
@@ -1047,9 +1048,9 @@ allowed_diagnostic_commands = [["echo"]]
         )
         .unwrap();
 
-        let cep = CepSection {
+        let cep = LancetSection {
             mode: CepMode::Off,
-            policy: Some(lattice_profile::CepPolicySection {
+            policy: Some(lattice_profile::LancetPolicySection {
                 path: Some("policy.toml".into()),
             }),
             ..Default::default()

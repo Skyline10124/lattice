@@ -19,7 +19,7 @@ fn cli_cutover_help_contains_supported_commands() {
     let output = lattice().arg("--help").output().unwrap();
     assert!(output.status.success(), "--help should exit 0");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for name in &["models", "resolve", "session", "doctor", "audit", "cep"] {
+    for name in &["models", "resolve", "session", "doctor", "audit", "lancet"] {
         assert!(
             stdout.contains(name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -46,7 +46,7 @@ fn cli_cutover_help_omits_removed_commands() {
         }
     }
 
-    for name in &["models", "resolve", "session", "doctor", "audit", "cep"] {
+    for name in &["models", "resolve", "session", "doctor", "audit", "lancet"] {
         assert!(
             command_names.iter().any(|candidate| candidate == name),
             "help should contain supported command '{name}', got:\n{stdout}"
@@ -218,11 +218,11 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-profile",
         "lattice-agent",
         "lattice-tooling",
-        "lattice-cep-protocol",
-        "lattice-cep-catalog",
-        "lattice-cep-dispatch",
-        "lattice-cep-audit",
-        "lattice-cep-native",
+        "lancet-protocol",
+        "lancet-catalog",
+        "lancet-dispatch",
+        "lancet-audit",
+        "lancet-native",
         "lattice-api",
         "lattice-cli",
     ];

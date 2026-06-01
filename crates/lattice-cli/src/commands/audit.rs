@@ -1,18 +1,18 @@
-//! `cep audit` — query and tail the CEP audit store.
+//! `lattice audit` — query and tail the CEP audit store.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use lattice_cep_catalog::methods::audit::{
+use lancet_catalog::methods::audit::{
     AuditQuery, AuditQueryParams, AuditTail, AuditTailParams, AuditTailResult,
 };
-use lattice_cep_native::{
+use lancet_native::{
     impact_kind_from_label, register_production_method_registry, CepAuditStore, CepClient,
     CepTransport, CepTurnContext, MethodRegistry, ServerRunConfig,
 };
-use lattice_cep_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
+use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use tokio::sync::RwLock;
 
 #[derive(Args, Debug, Clone)]
@@ -103,9 +103,9 @@ where
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
     config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "cep audit").with_read_audit();
+        BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-    config.audit_context = Arc::new(RwLock::new(lattice_cep_native::CepAuditContext {
+    config.audit_context = Arc::new(RwLock::new(lancet_native::CepAuditContext {
         session_id: session_id.to_string(),
         ..Default::default()
     }));
@@ -278,9 +278,9 @@ fn parse_impact_kind(label: Option<&str>) -> Result<Option<ImpactKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_cep_catalog::methods::workspace::ReadFile;
-    use lattice_cep_catalog::CepMethod;
-    use lattice_cep_native::audit::{CallAuditMetadata, CepAuditContext};
+    use lancet_catalog::methods::workspace::ReadFile;
+    use lancet_catalog::CepMethod;
+    use lancet_native::audit::{CallAuditMetadata, CepAuditContext};
     use tempfile::TempDir;
 
     fn seed_audit_db(dir: &Path, session_id: &str) {
@@ -304,7 +304,7 @@ mod tests {
         audit
             .finalize_call(
                 start,
-                lattice_cep_native::audit::AuditOutcome::Success {
+                lancet_native::audit::AuditOutcome::Success {
                     summary: "read ok".into(),
                 },
                 Some("native_handler"),

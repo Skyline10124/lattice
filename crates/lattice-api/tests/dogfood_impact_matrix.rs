@@ -16,20 +16,20 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lattice_cep_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-use lattice_cep_authority::{CepPolicyConfig, CepTurnContext};
-use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-use lattice_cep_catalog::methods::command::{Run, RunParams};
-use lattice_cep_catalog::methods::envelope::{Declare, DeclareParams};
-use lattice_cep_catalog::methods::external::{Fetch, FetchParams};
-use lattice_cep_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
-use lattice_cep_catalog::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
-use lattice_cep_native::audit::CepAuditContext;
-use lattice_cep_native::{
+use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lancet_authority::{CepPolicyConfig, CepTurnContext};
+use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+use lancet_catalog::methods::command::{Run, RunParams};
+use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+use lancet_catalog::methods::external::{Fetch, FetchParams};
+use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
+use lancet_catalog::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
+use lancet_native::audit::CepAuditContext;
+use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
-use lattice_cep_protocol::envelope::{
+use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
 use tempfile::TempDir;
@@ -280,7 +280,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // All rows (tool calls + envelope.declare calls) share the fixed turn_id.
     let all_rows = audit
-        .query_rows(&lattice_cep_native::AuditQueryFilters {
+        .query_rows(&lancet_native::AuditQueryFilters {
             session_id: Some(FIXED_SESSION_ID.to_string()),
             ..Default::default()
         })

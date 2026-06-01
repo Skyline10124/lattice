@@ -6,21 +6,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "== CEP stress: lattice-cep-native command.run =="
-cargo test -p lattice-cep-native --lib handlers::command -- --nocapture
+echo "== CEP stress: lancet-native command.run =="
+cargo test -p lancet-native --lib handlers::command -- --nocapture
 
-echo "== CEP stress: lattice-cep-native guard L1 =="
-cargo test -p lattice-cep-native --lib guard_l1:: -- --nocapture
+echo "== CEP stress: lancet-native guard L1 =="
+cargo test -p lancet-native --lib guard_l1:: -- --nocapture
 
-echo "== CEP stress: lattice-cep-native mutation + verify =="
-cargo test -p lattice-cep-native --lib handlers::mutation -- --nocapture
+echo "== CEP stress: lancet-native mutation + verify =="
+cargo test -p lancet-native --lib handlers::mutation -- --nocapture
 
-echo "== CEP stress: lattice-cep-native shell executor =="
-cargo test -p lattice-cep-native --lib executor::shell::tests -- --nocapture
+echo "== CEP stress: lancet-native shell executor =="
+cargo test -p lancet-native --lib executor::shell::tests -- --nocapture
 
 echo "== CEP stress: audit store + transport =="
-cargo test -p lattice-cep-audit --lib audit::tests -- --nocapture
-cargo test -p lattice-cep-dispatch -- --nocapture
+cargo test -p lancet-audit --lib audit::tests -- --nocapture
+cargo test -p lancet-dispatch -- --nocapture
 
 echo "== CEP stress: lattice-api turn / CEP event mapping =="
 cargo test -p lattice-api turn::tests:: -- --nocapture

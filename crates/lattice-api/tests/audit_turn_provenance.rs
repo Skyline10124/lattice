@@ -3,18 +3,18 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use lattice_agent::testing::FakeStreamingLlmClient;
-use lattice_agent::LlmClient;
-use lattice_api::{RunTurnRequest, RunTurnStatus};
-use lattice_cep_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-use lattice_cep_native::{
+use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
+use lancet_native::{
     register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
     CepTurnContext, MethodRegistry, ServerRunConfig,
 };
-use lattice_cep_protocol::envelope::{
+use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
     ImpactKind, Intent, OnFailure, Scope,
 };
+use lattice_agent::testing::FakeStreamingLlmClient;
+use lattice_agent::LlmClient;
+use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use serde_json::Value;
