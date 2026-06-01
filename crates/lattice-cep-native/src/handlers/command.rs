@@ -126,26 +126,29 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     // CommandExecution. For composite invocations, union in WritePath regions
     // from the active envelope so WorkspaceMutation effects are also authorized.
     if let Some(ref record) = active_record {
-        let write_paths: Vec<_> = record
-            .envelope
-            .capabilities
-            .iter()
-            .filter_map(|cap| match cap {
-                Capability::WritePath { path_pattern } => {
-                    Some(crate::effect::region::normalize_region_path(
-                        path_pattern,
-                        &ctx.cep_context.policy.project_root,
-                    ))
+        let mut write_paths = Vec::new();
+        let mut write_path_prefixes = Vec::new();
+        for cap in &record.envelope.capabilities {
+            if let Capability::WritePath { path_pattern } = cap {
+                if let Some((path, is_prefix)) = crate::effect::region::normalize_write_region_path(
+                    path_pattern,
+                    &ctx.cep_context.policy.project_root,
+                ) {
+                    if is_prefix {
+                        write_path_prefixes.push(path);
+                    } else {
+                        write_paths.push(path);
+                    }
                 }
-                _ => None,
-            })
-            .collect();
-        if !write_paths.is_empty() {
+            }
+        }
+        if !write_paths.is_empty() || !write_path_prefixes.is_empty() {
             let mut write_region = crate::effect::region::AuthorizedEffectRegion::empty();
             write_region
                 .kinds
                 .insert(lattice_cep_protocol::envelope::ImpactKind::WorkspaceMutation);
             write_region.write_paths = write_paths;
+            write_region.write_path_prefixes = write_path_prefixes;
             if let Some(existing) = ctx.authorized_region.get() {
                 let mut merged = existing.clone();
                 merged.union(&write_region);
@@ -246,7 +249,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                         }
 
                         if !out_of_scope.is_empty() {
-                            // Record out-of-scope paths; the effect checker enforces the final verdict.
+                            // Record out-of-scope paths before failing closed.
                             ctx.events
                                 .emit(
                                     "cep.effect_observed_out_of_scope",
@@ -267,6 +270,16 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                 "backend_invoked": true,
                                 "policy_enforced": true,
                             }));
+                            return Err(CepError::new(
+                                CepErrorCode::ReplanRequired,
+                                "command.run changed paths outside the active WritePath scope",
+                                CepErrorData::Guard(GuardErrorData {
+                                    method: Run::NAME.into(),
+                                    reason: "workspace mutation outside active WritePath scope"
+                                        .into(),
+                                }),
+                                Retriability::RequiresReplan,
+                            ));
                         }
                     }
 
@@ -1104,7 +1117,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_mutation_hidden_project_path_outside_scope_records_effect_and_succeeds() {
+    async fn workspace_mutation_hidden_project_path_outside_scope_records_effect_and_fails_replan()
+    {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
@@ -1179,12 +1193,11 @@ mod tests {
             timeout_ms: Some(5000),
             declared_impact: Some(ImpactKind::WorkspaceMutation),
         };
-        let result = registry
+        let err = registry
             .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
-            .unwrap();
-        let parsed: RunResult = serde_json::from_value(result).unwrap();
-        assert_eq!(parsed.exit_code, 0);
+            .unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
 
         let effects = ledger_clone.snapshot();
         let mutation_effects: Vec<_> = effects
@@ -1209,7 +1222,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn workspace_mutation_post_check_records_effects_and_succeeds_after_supersede() {
+    async fn workspace_mutation_post_check_records_effects_and_fails_replan_after_supersede() {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -1336,9 +1349,8 @@ mod tests {
             .await
             .unwrap();
 
-        let result = command_task.await.unwrap().unwrap();
-        let parsed: RunResult = serde_json::from_value(result).unwrap();
-        assert_eq!(parsed.exit_code, 0);
+        let err = command_task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
 
         let effects = ledger_clone.snapshot();
         let cmd_exec: Vec<_> = effects
