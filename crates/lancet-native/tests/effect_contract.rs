@@ -22,8 +22,8 @@ use lancet_catalog::methods::envelope::{DeclareParams, EnvelopeParams};
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    CreateParams, GrepParams, ObserveWorkspaceParams, ObserveWorkspaceResult, PatchParams,
-    ReadFileParams,
+    CreateParams, FindFilesParams, GrepParams, ListDirectoryParams, ObserveWorkspaceParams,
+    ObserveWorkspaceResult, PatchParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
 use lancet_catalog::{CatalogMethod, CepMethod};
@@ -31,7 +31,10 @@ use lancet_native::testing::effect_harness::{
     assert_negative_no_backend_effects, assert_positive, build_test_context,
     effect_contract_harness, rt,
 };
-use lancet_protocol::envelope::{Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent};
+use lancet_protocol::envelope::{
+    Capability, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, ImpactKind,
+    Intent, Scope as EnvScope, VerifyCommand,
+};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 use lancet_authority::NetworkPolicyConfig;
@@ -72,10 +75,12 @@ fn write_cap(_root: &str) -> SourcedCapability {
 }
 
 fn run_cap() -> SourcedCapability {
+    run_cap_with(vec!["echo".into(), "touch".into()])
+}
+
+fn run_cap_with(argv_allowlist: Vec<String>) -> SourcedCapability {
     SourcedCapability {
-        capability: Capability::RunCommand {
-            argv_allowlist: vec!["echo".into(), "touch".into()],
-        },
+        capability: Capability::RunCommand { argv_allowlist },
         source: CapabilitySource::Declared {
             envelope_id: "test-envelope".into(),
         },
@@ -83,14 +88,46 @@ fn run_cap() -> SourcedCapability {
 }
 
 fn test_mutation_envelope(root: &str) -> ExecutionEnvelope {
-    use lancet_protocol::envelope::{Impact as EnvImpact, ImpactConfidence, Scope as EnvScope};
+    test_mutation_envelope_with(root, ".", vec!["echo".into(), "touch".into()], None)
+}
+
+fn test_command_envelope(root: &str, argv_allowlist: Vec<String>) -> ExecutionEnvelope {
+    let mut caps = BTreeSet::new();
+    caps.insert(Capability::RunCommand { argv_allowlist });
+    ExecutionEnvelope {
+        intent: Intent {
+            description: "test command envelope".into(),
+        },
+        capabilities: caps,
+        scope: EnvScope {
+            workspace_root: Some(root.into()),
+            extensions: serde_json::Map::new(),
+        },
+        impact: vec![EnvImpact {
+            kind: ImpactKind::CommandExecution,
+            target: root.into(),
+            scope: None,
+            confidence: ImpactConfidence::Conservative,
+            unknowns: vec![],
+        }],
+        constraints: Constraints::default(),
+        verify: None,
+        on_failure: None,
+        extensions: serde_json::Map::new(),
+    }
+}
+
+fn test_mutation_envelope_with(
+    root: &str,
+    write_path_pattern: &str,
+    argv_allowlist: Vec<String>,
+    verify: Option<VerifyCommand>,
+) -> ExecutionEnvelope {
     let mut caps = BTreeSet::new();
     caps.insert(Capability::WritePath {
-        path_pattern: ".".to_string(),
+        path_pattern: write_path_pattern.to_string(),
     });
-    caps.insert(Capability::RunCommand {
-        argv_allowlist: vec!["echo".into(), "touch".into()],
-    });
+    caps.insert(Capability::RunCommand { argv_allowlist });
     ExecutionEnvelope {
         intent: Intent {
             description: "test mutation envelope".into(),
@@ -108,7 +145,7 @@ fn test_mutation_envelope(root: &str) -> ExecutionEnvelope {
             unknowns: vec![],
         }],
         constraints: Constraints::default(),
-        verify: None,
+        verify,
         on_failure: None,
         extensions: serde_json::Map::new(),
     }
@@ -116,6 +153,10 @@ fn test_mutation_envelope(root: &str) -> ExecutionEnvelope {
 
 fn declare_active_envelope(ctx: &lancet_native::registry::HandlerContext, root: &str) {
     let envelope = test_mutation_envelope(root);
+    declare_envelope(ctx, envelope);
+}
+
+fn declare_envelope(ctx: &lancet_native::registry::HandlerContext, envelope: ExecutionEnvelope) {
     rt().block_on(ctx.active_envelope.declare(envelope, 0, "test-turn"))
         .unwrap();
 }
@@ -179,6 +220,29 @@ fn command_region() -> AuthorizedEffectRegion {
     }
 }
 
+fn command_mutation_region(root: &str) -> AuthorizedEffectRegion {
+    command_mutation_region_with_write_prefixes(root, vec![PathBuf::from(root)])
+}
+
+fn command_mutation_region_with_write_prefixes(
+    _root: &str,
+    write_path_prefixes: Vec<PathBuf>,
+) -> AuthorizedEffectRegion {
+    let mut kinds = BTreeSet::new();
+    kinds.insert(ImpactKind::CommandExecution);
+    kinds.insert(ImpactKind::WorkspaceMutation);
+    AuthorizedEffectRegion {
+        kinds,
+        read_paths: Vec::new(),
+        observation_roots: Vec::new(),
+        write_paths: Vec::new(),
+        write_path_prefixes,
+        hosts: Vec::new(),
+        session_state_allowed: false,
+        command_allowed: true,
+    }
+}
+
 fn session_region() -> AuthorizedEffectRegion {
     let mut kinds = BTreeSet::new();
     kinds.insert(ImpactKind::SessionStateMutation);
@@ -229,10 +293,43 @@ fn hashline(line_number: usize, line: &str) -> String {
     format!("blake3:{}", &hex[..4])
 }
 
-fn dispatch_success_effects<M>(
+fn update_patch_text(path: &str, before: &str, remove_line: &str, add_line: &str) -> String {
+    let hash = blake3::hash(before.as_bytes());
+    let hash_hex = hash.to_hex();
+    let keep_line = before.lines().next().unwrap_or_default();
+    let keep_hash = hashline(1, keep_line);
+    let remove_line_number = before
+        .lines()
+        .position(|line| line == remove_line)
+        .map(|index| index + 1)
+        .expect("remove line must exist in before text");
+    let remove_hash = hashline(remove_line_number, remove_line);
+    format!(
+        "*** Begin Patch\n*** Update File: {path}\n*** Old Hash: blake3:{hash_hex}\n@@\n {keep_hash}\t{keep_line}\n-{remove_hash}\t{remove_line}\n+{add_line}\n*** End Patch\n"
+    )
+}
+
+#[derive(Debug)]
+struct RuntimeEffectScenario {
+    name: &'static str,
+    effects: Vec<ObservedEffect>,
+}
+
+fn scenario(name: &'static str, effects: Vec<ObservedEffect>) -> RuntimeEffectScenario {
+    RuntimeEffectScenario { name, effects }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DispatchExpectation {
+    Success,
+    Failure,
+}
+
+fn dispatch_effects<M>(
     params: M::Params,
     ctx: lancet_native::registry::HandlerContext,
     authority: AuthorizedEffectRegion,
+    expectation: DispatchExpectation,
 ) -> Vec<ObservedEffect>
 where
     M: CatalogMethod,
@@ -242,14 +339,49 @@ where
     let outcome = rt().block_on(effect_contract_harness::<M>(
         &registry, params, ctx, authority,
     ));
-    outcome
-        .dispatch_result
-        .as_ref()
-        .unwrap_or_else(|err| panic!("{} fixture dispatch failed: {err:?}", M::NAME));
+    match expectation {
+        DispatchExpectation::Success => {
+            outcome
+                .dispatch_result
+                .as_ref()
+                .unwrap_or_else(|err| panic!("{} fixture dispatch failed: {err:?}", M::NAME));
+        }
+        DispatchExpectation::Failure => {
+            assert!(
+                outcome.dispatch_result.is_err(),
+                "{} fixture was expected to fail",
+                M::NAME
+            );
+        }
+    }
     outcome.observed_effects
 }
 
-type RuntimeEffectFixture = fn() -> Vec<ObservedEffect>;
+fn dispatch_success_effects<M>(
+    params: M::Params,
+    ctx: lancet_native::registry::HandlerContext,
+    authority: AuthorizedEffectRegion,
+) -> Vec<ObservedEffect>
+where
+    M: CatalogMethod,
+    M::Params: Serialize,
+{
+    dispatch_effects::<M>(params, ctx, authority, DispatchExpectation::Success)
+}
+
+fn dispatch_failure_effects<M>(
+    params: M::Params,
+    ctx: lancet_native::registry::HandlerContext,
+    authority: AuthorizedEffectRegion,
+) -> Vec<ObservedEffect>
+where
+    M: CatalogMethod,
+    M::Params: Serialize,
+{
+    dispatch_effects::<M>(params, ctx, authority, DispatchExpectation::Failure)
+}
+
+type RuntimeEffectFixture = fn() -> Vec<RuntimeEffectScenario>;
 
 fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     let mut fixtures = BTreeMap::new();
@@ -283,65 +415,133 @@ fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     fixtures
 }
 
-fn observe_workspace_runtime_effects() -> Vec<ObservedEffect> {
+fn observe_workspace_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    let mut scenarios = Vec::new();
+
+    let observe_caps = vec![read_cap(&root), inspect_cap()];
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![read_cap(&root)],
+        observe_caps.clone(),
         NetworkPolicyConfig::safe_defaults(),
     );
-    dispatch_success_effects::<ObserveWorkspace>(
-        ObserveWorkspaceParams::ReadFile(ReadFileParams {
-            path: "hello.txt".into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        }),
-        ctx,
-        observation_region(&root),
-    )
+    scenarios.push(scenario(
+        "happy_read_file_read_path",
+        dispatch_success_effects::<ObserveWorkspace>(
+            ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "hello.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }),
+            ctx,
+            observation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        observe_caps.clone(),
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "happy_grep_inspect",
+        dispatch_success_effects::<ObserveWorkspace>(
+            ObserveWorkspaceParams::Grep(GrepParams {
+                pattern: "hello".into(),
+                path: None,
+                max_results: Some(10),
+            }),
+            ctx,
+            observation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        observe_caps.clone(),
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "happy_list_directory_inspect",
+        dispatch_success_effects::<ObserveWorkspace>(
+            ObserveWorkspaceParams::ListDirectory(ListDirectoryParams {
+                path: ".".into(),
+                limit: Some(10),
+            }),
+            ctx,
+            observation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        observe_caps.clone(),
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "happy_find_files_inspect",
+        dispatch_success_effects::<ObserveWorkspace>(
+            ObserveWorkspaceParams::FindFiles(FindFilesParams {
+                pattern: "*.txt".into(),
+                path: Some(".".into()),
+                limit: Some(10),
+            }),
+            ctx,
+            observation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) =
+        build_test_context(&root, observe_caps, NetworkPolicyConfig::safe_defaults());
+    scenarios.push(scenario(
+        "failure_missing_file_no_backend_effect",
+        dispatch_failure_effects::<ObserveWorkspace>(
+            ObserveWorkspaceParams::ReadFile(ReadFileParams {
+                path: "missing.txt".into(),
+                offset: None,
+                limit: None,
+                line_numbers: None,
+            }),
+            ctx,
+            observation_region(&root),
+        ),
+    ));
+
+    scenarios
 }
 
-fn create_runtime_effects() -> Vec<ObservedEffect> {
+fn create_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    let mut scenarios = Vec::new();
+
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![write_cap(&root)],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
-    dispatch_success_effects::<Create>(
-        CreateParams {
-            path: "created.txt".into(),
-            content: "created\n".into(),
-        },
-        ctx,
-        mutation_region(&root),
-    )
-}
-
-fn patch_runtime_effects() -> Vec<ObservedEffect> {
-    let dir = setup_tempdir_with_files();
-    let root = std::fs::canonicalize(dir.path())
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
-    let hash = blake3::hash(&content);
-    let hash_hex = hash.to_hex();
-    let hello_hash = hashline(1, "hello");
-    let world_hash = hashline(2, "world");
+    scenarios.push(scenario(
+        "happy_create",
+        dispatch_success_effects::<Create>(
+            CreateParams {
+                path: "created.txt".into(),
+                content: "created\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
@@ -349,17 +549,232 @@ fn patch_runtime_effects() -> Vec<ObservedEffect> {
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
-    let patch_text = format!(
-        "*** Begin Patch\n*** Update File: hello.txt\n*** Old Hash: blake3:{hash_hex}\n@@\n {hello_hash}\thello\n-{world_hash}\tworld\n+patched\n*** End Patch\n"
+    scenarios.push(scenario(
+        "failure_target_exists_no_backend_effect",
+        dispatch_failure_effects::<Create>(
+            CreateParams {
+                path: "hello.txt".into(),
+                content: "created\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
     );
-    dispatch_success_effects::<Patch>(
-        PatchParams { patch: patch_text },
-        ctx,
-        mutation_region(&root),
-    )
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
+    );
+    scenarios.push(scenario(
+        "scope_boundary_out_of_scope_no_backend_effect",
+        dispatch_failure_effects::<Create>(
+            CreateParams {
+                path: "outside.txt".into(),
+                content: "outside\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root), run_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(
+            &root,
+            ".",
+            vec!["echo".into(), "touch".into()],
+            Some(VerifyCommand {
+                command: "echo ok".into(),
+                expected_exit_code: None,
+            }),
+        ),
+    );
+    scenarios.push(scenario(
+        "verify_success_filters_verify_source",
+        dispatch_success_effects::<Create>(
+            CreateParams {
+                path: "created_with_verify.txt".into(),
+                content: "created\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root), run_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(
+            &root,
+            ".",
+            vec!["echo".into(), "touch".into()],
+            Some(VerifyCommand {
+                command: "echo ok".into(),
+                expected_exit_code: Some(1),
+            }),
+        ),
+    );
+    scenarios.push(scenario(
+        "failure_verify_failed_retains_backend_mutation",
+        dispatch_failure_effects::<Create>(
+            CreateParams {
+                path: "created_then_verify_failed.txt".into(),
+                content: "created\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    scenarios
 }
 
-fn command_run_runtime_effects() -> Vec<ObservedEffect> {
+fn patch_runtime_effects() -> Vec<RuntimeEffectScenario> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut scenarios = Vec::new();
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+    scenarios.push(scenario(
+        "happy_patch",
+        dispatch_success_effects::<Patch>(
+            PatchParams {
+                patch: update_patch_text("hello.txt", "hello\nworld\n", "world", "patched"),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+    scenarios.push(scenario(
+        "failure_hash_mismatch_no_backend_effect",
+        dispatch_failure_effects::<Patch>(
+            PatchParams {
+                patch: "*** Begin Patch\n*** Update File: data.txt\n*** Old Hash: blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n@@\n blake3:aaaa\tsome data content\n-blake3:aaaa\tsome data content\n+patched\n*** End Patch\n".into(),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
+    );
+    scenarios.push(scenario(
+        "scope_boundary_out_of_scope_no_backend_effect",
+        dispatch_failure_effects::<Patch>(
+            PatchParams {
+                patch: update_patch_text(
+                    "data.txt",
+                    "some data content\n",
+                    "some data content",
+                    "patched",
+                ),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    std::fs::write(dir.path().join("verify_success.txt"), "alpha\nbeta\n").unwrap();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root), run_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(
+            &root,
+            ".",
+            vec!["echo".into(), "touch".into()],
+            Some(VerifyCommand {
+                command: "echo ok".into(),
+                expected_exit_code: None,
+            }),
+        ),
+    );
+    scenarios.push(scenario(
+        "verify_success_filters_verify_source",
+        dispatch_success_effects::<Patch>(
+            PatchParams {
+                patch: update_patch_text("verify_success.txt", "alpha\nbeta\n", "beta", "patched"),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    std::fs::write(dir.path().join("verify_failure.txt"), "alpha\nbeta\n").unwrap();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root), run_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(
+            &root,
+            ".",
+            vec!["echo".into(), "touch".into()],
+            Some(VerifyCommand {
+                command: "echo ok".into(),
+                expected_exit_code: Some(1),
+            }),
+        ),
+    );
+    scenarios.push(scenario(
+        "failure_verify_failed_retains_backend_mutation",
+        dispatch_failure_effects::<Patch>(
+            PatchParams {
+                patch: update_patch_text("verify_failure.txt", "alpha\nbeta\n", "beta", "patched"),
+            },
+            ctx,
+            mutation_region(&root),
+        ),
+    ));
+
+    scenarios
+}
+
+fn command_run_runtime_effects() -> Vec<RuntimeEffectScenario> {
+    use std::os::unix::fs::PermissionsExt;
+
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -367,6 +782,28 @@ fn command_run_runtime_effects() -> Vec<ObservedEffect> {
         .unwrap()
         .to_string();
     std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
+    let mut scenarios = Vec::new();
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![run_cap_with(vec!["echo".into()])],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(&ctx, test_command_envelope(&root, vec!["echo".into()]));
+    scenarios.push(scenario(
+        "diagnostic_success_command_execution_only",
+        dispatch_success_effects::<Run>(
+            RunParams {
+                argv: vec!["echo".into(), "diagnostic".into()],
+                cwd: Some(root.clone()),
+                env: BTreeMap::new(),
+                timeout_ms: Some(5000),
+                declared_impact: None,
+            },
+            ctx,
+            command_region(),
+        ),
+    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
@@ -374,33 +811,131 @@ fn command_run_runtime_effects() -> Vec<ObservedEffect> {
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
+    scenarios.push(scenario(
+        "mutation_success_command_and_workspace_mutation",
+        dispatch_success_effects::<Run>(
+            RunParams {
+                argv: vec!["touch".into(), "src/composite.txt".into()],
+                cwd: Some(root.clone()),
+                env: BTreeMap::new(),
+                timeout_ms: Some(5000),
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+            ctx,
+            command_mutation_region(&root),
+        ),
+    ));
 
-    let mut kinds = BTreeSet::new();
-    kinds.insert(ImpactKind::CommandExecution);
-    kinds.insert(ImpactKind::WorkspaceMutation);
-    dispatch_success_effects::<Run>(
-        RunParams {
-            argv: vec!["touch".into(), "src/composite.txt".into()],
-            cwd: Some(root.clone()),
-            env: BTreeMap::new(),
-            timeout_ms: Some(5000),
-            declared_impact: Some(ImpactKind::WorkspaceMutation),
-        },
-        ctx,
-        AuthorizedEffectRegion {
-            kinds,
-            read_paths: Vec::new(),
-            observation_roots: Vec::new(),
-            write_paths: Vec::new(),
-            write_path_prefixes: vec![PathBuf::from(&root)],
-            hosts: Vec::new(),
-            session_state_allowed: false,
-            command_allowed: true,
-        },
+    let timeout_script = dir.path().join("poc_timeout.sh");
+    std::fs::write(
+        &timeout_script,
+        "#!/bin/sh\ntouch src/timeout.txt\nsleep 2\n",
     )
+    .unwrap();
+    let mut perms = std::fs::metadata(&timeout_script).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&timeout_script, perms).unwrap();
+    let script_allowlist = vec!["./poc_timeout.sh".into()];
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![
+            run_cap_with(script_allowlist.clone()),
+            SourcedCapability {
+                capability: Capability::WritePath {
+                    path_pattern: "src/**".into(),
+                },
+                source: CapabilitySource::Declared {
+                    envelope_id: "test-envelope".into(),
+                },
+            },
+        ],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(&root, "src/**", script_allowlist, None),
+    );
+    scenarios.push(scenario(
+        "failure_timeout_records_workspace_mutation",
+        dispatch_failure_effects::<Run>(
+            RunParams {
+                argv: vec!["./poc_timeout.sh".into()],
+                cwd: Some(root.clone()),
+                env: BTreeMap::new(),
+                timeout_ms: Some(100),
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+            ctx,
+            command_mutation_region_with_write_prefixes(
+                &root,
+                vec![PathBuf::from(&root).join("src")],
+            ),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![run_cap(), write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
+    );
+    scenarios.push(scenario(
+        "scope_boundary_out_of_scope_records_then_replans",
+        dispatch_failure_effects::<Run>(
+            RunParams {
+                argv: vec!["touch".into(), "outside.txt".into()],
+                cwd: Some(root.clone()),
+                env: BTreeMap::new(),
+                timeout_ms: Some(5000),
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+            ctx,
+            command_mutation_region_with_write_prefixes(
+                &root,
+                vec![PathBuf::from(&root).join("src")],
+            ),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![run_cap(), write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_envelope(
+        &ctx,
+        test_mutation_envelope_with(
+            &root,
+            ".",
+            vec!["echo".into(), "touch".into()],
+            Some(VerifyCommand {
+                command: "echo ok".into(),
+                expected_exit_code: None,
+            }),
+        ),
+    );
+    scenarios.push(scenario(
+        "verify_success_filters_verify_source",
+        dispatch_success_effects::<Run>(
+            RunParams {
+                argv: vec!["touch".into(), "src/with_verify.txt".into()],
+                cwd: Some(root.clone()),
+                env: BTreeMap::new(),
+                timeout_ms: Some(5000),
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+            ctx,
+            command_mutation_region(&root),
+        ),
+    ));
+
+    scenarios
 }
 
-fn fetch_runtime_effects() -> Vec<ObservedEffect> {
+fn fetch_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -409,7 +944,8 @@ fn fetch_runtime_effects() -> Vec<ObservedEffect> {
         .to_string();
     let registry = test_registry();
 
-    rt().block_on(async {
+    let mut scenarios = Vec::new();
+    let happy_effects = rt().block_on(async {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let addr_str = format!("127.0.0.1:{port}");
@@ -464,76 +1000,199 @@ fn fetch_runtime_effects() -> Vec<ObservedEffect> {
             .as_ref()
             .expect("fetch.web fixture dispatch must succeed");
         outcome.observed_effects
-    })
-}
+    });
+    scenarios.push(scenario("happy_fetch_localhost", happy_effects));
 
-fn todo_write_runtime_effects() -> Vec<ObservedEffect> {
-    let dir = setup_tempdir_with_files();
-    let root = std::fs::canonicalize(dir.path())
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![session_cap()],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-    dispatch_success_effects::<TodoWrite>(
-        TodoWriteParams {
-            todos: vec![TodoItem {
-                content: "item".into(),
-                status: TodoStatus::Pending,
-            }],
+    let fetch_cap = SourcedCapability {
+        capability: Capability::FetchUrl {
+            host: "allowed.example.com".into(),
         },
-        ctx,
-        session_region(),
-    )
+        source: CapabilitySource::Base,
+    };
+    let (ctx, _rx, _) =
+        build_test_context(&root, vec![fetch_cap], NetworkPolicyConfig::safe_defaults());
+    let mut kinds = BTreeSet::new();
+    kinds.insert(ImpactKind::ExternalObservation);
+    scenarios.push(scenario(
+        "failure_host_denied_no_backend_effect",
+        dispatch_failure_effects::<Fetch>(
+            FetchParams {
+                url: "https://denied.example.com/test".into(),
+                headers: BTreeMap::new(),
+            },
+            ctx,
+            AuthorizedEffectRegion {
+                kinds,
+                read_paths: Vec::new(),
+                observation_roots: Vec::new(),
+                write_paths: Vec::new(),
+                write_path_prefixes: Vec::new(),
+                hosts: vec!["allowed.example.com".into()],
+                session_state_allowed: false,
+                command_allowed: false,
+            },
+        ),
+    ));
+
+    scenarios
 }
 
-fn envelope_runtime_effects() -> Vec<ObservedEffect> {
+fn todo_write_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    let mut scenarios = Vec::new();
+
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![session_cap()],
         NetworkPolicyConfig::safe_defaults(),
     );
-    dispatch_success_effects::<Envelope>(
-        EnvelopeParams::Declare(DeclareParams {
-            envelope: test_mutation_envelope(&root),
-            supersede: false,
-            reason: None,
-        }),
-        ctx,
-        session_region(),
-    )
+    scenarios.push(scenario(
+        "happy_todo_write",
+        dispatch_success_effects::<TodoWrite>(
+            TodoWriteParams {
+                todos: vec![TodoItem {
+                    content: "item".into(),
+                    status: TodoStatus::Pending,
+                }],
+            },
+            ctx,
+            session_region(),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![session_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "failure_empty_todo_no_backend_effect",
+        dispatch_failure_effects::<TodoWrite>(
+            TodoWriteParams {
+                todos: vec![TodoItem {
+                    content: "   ".into(),
+                    status: TodoStatus::Pending,
+                }],
+            },
+            ctx,
+            session_region(),
+        ),
+    ));
+
+    scenarios
 }
 
-fn audit_observe_runtime_effects() -> Vec<ObservedEffect> {
+fn envelope_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    let mut scenarios = Vec::new();
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![session_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "happy_declare",
+        dispatch_success_effects::<Envelope>(
+            EnvelopeParams::Declare(DeclareParams {
+                envelope: test_mutation_envelope(&root),
+                supersede: false,
+                reason: None,
+            }),
+            ctx,
+            session_region(),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![session_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+    scenarios.push(scenario(
+        "failure_already_active_no_backend_effect",
+        dispatch_failure_effects::<Envelope>(
+            EnvelopeParams::Declare(DeclareParams {
+                envelope: test_mutation_envelope(&root),
+                supersede: false,
+                reason: None,
+            }),
+            ctx,
+            session_region(),
+        ),
+    ));
+
+    scenarios
+}
+
+fn audit_observe_runtime_effects() -> Vec<RuntimeEffectScenario> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut scenarios = Vec::new();
+
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![audit_cap()],
         NetworkPolicyConfig::safe_defaults(),
     );
-    dispatch_success_effects::<AuditObserve>(
-        AuditObserveParams {
-            stream: false,
-            query: AuditQueryParams::default(),
-        },
-        ctx,
-        audit_region(),
-    )
+    scenarios.push(scenario(
+        "happy_query",
+        dispatch_success_effects::<AuditObserve>(
+            AuditObserveParams {
+                stream: false,
+                query: AuditQueryParams::default(),
+            },
+            ctx,
+            audit_region(),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![audit_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "happy_tail",
+        dispatch_success_effects::<AuditObserve>(
+            AuditObserveParams {
+                stream: true,
+                query: AuditQueryParams::default(),
+            },
+            ctx,
+            audit_region(),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
+    scenarios.push(scenario(
+        "failure_missing_read_audit_cap_no_backend_effect",
+        dispatch_failure_effects::<AuditObserve>(
+            AuditObserveParams {
+                stream: false,
+                query: AuditQueryParams::default(),
+            },
+            ctx,
+            audit_region(),
+        ),
+    ));
+
+    scenarios
 }
 
 fn seed_audit_replay_row(ctx: &lancet_native::registry::HandlerContext) {
@@ -561,26 +1220,49 @@ fn seed_audit_replay_row(ctx: &lancet_native::registry::HandlerContext) {
     });
 }
 
-fn audit_replay_runtime_effects() -> Vec<ObservedEffect> {
+fn audit_replay_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
         .to_str()
         .unwrap()
         .to_string();
+    let mut scenarios = Vec::new();
+
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![audit_cap()],
         NetworkPolicyConfig::safe_defaults(),
     );
     seed_audit_replay_row(&ctx);
-    dispatch_success_effects::<AuditReplay>(
-        AuditReplayParams {
-            turn_id: "test-turn".into(),
-        },
-        ctx,
-        audit_region(),
-    )
+    scenarios.push(scenario(
+        "happy_replay_seeded_turn",
+        dispatch_success_effects::<AuditReplay>(
+            AuditReplayParams {
+                turn_id: "test-turn".into(),
+            },
+            ctx,
+            audit_region(),
+        ),
+    ));
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![audit_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    scenarios.push(scenario(
+        "failure_missing_turn_no_backend_effect",
+        dispatch_failure_effects::<AuditReplay>(
+            AuditReplayParams {
+                turn_id: "missing-turn".into(),
+            },
+            ctx,
+            audit_region(),
+        ),
+    ));
+
+    scenarios
 }
 
 #[test]
@@ -596,57 +1278,89 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
     );
 
     for descriptor in catalog() {
-        let observed = fixtures
+        let scenarios = fixtures
             .get(descriptor.name)
             .expect("fixture coverage checked")();
-        let backend_effects: Vec<_> = observed
-            .into_iter()
-            .filter(|effect| effect.source == EffectSource::HandlerBackend)
-            .collect();
         assert!(
-            !backend_effects.is_empty(),
-            "{} fixture did not record HandlerBackend effects",
+            !scenarios.is_empty(),
+            "{} fixture did not define any runtime scenarios",
             descriptor.name
         );
 
-        for effect in &backend_effects {
-            assert!(
-                descriptor.effect.kinds.contains(&effect.kind),
-                "{} runtime produced undeclared effect kind {:?}; declared={:?}",
-                descriptor.name,
-                effect.kind,
-                descriptor.effect.kinds.0
-            );
-            assert!(
-                descriptor
-                    .effect
-                    .capabilities
-                    .contains(&effect.required_capability),
-                "{} runtime required undeclared capability {:?}; declared={:?}",
-                descriptor.name,
-                effect.required_capability,
-                descriptor.effect.capabilities
-            );
+        let mut method_recorded_backend_effect = false;
+        let mut run_saw_command_execution = false;
+        let mut run_saw_workspace_mutation = false;
+        let mut run_saw_write_path = false;
+        for scenario in scenarios {
+            let backend_effects: Vec<_> = scenario
+                .effects
+                .iter()
+                .filter(|effect| effect.source == EffectSource::HandlerBackend)
+                .collect();
+            method_recorded_backend_effect |= !backend_effects.is_empty();
+
+            if scenario
+                .name
+                .contains("verify_success_filters_verify_source")
+            {
+                assert!(
+                    scenario
+                        .effects
+                        .iter()
+                        .any(|effect| effect.source == EffectSource::Verify),
+                    "{} scenario {} must record a Verify-source effect so the source filter is exercised",
+                    descriptor.name,
+                    scenario.name
+                );
+            }
+
+            for effect in &backend_effects {
+                if descriptor.name == Run::NAME {
+                    run_saw_command_execution |= effect.kind == ImpactKind::CommandExecution;
+                    run_saw_workspace_mutation |= effect.kind == ImpactKind::WorkspaceMutation;
+                    run_saw_write_path |=
+                        effect.required_capability == RequiredCapability::WritePath;
+                }
+                assert!(
+                    descriptor.effect.kinds.contains(&effect.kind),
+                    "{} scenario {} runtime produced undeclared effect kind {:?}; declared={:?}",
+                    descriptor.name,
+                    scenario.name,
+                    effect.kind,
+                    descriptor.effect.kinds.0
+                );
+                assert!(
+                    descriptor
+                        .effect
+                        .capabilities
+                        .contains(&effect.required_capability),
+                    "{} scenario {} runtime required undeclared capability {:?}; declared={:?}",
+                    descriptor.name,
+                    scenario.name,
+                    effect.required_capability,
+                    descriptor.effect.capabilities
+                );
+            }
         }
+
+        assert!(
+            method_recorded_backend_effect,
+            "{} fixture scenarios did not record any HandlerBackend effects",
+            descriptor.name
+        );
 
         if descriptor.name == Run::NAME {
             assert!(
-                backend_effects
-                    .iter()
-                    .any(|effect| effect.kind == ImpactKind::CommandExecution),
-                "exec.command_run fixture must record CommandExecution"
+                run_saw_command_execution,
+                "exec.command_run fixtures must record CommandExecution"
             );
             assert!(
-                backend_effects
-                    .iter()
-                    .any(|effect| effect.kind == ImpactKind::WorkspaceMutation),
-                "exec.command_run fixture must record WorkspaceMutation"
+                run_saw_workspace_mutation,
+                "exec.command_run fixtures must record WorkspaceMutation"
             );
             assert!(
-                backend_effects
-                    .iter()
-                    .any(|effect| effect.required_capability == RequiredCapability::WritePath),
-                "exec.command_run mutation fixture must exercise WritePath capability"
+                run_saw_write_path,
+                "exec.command_run mutation fixtures must exercise WritePath capability"
             );
         }
     }
