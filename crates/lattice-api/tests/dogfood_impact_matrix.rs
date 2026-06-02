@@ -67,6 +67,17 @@ async fn spawn_echo_server(status_line: &str, body: &str) -> String {
     format!("http://127.0.0.1:{}/", addr.port())
 }
 
+fn line_hash(line_number: usize, line: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lattice.hashline.v2\0");
+    hasher.update(&(line_number as u64).to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(line.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.to_hex();
+    format!("blake3:{}", &hex[..4])
+}
+
 /// Build a production server config with a fixed turn_id and the given base envelope.
 async fn build_production_config(
     canonical_root: &str,
@@ -115,7 +126,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // Compute blake3 hash for mutate.patch
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
-    let seed_line_hash = format!("blake3:{}", blake3::hash("hello dog04".as_bytes()).to_hex());
+    let seed_line_hash = line_hash(1, "hello dog04");
     let patch_doc = format!(
         "*** Begin Patch\n\
          *** Update File: src/dog04.txt\n\

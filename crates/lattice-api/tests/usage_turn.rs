@@ -59,6 +59,17 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
     ]
 }
 
+fn line_hash(line_number: usize, line: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lattice.hashline.v2\0");
+    hasher.update(&(line_number as u64).to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(line.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.to_hex();
+    format!("blake3:{}", &hex[..4])
+}
+
 /// Temp workspace with src/lib.rs and a default agent profile.
 struct Workspace {
     _dir: tempfile::TempDir,
@@ -295,6 +306,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
+    let line_hash = line_hash(1, original);
 
     let patch_doc = format!(
         "\
@@ -302,7 +314,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 *** Update File: src/lib.rs
 *** Old Hash: {hash}
 @@
--{hash}\tpub fn answer() -> i32 {{ 1 }}
+-{line_hash}\tpub fn answer() -> i32 {{ 1 }}
 +pub fn answer() -> i32 {{ 42 }}
 *** End Patch
 "

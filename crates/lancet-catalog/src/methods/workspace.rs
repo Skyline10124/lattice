@@ -181,7 +181,7 @@ pub struct PatchResult {
 
 impl CepMethod for Patch {
     const NAME: &'static str = "mutate.patch";
-    const DESCRIPTION: &'static str = "Apply LATTICE hashline patch text with multi-file update and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Update File: path / *** Delete File: path operations, then *** End Patch. Every operation requires *** Old Hash: blake3:<64 hex> from observe.workspace read_file content_hash. Hunk context/removal lines after @@ must carry the current line hash as '<prefix>blake3:<64 hex><tab>text' using a leading space for context or - for removals; additions use +text. New files must use mutate.create. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
+    const DESCRIPTION: &'static str = "Apply LATTICE hashline patch text with multi-file update and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Update File: path / *** Delete File: path operations, then *** End Patch. Every operation requires *** Old Hash: blake3:<64 hex> from observe.workspace read_file content_hash. Hunk context/removal lines after @@ must carry the current line anchor as '<prefix>blake3:<4 hex><tab>text' using a leading space for context or - for removals; the short anchor is the first 4 hex digits of BLAKE3 over the before-state 1-based line number and line text. Additions use +text. New files must use mutate.create. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
     type Params = PatchParams;
     type Result = PatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;

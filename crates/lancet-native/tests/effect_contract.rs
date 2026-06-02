@@ -218,8 +218,15 @@ fn setup_tempdir_with_files() -> TempDir {
     dir
 }
 
-fn hashline(line: &str) -> String {
-    format!("blake3:{}", blake3::hash(line.as_bytes()).to_hex())
+fn hashline(line_number: usize, line: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lattice.hashline.v2\0");
+    hasher.update(&(line_number as u64).to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(line.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.to_hex();
+    format!("blake3:{}", &hex[..4])
 }
 
 fn dispatch_success_effects<M>(
@@ -333,8 +340,8 @@ fn patch_runtime_effects() -> Vec<ObservedEffect> {
     let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
     let hash = blake3::hash(&content);
     let hash_hex = hash.to_hex();
-    let hello_hash = hashline("hello");
-    let world_hash = hashline("world");
+    let hello_hash = hashline(1, "hello");
+    let world_hash = hashline(2, "world");
 
     let (ctx, _rx, _) = build_test_context(
         &root,
@@ -722,8 +729,8 @@ proptest! {
         let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
         let hash = blake3::hash(&content);
         let hash_hex = hash.to_hex();
-        let hello_hash = hashline("hello");
-        let world_hash = hashline("world");
+        let hello_hash = hashline(1, "hello");
+        let world_hash = hashline(2, "world");
 
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);

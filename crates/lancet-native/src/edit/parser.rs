@@ -1,7 +1,7 @@
 use std::fmt;
 
 use super::diagnostics::parse_error;
-use super::hash::parse_old_hash;
+use super::hash::{parse_line_hash, parse_old_hash};
 use super::types::{
     HashLine, PatchDiagnostic, PatchDocument, PatchHunk, PatchHunkLine, PatchOperation,
 };
@@ -312,7 +312,7 @@ fn parse_hunk_line(line: &str) -> Option<PatchHunkLine> {
 
 fn parse_hashline(content: &str) -> Option<HashLine> {
     let (hash, text) = content.split_once('\t')?;
-    let hash = parse_old_hash(hash.trim()).ok()?;
+    let hash = parse_line_hash(hash.trim()).ok()?;
     Some(HashLine {
         hash,
         text: text.to_string(),
@@ -325,6 +325,8 @@ mod tests {
 
     const HASH_A: &str = "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HASH_B: &str = "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const LINE_A: &str = "blake3:aaaa";
+    const LINE_B: &str = "blake3:bbbb";
 
     #[test]
     fn parse_patch_document_accepts_begin_update_delete() {
@@ -334,10 +336,10 @@ mod tests {
 *** Update File: src/lib.rs
 *** Old Hash: {HASH_A}
 @@
- {HASH_A}\tpub fn existing() {{
--{HASH_B}\t    old();
+ {LINE_A}\tpub fn existing() {{
+-{LINE_B}\t    old();
 +    new();
- {HASH_A}\t}}
+ {LINE_A}\t}}
 *** Delete File: src/old.rs
 *** Old Hash: {HASH_B}
 *** End Patch"
@@ -421,7 +423,7 @@ plain text without add marker
 *** Update File: src/lib.rs
 *** Old Hash: blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 @@
- blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpub fn old() {}
+ blake3:aaaa\tpub fn old() {}
 +pub fn new() {}";
 
         let err = parse_patch_document(patch).unwrap_err();

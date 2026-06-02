@@ -62,6 +62,17 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
     ]
 }
 
+fn line_hash(line_number: usize, line: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"lattice.hashline.v2\0");
+    hasher.update(&(line_number as u64).to_be_bytes());
+    hasher.update(b"\0");
+    hasher.update(line.as_bytes());
+    let digest = hasher.finalize();
+    let hex = digest.to_hex();
+    format!("blake3:{}", &hex[..4])
+}
+
 // ── Workspace setup ──────────────────────────────────────────────────────────
 
 struct ReleaseE2eWorkspace {
@@ -165,18 +176,20 @@ async fn release_e2e_criterion_8() {
         blake3::hash(initial_content.as_bytes()).to_hex()
     );
     let hash2 = format!("blake3:{}", blake3::hash(bad_content.as_bytes()).to_hex());
+    let line_hash1 = line_hash(1, initial_content);
+    let line_hash2 = line_hash(1, bad_content);
 
     // Patch 1 (bad): changes content but does NOT add RELEASE_E2E_OK sentinel.
     // verify.sh ("grep -q RELEASE_E2E_OK src/lib.rs") will exit 1 → VerifyFailed.
     // OnFailure::RetainDiff means the diff IS applied; file IS changed.
     let bad_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{hash1}\t{initial_content}\n+{bad_content}\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{line_hash1}\t{initial_content}\n+{bad_content}\n*** End Patch\n"
     );
 
     // Patch 2 (good): changes content to include RELEASE_E2E_OK.
     // Hash uses the post-bad-patch content since RetainDiff left it changed.
     let good_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{hash2}\t{bad_content}\n+{good_content}\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{line_hash2}\t{bad_content}\n+{good_content}\n*** End Patch\n"
     );
 
     // ── Envelope for Round 1: RunCommand + WritePath + verify ──────────

@@ -519,8 +519,8 @@ fn projected_patch_content(
                     Retriability::Permanent,
                 )
             })?;
-            let after =
-                crate::edit::apply::apply_hunks(path, &before, hunks, 0).map_err(|diagnostic| {
+            let after = crate::edit::apply::apply_hunks(path, &before, hunks, 0)
+                .map_err(|diagnostic| {
                     CepError::new(
                         CepErrorCode::SchemaMismatch,
                         format!("patch L2 preflight hunk error: {}", diagnostic.message),
@@ -530,7 +530,8 @@ fn projected_patch_content(
                         }),
                         Retriability::Permanent,
                     )
-                })?;
+                })?
+                .after_text;
             Ok(Some((Some(before), after)))
         }
         PatchOperation::DeleteFile { .. } => Ok(None),
@@ -1239,8 +1240,13 @@ mod patch_tests {
         registry
     }
 
-    fn hashline(line: &str) -> String {
-        crate::edit::hash::line_hash(line)
+    fn hashline(before: &str, line: &str) -> String {
+        let line_number = before
+            .lines()
+            .position(|candidate| candidate == line)
+            .map(|index| index + 1)
+            .expect("line must exist in before content");
+        crate::edit::hash::line_hash(line_number, line)
     }
 
     fn update_patch(path: &str, before: &str, remove_line: &str, add_line: &str) -> String {
@@ -1254,7 +1260,7 @@ mod patch_tests {
 +{add_line}
 *** End Patch",
             content_hash(before.as_bytes()),
-            hashline(remove_line)
+            hashline(before, remove_line)
         )
     }
 

@@ -65,11 +65,13 @@ side effect is caught only by effect-kind denial.
 ### Hashline patches
 
 `mutate.patch` requires hashline anchors for context and removed lines:
-`<prefix><blake3-line-hash><TAB><line text>`, where `<prefix>` is either a
-space for context or `-` for removal. Added lines remain plain `+text`.
+`<prefix>blake3:<4 hex><TAB><line text>`, where `<prefix>` is either a space
+for context or `-` for removal. The short anchor is the first 4 hex digits of
+BLAKE3 over the before-state 1-based line number and line text. Added lines
+remain plain `+text`.
 
 This forces edits to be based on the current file state: a patch cannot remove
-or anchor a line unless it supplies that line's current content hash. Full-file
+or anchor a line unless it supplies that line's current line anchor. Full-file
 replacement is allowed when every removed line is hashline-anchored. Patch audit
 metadata records changed files and line-level add/remove effects.
 

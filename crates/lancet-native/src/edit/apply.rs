@@ -232,7 +232,8 @@ async fn plan_update_file(
         .with_path(path.to_string())
         .with_operation_index(operation_index)
     })?;
-    let after_text = apply_hunks(path, &before_text, hunks, operation_index)?;
+    let apply_outcome = apply_hunks(path, &before_text, hunks, operation_index)?;
+    let after_text = apply_outcome.after_text;
     let after = after_text.into_bytes();
 
     if after.len() > limits.max_write_size {
@@ -260,7 +261,7 @@ async fn plan_update_file(
             FileOperationKind::Update,
             Some(&before),
             Some(&after),
-            update_line_changes(hunks),
+            apply_outcome.line_changes,
         ),
     })
 }
@@ -328,14 +329,36 @@ fn validate_old_hash(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApplyHunksOutcome {
+    pub after_text: String,
+    pub line_changes: Vec<LineChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkingLine {
+    text: String,
+    original_line_number: Option<usize>,
+    added_change_index: Option<usize>,
+}
+
 pub(crate) fn apply_hunks(
     path: &str,
     before: &str,
     hunks: &[PatchHunk],
     operation_index: usize,
-) -> Result<String, PatchDiagnostic> {
+) -> Result<ApplyHunksOutcome, PatchDiagnostic> {
     let final_newline = before.ends_with('\n');
-    let mut lines = split_lines(before);
+    let mut lines = split_lines(before)
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| WorkingLine {
+            text,
+            original_line_number: Some(index + 1),
+            added_change_index: None,
+        })
+        .collect::<Vec<_>>();
+    let mut line_changes = Vec::new();
 
     for hunk in hunks {
         let original = hunk_original_lines(hunk);
@@ -361,7 +384,11 @@ pub(crate) fn apply_hunks(
                 .with_hunk_index(hunk.index));
             }
             [start] => {
-                let replacement = hunk_replacement_lines(hunk);
+                let replacement = hunk_replacement_lines(
+                    hunk,
+                    &lines[*start..(*start + original.len())],
+                    &mut line_changes,
+                );
                 lines.splice(*start..(*start + original.len()), replacement);
             }
             _ => {
@@ -379,7 +406,18 @@ pub(crate) fn apply_hunks(
         }
     }
 
-    Ok(join_lines(&lines, final_newline))
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(change_index) = line.added_change_index {
+            if let Some(change) = line_changes.get_mut(change_index) {
+                change.new_hash = Some(line_hash(index + 1, &line.text));
+            }
+        }
+    }
+
+    Ok(ApplyHunksOutcome {
+        after_text: join_lines(&lines, final_newline),
+        line_changes,
+    })
 }
 
 fn split_lines(content: &str) -> Vec<String> {
@@ -396,8 +434,12 @@ fn split_lines(content: &str) -> Vec<String> {
     lines
 }
 
-fn join_lines(lines: &[String], final_newline: bool) -> String {
-    let mut content = lines.join("\n");
+fn join_lines(lines: &[WorkingLine], final_newline: bool) -> String {
+    let mut content = lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     if final_newline && !content.is_empty() {
         content.push('\n');
     }
@@ -414,18 +456,50 @@ fn hunk_original_lines(hunk: &PatchHunk) -> Vec<HashLine> {
         .collect()
 }
 
-fn hunk_replacement_lines(hunk: &PatchHunk) -> Vec<String> {
-    hunk.lines
-        .iter()
-        .filter_map(|line| match line {
-            PatchHunkLine::Context(value) => Some(value.text.clone()),
-            PatchHunkLine::Add(value) => Some(value.clone()),
-            PatchHunkLine::Remove(_) => None,
-        })
-        .collect()
+fn hunk_replacement_lines(
+    hunk: &PatchHunk,
+    matched_original: &[WorkingLine],
+    line_changes: &mut Vec<LineChange>,
+) -> Vec<WorkingLine> {
+    let mut replacement = Vec::new();
+    let mut original_index = 0usize;
+
+    for line in &hunk.lines {
+        match line {
+            PatchHunkLine::Context(_) => {
+                if let Some(original) = matched_original.get(original_index) {
+                    replacement.push(original.clone());
+                }
+                original_index += 1;
+            }
+            PatchHunkLine::Remove(hashline) => {
+                line_changes.push(LineChange {
+                    kind: LineChangeKind::Removed,
+                    old_hash: Some(hashline.hash.clone()),
+                    new_hash: None,
+                });
+                original_index += 1;
+            }
+            PatchHunkLine::Add(text) => {
+                let change_index = line_changes.len();
+                line_changes.push(LineChange {
+                    kind: LineChangeKind::Added,
+                    old_hash: None,
+                    new_hash: None,
+                });
+                replacement.push(WorkingLine {
+                    text: text.clone(),
+                    original_line_number: None,
+                    added_change_index: Some(change_index),
+                });
+            }
+        }
+    }
+
+    replacement
 }
 
-fn find_hashline_matches(lines: &[String], needle: &[HashLine]) -> Vec<usize> {
+fn find_hashline_matches(lines: &[WorkingLine], needle: &[HashLine]) -> Vec<usize> {
     if needle.is_empty() || needle.len() > lines.len() {
         return Vec::new();
     }
@@ -434,10 +508,12 @@ fn find_hashline_matches(lines: &[String], needle: &[HashLine]) -> Vec<usize> {
         .windows(needle.len())
         .enumerate()
         .filter_map(|(index, window)| {
-            let matched = window
-                .iter()
-                .zip(needle.iter())
-                .all(|(line, expected)| line == &expected.text && line_hash(line) == expected.hash);
+            let matched = window.iter().zip(needle.iter()).all(|(line, expected)| {
+                let Some(line_number) = line.original_line_number else {
+                    return false;
+                };
+                line.text == expected.text && line_hash(line_number, &line.text) == expected.hash
+            });
             matched.then_some(index)
         })
         .collect()
@@ -543,34 +619,13 @@ fn manifest(
     }
 }
 
-fn update_line_changes(hunks: &[PatchHunk]) -> Vec<LineChange> {
-    let mut changes = Vec::new();
-    for hunk in hunks {
-        for line in &hunk.lines {
-            match line {
-                PatchHunkLine::Remove(hashline) => changes.push(LineChange {
-                    kind: LineChangeKind::Removed,
-                    old_hash: Some(hashline.hash.clone()),
-                    new_hash: None,
-                }),
-                PatchHunkLine::Add(text) => changes.push(LineChange {
-                    kind: LineChangeKind::Added,
-                    old_hash: None,
-                    new_hash: Some(line_hash(text)),
-                }),
-                PatchHunkLine::Context(_) => {}
-            }
-        }
-    }
-    changes
-}
-
 fn delete_line_changes(before: &[u8]) -> Vec<LineChange> {
     String::from_utf8_lossy(before)
         .lines()
-        .map(|line| LineChange {
+        .enumerate()
+        .map(|(index, line)| LineChange {
             kind: LineChangeKind::Removed,
-            old_hash: Some(line_hash(line)),
+            old_hash: Some(line_hash(index + 1, line)),
             new_hash: None,
         })
         .collect()
@@ -650,12 +705,12 @@ mod tests {
         serde_json::to_value(envelope).unwrap()
     }
 
-    fn context(line: &str) -> String {
-        format!(" {}\t{}", line_hash(line), line)
+    fn context(line_number: usize, line: &str) -> String {
+        format!(" {}\t{}", line_hash(line_number, line), line)
     }
 
-    fn remove(line: &str) -> String {
-        format!("-{}\t{}", line_hash(line), line)
+    fn remove(line_number: usize, line: &str) -> String {
+        format!("-{}\t{}", line_hash(line_number, line), line)
     }
 
     #[tokio::test]
@@ -708,7 +763,7 @@ mod tests {
         let file = dir.path().join("sample.txt");
         std::fs::write(&file, "actual\n").unwrap();
         let stale_hash = hash("stale\n");
-        let actual = remove("actual");
+        let actual = remove(1, "actual");
         let patch = format!(
             "\
 *** Begin Patch
@@ -730,14 +785,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_patch_engine_ambiguous_hunk_matching_does_not_choose_first_match() {
+    async fn apply_patch_engine_line_numbered_hashes_disambiguate_repeated_content() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("sample.txt");
         let before = "same\nold\nsame\nold\n";
         std::fs::write(&file, before).unwrap();
         let old_hash = hash(before);
-        let same = context("same");
-        let old = remove("old");
+        let same = context(3, "same");
+        let old = remove(4, "old");
         let patch = format!(
             "\
 *** Begin Patch
@@ -752,9 +807,11 @@ mod tests {
 
         let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
 
-        assert!(!result.ok);
-        assert_eq!(result.errors[0].code.as_str(), "hunk_ambiguous");
-        assert_eq!(std::fs::read_to_string(file).unwrap(), before);
+        assert!(result.ok);
+        assert_eq!(
+            std::fs::read_to_string(file).unwrap(),
+            "same\nold\nsame\nnew\n"
+        );
     }
 
     #[cfg(unix)]
@@ -779,8 +836,8 @@ mod tests {
         std::fs::write(&first, first_before).unwrap();
         std::fs::write(&second, second_before).unwrap();
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let first_old = remove("first old");
-        let second_old = remove("second old");
+        let first_old = remove(1, "first old");
+        let second_old = remove(1, "second old");
 
         let patch = format!(
             "\
@@ -819,9 +876,9 @@ mod tests {
         let delete_before = "remove me\n";
         std::fs::write(&update, update_before).unwrap();
         std::fs::write(&delete, delete_before).unwrap();
-        let alpha = context("alpha");
-        let old = remove("old");
-        let omega = context("omega");
+        let alpha = context(1, "alpha");
+        let old = remove(2, "old");
+        let omega = context(3, "omega");
 
         let patch = format!(
             "\
@@ -862,7 +919,7 @@ mod tests {
         let before = "actual\n";
         std::fs::write(&file, before).unwrap();
         let old_hash = hash(before);
-        let missing = remove("missing");
+        let missing = remove(1, "missing");
         let patch = format!(
             "\
 *** Begin Patch
@@ -890,8 +947,8 @@ mod tests {
         let before = "old one\nold two\n";
         std::fs::write(&file, before).unwrap();
         let old_hash = hash(before);
-        let old_one = remove("old one");
-        let old_two = remove("old two");
+        let old_one = remove(1, "old one");
+        let old_two = remove(2, "old two");
         let patch = format!(
             "\
 *** Begin Patch
