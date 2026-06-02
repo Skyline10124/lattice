@@ -4,15 +4,21 @@
 //! [`effect_contract_harness`], plus a deterministic malicious-handler
 //! fixture and the composite command-mutation audit test.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use proptest::prelude::*;
+use serde::Serialize;
 use tempfile::TempDir;
 
+use lancet_audit::{AuditOutcome, CallAuditMetadata};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_catalog::catalog;
+use lancet_catalog::method::RequiredCapability;
+use lancet_catalog::methods::audit::{AuditObserveParams, AuditQueryParams, AuditReplayParams};
 use lancet_catalog::methods::command::RunParams;
+use lancet_catalog::methods::envelope::{DeclareParams, EnvelopeParams};
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -20,7 +26,7 @@ use lancet_catalog::methods::workspace::{
     ReadFileParams,
 };
 use lancet_catalog::methods::*;
-use lancet_catalog::CepMethod;
+use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::testing::effect_harness::{
     assert_negative_no_backend_effects, assert_positive, build_test_context,
     effect_contract_harness, rt,
@@ -76,16 +82,16 @@ fn run_cap() -> SourcedCapability {
     }
 }
 
-fn declare_active_envelope(ctx: &lancet_native::registry::HandlerContext, root: &str) {
+fn test_mutation_envelope(root: &str) -> ExecutionEnvelope {
     use lancet_protocol::envelope::{Impact as EnvImpact, ImpactConfidence, Scope as EnvScope};
-    let mut caps = std::collections::BTreeSet::new();
+    let mut caps = BTreeSet::new();
     caps.insert(Capability::WritePath {
         path_pattern: ".".to_string(),
     });
     caps.insert(Capability::RunCommand {
         argv_allowlist: vec!["echo".into(), "touch".into()],
     });
-    let envelope = ExecutionEnvelope {
+    ExecutionEnvelope {
         intent: Intent {
             description: "test mutation envelope".into(),
         },
@@ -105,7 +111,11 @@ fn declare_active_envelope(ctx: &lancet_native::registry::HandlerContext, root: 
         verify: None,
         on_failure: None,
         extensions: serde_json::Map::new(),
-    };
+    }
+}
+
+fn declare_active_envelope(ctx: &lancet_native::registry::HandlerContext, root: &str) {
+    let envelope = test_mutation_envelope(root);
     rt().block_on(ctx.active_envelope.declare(envelope, 0, "test-turn"))
         .unwrap();
 }
@@ -113,6 +123,13 @@ fn declare_active_envelope(ctx: &lancet_native::registry::HandlerContext, root: 
 fn session_cap() -> SourcedCapability {
     SourcedCapability {
         capability: Capability::MutateSessionState,
+        source: CapabilitySource::Base,
+    }
+}
+
+fn audit_cap() -> SourcedCapability {
+    SourcedCapability {
+        capability: Capability::ReadAudit,
         source: CapabilitySource::Base,
     }
 }
@@ -163,8 +180,23 @@ fn command_region() -> AuthorizedEffectRegion {
 }
 
 fn session_region() -> AuthorizedEffectRegion {
-    let mut kinds = std::collections::BTreeSet::new();
+    let mut kinds = BTreeSet::new();
     kinds.insert(ImpactKind::SessionStateMutation);
+    AuthorizedEffectRegion {
+        kinds,
+        read_paths: Vec::new(),
+        observation_roots: Vec::new(),
+        write_paths: Vec::new(),
+        write_path_prefixes: Vec::new(),
+        hosts: Vec::new(),
+        session_state_allowed: true,
+        command_allowed: false,
+    }
+}
+
+fn audit_region() -> AuthorizedEffectRegion {
+    let mut kinds = BTreeSet::new();
+    kinds.insert(ImpactKind::AuditObservation);
     AuthorizedEffectRegion {
         kinds,
         read_paths: Vec::new(),
@@ -188,6 +220,429 @@ fn setup_tempdir_with_files() -> TempDir {
 
 fn hashline(line: &str) -> String {
     format!("blake3:{}", blake3::hash(line.as_bytes()).to_hex())
+}
+
+fn dispatch_success_effects<M>(
+    params: M::Params,
+    ctx: lancet_native::registry::HandlerContext,
+    authority: AuthorizedEffectRegion,
+) -> Vec<ObservedEffect>
+where
+    M: CatalogMethod,
+    M::Params: Serialize,
+{
+    let registry = test_registry();
+    let outcome = rt().block_on(effect_contract_harness::<M>(
+        &registry, params, ctx, authority,
+    ));
+    outcome
+        .dispatch_result
+        .as_ref()
+        .unwrap_or_else(|err| panic!("{} fixture dispatch failed: {err:?}", M::NAME));
+    outcome.observed_effects
+}
+
+type RuntimeEffectFixture = fn() -> Vec<ObservedEffect>;
+
+fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
+    let mut fixtures = BTreeMap::new();
+    fixtures.insert(
+        ObserveWorkspace::NAME,
+        observe_workspace_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures.insert(Create::NAME, create_runtime_effects as RuntimeEffectFixture);
+    fixtures.insert(Patch::NAME, patch_runtime_effects as RuntimeEffectFixture);
+    fixtures.insert(
+        Run::NAME,
+        command_run_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures.insert(Fetch::NAME, fetch_runtime_effects as RuntimeEffectFixture);
+    fixtures.insert(
+        TodoWrite::NAME,
+        todo_write_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures.insert(
+        Envelope::NAME,
+        envelope_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures.insert(
+        AuditObserve::NAME,
+        audit_observe_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures.insert(
+        AuditReplay::NAME,
+        audit_replay_runtime_effects as RuntimeEffectFixture,
+    );
+    fixtures
+}
+
+fn observe_workspace_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![read_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    dispatch_success_effects::<ObserveWorkspace>(
+        ObserveWorkspaceParams::ReadFile(ReadFileParams {
+            path: "hello.txt".into(),
+            offset: None,
+            limit: None,
+            line_numbers: None,
+        }),
+        ctx,
+        observation_region(&root),
+    )
+}
+
+fn create_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+    dispatch_success_effects::<Create>(
+        CreateParams {
+            path: "created.txt".into(),
+            content: "created\n".into(),
+        },
+        ctx,
+        mutation_region(&root),
+    )
+}
+
+fn patch_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
+    let hash = blake3::hash(&content);
+    let hash_hex = hash.to_hex();
+    let hello_hash = hashline("hello");
+    let world_hash = hashline("world");
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+    let patch_text = format!(
+        "*** Begin Patch\n*** Update File: hello.txt\n*** Old Hash: blake3:{hash_hex}\n@@\n {hello_hash}\thello\n-{world_hash}\tworld\n+patched\n*** End Patch\n"
+    );
+    dispatch_success_effects::<Patch>(
+        PatchParams { patch: patch_text },
+        ctx,
+        mutation_region(&root),
+    )
+}
+
+fn command_run_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
+
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![run_cap(), write_cap(&root)],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    declare_active_envelope(&ctx, &root);
+
+    let mut kinds = BTreeSet::new();
+    kinds.insert(ImpactKind::CommandExecution);
+    kinds.insert(ImpactKind::WorkspaceMutation);
+    dispatch_success_effects::<Run>(
+        RunParams {
+            argv: vec!["touch".into(), "src/composite.txt".into()],
+            cwd: Some(root.clone()),
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        },
+        ctx,
+        AuthorizedEffectRegion {
+            kinds,
+            read_paths: Vec::new(),
+            observation_roots: Vec::new(),
+            write_paths: Vec::new(),
+            write_path_prefixes: vec![PathBuf::from(&root)],
+            hosts: Vec::new(),
+            session_state_allowed: false,
+            command_allowed: true,
+        },
+    )
+}
+
+fn fetch_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let registry = test_registry();
+
+    rt().block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let addr_str = format!("127.0.0.1:{port}");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+                let _ = stream.write_all(response).await;
+            }
+        });
+
+        let fetch_cap = SourcedCapability {
+            capability: Capability::FetchUrl {
+                host: "127.0.0.1".into(),
+            },
+            source: CapabilitySource::Base,
+        };
+        let network = NetworkPolicyConfig {
+            allow_public_https: true,
+            allow_localhost: true,
+            allowed_hosts: vec!["127.0.0.1".into()],
+            max_web_response_bytes: 10 * 1024 * 1024,
+        };
+        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
+
+        let mut kinds = BTreeSet::new();
+        kinds.insert(ImpactKind::ExternalObservation);
+        let outcome = effect_contract_harness::<Fetch>(
+            &registry,
+            FetchParams {
+                url: format!("http://{addr_str}/test"),
+                headers: BTreeMap::new(),
+            },
+            ctx,
+            AuthorizedEffectRegion {
+                kinds,
+                read_paths: Vec::new(),
+                observation_roots: Vec::new(),
+                write_paths: Vec::new(),
+                write_path_prefixes: Vec::new(),
+                hosts: vec!["127.0.0.1".into()],
+                session_state_allowed: false,
+                command_allowed: false,
+            },
+        )
+        .await;
+        outcome
+            .dispatch_result
+            .as_ref()
+            .expect("fetch.web fixture dispatch must succeed");
+        outcome.observed_effects
+    })
+}
+
+fn todo_write_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![session_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    dispatch_success_effects::<TodoWrite>(
+        TodoWriteParams {
+            todos: vec![TodoItem {
+                content: "item".into(),
+                status: TodoStatus::Pending,
+            }],
+        },
+        ctx,
+        session_region(),
+    )
+}
+
+fn envelope_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![session_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    dispatch_success_effects::<Envelope>(
+        EnvelopeParams::Declare(DeclareParams {
+            envelope: test_mutation_envelope(&root),
+            supersede: false,
+            reason: None,
+        }),
+        ctx,
+        session_region(),
+    )
+}
+
+fn audit_observe_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![audit_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    dispatch_success_effects::<AuditObserve>(
+        AuditObserveParams {
+            stream: false,
+            query: AuditQueryParams::default(),
+        },
+        ctx,
+        audit_region(),
+    )
+}
+
+fn seed_audit_replay_row(ctx: &lancet_native::registry::HandlerContext) {
+    rt().block_on(async {
+        let audit_context = ctx.audit_context.read().await.clone();
+        let start = ctx
+            .audit
+            .start_call(
+                &audit_context,
+                99,
+                TodoWrite::NAME,
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
+            )
+            .unwrap();
+        ctx.audit
+            .finalize_call(
+                start,
+                AuditOutcome::Success {
+                    summary: "seed".into(),
+                },
+                Some("native_handler"),
+                Some("{}"),
+            )
+            .unwrap();
+    });
+}
+
+fn audit_replay_runtime_effects() -> Vec<ObservedEffect> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (ctx, _rx, _) = build_test_context(
+        &root,
+        vec![audit_cap()],
+        NetworkPolicyConfig::safe_defaults(),
+    );
+    seed_audit_replay_row(&ctx);
+    dispatch_success_effects::<AuditReplay>(
+        AuditReplayParams {
+            turn_id: "test-turn".into(),
+        },
+        ctx,
+        audit_region(),
+    )
+}
+
+#[test]
+fn runtime_backend_effects_are_declared_for_every_catalog_method() {
+    let fixtures = runtime_effect_fixtures();
+    let catalog_names: BTreeSet<_> = catalog().iter().map(|descriptor| descriptor.name).collect();
+    let fixture_names: BTreeSet<_> = fixtures.keys().copied().collect();
+    let missing: Vec<_> = catalog_names.difference(&fixture_names).copied().collect();
+    let extra: Vec<_> = fixture_names.difference(&catalog_names).copied().collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "runtime effect contract fixtures must cover the catalog exactly; missing={missing:?}, extra={extra:?}"
+    );
+
+    for descriptor in catalog() {
+        let observed = fixtures
+            .get(descriptor.name)
+            .expect("fixture coverage checked")();
+        let backend_effects: Vec<_> = observed
+            .into_iter()
+            .filter(|effect| effect.source == EffectSource::HandlerBackend)
+            .collect();
+        assert!(
+            !backend_effects.is_empty(),
+            "{} fixture did not record HandlerBackend effects",
+            descriptor.name
+        );
+
+        for effect in &backend_effects {
+            assert!(
+                descriptor.effect.kinds.contains(&effect.kind),
+                "{} runtime produced undeclared effect kind {:?}; declared={:?}",
+                descriptor.name,
+                effect.kind,
+                descriptor.effect.kinds.0
+            );
+            assert!(
+                descriptor
+                    .effect
+                    .capabilities
+                    .contains(&effect.required_capability),
+                "{} runtime required undeclared capability {:?}; declared={:?}",
+                descriptor.name,
+                effect.required_capability,
+                descriptor.effect.capabilities
+            );
+        }
+
+        if descriptor.name == Run::NAME {
+            assert!(
+                backend_effects
+                    .iter()
+                    .any(|effect| effect.kind == ImpactKind::CommandExecution),
+                "exec.command_run fixture must record CommandExecution"
+            );
+            assert!(
+                backend_effects
+                    .iter()
+                    .any(|effect| effect.kind == ImpactKind::WorkspaceMutation),
+                "exec.command_run fixture must record WorkspaceMutation"
+            );
+            assert!(
+                backend_effects
+                    .iter()
+                    .any(|effect| effect.required_capability == RequiredCapability::WritePath),
+                "exec.command_run mutation fixture must exercise WritePath capability"
+            );
+        }
+    }
 }
 
 // ── Positive property tests ────────────────────────────────────────────
