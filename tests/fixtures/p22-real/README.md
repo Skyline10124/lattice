@@ -1,6 +1,9 @@
 # P22 real-world scenario fixtures
 
-Disposable workspaces for `scripts/p22-real-scenarios.sh` are generated at runtime under `build/tmp/p22-real-scenarios/`. This directory documents the five supervision scenarios; it is not copied verbatim into each run.
+Legacy Phase 22 fixtures: these scenarios pair with scripts that use
+pre-v1.3.1 CEP tool names and are kept for historical reproduction.
+
+Disposable workspaces for `benchmarks/lancet-dogfood/legacy/p22-real-scenarios.sh` are generated at runtime under `build/tmp/p22-real-scenarios/`. This directory documents the five supervision scenarios; it is not copied verbatim into each run.
 
 | # | Slug | Intent |
 |---|------|--------|

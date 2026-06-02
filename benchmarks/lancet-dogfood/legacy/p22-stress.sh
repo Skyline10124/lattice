@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Targeted CEP stress checks: command.run lifecycle, Guard L1, verify semantics,
+# Targeted CEP stress checks: exec.command_run lifecycle, Guard L1, verify semantics,
 # audit safety, and turn-level event mapping.
 # Offline only — no API keys or network required.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../../.."
 
-echo "== CEP stress: lancet-native command.run =="
+echo "== CEP stress: lancet-native exec.command_run =="
 cargo test -p lancet-native --lib handlers::command -- --nocapture
 
 echo "== CEP stress: lancet-native guard L1 =="

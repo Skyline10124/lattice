@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Real-world supervision harness for production session turns.
+# Legacy Phase 22 harness: prompts and assertions use pre-v1.3.1 CEP tool names.
+# Keep for historical reproduction; use benchmarks/lancet-dogfood/run.sh for
+# the current 9-method LANCET catalog.
 #
 # Cursor supervises; Lattice (inner agent) performs work via `lattice session send`.
 # Disposable workspaces only — never mutates the lattice repository source tree.
@@ -17,7 +20,7 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_REAL_MODEL:-compat:deepseek-v4-pro}"

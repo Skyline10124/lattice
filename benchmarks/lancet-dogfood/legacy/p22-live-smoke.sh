@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Live smoke for the production CLI turn path with an OpenAI-compatible model.
+# Legacy Phase 22 harness: prompts and assertions use pre-v1.3.1 CEP tool names.
+# Keep for historical reproduction; use benchmarks/lancet-dogfood/run.sh for
+# the current 9-method LANCET catalog.
 #
 # Required env (values must NOT be logged):
 #   OPENAI_COMPATIBLE_API_KEY
@@ -12,7 +15,7 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_SMOKE_MODEL:-compat:deepseek-v4-pro}"

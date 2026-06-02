@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scripts/p27-real-dogfood.sh — manual real-LLM dogfood checklist
+# Legacy manual real-LLM dogfood checklist.
 #
 # MANUAL CHECKLIST — NOT CALLED FROM CI OR scripts/release-gate-v1.3.sh
 #
-# This script exercises the full CEP stack (declare + workspace.patch +
-# command.run + verify) with a real LLM provider. It complements the offline
+# This script exercises the full CEP stack (session.envelope + mutate.patch +
+# exec.command_run + verify) with a real LLM provider. It complements the offline
 # fake-LLM e2e test without becoming part of the release gate.
 #
 # Required env:
@@ -21,7 +21,7 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P27_MODEL:-sonnet}"
@@ -75,14 +75,10 @@ model = "${MODEL}"
 
 [tools]
 enabled = [
-  "envelope.declare",
-  "workspace.read_file",
-  "workspace.grep",
-  "workspace.list_directory",
-  "workspace.find_files",
-  "workspace.write_file",
-  "workspace.patch",
-  "command.run",
+  "session.envelope",
+  "observe.workspace",
+  "mutate.patch",
+  "exec.command_run",
 ]
 
 [lancet]
@@ -154,8 +150,8 @@ run_dogfood_turn() {
   return "${status}"
 }
 
-# ── Scenario 1: CEP declare + read + patch ────────────────────────────────────
-log "## Scenario 1: declare + workspace.patch (CEP mutation path)"
+# ── Scenario 1: CEP envelope + read + patch ───────────────────────────────────
+log "## Scenario 1: session.envelope + mutate.patch (CEP mutation path)"
 log ""
 log "Prompt: Read src/counter.rs, declare a mutation envelope, patch it to add a"
 log "  doc comment, and verify via cargo check."
@@ -168,7 +164,7 @@ set +e
 run_dogfood_turn \
   "${JSONL1}" \
   "${STDERR1}" \
-  'Use CEP tools. envelope.declare with intent "p27 patch counter", WritePath ["src/counter.rs"], verify command "cargo check --manifest-path Cargo.toml", expected_exit_code 0, on_failure retain_diff. Then workspace.patch to add a /// doc comment above the count function. Final message: P27_SCENARIO_1_DONE'
+  'Use CEP tools. Call session.envelope with mode=declare, intent "p27 patch counter", WritePath ["src/counter.rs"], verify command "cargo check --manifest-path Cargo.toml", expected_exit_code 0, on_failure retain_diff. Then use observe.workspace with mode=read_file on src/counter.rs to get content_hash and line anchors. Then call mutate.patch to add a /// doc comment above the count function. Final message: P27_SCENARIO_1_DONE'
 S1_EXIT=$?
 set -e
 
@@ -181,8 +177,8 @@ log "- [ ] src/counter.rs has a doc comment"
 log "- [ ] cep_audit.db exists with ≥2 rows"
 log ""
 
-# ── Scenario 2: CEP declare + command.run ─────────────────────────────────────
-log "## Scenario 2: declare + command.run (command enforcement path)"
+# ── Scenario 2: CEP envelope + command run ────────────────────────────────────
+log "## Scenario 2: session.envelope + exec.command_run (command enforcement path)"
 log ""
 JSONL2="${RUN_DIR}/s2.jsonl"
 STDERR2="${RUN_DIR}/s2.stderr"
@@ -191,7 +187,7 @@ set +e
 run_dogfood_turn \
   "${JSONL2}" \
   "${STDERR2}" \
-  'Use CEP tools. envelope.declare with intent "p27 run echo", RunCommand ["echo p27-ok"], verify command "echo p27-ok", expected_exit_code 0, on_failure retain_diff. Then command.run "echo p27-ok". Final message: P27_SCENARIO_2_DONE'
+  'Use CEP tools. Call session.envelope with mode=declare, intent "p27 run echo", RunCommand ["echo p27-ok"], verify command "echo p27-ok", expected_exit_code 0, on_failure retain_diff. Then call exec.command_run with argv ["echo", "p27-ok"]. Final message: P27_SCENARIO_2_DONE'
 S2_EXIT=$?
 set -e
 
@@ -199,7 +195,7 @@ log "- exit: ${S2_EXIT}"
 log ""
 log "### Manual checklist"
 log "- [ ] JSONL contains cep_envelope_declared event"
-log "- [ ] JSONL contains tool_call_finished for command.run with ok=true"
+log "- [ ] JSONL contains tool_call_finished for exec.command_run with ok=true"
 log "- [ ] No cep_verify_failed events (verify passed)"
 log "- [ ] turn_committed present"
 log ""
@@ -209,8 +205,8 @@ log "## Summary"
 log ""
 log "| Scenario | Exit | Notes |"
 log "|----------|------|-------|"
-log "| 1: declare+patch | ${S1_EXIT} | inspect ${JSONL1} |"
-log "| 2: declare+command.run | ${S2_EXIT} | inspect ${JSONL2} |"
+log "| 1: envelope+patch | ${S1_EXIT} | inspect ${JSONL1} |"
+log "| 2: envelope+exec.command_run | ${S2_EXIT} | inspect ${JSONL2} |"
 log ""
 log "Inspect JSONL files with:"
 log "  jq -c 'select(.type | test(\"^(cep_|tool_call_)\"))' ${JSONL1}"

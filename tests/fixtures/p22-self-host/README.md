@@ -1,6 +1,9 @@
 # P22.6 self-host supervision fixtures
 
-`scripts/p22-self-host.sh` builds the **outer** Lattice CLI from the supervisor checkout, clones [Skyline10124/lattice](https://github.com/Skyline10124/lattice) into `build/tmp/p22-self-host/<run-id>/lattice-under-test`, creates a session for the inner agent, and runs `lattice session send` there. Cursor must not edit the clone directly; only the harness prepares fixtures and judges results.
+Legacy Phase 22 fixtures: these scenarios pair with scripts that use
+pre-v1.3.1 CEP tool names and are kept for historical reproduction.
+
+`benchmarks/lancet-dogfood/legacy/p22-self-host.sh` builds the **outer** Lattice CLI from the supervisor checkout, clones [Skyline10124/lattice](https://github.com/Skyline10124/lattice) into `build/tmp/p22-self-host/<run-id>/lattice-under-test`, creates a session for the inner agent, and runs `lattice session send` there. Cursor must not edit the clone directly; only the harness prepares fixtures and judges results.
 
 | Task | Slug | Default run | Intent |
 |------|------|-------------|--------|

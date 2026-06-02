@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Run the legacy-maintenance benchmark against a pinned real upstream project.
+# Legacy benchmark: phase prompts still use pre-v1.3.1 CEP tool names and are
+# kept for historical comparison, not as the current LANCET catalog contract.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 MODEL="${BENCH_MODEL:-compat:deepseek-v4-pro}"

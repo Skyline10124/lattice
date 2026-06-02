@@ -1,5 +1,9 @@
 # Legacy Maintenance Benchmark
 
+This benchmark is historical: its phase prompts still use pre-v1.3.1 CEP tool
+names. Keep it for comparison unless the whole benchmark is revalidated against
+the current 9-method LANCET catalog.
+
 This benchmark targets the product shift from code-specialized assistance to a
 general session-centric maintenance runtime.
 
@@ -40,7 +44,7 @@ Create a target env file from `benchmark.env.example`, then run:
 set -a
 . benchmarks/legacy-maintenance/benchmark.env
 set +a
-scripts/bench-legacy-maintenance.sh
+benchmarks/legacy-maintenance/run.sh
 ```
 
 Required provider environment:

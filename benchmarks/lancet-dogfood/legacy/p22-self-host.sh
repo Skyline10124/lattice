@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Self-host supervision harness for disposable Lattice checkouts.
+# Legacy Phase 22 harness: prompts and assertions use pre-v1.3.1 CEP tool names.
+# Keep for historical reproduction; use benchmarks/lancet-dogfood/run.sh for
+# the current 9-method LANCET catalog.
 #
 # Cursor (outer) supervises; Lattice (inner) runs in a disposable clone of
 # Skyline10124/lattice. The outer lattice checkout is only used to build the
@@ -20,7 +23,7 @@
 #
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 
 MODEL="${P22_SELF_HOST_MODEL:-compat:deepseek-v4-pro}"
