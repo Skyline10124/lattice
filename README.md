@@ -85,7 +85,12 @@ The following capabilities are deferred beyond the current release:
 ```sh
 export ANTHROPIC_API_KEY="..."
 export OPENAI_API_KEY="..."
-export DEEPSEEK_API_KEY="..."
+export GEMINI_API_KEY="..."
+
+# For OpenAI-compatible providers such as DeepSeek:
+export OPENAI_COMPATIBLE_BASE_URL="https://provider.example/v1"
+export OPENAI_COMPATIBLE_API_KEY="..."
+export OPENAI_COMPATIBLE_MODEL="deepseek-chat"
 ```
 
 ## License
