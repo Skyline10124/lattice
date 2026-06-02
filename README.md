@@ -24,7 +24,7 @@ lattice/
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
 │   ├── lattice-profile/     # Agent profile schema ([lancet] policy sections), discovery, defaults
-│   ├── lattice-tooling/     # ToolExecutor trait, limits, enabled-tools resolution
+│   ├── lattice-tooling/     # Tool limits/errors, enabled-tools resolution
 │   ├── lattice-agent/       # Multi-turn agent loop (AgentLoop), state machine
 │   ├── lattice-api/         # Public facade (turn execution/session); composes the per-turn LANCET runtime
 │   └── lattice-cli/         # CLI (session, models, resolve, doctor, lancet, audit)

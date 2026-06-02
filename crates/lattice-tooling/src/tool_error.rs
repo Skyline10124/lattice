@@ -1,5 +1,4 @@
-/// Internal error type for tool execution. Not exposed in the ToolExecutor trait
-/// signature — errors are converted to String via Display.
+/// Internal error type for native tool execution helpers.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ToolError {

@@ -58,7 +58,7 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authori
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[lancet]` policy sections), discovery, defaults |
-| `lattice-tooling` | Tool `ToolExecutor` trait, `ToolLimits`, and enabled-tools resolution shared types |
+| `lattice-tooling` | `ToolLimits`, `ToolError`, and enabled-tools resolution shared types |
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
 | `lattice-api` | Thin public facade for create/open/turn execution/session; composes the per-turn LANCET runtime |
 | `lattice-cli` | Binary entry point, subcommands (session, models, resolve, doctor, lancet, audit) |

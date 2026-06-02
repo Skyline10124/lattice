@@ -8,7 +8,6 @@ description = "CEP pure wire/data contracts: JSON-RPC frames, envelopes, policy 
 
 [features]
 default = []
-inspect-scaffold = []
 
 [dependencies]
 serde = { workspace = true }

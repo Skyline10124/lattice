@@ -12,8 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 lattice-session = { workspace = true }
-lattice-agent = { workspace = true, features = ["test-utils"] }
-lattice-tooling = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
 lancet-protocol = { workspace = true }
@@ -22,27 +20,19 @@ lancet-authority = { workspace = true }
 lancet-invariants = { workspace = true }
 lancet-native = { workspace = true }
 lattice-llm = { workspace = true }
-async-trait = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 clap = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 dirs = { workspace = true }
 colored = { workspace = true }
 anyhow = { workspace = true }
-base64 = { workspace = true }
-reqwest = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
-sha2 = { workspace = true }
-uuid = { workspace = true }
-toml_edit = { workspace = true }
-zeroize = { workspace = true }
 
 [dev-dependencies]
+lattice-agent = { workspace = true, features = ["test-utils"] }
+async-trait = { workspace = true }
 tempfile = { workspace = true }
 
 [features]

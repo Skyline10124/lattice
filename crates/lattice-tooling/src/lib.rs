@@ -1,5 +1,5 @@
-//! Shared tool types (`ToolCallExecutor`, `ToolLimits`) used by the CEP
-//! executor bridge and the agent loop.
+//! Shared tool limits, execution errors, and enabled-tool resolution used by
+//! the CEP executor bridge and native handlers.
 //!
 //! The **public tool contract** is split between `lancet-catalog`
 //! (CATALOG plus params/result schemas) and `lancet-protocol`
@@ -9,19 +9,6 @@
 
 pub mod enabled_tools;
 pub mod tool_error;
-
-use lattice_llm::ToolCall;
-
-/// Executes a tool call.
-///
-/// Returns `Ok(output)` on success or `Err(message)` when the tool could
-/// not produce a valid result (denied, invalid args, IO error, etc.).
-/// Implementations encode success/failure structurally in the Result
-/// variant — never via prefixes in the output string.
-#[async_trait::async_trait]
-pub trait ToolExecutor: Send + Sync {
-    async fn execute(&self, call: &ToolCall) -> Result<String, String>;
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolLimits {

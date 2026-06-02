@@ -42,7 +42,6 @@ print_group() {
 # handlers or test-only projections.
 DEFAULT_TOOL_EXECUTOR_ALLOWLIST=(
   'crates/lancet-native/src/executor/'
-  'crates/lancet-native/src/legacy_backend.rs'
   'crates/lancet-native/src/lib.rs'
 )
 
