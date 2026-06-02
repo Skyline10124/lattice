@@ -33,7 +33,7 @@ pub enum CepErrorFamily {
 /// Closed enum of CEP error codes within `-32000..-32099`.
 ///
 /// `CommandTimeout` (`-32021`) is the default wire code emitted by
-/// `command.run` whenever the configured deadline elapses, including cases
+/// `exec.command_run` whenever the configured deadline elapses, including cases
 /// where cleanup succeeds or the child has already exited. `ChildKillFailed`
 /// (`-32022`) is reserved for timeout cleanup failures, such as
 /// `Child::kill().await` returning an error or the OS reporting an unreaped
@@ -415,14 +415,14 @@ mod tests {
             (
                 CepErrorCode::EnvelopeMissing,
                 CepErrorData::Guard(GuardErrorData {
-                    method: "workspace.write_file".into(),
+                    method: "mutate.create".into(),
                     reason: "no envelope".into(),
                 }),
             ),
             (
                 CepErrorCode::EffectViolation,
                 CepErrorData::Effect(Box::new(EffectErrorData {
-                    method: "workspace.read_file".into(),
+                    method: "observe.workspace".into(),
                     declared_effect: vec![ImpactKind::WorkspaceObservation],
                     authorized_effect: vec![ImpactKind::WorkspaceObservation],
                     observed_effects: vec![
@@ -585,7 +585,7 @@ mod tests {
         use crate::envelope::ImpactKind;
 
         let data = EffectErrorData {
-            method: "workspace.read_file".into(),
+            method: "observe.workspace".into(),
             declared_effect: vec![ImpactKind::WorkspaceObservation],
             authorized_effect: vec![ImpactKind::WorkspaceObservation],
             observed_effects: vec![
@@ -598,7 +598,7 @@ mod tests {
         let wrapped = CepErrorData::Effect(Box::new(data.clone()));
         let value = serde_json::to_value(&wrapped).unwrap();
         assert_eq!(value["kind"], "effect");
-        assert_eq!(value["method"], "workspace.read_file");
+        assert_eq!(value["method"], "observe.workspace");
         assert!(value["declared_effect"].is_array());
         assert!(value["authorized_effect"].is_array());
         assert!(value["observed_effects"].is_array());

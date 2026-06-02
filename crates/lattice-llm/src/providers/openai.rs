@@ -12,7 +12,7 @@ use crate::types::{ChatRequest, LlmEvent, Role};
 /// Encode a CEP catalog tool name for OpenAI Chat Completions wire transport.
 ///
 /// Many compatible endpoints require `tools[].function.name` to match
-/// `^[a-zA-Z0-9_-]+$` (no `.`). CEP canonical names are dotted (`workspace.read_file`);
+/// `^[a-zA-Z0-9_-]+$` (no `.`). CEP canonical names are dotted (`observe.workspace`);
 /// only this adapter performs `.__` encoding — the catalog and executor keep dots.
 pub(crate) fn wire_tool_name(canonical: &str) -> String {
     canonical.replace('.', "__")
@@ -306,10 +306,10 @@ mod tests {
 
     #[test]
     fn wire_tool_name_maps_dotted_cep_names() {
-        assert_eq!(wire_tool_name("envelope.declare"), "envelope__declare");
+        assert_eq!(wire_tool_name("session.envelope"), "session__envelope");
         assert_eq!(
-            canonical_tool_name("workspace__read_file"),
-            "workspace.read_file"
+            canonical_tool_name("observe__workspace"),
+            "observe.workspace"
         );
         assert_eq!(wire_tool_name("get_weather"), "get_weather");
     }
@@ -319,8 +319,8 @@ mod tests {
         let req = ChatRequest {
             messages: vec![Message::user("go")],
             tools: vec![ToolDefinition::new(
-                "workspace.read_file",
-                "Read a file",
+                "observe.workspace",
+                "Observe workspace content",
                 serde_json::json!({"type": "object"}),
             )],
             target: ModelTarget::new("gpt-4o"),
@@ -329,7 +329,7 @@ mod tests {
             max_completion_tokens: None,
         };
         let json = build_request_json(&req, &make_resolved());
-        assert_eq!(json["tools"][0]["function"]["name"], "workspace__read_file");
+        assert_eq!(json["tools"][0]["function"]["name"], "observe__workspace");
     }
 
     #[test]

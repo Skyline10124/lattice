@@ -109,7 +109,7 @@ pub struct InvocationFacts {
     pub env_keys: Vec<String>,
     /// URL host (for FetchUrl).
     pub host: Option<String>,
-    /// All target file paths extracted from a patch document (for workspace.patch).
+    /// All target file paths extracted from a patch document (for mutate.patch).
     pub all_patch_targets: Vec<String>,
     /// Session-state operation kind (for MutateSessionState).
     pub session_state_operation: Option<SessionStateOperation>,
@@ -200,12 +200,11 @@ pub fn match_capability(
 /// Check whether `source` is allowed for the given `method`.
 ///
 /// Source rules:
-/// - Observation methods (workspace.read_file, workspace.grep, workspace.list_directory,
-///   workspace.find_files) accept Base, Declared, or Both for their catalog-required capability.
-/// - External observation (web.fetch) accepts Base, Declared, or Both.
-/// - Session state (session.todo_write, envelope.declare) accepts Base, Declared, or Both.
-/// - Workspace mutation (workspace.write_file, workspace.patch) requires Declared or Both.
-/// - command.run requires Declared or Both.
+/// - `observe.workspace` accepts Base, Declared, or Both for its mode-specific capability.
+/// - `fetch.web` accepts Base, Declared, or Both.
+/// - Session-state and audit observation methods accept Base, Declared, or Both.
+/// - `mutate.create` / `mutate.patch` require Declared or Both.
+/// - `exec.command_run` requires Declared or Both.
 fn is_source_allowed_for_method(
     source: &CapabilitySource,
     method: &str,
@@ -214,17 +213,13 @@ fn is_source_allowed_for_method(
     use super::default::CapabilitySourceClass;
 
     let allowed_classes = match method {
-        "workspace.read_file"
-        | "workspace.grep"
-        | "workspace.list_directory"
-        | "workspace.find_files" => &source_policy.observation,
-        "web.fetch" => &source_policy.external,
-        "session.todo_write" | "envelope.declare" | "envelope.submit_intent" => {
+        "observe.workspace" => &source_policy.observation,
+        "fetch.web" => &source_policy.external,
+        "session.todo_write" | "session.envelope" | "observe.audit" | "observe.audit_replay" => {
             &source_policy.session_state
         }
-        "audit.query" | "audit.tail" | "audit.replay" => &source_policy.session_state,
-        "workspace.write_file" | "workspace.patch" => &source_policy.mutation,
-        "command.run" => &source_policy.command,
+        "mutate.create" | "mutate.patch" => &source_policy.mutation,
+        "exec.command_run" => &source_policy.command,
         _ => return false,
     };
 
@@ -586,7 +581,7 @@ mod tests {
         }
     }
 
-    // ── Test 1: ReadPath with Base source satisfies workspace.read_file ──
+    // ── Test 1: ReadPath with Base source satisfies observe.workspace ──
 
     #[test]
     fn read_path_base_source_satisfies_workspace_read_file() {
@@ -604,7 +599,7 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation,
             &caps,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
@@ -613,7 +608,7 @@ mod tests {
         assert!(result.action_required.is_none());
     }
 
-    // ── Test 2: ReadPath with Declared source satisfies workspace.read_file ──
+    // ── Test 2: ReadPath with Declared source satisfies observe.workspace ──
 
     #[test]
     fn read_path_declared_source_satisfies_workspace_read_file() {
@@ -631,14 +626,14 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation,
             &caps,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
         assert!(result.source_allowed);
     }
 
-    // ── Test 3: Inspect with Base source satisfies grep, list_directory, find_files ──
+    // ── Test 3: Inspect with Base source satisfies workspace observation ──
 
     #[test]
     fn inspect_base_source_satisfies_observation_methods() {
@@ -648,28 +643,23 @@ mod tests {
         }];
         let invocation = InvocationFacts::default();
 
-        for method in &[
-            "workspace.grep",
-            "workspace.list_directory",
-            "workspace.find_files",
-        ] {
-            let result = match_capability(
-                RequiredCapability::Inspect,
-                &invocation,
-                &caps,
-                method,
-                &CapabilitySourcePolicy::default(),
-            );
-            assert_eq!(
-                result.verdict,
-                CapabilityMatchVerdict::Satisfied,
-                "Inspect with Base should satisfy {method}"
-            );
-            assert!(result.source_allowed);
-        }
+        let method = "observe.workspace";
+        let result = match_capability(
+            RequiredCapability::Inspect,
+            &invocation,
+            &caps,
+            method,
+            &CapabilitySourcePolicy::default(),
+        );
+        assert_eq!(
+            result.verdict,
+            CapabilityMatchVerdict::Satisfied,
+            "Inspect with Base should satisfy {method}"
+        );
+        assert!(result.source_allowed);
     }
 
-    // ── Test 4: Inspect with Declared source satisfies observation methods ──
+    // ── Test 4: Inspect with Declared source satisfies workspace observation ──
 
     #[test]
     fn inspect_declared_source_satisfies_observation_methods() {
@@ -679,24 +669,19 @@ mod tests {
         }];
         let invocation = InvocationFacts::default();
 
-        for method in &[
-            "workspace.grep",
-            "workspace.list_directory",
-            "workspace.find_files",
-        ] {
-            let result = match_capability(
-                RequiredCapability::Inspect,
-                &invocation,
-                &caps,
-                method,
-                &CapabilitySourcePolicy::default(),
-            );
-            assert_eq!(
-                result.verdict,
-                CapabilityMatchVerdict::Satisfied,
-                "Inspect with Declared should satisfy {method}"
-            );
-        }
+        let method = "observe.workspace";
+        let result = match_capability(
+            RequiredCapability::Inspect,
+            &invocation,
+            &caps,
+            method,
+            &CapabilitySourcePolicy::default(),
+        );
+        assert_eq!(
+            result.verdict,
+            CapabilityMatchVerdict::Satisfied,
+            "Inspect with Declared should satisfy {method}"
+        );
     }
 
     // ── Test 5: WritePath with Declared source satisfies mutation methods ──
@@ -714,7 +699,7 @@ mod tests {
             ..Default::default()
         };
 
-        for method in &["workspace.write_file", "workspace.patch"] {
+        for method in &["mutate.create", "mutate.patch"] {
             let result = match_capability(
                 RequiredCapability::WritePath,
                 &invocation,
@@ -746,7 +731,7 @@ mod tests {
             ..Default::default()
         };
 
-        for method in &["workspace.write_file", "workspace.patch"] {
+        for method in &["mutate.create", "mutate.patch"] {
             let result = match_capability(
                 RequiredCapability::WritePath,
                 &invocation,
@@ -788,7 +773,7 @@ mod tests {
             RequiredCapability::RunCommand,
             &invocation,
             &caps,
-            "command.run",
+            "exec.command_run",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
@@ -813,7 +798,7 @@ mod tests {
             RequiredCapability::RunCommand,
             &invocation,
             &caps,
-            "command.run",
+            "exec.command_run",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::SourceNotAllowed);
@@ -841,7 +826,7 @@ mod tests {
             RequiredCapability::RunCommand,
             &invocation,
             &caps,
-            "command.run",
+            "exec.command_run",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);
@@ -877,7 +862,7 @@ mod tests {
             RequiredCapability::RunCommand,
             &invocation,
             &caps,
-            "command.run",
+            "exec.command_run",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
@@ -886,7 +871,7 @@ mod tests {
         assert_eq!(invocation.env_keys.len(), 2);
     }
 
-    // ── FetchUrl with Base source satisfies web.fetch ───────────────────
+    // ── FetchUrl with Base source satisfies fetch.web ───────────────────
 
     #[test]
     fn fetch_url_base_source_satisfies_web_fetch() {
@@ -904,14 +889,14 @@ mod tests {
             RequiredCapability::FetchUrl,
             &invocation,
             &caps,
-            "web.fetch",
+            "fetch.web",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
         assert!(result.source_allowed);
     }
 
-    // ── Test 12: FetchUrl with Declared source satisfies web.fetch ──
+    // ── Test 12: FetchUrl with Declared source satisfies fetch.web ──
 
     #[test]
     fn fetch_url_declared_source_satisfies_web_fetch() {
@@ -929,7 +914,7 @@ mod tests {
             RequiredCapability::FetchUrl,
             &invocation,
             &caps,
-            "web.fetch",
+            "fetch.web",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
@@ -953,7 +938,7 @@ mod tests {
             RequiredCapability::FetchUrl,
             &invocation,
             &caps,
-            "web.fetch",
+            "fetch.web",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);
@@ -988,7 +973,7 @@ mod tests {
         assert!(result.source_allowed);
     }
 
-    // ── Test 15: MutateSessionState with Base source satisfies envelope.declare ──
+    // ── Test 15: MutateSessionState with Base source satisfies session.envelope ──
 
     #[test]
     fn mutate_session_state_base_source_satisfies_envelope_declare() {
@@ -1004,7 +989,7 @@ mod tests {
             RequiredCapability::MutateSessionState,
             &invocation,
             &caps,
-            "envelope.declare",
+            "session.envelope",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
@@ -1030,7 +1015,7 @@ mod tests {
             RequiredCapability::WritePath,
             &invocation,
             &caps,
-            "workspace.write_file",
+            "mutate.create",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::NoMatchingCapability);
@@ -1064,7 +1049,7 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation,
             &caps,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);
@@ -1088,7 +1073,7 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation_ok,
             &caps_traversal,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result2.verdict, CapabilityMatchVerdict::PatternRejected);
@@ -1116,7 +1101,7 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation,
             &caps,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);
@@ -1144,7 +1129,7 @@ mod tests {
             RequiredCapability::ReadPath,
             &invocation,
             &caps,
-            "workspace.read_file",
+            "observe.workspace",
             &CapabilitySourcePolicy::default(),
         );
         assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);

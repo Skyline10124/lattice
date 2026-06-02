@@ -3,7 +3,7 @@
 use crate::handlers::{
     register_audit_methods, register_command_methods, register_envelope_methods,
     register_external_methods, register_mutation_methods, register_session_state_methods,
-    register_submit_intent, register_workspace_observation_methods,
+    register_workspace_observation_methods,
 };
 use crate::registry::MethodRegistry;
 use lancet_protocol::CepError;
@@ -23,7 +23,7 @@ pub fn register_native_workspace_observation(
     register_workspace_observation_methods(registry)
 }
 
-/// Register native CEP `web.fetch` handler.
+/// Register native CEP `fetch.web` handler.
 pub fn register_native_external(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_external_methods(registry)
 }
@@ -33,23 +33,19 @@ pub fn register_native_session_state(registry: &mut MethodRegistry) -> Result<()
     register_session_state_methods(registry)
 }
 
-/// Register native CEP `envelope.declare` handler.
+/// Register native CEP `session.envelope` handler.
 pub fn register_native_envelope(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_envelope_methods(registry)
 }
 
-/// Register native CEP `command.run` handler.
+/// Register native CEP `exec.command_run` handler.
 pub fn register_native_command(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_command_methods(registry)
 }
 
-/// Register native CEP `workspace.write_file` and `workspace.patch` handlers.
+/// Register native CEP `mutate.create` and `mutate.patch` handlers.
 pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_mutation_methods(registry)
-}
-
-pub fn register_native_submit_intent(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    register_submit_intent(registry)
 }
 
 pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -57,7 +53,6 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
     register_native_envelope(registry)?;
     register_native_command(registry)?;
     register_native_mutation(registry)?;
-    register_native_submit_intent(registry)?;
     register_audit_methods(registry)
 }
 
@@ -71,7 +66,9 @@ mod cep_native_registry_tests {
     use crate::{CepTransport, ServerRunConfig};
     use lancet_catalog::catalog;
     use lancet_catalog::methods::command::Run;
-    use lancet_catalog::methods::workspace::{ReadFile, ReadFileParams};
+    use lancet_catalog::methods::workspace::{
+        ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
+    };
     use lancet_catalog::CepMethod;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::CepErrorCode;
@@ -148,7 +145,11 @@ mod cep_native_registry_tests {
             line_numbers: None,
         };
         let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::ReadFile(params)).unwrap(),
+                ctx,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
@@ -178,18 +179,18 @@ mod cep_native_registry_tests {
         });
 
         client
-            .call::<ReadFile>(ReadFileParams {
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
                 path: "hello.txt".into(),
                 offset: None,
                 limit: None,
                 line_numbers: None,
-            })
+            }))
             .await
             .unwrap();
 
         assert_eq!(audit.row_count().unwrap(), 1);
         let read_row = audit.row_by_audit_id(1).unwrap();
-        assert_eq!(read_row.method, ReadFile::NAME);
+        assert_eq!(read_row.method, ObserveWorkspace::NAME);
         assert_eq!(read_row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert_eq!(read_row.guard_stage, GUARD_STAGE_NATIVE);
         assert!(read_row.policy_enforced);
@@ -276,7 +277,11 @@ mod cep_native_registry_tests {
             line_numbers: None,
         };
         let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::ReadFile(params)).unwrap(),
+                ctx,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ProjectRootViolation);

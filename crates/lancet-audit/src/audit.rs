@@ -127,7 +127,7 @@ pub struct CepAuditContext {
     pub runtime_version: String,
 }
 
-/// Filters for [`CepAuditStore::query_rows`] — mirrors `audit.query` wire params.
+/// Filters for [`CepAuditStore::query_rows`] — mirrors `observe.audit` query mode.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditQueryFilters {
     pub session_id: Option<String>,
@@ -171,6 +171,13 @@ pub fn required_capability_label(cap: RequiredCapability) -> &'static str {
     }
 }
 
+fn required_capability_for_method(method: &str) -> Option<RequiredCapability> {
+    catalog()
+        .iter()
+        .find(|descriptor| descriptor.name == method)
+        .map(|descriptor| descriptor.capability)
+}
+
 /// Merge transport and catalog summary keys into metadata JSON only.
 pub fn merge_finalize_metadata(
     existing: Option<&str>,
@@ -186,10 +193,10 @@ pub fn merge_finalize_metadata(
         return existing.map(str::to_string);
     };
 
-    if let Some(descriptor) = catalog().iter().find(|d| d.name == method) {
+    if let Some(capability) = required_capability_for_method(method) {
         obj_map.insert(
             "required_capability".into(),
-            serde_json::Value::String(required_capability_label(descriptor.capability).into()),
+            serde_json::Value::String(required_capability_label(capability).into()),
         );
     }
 
@@ -444,7 +451,7 @@ impl CepAuditStore {
         })
     }
 
-    /// Filtered read for PROV projection and `audit.query` (parameterized SQL only).
+    /// Filtered read for PROV projection and `observe.audit` query mode (parameterized SQL only).
     pub fn query_rows(&self, filters: &AuditQueryFilters) -> Result<Vec<AuditRow>, AuditError> {
         let mut sql = String::from(
             "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
@@ -747,7 +754,9 @@ fn chrono_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_catalog::methods::TodoWrite as TodoWriteMethod;
+    use lancet_catalog::methods::{
+        AuditObserve, Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,
+    };
     use lancet_catalog::CepMethod;
     use serde_json::json;
 
@@ -1004,7 +1013,7 @@ mod tests {
             .start_call(
                 &ctx,
                 2,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -1055,7 +1064,7 @@ mod tests {
             .start_call(
                 &test_context(),
                 5,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(None),
             )
             .unwrap();
@@ -1163,7 +1172,7 @@ mod tests {
             .start_call(
                 &ctx_a,
                 1,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(None),
             )
             .unwrap();
@@ -1181,7 +1190,7 @@ mod tests {
             .start_call(
                 &ctx_b,
                 2,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(None),
             )
             .unwrap();
@@ -1199,7 +1208,7 @@ mod tests {
         let rows = store
             .query_rows(&AuditQueryFilters {
                 session_id: Some("sess-a".into()),
-                method: Some("workspace.read_file".into()),
+                method: Some("observe.workspace".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -1285,7 +1294,7 @@ mod tests {
             .start_call(
                 &ctx,
                 1,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(None),
             )
             .unwrap();
@@ -1303,7 +1312,7 @@ mod tests {
             .start_call(
                 &ctx,
                 2,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(None),
             )
             .unwrap();
@@ -1334,10 +1343,10 @@ mod tests {
         let store = CepAuditStore::in_memory().unwrap();
         let ctx = test_context();
         for (idx, method) in [
-            "workspace.read_file",
-            "audit.query",
-            "workspace.grep",
-            "workspace.list_directory",
+            ObserveWorkspace::NAME,
+            AuditObserve::NAME,
+            Create::NAME,
+            Fetch::NAME,
         ]
         .into_iter()
         .enumerate()
@@ -1365,28 +1374,28 @@ mod tests {
         let rows = store
             .query_rows(&AuditQueryFilters {
                 session_id: Some(ctx.session_id.clone()),
-                exclude_method_prefix: Some("audit.".into()),
+                exclude_method_prefix: Some("observe.audit".into()),
                 limit: Some(2),
                 ..Default::default()
             })
             .unwrap();
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].method, "workspace.read_file");
-        assert_eq!(rows[1].method, "workspace.grep");
+        assert_eq!(rows[0].method, ObserveWorkspace::NAME);
+        assert_eq!(rows[1].method, Create::NAME);
     }
 
     #[test]
     fn merge_finalize_metadata_adds_required_capability() {
         let merged = merge_finalize_metadata(
             Some(r#"{"observation_source":"workspace"}"#),
-            "workspace.read_file",
+            "observe.workspace",
             &[],
             None,
         )
         .unwrap();
         assert!(merged.contains("required_capability"));
-        assert!(merged.contains("read_path"));
+        assert!(merged.contains("inspect"));
     }
 
     #[tokio::test]

@@ -1,14 +1,16 @@
 //! Native CEP workspace mutation handlers.
 //!
-//! Implements `workspace.write_file` and `workspace.patch` with Guard L1 scope
+//! Implements `mutate.create` and `mutate.patch` with Guard L1 scope
 //! enforcement and verify flow.
-//! Both methods require an active `ExecutionEnvelope`; `workspace.patch`
+//! Both methods require an active `ExecutionEnvelope`; `mutate.patch`
 //! performs all-or-nothing scope preflight before applying changes.
 
 use crate::edit::content_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::types::PatchOperation;
-use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use crate::effect::ledger::{
+    EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
+};
 use crate::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
@@ -19,7 +21,7 @@ use crate::verify::{
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
-    Patch, PatchParams, PatchResult, WriteFile, WriteFileParams, WriteFileResult,
+    Create, CreateParams, CreateResult, Patch, PatchParams, PatchResult,
 };
 use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{CepMode, ImpactKind};
@@ -30,42 +32,50 @@ use std::path::PathBuf;
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    registry.register_method::<WriteFile, _, _>(handle_write_file)?;
+    registry.register_method::<Create, _, _>(handle_create)?;
     registry.register_method::<Patch, _, _>(handle_patch)?;
     Ok(())
 }
 
-/// Handle `workspace.write_file` with Guard L1 scope enforcement and verify flow.
+async fn handle_create(
+    params: CreateParams,
+    ctx: HandlerContext,
+) -> Result<CreateResult, CepError> {
+    handle_create_as(params, ctx, Create::NAME).await
+}
+
+/// Handle `mutate.create` with Guard L1 scope enforcement and verify flow.
 ///
 /// Flow:
 /// 1. Check active envelope exists -> else EnvelopeMissing
 /// 2. Extract WritePath patterns from active envelope
 /// 3. Check target path matches WritePath scope via check_write_scope
-/// 4. Check parent directory exists (`write_file` does not create directories)
-/// 5. Write file using secure containment
+/// 4. Check parent directory exists and target file does not exist
+/// 5. Create file using secure containment
 /// 6. If envelope has verify -> run verify
 /// 7. If verify fails -> VerifyFailed, retain diff, leave envelope valid
-/// 8. Return WriteFileResult
-async fn handle_write_file(
-    params: WriteFileParams,
+/// 8. Return CreateResult
+async fn handle_create_as(
+    params: CreateParams,
     ctx: HandlerContext,
-) -> Result<WriteFileResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, WriteFile::NAME, &params).await?;
+    method: &'static str,
+) -> Result<CreateResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
 
     // 1. Check active envelope
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
         None => {
-            emit_envelope_missing(&ctx, WriteFile::NAME, "workspace_mutation").await;
-            return Err(envelope_missing_error(WriteFile::NAME));
+            emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+            return Err(envelope_missing_error(method));
         }
     };
 
     // 2. Extract WritePath patterns
     let patterns = extract_write_path_patterns(&envelope.capabilities);
     if patterns.is_empty() {
-        emit_envelope_missing(&ctx, WriteFile::NAME, "workspace_mutation").await;
-        return Err(envelope_missing_error(WriteFile::NAME));
+        emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+        return Err(envelope_missing_error(method));
     }
 
     // 3. Get project root
@@ -81,7 +91,7 @@ async fn handle_write_file(
         if err.code == CepErrorCode::ReplanRequired {
             emit_replan_required(
                 &ctx,
-                WriteFile::NAME,
+                method,
                 &envelope_id,
                 std::slice::from_ref(&params.path),
             )
@@ -90,14 +100,14 @@ async fn handle_write_file(
         return Err(err);
     }
 
-    // 5. Check parent directory exists; write_file does not create directories.
+    // 5. Check parent directory exists; create does not create directories.
     let full_path = std::path::Path::new(&project_root).join(&params.path);
     if let Some(parent) = full_path.parent() {
         if !parent.exists() {
             return Err(CepError::new(
                 CepErrorCode::ExecutionFailed,
                 format!(
-                    "parent directory '{}' does not exist for '{}'; write_file does not create directories",
+                    "parent directory '{}' does not exist for '{}'; mutate.create does not create directories",
                     parent.display(),
                     params.path
                 ),
@@ -109,19 +119,32 @@ async fn handle_write_file(
             ));
         }
     }
+    if full_path.exists() {
+        return Err(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!(
+                "target file '{}' already exists; mutate.create only creates new files",
+                params.path
+            ),
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "path".into(),
+                reason: "target already exists".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
 
     // 6. Opaque invariant cards require human review before mutation.
     let cards = ctx.invariant_index.match_target(&params.path);
     if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
         return Err(crate::invariants::opaque_human_review_error(
-            WriteFile::NAME,
-            &message,
+            method, &message,
         ));
     }
 
     // 7. Guard L2: AST category check for .rs files with invariant cards
     if params.path.ends_with(".rs") && !matches!(ctx.cep_mode, CepMode::Off) {
-        let _status = guard_l2::l2_status_for_method(WriteFile::NAME);
+        let _status = guard_l2::l2_status_for_method(method);
         let has_forbidden = cards.iter().any(|c| !c.forbidden.is_empty());
         if has_forbidden {
             let result = guard_l2::check_l2(
@@ -130,13 +153,13 @@ async fn handle_write_file(
                 &[(0, params.content.len())],
                 &cards,
             );
-            enforce_l2_result(&ctx, WriteFile::NAME, &params.path, &result)?;
+            enforce_l2_result(&ctx, method, &params.path, &result)?;
         }
     }
 
     // 7. Write file using native secure containment.
     let bytes_written = params.content.len() as u64;
-    write_file_secure(&project_root, &params.path, &params.content).await?;
+    create_file_secure(&project_root, &params.path, &params.content).await?;
 
     ctx.record_effect(ObservedEffect {
         kind: ImpactKind::WorkspaceMutation,
@@ -153,7 +176,7 @@ async fn handle_write_file(
         let mut cancellation = ctx.cancellation.clone();
         match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
             Ok(outcome) if !outcome.success => {
-                emit_verify_failed(&ctx, WriteFile::NAME, &envelope_id, outcome.exit_code).await;
+                emit_verify_failed(&ctx, method, &envelope_id, outcome.exit_code).await;
                 return Err(verify_failed_error(&verify_cmd, &outcome));
             }
             Ok(_) => {
@@ -166,7 +189,7 @@ async fn handle_write_file(
             }
             Err(err) => {
                 // Verify execution error (timeout, cancel, etc.)
-                emit_verify_failed(&ctx, WriteFile::NAME, &envelope_id, -1).await;
+                emit_verify_failed(&ctx, method, &envelope_id, -1).await;
                 return Err(err);
             }
         }
@@ -175,7 +198,7 @@ async fn handle_write_file(
     // 8. Record metadata
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
-        "method": WriteFile::NAME,
+        "method": method,
         "envelope_id": envelope_id,
         "bytes_written": bytes_written,
         "content_hash": written_hash,
@@ -183,13 +206,13 @@ async fn handle_write_file(
         "policy_enforced": true,
     }));
 
-    Ok(WriteFileResult {
+    Ok(CreateResult {
         path: params.path,
         bytes_written,
     })
 }
 
-/// Handle `workspace.patch` with Guard L1 preflight scope enforcement and verify flow.
+/// Handle `mutate.patch` with Guard L1 preflight scope enforcement and verify flow.
 ///
 /// Flow:
 /// 1. Parse patch, extract all changed paths; malformed patch text is schema
@@ -202,6 +225,14 @@ async fn handle_write_file(
 /// 7. If verify fails -> VerifyFailed, retain diff
 /// 8. Return PatchResult with changed_files
 async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchResult, CepError> {
+    handle_patch_as(params, ctx, Patch::NAME).await
+}
+
+async fn handle_patch_as(
+    params: PatchParams,
+    ctx: HandlerContext,
+    method: &'static str,
+) -> Result<PatchResult, CepError> {
     let document = parse_patch_document(&params.patch).map_err(|parse_err| {
         CepError::new(
             CepErrorCode::SchemaMismatch,
@@ -214,22 +245,22 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         )
     })?;
 
-    let _evaluation = evaluate_and_enforce_policy(&ctx, Patch::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
 
     // 1. Check active envelope
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
         None => {
-            emit_envelope_missing(&ctx, Patch::NAME, "workspace_mutation").await;
-            return Err(envelope_missing_error(Patch::NAME));
+            emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+            return Err(envelope_missing_error(method));
         }
     };
 
     // 2. Extract WritePath patterns
     let patterns = extract_write_path_patterns(&envelope.capabilities);
     if patterns.is_empty() {
-        emit_envelope_missing(&ctx, Patch::NAME, "workspace_mutation").await;
-        return Err(envelope_missing_error(Patch::NAME));
+        emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+        return Err(envelope_missing_error(method));
     }
 
     // 3. Get project root
@@ -259,7 +290,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
     }
 
     if !out_of_scope.is_empty() {
-        emit_replan_required(&ctx, Patch::NAME, &envelope_id, &out_of_scope).await;
+        emit_replan_required(&ctx, method, &envelope_id, &out_of_scope).await;
         return Err(CepError::new(
             CepErrorCode::ReplanRequired,
             format!(
@@ -267,7 +298,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
                 out_of_scope
             ),
             CepErrorData::Guard(GuardErrorData {
-                method: Patch::NAME.into(),
+                method: method.into(),
                 reason: format!("ReplanRequired: out-of-scope paths {:?}", out_of_scope),
             }),
             Retriability::RequiresReplan,
@@ -281,8 +312,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         let cards = ctx.invariant_index.match_target(path);
         if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
             return Err(crate::invariants::opaque_human_review_error(
-                Patch::NAME,
-                &message,
+                method, &message,
             ));
         }
         if path.ends_with(".rs")
@@ -292,7 +322,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
             if let Some((before, after)) = projected_patch_content(&project_root, operation)? {
                 let ranges = changed_line_byte_ranges(before.as_deref(), &after);
                 let result = guard_l2::check_l2(path, after.as_bytes(), &ranges, &cards);
-                enforce_l2_result(&ctx, Patch::NAME, path, &result)?;
+                enforce_l2_result(&ctx, method, path, &result)?;
             }
         }
     }
@@ -334,6 +364,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
             json!({
                 "path": f.path,
                 "content_hash": f.hash_after,
+                "line_changes": f.line_changes,
             })
         })
         .collect();
@@ -344,9 +375,34 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         } else {
             PathBuf::from(changed_path)
         };
+        let changes = result
+            .changed_files
+            .iter()
+            .find(|file| file.path == *changed_path)
+            .map(|file| {
+                file.line_changes
+                    .iter()
+                    .map(|change| ObservedLineChange {
+                        kind: match change.kind {
+                            crate::edit::types::LineChangeKind::Added => {
+                                ObservedLineChangeKind::Added
+                            }
+                            crate::edit::types::LineChangeKind::Removed => {
+                                ObservedLineChangeKind::Removed
+                            }
+                        },
+                        old_hash: change.old_hash.clone(),
+                        new_hash: change.new_hash.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(abs_path),
+            scope: ObservedScope::Lines {
+                path: abs_path,
+                changes,
+            },
             required_capability: RequiredCapability::WritePath,
             source: EffectSource::HandlerBackend,
         });
@@ -360,7 +416,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
         let mut cancellation = ctx.cancellation.clone();
         match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
             Ok(outcome) if !outcome.success => {
-                emit_verify_failed(&ctx, Patch::NAME, &envelope_id, outcome.exit_code).await;
+                emit_verify_failed(&ctx, method, &envelope_id, outcome.exit_code).await;
                 return Err(verify_failed_error(&verify_cmd, &outcome));
             }
             Ok(_) => {
@@ -372,7 +428,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
                 });
             }
             Err(err) => {
-                emit_verify_failed(&ctx, Patch::NAME, &envelope_id, -1).await;
+                emit_verify_failed(&ctx, method, &envelope_id, -1).await;
                 return Err(err);
             }
         }
@@ -380,7 +436,7 @@ async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchR
 
     // 8. Record metadata
     ctx.record_durable_metadata(json!({
-        "method": Patch::NAME,
+        "method": method,
         "envelope_id": envelope_id,
         "changed_files": changed_files_meta,
         "backend_invoked": true,
@@ -449,15 +505,6 @@ fn projected_patch_content(
     operation: &PatchOperation,
 ) -> Result<Option<(Option<String>, String)>, CepError> {
     match operation {
-        PatchOperation::AddFile { lines, .. } => {
-            let content = lines.join("\n");
-            let after = if lines.is_empty() {
-                String::new()
-            } else {
-                format!("{content}\n")
-            };
-            Ok(Some((None, after)))
-        }
         PatchOperation::UpdateFile { path, hunks, .. } => {
             let full_path = std::path::Path::new(project_root).join(path);
             let before = std::fs::read_to_string(&full_path).map_err(|err| {
@@ -556,8 +603,8 @@ fn line_byte_bounds(source: &str) -> Vec<(usize, usize)> {
     bounds
 }
 
-/// Write a file securely using the containment logic from fs.rs.
-async fn write_file_secure(
+/// Create a file securely using native containment checks.
+async fn create_file_secure(
     project_root: &str,
     relative_path: &str,
     content: &str,
@@ -598,7 +645,7 @@ async fn write_file_secure(
             CepErrorCode::ExecutionFailed,
             format!("cannot resolve parent for '{relative_path}'"),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "write_file".into(),
+                command: "create".into(),
                 exit_code: None,
                 stderr: Some("no parent directory".into()),
             }),
@@ -611,7 +658,7 @@ async fn write_file_secure(
             CepErrorCode::ExecutionFailed,
             format!("parent directory '{}' does not exist", parent.display()),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "write_file".into(),
+                command: "create".into(),
                 exit_code: None,
                 stderr: Some("parent directory does not exist".into()),
             }),
@@ -619,13 +666,44 @@ async fn write_file_secure(
         ));
     }
 
-    // Write using tokio::fs::write after Guard L1 containment checks.
-    tokio::fs::write(&full_path, content).await.map_err(|e| {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&full_path)
+        .await
+        .map_err(|e| {
+            CepError::new(
+                CepErrorCode::ExecutionFailed,
+                format!("failed to create '{}': {e}", relative_path),
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    command: "create".into(),
+                    exit_code: None,
+                    stderr: Some(e.to_string()),
+                }),
+                Retriability::Transient,
+            )
+        })?;
+
+    file.write_all(content.as_bytes()).await.map_err(|e| {
         CepError::new(
             CepErrorCode::ExecutionFailed,
             format!("failed to write '{}': {e}", relative_path),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "write_file".into(),
+                command: "create".into(),
+                exit_code: None,
+                stderr: Some(e.to_string()),
+            }),
+            Retriability::Transient,
+        )
+    })?;
+    file.sync_all().await.map_err(|e| {
+        CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!("failed to sync '{}': {e}", relative_path),
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                command: "create".into(),
                 exit_code: None,
                 stderr: Some(e.to_string()),
             }),
@@ -699,13 +777,13 @@ async fn emit_verify_failed(
 }
 
 #[cfg(test)]
-mod write_file_tests {
+mod create_tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
-    use crate::handlers::register_submit_intent;
+    use crate::handlers::register_envelope_methods;
     use crate::invariants::InvariantCardIndex;
     use crate::registry::{Cancellation, EventSink};
-    use lancet_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
+    use lancet_catalog::methods::envelope::{Envelope, EnvelopeParams, SubmitIntentParams};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
@@ -816,7 +894,7 @@ mod write_file_tests {
 
     fn mutation_and_intent_registry() -> MethodRegistry {
         let mut registry = mutation_registry();
-        register_submit_intent(&mut registry).unwrap();
+        register_envelope_methods(&mut registry).unwrap();
         registry
     }
 
@@ -846,25 +924,25 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_no_envelope_returns_capability_not_granted() {
+    async fn create_no_envelope_returns_capability_not_granted() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let (ctx, _events) = test_ctx(root);
 
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
         };
         let err = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
     }
 
     #[tokio::test]
-    async fn write_file_in_scope_succeeds() {
+    async fn create_in_scope_succeeds() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -876,15 +954,15 @@ mod write_file_tests {
 
         let (ctx, _events) = test_ctx_with_store(root, store);
 
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "test.txt".into(),
             content: "hello world".into(),
         };
         let result = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap();
-        let parsed: WriteFileResult = serde_json::from_value(result).unwrap();
+        let parsed: CreateResult = serde_json::from_value(result).unwrap();
         assert_eq!(parsed.path, "test.txt");
         assert_eq!(parsed.bytes_written, 11);
         assert_eq!(
@@ -894,7 +972,7 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_verify_failure_returns_verify_failed_not_replan() {
+    async fn create_verify_failure_returns_verify_failed_not_replan() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -908,12 +986,12 @@ mod write_file_tests {
         store.declare(envelope, 0, "test-turn").await.unwrap();
 
         let (ctx, _events) = test_ctx_with_store(root, store);
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
         };
         let err = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::VerifyFailed, "err: {err:?}");
@@ -921,7 +999,7 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_out_of_scope_returns_replan_required() {
+    async fn create_out_of_scope_returns_replan_required() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -933,12 +1011,12 @@ mod write_file_tests {
 
         let (ctx, _events) = test_ctx_with_store(root, store);
 
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "README.md".into(),
             content: "out of scope".into(),
         };
         let err = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
@@ -955,13 +1033,13 @@ mod write_file_tests {
         store.declare(envelope, 0, "test-turn").await.unwrap();
 
         let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
-        let out_of_scope = WriteFileParams {
+        let out_of_scope = CreateParams {
             path: "src/other/file.rs".into(),
             content: "fn main() {}\n".into(),
         };
         let replan = registry
             .dispatch(
-                WriteFile::NAME,
+                Create::NAME,
                 serde_json::to_value(&out_of_scope).unwrap(),
                 ctx1,
             )
@@ -970,13 +1048,13 @@ mod write_file_tests {
         assert_eq!(replan.code, CepErrorCode::ReplanRequired);
 
         let (ctx2, _events2) = test_ctx_with_store(root, store);
-        let traversal = WriteFileParams {
+        let traversal = CreateParams {
             path: "../../etc/passwd".into(),
             content: "bad".into(),
         };
         let guard = registry
             .dispatch(
-                WriteFile::NAME,
+                Create::NAME,
                 serde_json::to_value(&traversal).unwrap(),
                 ctx2,
             )
@@ -996,7 +1074,7 @@ mod write_file_tests {
         let envelope = envelope_with_write_path("src/allowed/**");
         store.declare(envelope, 0, "test-turn").await.unwrap();
 
-        let write_params = WriteFileParams {
+        let create_params = CreateParams {
             path: "src/other/file.rs".into(),
             content: "fn main() {}\n".into(),
         };
@@ -1004,8 +1082,8 @@ mod write_file_tests {
         let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
         let err = registry
             .dispatch(
-                WriteFile::NAME,
-                serde_json::to_value(&write_params).unwrap(),
+                Create::NAME,
+                serde_json::to_value(&create_params).unwrap(),
                 ctx1,
             )
             .await
@@ -1022,8 +1100,8 @@ mod write_file_tests {
         };
         registry
             .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&intent_params).unwrap(),
+                Envelope::NAME,
+                serde_json::to_value(EnvelopeParams::DeriveIntent(intent_params)).unwrap(),
                 ctx2,
             )
             .await
@@ -1032,8 +1110,8 @@ mod write_file_tests {
         let (ctx3, _events3) = test_ctx_with_store(root, store);
         registry
             .dispatch(
-                WriteFile::NAME,
-                serde_json::to_value(&write_params).unwrap(),
+                Create::NAME,
+                serde_json::to_value(&create_params).unwrap(),
                 ctx3,
             )
             .await
@@ -1043,7 +1121,7 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_missing_parent_returns_error() {
+    async fn create_missing_parent_returns_error() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
@@ -1054,12 +1132,12 @@ mod write_file_tests {
 
         let (ctx, _events) = test_ctx_with_store(root, store);
 
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "nonexistent/dir/file.txt".into(),
             content: "hello".into(),
         };
         let err = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ExecutionFailed);
@@ -1067,18 +1145,18 @@ mod write_file_tests {
     }
 
     #[tokio::test]
-    async fn write_file_emits_guard_verdict_event() {
+    async fn create_emits_guard_verdict_event() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();
         let (ctx, mut events) = test_ctx(root);
 
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
         };
         let _ = registry
-            .dispatch(WriteFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await;
 
         let event = events.recv().await.unwrap();
@@ -1161,6 +1239,25 @@ mod patch_tests {
         registry
     }
 
+    fn hashline(line: &str) -> String {
+        crate::edit::hash::line_hash(line)
+    }
+
+    fn update_patch(path: &str, before: &str, remove_line: &str, add_line: &str) -> String {
+        format!(
+            "\
+*** Begin Patch
+*** Update File: {path}
+*** Old Hash: {}
+@@
+-{}\t{remove_line}
++{add_line}
+*** End Patch",
+            content_hash(before.as_bytes()),
+            hashline(remove_line)
+        )
+    }
+
     fn envelope_with_write_path(pattern: &str) -> ExecutionEnvelope {
         let mut caps = BTreeSet::new();
         caps.insert(Capability::WritePath {
@@ -1190,12 +1287,14 @@ mod patch_tests {
     async fn patch_no_envelope_returns_capability_not_granted() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
+        let before = "old\n";
+        std::fs::write(dir.path().join("test.txt"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
         let (ctx, _events) = test_ctx_with_store(root, store);
 
         let params = PatchParams {
-            patch: "*** Begin Patch\n*** Add File: test.txt\n+hello\n*** End Patch".into(),
+            patch: update_patch("test.txt", before, "old", "hello"),
         };
         let err = registry
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1231,6 +1330,8 @@ mod patch_tests {
     async fn patch_in_scope_succeeds() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
+        let before = "old\n";
+        std::fs::write(dir.path().join("new.txt"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
 
@@ -1240,7 +1341,7 @@ mod patch_tests {
         let (ctx, _events) = test_ctx_with_store(root, store);
 
         let params = PatchParams {
-            patch: "*** Begin Patch\n*** Add File: new.txt\n+content\n*** End Patch".into(),
+            patch: update_patch("new.txt", before, "old", "content"),
         };
         let result = registry
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1258,6 +1359,8 @@ mod patch_tests {
     async fn patch_out_of_scope_returns_replan_required_not_applied() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
+        let before = "old\n";
+        std::fs::write(dir.path().join("README.md"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
 
@@ -1268,22 +1371,26 @@ mod patch_tests {
         let (ctx, _events) = test_ctx_with_store(root, store);
 
         let params = PatchParams {
-            patch: "*** Begin Patch\n*** Add File: README.md\n+# Title\n*** End Patch".into(),
+            patch: update_patch("README.md", before, "old", "# Title"),
         };
         let err = registry
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
-        // File should NOT exist (patch not applied)
-        assert!(!dir.path().join("README.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
-    async fn patch_l2_checks_post_patch_new_file_content() {
+    async fn patch_l2_checks_post_patch_updated_file_content() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let before = "fn marker() {}\n";
+        std::fs::write(dir.path().join("src/new.rs"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
         store
@@ -1305,21 +1412,25 @@ mod patch_tests {
         let (ctx, _events) = test_ctx_with_store_and_index(root, store, index, CepMode::Enforce);
 
         let params = PatchParams {
-            patch: "*** Begin Patch\n*** Add File: src/new.rs\n+struct Added {}\n*** End Patch"
-                .into(),
+            patch: update_patch("src/new.rs", before, "fn marker() {}", "struct Added {}"),
         };
         let err = registry
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
-        assert!(!dir.path().join("src/new.rs").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/new.rs")).unwrap(),
+            before
+        );
     }
 
     #[tokio::test]
     async fn patch_emits_guard_verdict_event() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
+        let before = "old\n";
+        std::fs::write(dir.path().join("README.md"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
 
@@ -1329,7 +1440,7 @@ mod patch_tests {
         let (ctx, mut events) = test_ctx_with_store(root, store);
 
         let params = PatchParams {
-            patch: "*** Begin Patch\n*** Add File: README.md\n+# Title\n*** End Patch".into(),
+            patch: update_patch("README.md", before, "old", "# Title"),
         };
         let _ = registry
             .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)

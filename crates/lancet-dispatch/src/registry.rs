@@ -122,6 +122,9 @@ where
         if self.handlers.contains_key(name) {
             return Err(duplicate_registration(name));
         }
+        M::EFFECT
+            .validate_complete(name)
+            .map_err(|reason| incomplete_effect_contract(name, reason))?;
 
         let handler = Arc::new(handler);
         let erased: ErasedHandler<C> = Arc::new(move |params, ctx| {
@@ -154,6 +157,18 @@ where
     pub fn contains(&self, method: &str) -> bool {
         self.handlers.contains_key(method)
     }
+}
+
+fn incomplete_effect_contract(method: &str, reason: String) -> CepError {
+    CepError::new(
+        CepErrorCode::SchemaMismatch,
+        format!("method {method} has an incomplete effect contract: {reason}"),
+        CepErrorData::State(StateErrorData {
+            resource: method.to_string(),
+            reason,
+        }),
+        Retriability::Permanent,
+    )
 }
 
 /// Build a duplicate-registration state error.

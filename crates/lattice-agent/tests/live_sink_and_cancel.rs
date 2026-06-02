@@ -26,8 +26,8 @@ use lattice_session::HeadTranscript;
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
-        "workspace.read_file",
-        "Read a file",
+        "observe.workspace",
+        "Observe workspace content",
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
     )
 }
@@ -1174,7 +1174,7 @@ async fn scenario_08c_timeout_during_tool_execution_preserves_state() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "call_1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "call_1".to_string(),

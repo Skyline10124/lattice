@@ -5,6 +5,8 @@
 //! (structural analog: guard_l1.rs) — no I/O, no mutation, no cep_mode logic.
 //! Callers apply enforce/warn/off gating to the verdict.
 
+use std::collections::BTreeSet;
+
 use lancet_protocol::envelope::{EffectDecl, ImpactKind};
 use lancet_protocol::error::{CepErrorData, EffectErrorData};
 use lancet_protocol::policy::SourcedCapability;
@@ -25,6 +27,71 @@ use crate::policy::CepPolicyConfig;
 /// - `EffectProbe` / `GuardProbe` — skipped entirely
 /// - `Verify` — audited but not charged (envelope-internal constraint)
 pub fn check_effects_against_region(
+    method: &str,
+    observed: &[ObservedEffect],
+    authorized: &AuthorizedEffectRegion,
+    effect_decl: &EffectDecl,
+) -> Result<(), CepError> {
+    check_effects_against_region_inner(method, observed, authorized, effect_decl)
+}
+
+/// Hard-fail if any charged observed effect kind is globally denied.
+///
+/// This is intentionally independent of region membership and `CepMode`: an
+/// effect-kind deny is a kill switch for runtime-observed handler effects, not
+/// a warn/off-tunable region policy.
+pub fn check_denied_effect_kinds(
+    method: &str,
+    observed: &[ObservedEffect],
+    effect_decl: &EffectDecl,
+    denied_effect_kinds: &BTreeSet<ImpactKind>,
+) -> Result<(), CepError> {
+    if denied_effect_kinds.is_empty() {
+        return Ok(());
+    }
+
+    let mut observed_denied_kinds: Vec<ImpactKind> = Vec::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for effect in observed {
+        if effect.source != EffectSource::HandlerBackend {
+            continue;
+        }
+        if denied_effect_kinds.contains(&effect.kind) {
+            observed_denied_kinds.push(effect.kind.clone());
+            violations.push(format!(
+                "{:?}@{:?} denied by effect-kind policy",
+                effect.kind, effect.scope
+            ));
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(effect_violation_error(
+        method,
+        effect_decl,
+        Vec::new(),
+        observed_denied_kinds,
+        violations,
+        "observed effect denied by effect-kind policy",
+    ))
+}
+
+pub fn check_effects_against_region_with_denies(
+    method: &str,
+    observed: &[ObservedEffect],
+    authorized: &AuthorizedEffectRegion,
+    effect_decl: &EffectDecl,
+    denied_effect_kinds: &BTreeSet<ImpactKind>,
+) -> Result<(), CepError> {
+    check_denied_effect_kinds(method, observed, effect_decl, denied_effect_kinds)?;
+    check_effects_against_region_inner(method, observed, authorized, effect_decl)
+}
+
+fn check_effects_against_region_inner(
     method: &str,
     observed: &[ObservedEffect],
     authorized: &AuthorizedEffectRegion,
@@ -55,11 +122,30 @@ pub fn check_effects_against_region(
 
     let authorized_kinds: Vec<ImpactKind> = authorized.kinds.iter().cloned().collect();
 
-    Err(CepError::new(
+    Err(effect_violation_error(
+        method,
+        effect_decl,
+        authorized_kinds,
+        charged_kinds,
+        violations,
+        "observed effect exceeds authorized region",
+    ))
+}
+
+fn effect_violation_error(
+    method: &str,
+    effect_decl: &EffectDecl,
+    authorized_kinds: Vec<ImpactKind>,
+    observed_kinds: Vec<ImpactKind>,
+    violations: Vec<String>,
+    reason: &str,
+) -> CepError {
+    CepError::new(
         CepErrorCode::EffectViolation,
         format!(
-            "{}: observed effect exceeds authorized region ({} violation{})",
+            "{}: {} ({} violation{})",
             method,
+            reason,
             violations.len(),
             if violations.len() == 1 { "" } else { "s" }
         ),
@@ -67,11 +153,11 @@ pub fn check_effects_against_region(
             method: method.to_string(),
             declared_effect: effect_decl.kinds.0.to_vec(),
             authorized_effect: authorized_kinds,
-            observed_effects: charged_kinds,
+            observed_effects: observed_kinds,
             violations,
         })),
         Retriability::Permanent,
-    ))
+    )
 }
 
 /// Check whether observed effects are within the authorized effect region,
@@ -87,7 +173,13 @@ pub fn check_effects(
     effect_decl: &EffectDecl,
 ) -> Result<(), CepError> {
     let authorized = AuthorizedEffectRegion::from_matched_capability(matched_cap, policy);
-    check_effects_against_region(method, observed, &authorized, effect_decl)
+    check_effects_against_region_with_denies(
+        method,
+        observed,
+        &authorized,
+        effect_decl,
+        &policy.denied_effect_kinds,
+    )
 }
 
 #[cfg(test)]
@@ -95,7 +187,9 @@ mod tests {
     use super::*;
     use crate::effect::ledger::{EffectSource, ObservedScope};
     use lancet_catalog::method::RequiredCapability;
-    use lancet_protocol::envelope::{Capability, EffectKindSet, EffectScopeKind};
+    use lancet_protocol::envelope::{
+        Capability, EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior,
+    };
     use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
     use std::path::PathBuf;
 
@@ -104,6 +198,8 @@ mod tests {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
             scope: EffectScopeKind::ObservationRoot,
             capabilities: &[RequiredCapability::Inspect],
+            overlay: OverlayBehavior::ReadWorkspace,
+            failure: FailureSemantics::NoBackendEffectOnFailure,
         }
     }
 
@@ -135,13 +231,51 @@ mod tests {
         }];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
             &observation_decl(),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn denied_effect_kind_rejects_authorized_handler_effect() {
+        let mut policy = crate::effect::shared_test_policy();
+        policy
+            .denied_effect_kinds
+            .insert(ImpactKind::WorkspaceObservation);
+        let cap = inspect_cap();
+        let observed = vec![ObservedEffect {
+            kind: ImpactKind::WorkspaceObservation,
+            scope: ObservedScope::Root("/project".to_string()),
+            required_capability: RequiredCapability::Inspect,
+            source: EffectSource::HandlerBackend,
+        }];
+
+        let result = check_effects(
+            "observe.workspace",
+            &observed,
+            Some(&cap),
+            &policy,
+            &observation_decl(),
+        );
+
+        let err = result.expect_err("denied effect kind must hard fail");
+        assert_eq!(err.code, CepErrorCode::EffectViolation);
+        if let CepErrorData::Effect(data) = &err.data {
+            assert_eq!(
+                data.observed_effects,
+                vec![ImpactKind::WorkspaceObservation]
+            );
+            assert!(data
+                .violations
+                .iter()
+                .any(|violation| violation.contains("denied by effect-kind policy")));
+        } else {
+            panic!("expected Effect error data");
+        }
     }
 
     #[test]
@@ -156,7 +290,7 @@ mod tests {
         }];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
@@ -168,7 +302,7 @@ mod tests {
         assert_eq!(err.retriability, Retriability::Permanent);
 
         if let CepErrorData::Effect(data) = &err.data {
-            assert_eq!(data.method, "workspace.grep");
+            assert_eq!(data.method, "observe.workspace");
             assert!(!data.violations.is_empty());
         } else {
             panic!("expected Effect error data");
@@ -177,7 +311,13 @@ mod tests {
 
     #[test]
     fn probe_and_guard_effects_are_not_charged() {
-        let policy = crate::effect::shared_test_policy();
+        let mut policy = crate::effect::shared_test_policy();
+        policy
+            .denied_effect_kinds
+            .insert(ImpactKind::WorkspaceMutation);
+        policy
+            .denied_effect_kinds
+            .insert(ImpactKind::WorkspaceObservation);
         let cap = inspect_cap();
         let observed = vec![
             ObservedEffect {
@@ -195,7 +335,7 @@ mod tests {
         ];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
@@ -206,7 +346,10 @@ mod tests {
 
     #[test]
     fn verify_effect_is_not_charged() {
-        let policy = crate::effect::shared_test_policy();
+        let mut policy = crate::effect::shared_test_policy();
+        policy
+            .denied_effect_kinds
+            .insert(ImpactKind::CommandExecution);
         let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::CommandExecution,
@@ -216,7 +359,7 @@ mod tests {
         }];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
@@ -236,7 +379,7 @@ mod tests {
         }];
 
         let result = check_effects(
-            "workspace.read_file",
+            "observe.workspace",
             &observed,
             None,
             &policy,
@@ -255,6 +398,8 @@ mod tests {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
             scope: EffectScopeKind::PathRead,
             capabilities: &[RequiredCapability::ReadPath],
+            overlay: OverlayBehavior::ReadWorkspace,
+            failure: FailureSemantics::NoBackendEffectOnFailure,
         };
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
@@ -263,7 +408,7 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects("workspace.read_file", &observed, Some(&cap), &policy, &decl);
+        let result = check_effects("observe.workspace", &observed, Some(&cap), &policy, &decl);
         assert!(result.is_ok());
     }
 
@@ -275,6 +420,8 @@ mod tests {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
             scope: EffectScopeKind::PathRead,
             capabilities: &[RequiredCapability::ReadPath],
+            overlay: OverlayBehavior::ReadWorkspace,
+            failure: FailureSemantics::NoBackendEffectOnFailure,
         };
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
@@ -283,7 +430,7 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects("workspace.read_file", &observed, Some(&cap), &policy, &decl);
+        let result = check_effects("observe.workspace", &observed, Some(&cap), &policy, &decl);
         assert!(result.is_err());
     }
 
@@ -307,7 +454,7 @@ mod tests {
         ];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
@@ -328,7 +475,7 @@ mod tests {
         }];
 
         let result = check_effects(
-            "workspace.grep",
+            "observe.workspace",
             &observed,
             Some(&cap),
             &policy,
@@ -337,7 +484,7 @@ mod tests {
         let err = result.unwrap_err();
 
         if let CepErrorData::Effect(data) = &err.data {
-            assert_eq!(data.method, "workspace.grep");
+            assert_eq!(data.method, "observe.workspace");
             assert!(data
                 .declared_effect
                 .contains(&ImpactKind::WorkspaceObservation));

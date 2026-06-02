@@ -20,7 +20,7 @@ pub fn scaffold_tool_definitions() -> Vec<ToolDefinition> {
 /// Project CEP catalog descriptors into LLM-facing tool definitions.
 ///
 /// Names and parameter schemas come directly from the catalog. The full dotted
-/// method name (`workspace.read_file`, `command.run`, etc.) is the single
+/// method name (`observe.workspace`, `exec.command_run`, etc.) is the single
 /// identity used for the wire, registry, audit, and LLM-facing tool name.
 pub fn to_tool_definitions(catalog: &[MethodDescriptor]) -> Vec<ToolDefinition> {
     catalog
@@ -72,15 +72,16 @@ mod tests {
     }
 
     #[test]
-    fn read_file_projection_uses_catalog_name_and_typed_params() {
+    fn observe_workspace_projection_uses_catalog_name_and_typed_params() {
         let projected = to_tool_definitions(catalog());
-        let read_file = projected
+        let observe_workspace = projected
             .iter()
-            .find(|tool| tool.name == "workspace.read_file")
-            .expect("workspace.read_file in projection");
+            .find(|tool| tool.name == "observe.workspace")
+            .expect("observe.workspace in projection");
 
-        assert_ne!(read_file.name, "read_file");
-        assert!(read_file.parameters["properties"]["path"].is_object());
+        assert_eq!(observe_workspace.name, "observe.workspace");
+        assert_eq!(observe_workspace.parameters["type"], "object");
+        assert!(observe_workspace.parameters["oneOf"].is_array());
     }
 
     #[test]

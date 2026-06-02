@@ -1,6 +1,6 @@
 //! Fake-LLM end-to-end release scenario.
 //!
-//! Validates the full declare → command.run → patch(fail-verify) → patch(ok)
+//! Validates the full declare → exec.command_run → patch(fail-verify) → patch(ok)
 //! cycle in a **single `run_turn`** with a multi-round `FakeStreamingLlmClient`.
 //! Uses a persisted on-disk audit DB so the attestation can be inspected after
 //! the turn completes.
@@ -95,7 +95,7 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = ["envelope.declare", "command.run", "workspace.patch"]
+enabled = ["session.envelope", "exec.command_run", "mutate.patch"]
 [lancet.command]
 allowed_diagnostic_commands = [["echo"], ["grep"]]
 "#;
@@ -141,7 +141,7 @@ fn make_release_e2e_request(
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
-/// Single `run_turn` driving declare → command.run →
+/// Single `run_turn` driving declare → exec.command_run →
 /// patch(verify-fail, RetainDiff) → patch(verify-pass) → Done(stop).
 ///
 /// Asserts:
@@ -149,7 +149,7 @@ fn make_release_e2e_request(
 /// 2. Workspace file contains the RELEASE_E2E_OK sentinel after the second patch.
 /// 3. Session has exactly one commit in the graph.
 /// 4. On-disk attestation has correct in-toto subject / predicate / materials.
-/// 5. Audit rows are in declare → command.run → patch → patch order.
+/// 5. Audit rows are in declare → exec.command_run → patch → patch order.
 /// 6. First patch tool result is ok=false (VerifyFailed); second is ok=true.
 #[tokio::test]
 async fn release_e2e_criterion_8() {
@@ -170,13 +170,13 @@ async fn release_e2e_criterion_8() {
     // verify.sh ("grep -q RELEASE_E2E_OK src/lib.rs") will exit 1 → VerifyFailed.
     // OnFailure::RetainDiff means the diff IS applied; file IS changed.
     let bad_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{initial_content}\n+{bad_content}\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{hash1}\t{initial_content}\n+{bad_content}\n*** End Patch\n"
     );
 
     // Patch 2 (good): changes content to include RELEASE_E2E_OK.
     // Hash uses the post-bad-patch content since RetainDiff left it changed.
     let good_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{bad_content}\n+{good_content}\n*** End Patch\n"
+        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{hash2}\t{bad_content}\n+{good_content}\n*** End Patch\n"
     );
 
     // ── Envelope for Round 1: RunCommand + WritePath + verify ──────────
@@ -211,12 +211,13 @@ async fn release_e2e_criterion_8() {
         extensions: serde_json::Map::new(),
     };
     let declare_args = serde_json::json!({
+        "mode": "declare",
         "envelope": envelope,
         "supersede": false,
         "reason": "release criterion-8 authority"
     });
 
-    // Round 2: command.run uses the RunCommand from the declared envelope.
+    // Round 2: exec.command_run uses the RunCommand from the declared envelope.
     let run_args = serde_json::json!({
         "argv": ["echo", "release-command-run-ok"],
         "timeout_ms": 5000,
@@ -226,28 +227,28 @@ async fn release_e2e_criterion_8() {
     // ── Build FakeStreamingLlmClient with 5 rounds ──────────────────────
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
-            // Round 1: envelope.declare → sets up capabilities + verify command
+            // Round 1: session.envelope → sets up capabilities + verify command
             .push_events(tool_call_events(
                 "call_0",
-                "envelope.declare",
+                "session.envelope",
                 &declare_args.to_string(),
             ))
-            // Round 2: command.run — verifies RunCommand capability works
+            // Round 2: exec.command_run — verifies RunCommand capability works
             .push_events(tool_call_events(
                 "call_1",
-                "command.run",
+                "exec.command_run",
                 &run_args.to_string(),
             ))
-            // Round 3: workspace.patch (bad) — no sentinel → verify fails, diff retained
+            // Round 3: mutate.patch (bad) — no sentinel → verify fails, diff retained
             .push_events(tool_call_events(
                 "call_2",
-                "workspace.patch",
+                "mutate.patch",
                 &serde_json::json!({ "patch": bad_patch }).to_string(),
             ))
-            // Round 4: workspace.patch (good) — adds sentinel → verify passes
+            // Round 4: mutate.patch (good) — adds sentinel → verify passes
             .push_events(tool_call_events(
                 "call_3",
-                "workspace.patch",
+                "mutate.patch",
                 &serde_json::json!({ "patch": good_patch }).to_string(),
             ))
             // Round 5: final assistant response after both patches
@@ -360,16 +361,16 @@ async fn release_e2e_criterion_8() {
         .filter_map(|m| m["method"].as_str())
         .collect();
     assert!(
-        method_names.contains(&"envelope.declare"),
-        "materials must include envelope.declare; got: {method_names:?}"
+        method_names.contains(&"session.envelope"),
+        "materials must include session.envelope; got: {method_names:?}"
     );
     assert!(
-        method_names.contains(&"command.run"),
-        "materials must include command.run; got: {method_names:?}"
+        method_names.contains(&"exec.command_run"),
+        "materials must include exec.command_run; got: {method_names:?}"
     );
     assert!(
-        method_names.contains(&"workspace.patch"),
-        "materials must include workspace.patch; got: {method_names:?}"
+        method_names.contains(&"mutate.patch"),
+        "materials must include mutate.patch; got: {method_names:?}"
     );
 
     // predicate.capabilities: must be non-empty (write_path, run_command at minimum)
@@ -381,7 +382,7 @@ async fn release_e2e_criterion_8() {
         "predicate.capabilities must be non-empty"
     );
 
-    // ── 5. Audit PROV ordering: declare → command.run → patch → patch ────
+    // ── 5. Audit PROV ordering: declare → exec.command_run → patch → patch ────
     let rows = audit
         .query_rows(&AuditQueryFilters {
             turn_id: Some(turn_id.clone()),
@@ -391,7 +392,7 @@ async fn release_e2e_criterion_8() {
 
     assert!(
         rows.len() >= 4,
-        "must have at least 4 audit rows (declare, command.run, 2×patch); got: {}",
+        "must have at least 4 audit rows (declare, exec.command_run, 2x patch); got: {}",
         rows.len()
     );
 
@@ -399,32 +400,32 @@ async fn release_e2e_criterion_8() {
     let methods: Vec<&str> = rows.iter().map(|r| r.method.as_str()).collect();
     let declare_pos = methods
         .iter()
-        .position(|&m| m == "envelope.declare")
-        .expect("envelope.declare must appear in audit rows");
+        .position(|&m| m == "session.envelope")
+        .expect("session.envelope must appear in audit rows");
     let run_pos = methods
         .iter()
-        .position(|&m| m == "command.run")
-        .expect("command.run must appear in audit rows");
+        .position(|&m| m == "exec.command_run")
+        .expect("exec.command_run must appear in audit rows");
     let patch_positions: Vec<usize> = methods
         .iter()
         .enumerate()
-        .filter(|(_, &m)| m == "workspace.patch")
+        .filter(|(_, &m)| m == "mutate.patch")
         .map(|(i, _)| i)
         .collect();
 
     assert_eq!(
         patch_positions.len(),
         2,
-        "must have exactly 2 workspace.patch audit rows; got {}: {methods:?}",
+        "must have exactly 2 mutate.patch audit rows; got {}: {methods:?}",
         patch_positions.len()
     );
     assert!(
         declare_pos < run_pos,
-        "declare must precede command.run in audit; order: {methods:?}"
+        "declare must precede exec.command_run in audit; order: {methods:?}"
     );
     assert!(
         run_pos < patch_positions[0],
-        "command.run must precede first patch in audit; order: {methods:?}"
+        "exec.command_run must precede first patch in audit; order: {methods:?}"
     );
     assert!(
         patch_positions[0] < patch_positions[1],
@@ -435,23 +436,23 @@ async fn release_e2e_criterion_8() {
     let declare_result = result
         .tool_results
         .iter()
-        .find(|t| t.name == "envelope.declare")
-        .expect("must have envelope.declare tool result");
+        .find(|t| t.name == "session.envelope")
+        .expect("must have session.envelope tool result");
     assert!(
         declare_result.ok,
-        "envelope.declare must succeed before mutation; error: {:?}",
+        "session.envelope must succeed before mutation; error: {:?}",
         declare_result.error_summary
     );
 
     let patch_results: Vec<_> = result
         .tool_results
         .iter()
-        .filter(|t| t.name == "workspace.patch")
+        .filter(|t| t.name == "mutate.patch")
         .collect();
     assert_eq!(
         patch_results.len(),
         2,
-        "must have 2 workspace.patch tool results; all results: {:?}",
+        "must have 2 mutate.patch tool results; all results: {:?}",
         result
             .tool_results
             .iter()
@@ -460,11 +461,11 @@ async fn release_e2e_criterion_8() {
     );
     assert!(
         !patch_results[0].ok,
-        "first workspace.patch must fail (verify returned non-zero exit code)"
+        "first mutate.patch must fail (verify returned non-zero exit code)"
     );
     assert!(
         patch_results[1].ok,
-        "second workspace.patch must succeed (verify found RELEASE_E2E_OK sentinel)"
+        "second mutate.patch must succeed (verify found RELEASE_E2E_OK sentinel)"
     );
 
     println!(

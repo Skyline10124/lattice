@@ -93,7 +93,7 @@ fn empty_envelope() -> EffectiveEnvelopeSnapshot {
 //
 // Exercises the positive policy branches:
 // - WorkspaceObservation with base ReadPath within scope
-// - WorkspaceObservation via grep with base ReadPath
+// - WorkspaceObservation via grep mode with base Inspect
 // - SessionStateMutation with base MutateSessionState
 // - ExternalObservation with base FetchUrl wildcard
 // - CommandExecution with declared RunCommand (diagnostic echo)
@@ -102,8 +102,8 @@ fn empty_envelope() -> EffectiveEnvelopeSnapshot {
 fn biased_allowed_inputs() -> Vec<PolicyInput> {
     vec![
         PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({ "path": "src/main.rs" }),
+            method: "observe.workspace".into(),
+            params: json!({ "mode": "read_file", "path": "src/main.rs" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -113,12 +113,10 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
             audit_context: audit_ctx(1, default_budget()),
         },
         PolicyInput {
-            method: "workspace.grep".into(),
-            params: json!({ "pattern": "fn main", "path": "src" }),
+            method: "observe.workspace".into(),
+            params: json!({ "mode": "grep", "pattern": "fn main", "path": "src" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-                capability: Capability::ReadPath {
-                    path_pattern: "src/**".into(),
-                },
+                capability: Capability::Inspect,
                 source: base_source(),
             }]),
             audit_context: audit_ctx(2, default_budget()),
@@ -133,7 +131,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
             audit_context: audit_ctx(3, default_budget()),
         },
         PolicyInput {
-            method: "web.fetch".into(),
+            method: "fetch.web".into(),
             params: json!({ "url": "https://example.com/doc" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::FetchUrl { host: "*".into() },
@@ -143,7 +141,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
         },
         // CommandExecution: declared RunCommand for echo (diagnostic allowlist)
         PolicyInput {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             params: json!({ "argv": ["echo", "guard-fuzz"] }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::RunCommand {
@@ -155,7 +153,7 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
         },
         // WorkspaceMutation: declared WritePath
         PolicyInput {
-            method: "workspace.write_file".into(),
+            method: "mutate.create".into(),
             params: json!({ "path": "src/new.rs", "content": "fn f(){}" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::WritePath {
@@ -180,14 +178,14 @@ fn biased_allowed_inputs() -> Vec<PolicyInput> {
 fn deny_path_inputs() -> Vec<PolicyInput> {
     vec![
         PolicyInput {
-            method: "workspace.write_file".into(),
+            method: "mutate.create".into(),
             params: json!({ "path": "src/new.rs", "content": "x" }),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(10, default_budget()),
         },
         PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({ "path": "src/lib.rs" }),
+            method: "observe.workspace".into(),
+            params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -204,7 +202,7 @@ fn deny_path_inputs() -> Vec<PolicyInput> {
         },
         // RunCommand with base source — source policy requires Declared for commands
         PolicyInput {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             params: json!({ "argv": ["echo", "fuzz"] }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::RunCommand {
@@ -216,7 +214,7 @@ fn deny_path_inputs() -> Vec<PolicyInput> {
         },
         // WritePath with base source — source policy requires Declared for mutations
         PolicyInput {
-            method: "workspace.patch".into(),
+            method: "mutate.patch".into(),
             params: json!({ "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch\n" }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::WritePath {
@@ -313,8 +311,8 @@ proptest! {
 fn guard_decide_regression_budget_exhausted_deny_message() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "workspace.read_file".into(),
-        params: json!({ "path": "src/lib.rs" }),
+        method: "observe.workspace".into(),
+        params: json!({ "mode": "read_file", "path": "src/lib.rs" }),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::ReadPath {
                 path_pattern: "src/**".into(),

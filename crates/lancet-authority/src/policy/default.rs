@@ -8,7 +8,7 @@
 //! - `decide_resolved` is a pure function on resolved facts.
 //! - Policy is data-driven (TOML configuration), not hard-coded if/else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use lancet_protocol::policy::{
@@ -21,6 +21,7 @@ use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
 use super::resolved::PolicyResolver;
 use super::BudgetLimits;
+use lancet_protocol::envelope::ImpactKind;
 
 // ── Config-friendly source class ───────────────────────────────────────
 
@@ -89,6 +90,7 @@ pub struct PolicyConfig {
     pub budget: BudgetLimits,
     pub observation: ObservationPolicyConfig,
     pub project_root: PathBuf,
+    pub denied_effect_kinds: BTreeSet<ImpactKind>,
 }
 
 impl PolicyConfig {
@@ -111,6 +113,7 @@ impl PolicyConfig {
             budget,
             observation,
             project_root,
+            denied_effect_kinds: BTreeSet::new(),
         }
     }
 
@@ -213,6 +216,11 @@ impl PolicyConfig {
                 self.budget.max_todo_ops = v;
             }
         }
+        if let Some(effects) = &external.effects {
+            if let Some(deny) = &effects.deny {
+                self.denied_effect_kinds = deny.iter().cloned().collect();
+            }
+        }
         if let Some(obs) = &external.observation {
             if let Some(v) = obs.max_single_read_bytes {
                 self.observation.max_single_read_bytes = v;
@@ -256,6 +264,7 @@ impl PolicyConfig {
             network: self.network.clone(),
             budget: self.budget.clone(),
             command: self.command.clone(),
+            denied_effect_kinds: self.denied_effect_kinds.clone(),
         }
     }
 }
@@ -272,6 +281,7 @@ pub struct ExternalPolicyFile {
     pub network: Option<ExternalNetworkPolicy>,
     pub budget: Option<ExternalBudgetPolicy>,
     pub observation: Option<ExternalObservationPolicy>,
+    pub effects: Option<ExternalEffectsPolicy>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -336,6 +346,13 @@ pub struct ExternalObservationPolicy {
     pub max_list_entries: Option<usize>,
     pub max_find_paths: Option<usize>,
     pub max_todo_ops: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalEffectsPolicy {
+    #[serde(default)]
+    pub deny: Option<Vec<ImpactKind>>,
 }
 
 fn parse_source_classes(strings: &[String]) -> Result<Vec<CapabilitySourceClass>, String> {
@@ -505,24 +522,14 @@ impl DefaultPolicyHook {
             .map(|overrides| {
                 let mut policy = self.config.capability_sources.clone();
                 match resolved.method.as_str() {
-                    m if m.starts_with("workspace.")
-                        && m != "workspace.write_file"
-                        && m != "workspace.patch" =>
-                    {
-                        policy.observation = overrides.clone();
-                    }
-                    "workspace.write_file" | "workspace.patch" => {
-                        policy.mutation = overrides.clone();
-                    }
-                    "command.run" => {
-                        policy.command = overrides.clone();
-                    }
-                    "web.fetch" => {
-                        policy.external = overrides.clone();
-                    }
-                    "session.todo_write" | "envelope.declare" => {
-                        policy.session_state = overrides.clone();
-                    }
+                    "observe.workspace" => policy.observation = overrides.clone(),
+                    "mutate.create" | "mutate.patch" => policy.mutation = overrides.clone(),
+                    "exec.command_run" => policy.command = overrides.clone(),
+                    "fetch.web" => policy.external = overrides.clone(),
+                    "session.todo_write"
+                    | "session.envelope"
+                    | "observe.audit"
+                    | "observe.audit_replay" => policy.session_state = overrides.clone(),
                     _ => {}
                 }
                 policy
@@ -575,7 +582,7 @@ impl DefaultPolicyHook {
         }
 
         // Step 2: Command policy (for non-diagnostic commands that passed capability check)
-        if resolved.method == "command.run" {
+        if resolved.method == "exec.command_run" {
             if let Some(cmd_err) = &resolved.command_error {
                 return RichPolicyOutcome {
                     decision: PolicyDecision::Denied {
@@ -608,7 +615,7 @@ impl DefaultPolicyHook {
         }
 
         // Step 3: Network policy
-        if resolved.method == "web.fetch" {
+        if resolved.method == "fetch.web" {
             if let Some(net) = &resolved.resolved_network {
                 // Check against network policy: allowed_hosts
                 if !self.config.network.allowed_hosts.is_empty() {
@@ -642,14 +649,7 @@ impl DefaultPolicyHook {
 
         // Step 4: Budget policy (scoped to method family)
         let budget = &resolved.budget_snapshot;
-        let is_observation = matches!(
-            resolved.method.as_str(),
-            "workspace.read_file"
-                | "workspace.grep"
-                | "workspace.list_directory"
-                | "workspace.find_files"
-                | "web.fetch"
-        );
+        let is_observation = matches!(resolved.method.as_str(), "observe.workspace" | "fetch.web");
         if is_observation
             && budget.turn_observation_bytes_used >= budget.turn_observation_bytes_limit
         {
@@ -799,14 +799,14 @@ mod tests {
         }
     }
 
-    // ── Test 1: workspace.read_file with Base ReadPath capability ──────
+    // ── Test 1: observe.workspace read_file with Base ReadPath capability ──────
 
     #[test]
     fn default_hook_allows_workspace_read_file_with_base_capability() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -820,13 +820,13 @@ mod tests {
         assert!(outcome.evidence.capability_match.is_some());
     }
 
-    // ── Test 2: workspace.write_file with no declared envelope ─────────
+    // ── Test 2: mutate.create with no declared envelope ─────────
 
     #[test]
-    fn default_hook_denies_workspace_write_file_with_no_envelope() {
+    fn default_hook_denies_create_with_no_envelope() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.write_file".into(),
+            method: "mutate.create".into(),
             params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(default_budget()),
@@ -841,13 +841,13 @@ mod tests {
         ));
     }
 
-    // ── Test 3: command.run with denied argv ───────────────────────────
+    // ── Test 3: exec.command_run with denied argv ───────────────────────────
 
     #[test]
     fn default_hook_denies_command_run_with_denied_argv() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             params: json!({
                 "argv": ["sh", "-c", "rm -rf /"],
                 "declared_impact": "workspace_mutation"
@@ -870,7 +870,7 @@ mod tests {
         ));
     }
 
-    // ── Test 4: web.fetch with disallowed host ─────────────────────────
+    // ── Test 4: fetch.web with disallowed host ─────────────────────────
 
     #[test]
     fn default_hook_denies_web_fetch_with_disallowed_host() {
@@ -879,7 +879,7 @@ mod tests {
         config.network.allow_public_https = false;
         let hook = DefaultPolicyHook::new(config);
         let input = PolicyInput {
-            method: "web.fetch".into(),
+            method: "fetch.web".into(),
             params: json!({"url": "https://evil.example.com/page"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::FetchUrl { host: "*".into() },
@@ -903,8 +903,8 @@ mod tests {
     fn default_hook_denies_observation_over_budget() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -994,8 +994,8 @@ allow_public_https = false
     fn decide_resolved_is_pure_same_input_same_output() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -1019,8 +1019,8 @@ allow_public_https = false
     fn decide_with_evidence_contains_rich_facts() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -1044,8 +1044,8 @@ allow_public_https = false
     fn policy_hook_decide_returns_stable_decision() {
         let hook = DefaultPolicyHook::new(test_config());
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
@@ -1080,7 +1080,7 @@ allow_public_https = false
 observation = ["base", "declared"]
 mutation = ["declared"]
 
-[methods."workspace.read_file"]
+[methods."observe.workspace"]
 enabled = true
 
 [command]

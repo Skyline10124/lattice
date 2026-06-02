@@ -2,12 +2,14 @@
 
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
-use lancet_protocol::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
+use lancet_protocol::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// `web.fetch`
+/// `fetch.web`
 pub struct Fetch;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -28,7 +30,7 @@ pub struct FetchResult {
 }
 
 impl CepMethod for Fetch {
-    const NAME: &'static str = "web.fetch";
+    const NAME: &'static str = "fetch.web";
     const DESCRIPTION: &'static str = "Fetch a URL and return its text content.";
     type Params = FetchParams;
     type Result = FetchResult;
@@ -38,6 +40,8 @@ impl CepMethod for Fetch {
         kinds: EffectKindSet::from_static(&[ImpactKind::ExternalObservation]),
         scope: EffectScopeKind::ExternalHost,
         capabilities: &[RequiredCapability::FetchUrl],
+        overlay: OverlayBehavior::ExternalOpaque,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 
@@ -49,7 +53,7 @@ mod tests {
 
     #[test]
     fn web_fetch_name_is_dotted() {
-        assert_eq!(Fetch::NAME, "web.fetch");
+        assert_eq!(Fetch::NAME, "fetch.web");
         assert!(Fetch::NAME.contains('.'));
         assert!(!Fetch::NAME.contains('/'));
     }

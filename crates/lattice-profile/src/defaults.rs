@@ -29,7 +29,7 @@ model = {model}
 system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
-enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
+enabled = ["observe.workspace"]
 
 [llm.retry]
 max_retries = 3
@@ -63,7 +63,7 @@ description = "Read-only agent for code understanding and review"
 system = "You are a code reader and reviewer. Read and analyze code carefully. Do not suggest edits or run commands. Explain your reasoning clearly."
 
 [tools]
-enabled = ["workspace.read_file", "workspace.grep", "workspace.find_files", "workspace.list_directory"]
+enabled = ["observe.workspace"]
 
 [llm.retry]
 max_retries = 3
@@ -75,7 +75,7 @@ max_delay_ms = 3000
 
 /// Generate a strict v1 `agent.toml` template for an editing agent.
 ///
-/// Read-write tools: file reading, editing (write/patch), grep, find,
+/// Read-write tools: workspace observation, create/patch mutation,
 /// listing, todo tracking, workspace context.  No shell or web access.
 pub fn default_editor_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
@@ -94,10 +94,10 @@ model = {model}
 description = "Editing agent for refactoring, fixing, and applying patches"
 
 [prompt]
-system = "You are a code editor. Read, edit, and refactor code within the project. Use read, write, and patch tools for changes. Be precise and explain your edits."
+system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, and patch tools for changes. Be precise and explain your edits."
 
 [tools]
-enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write"]
+enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write"]
 
 [llm.retry]
 max_retries = 3
@@ -109,7 +109,7 @@ max_delay_ms = 3000
 
 /// Generate a strict v1 `agent.toml` template for a development agent.
 ///
-/// Full tool set: all reader/editor tools plus bash and web_fetch.
+/// Full tool set: all reader/editor tools plus command execution and web fetch.
 pub fn default_dev_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
@@ -129,7 +129,7 @@ description = "Full development agent for coding, planning, and troubleshooting"
 system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Fetch web docs when needed. Be methodical and explain your reasoning."
 
 [tools]
-enabled = ["workspace.read_file", "workspace.write_file", "workspace.patch", "workspace.grep", "workspace.find_files", "workspace.list_directory", "session.todo_write", "command.run", "web.fetch"]
+enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write", "exec.command_run", "fetch.web"]
 
 [llm.retry]
 max_retries = 3
@@ -294,17 +294,18 @@ mod tests {
         assert!(!profile.tools.enabled.is_empty());
         // No shell, web, or editing tools
         let enabled = &profile.tools.enabled;
-        assert!(!enabled.contains(&"command.run".to_string()));
-        assert!(!enabled.contains(&"web.fetch".to_string()));
-        assert!(!enabled.contains(&"workspace.write_file".to_string()));
-        assert!(!enabled.contains(&"workspace.patch".to_string()));
+        assert!(!enabled.contains(&"exec.command_run".to_string()));
+        assert!(!enabled.contains(&"fetch.web".to_string()));
+        assert!(!enabled.contains(&"mutate.create".to_string()));
+        assert!(!enabled.contains(&"mutate.patch".to_string()));
+        assert!(!enabled.contains(&"session.envelope".to_string()));
     }
 
     #[test]
     fn reader_template_has_no_shell_or_web() {
         let toml_str = default_reader_template("r", "haiku").to_lowercase();
-        assert!(!toml_str.contains("command.run"));
-        assert!(!toml_str.contains("web.fetch"));
+        assert!(!toml_str.contains("exec.command_run"));
+        assert!(!toml_str.contains("fetch.web"));
         assert!(!toml_str.contains("editing"));
     }
 
@@ -313,12 +314,7 @@ mod tests {
         let toml_str = default_reader_template("r", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("reader template must parse");
-        let expected: Vec<&str> = vec![
-            "workspace.read_file",
-            "workspace.grep",
-            "workspace.find_files",
-            "workspace.list_directory",
-        ];
+        let expected: Vec<&str> = vec!["observe.workspace"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -337,18 +333,19 @@ mod tests {
         assert_eq!(profile.agent.model, "sonnet");
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"workspace.write_file".to_string()));
-        assert!(enabled.contains(&"workspace.patch".to_string()));
+        assert!(enabled.contains(&"mutate.create".to_string()));
+        assert!(enabled.contains(&"mutate.patch".to_string()));
+        assert!(enabled.contains(&"session.envelope".to_string()));
         assert!(enabled.contains(&"session.todo_write".to_string()));
         // No shell or web
-        assert!(!enabled.contains(&"command.run".to_string()));
-        assert!(!enabled.contains(&"web.fetch".to_string()));
+        assert!(!enabled.contains(&"exec.command_run".to_string()));
+        assert!(!enabled.contains(&"fetch.web".to_string()));
     }
 
     #[test]
     fn editor_template_has_no_web_fetch_tool() {
         let toml_str = default_editor_template("e", "sonnet");
-        assert!(!toml_str.contains("web.fetch"));
+        assert!(!toml_str.contains("fetch.web"));
     }
 
     #[test]
@@ -357,12 +354,10 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("editor template must parse");
         let expected: Vec<&str> = vec![
-            "workspace.read_file",
-            "workspace.write_file",
-            "workspace.patch",
-            "workspace.grep",
-            "workspace.find_files",
-            "workspace.list_directory",
+            "observe.workspace",
+            "mutate.create",
+            "mutate.patch",
+            "session.envelope",
             "session.todo_write",
         ];
         let mut enabled = profile.tools.enabled.clone();
@@ -383,10 +378,11 @@ mod tests {
         assert_eq!(profile.agent.model, "sonnet");
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"command.run".to_string()));
-        assert!(enabled.contains(&"web.fetch".to_string()));
-        assert!(enabled.contains(&"workspace.write_file".to_string()));
-        assert!(enabled.contains(&"workspace.patch".to_string()));
+        assert!(enabled.contains(&"exec.command_run".to_string()));
+        assert!(enabled.contains(&"fetch.web".to_string()));
+        assert!(enabled.contains(&"mutate.create".to_string()));
+        assert!(enabled.contains(&"mutate.patch".to_string()));
+        assert!(enabled.contains(&"session.envelope".to_string()));
         assert!(enabled.contains(&"session.todo_write".to_string()));
     }
 
@@ -396,15 +392,13 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("dev template must parse");
         let expected: Vec<&str> = vec![
-            "workspace.read_file",
-            "workspace.write_file",
-            "workspace.patch",
-            "workspace.grep",
-            "workspace.find_files",
-            "workspace.list_directory",
+            "observe.workspace",
+            "mutate.create",
+            "mutate.patch",
+            "session.envelope",
             "session.todo_write",
-            "command.run",
-            "web.fetch",
+            "exec.command_run",
+            "fetch.web",
         ];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();

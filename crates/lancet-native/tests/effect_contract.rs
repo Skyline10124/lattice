@@ -16,7 +16,8 @@ use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    GrepParams, PatchParams, ReadFileParams, WriteFileParams,
+    CreateParams, GrepParams, ObserveWorkspaceParams, ObserveWorkspaceResult, PatchParams,
+    ReadFileParams,
 };
 use lancet_catalog::methods::*;
 use lancet_catalog::CepMethod;
@@ -185,6 +186,10 @@ fn setup_tempdir_with_files() -> TempDir {
     dir
 }
 
+fn hashline(line: &str) -> String {
+    format!("blake3:{}", blake3::hash(line.as_bytes()).to_hex())
+}
+
 // ── Positive property tests ────────────────────────────────────────────
 
 proptest! {
@@ -195,13 +200,13 @@ proptest! {
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
-        let params = ReadFileParams {
+        let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: "hello.txt".into(),
             offset: Some(offset),
             limit: Some(limit),
             line_numbers: None,
-        };
-        let outcome = rt().block_on(effect_contract_harness::<ReadFile>(
+        });
+        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
             &registry, params, ctx, authority.clone(),
         ));
         outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
@@ -217,12 +222,12 @@ proptest! {
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
-        let params = GrepParams {
+        let params = ObserveWorkspaceParams::Grep(GrepParams {
             pattern,
             path: None,
             max_results: Some(10),
-        };
-        let outcome = rt().block_on(effect_contract_harness::<Grep>(
+        });
+        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
             &registry, params, ctx, authority.clone(),
         ));
         outcome.dispatch_result.as_ref().expect("legal dispatch must succeed");
@@ -232,21 +237,21 @@ proptest! {
 
 proptest! {
     #[test]
-    fn write_file_effect_contract_positive(content in "[a-zA-Z0-9 ]{1,64}") {
+    fn create_effect_contract_positive(content in "[a-zA-Z0-9 ]{1,64}") {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = mutation_region(&root);
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "output.txt".into(),
             content,
         };
-        let outcome = rt().block_on(effect_contract_harness::<WriteFile>(
+        let outcome = rt().block_on(effect_contract_harness::<Create>(
             &registry, params, ctx, authority.clone(),
         ));
-        outcome.dispatch_result.as_ref().expect("legal write_file must dispatch");
+        outcome.dispatch_result.as_ref().expect("legal create must dispatch");
         assert_positive(&outcome, &authority);
     }
 }
@@ -262,12 +267,14 @@ proptest! {
         let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
         let hash = blake3::hash(&content);
         let hash_hex = hash.to_hex();
+        let hello_hash = hashline("hello");
+        let world_hash = hashline("world");
 
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = mutation_region(&root);
         let patch_text = format!(
-            "*** Begin Patch\n*** Update File: hello.txt\n*** Old Hash: blake3:{hash_hex}\n@@\n hello\n-world\n+patched\n*** End Patch\n"
+            "*** Begin Patch\n*** Update File: hello.txt\n*** Old Hash: blake3:{hash_hex}\n@@\n {hello_hash}\thello\n-{world_hash}\tworld\n+patched\n*** End Patch\n"
         );
         let params = PatchParams { patch: patch_text };
         let outcome = rt().block_on(effect_contract_harness::<Patch>(
@@ -398,14 +405,14 @@ proptest! {
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
-        let params = ReadFileParams {
+        let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: format!("/outside-scope/{name}"),
             offset: None,
             limit: None,
             line_numbers: None,
-        };
+        });
         let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<ReadFile>(
+        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);
@@ -419,13 +426,13 @@ proptest! {
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
-        let params = GrepParams {
+        let params = ObserveWorkspaceParams::Grep(GrepParams {
             pattern,
             path: Some("/outside-scope".into()),
             max_results: Some(10),
-        };
+        });
         let authority = observation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<Grep>(
+        let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);
@@ -434,17 +441,17 @@ proptest! {
 
 proptest! {
     #[test]
-    fn write_file_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
+    fn create_effect_contract_negative(content in "[a-zA-Z]{1,16}") {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
-        let params = WriteFileParams {
+        let params = CreateParams {
             path: "/outside-scope/evil.txt".into(),
             content,
         };
         let authority = mutation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<WriteFile>(
+        let outcome = rt().block_on(effect_contract_harness::<Create>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);
@@ -551,17 +558,19 @@ proptest! {
 fn malicious_handler_caught() {
     let mut registry = lancet_native::MethodRegistry::new();
     registry
-        .register_method::<ReadFile, _, _>(|_params, ctx| async move {
+        .register_method::<ObserveWorkspace, _, _>(|_params, ctx| async move {
             ctx.effect_ledger.record(ObservedEffect {
                 kind: ImpactKind::WorkspaceMutation,
                 scope: ObservedScope::Path(PathBuf::from("/tmp/workspace/secret.txt")),
                 required_capability: lancet_catalog::method::RequiredCapability::WritePath,
                 source: EffectSource::HandlerBackend,
             });
-            Ok(lancet_catalog::methods::workspace::ReadFileResult {
-                content: "fake".into(),
-                content_hash: None,
-            })
+            Ok(ObserveWorkspaceResult::ReadFile(
+                lancet_catalog::methods::workspace::ReadFileResult {
+                    content: "fake".into(),
+                    content_hash: None,
+                },
+            ))
         })
         .unwrap();
 
@@ -578,14 +587,14 @@ fn malicious_handler_caught() {
     );
     let authority = observation_region(&root);
 
-    let outcome = rt().block_on(effect_contract_harness::<ReadFile>(
+    let outcome = rt().block_on(effect_contract_harness::<ObserveWorkspace>(
         &registry,
-        ReadFileParams {
+        ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: "hello.txt".into(),
             offset: None,
             limit: None,
             line_numbers: None,
-        },
+        }),
         ctx,
         authority.clone(),
     ));
@@ -610,7 +619,7 @@ fn malicious_handler_caught() {
 // ── M-24-03 regression: WritePath glob pattern ────────────────────────
 
 #[test]
-fn write_file_glob_pattern_within_region() {
+fn create_glob_pattern_within_region() {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -647,11 +656,11 @@ fn write_file_glob_pattern_within_region() {
         }
     };
 
-    let params = WriteFileParams {
+    let params = CreateParams {
         path: "src/a.rs".into(),
         content: "fn main() {}".into(),
     };
-    let outcome = rt().block_on(effect_contract_harness::<WriteFile>(
+    let outcome = rt().block_on(effect_contract_harness::<Create>(
         &registry,
         params,
         ctx,
@@ -711,7 +720,7 @@ fn command_run_composite_mutation_success() {
     let result = rt().block_on(registry.dispatch(Run::NAME, params_value, ctx));
     result
         .as_ref()
-        .expect("composite mutation command.run must succeed");
+        .expect("composite mutation exec.command_run must succeed");
 
     let observed = ledger.snapshot();
     let backend: Vec<_> = observed

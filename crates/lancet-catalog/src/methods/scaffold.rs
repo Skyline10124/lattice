@@ -2,7 +2,9 @@
 
 use crate::method::CepMethod;
 use lancet_protocol::RequiredCapability;
-use lancet_protocol::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
+use lancet_protocol::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,8 @@ impl CepMethod for Inspect {
         kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
         scope: EffectScopeKind::PathRead,
         capabilities: &[RequiredCapability::Inspect],
+        overlay: OverlayBehavior::ReadWorkspace,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 
@@ -73,6 +77,8 @@ impl CepMethod for Navigate {
         kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
         scope: EffectScopeKind::PathRead,
         capabilities: &[RequiredCapability::Inspect],
+        overlay: OverlayBehavior::ReadWorkspace,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 

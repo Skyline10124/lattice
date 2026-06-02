@@ -1,4 +1,4 @@
-//! Native command.run CEP handler with policy enforcement.
+//! Native exec.command_run CEP handler with policy enforcement.
 //!
 //! This is the only shell execution path from the agent.
 //! WorkspaceMutation commands capture a pre-execution workspace snapshot, compute
@@ -30,16 +30,24 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Register native `command.run` handler.
+/// Register native `exec.command_run` handler.
 pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
     registry.register_method::<Run, _, _>(handle_run)?;
     Ok(())
 }
 
 async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult, CepError> {
+    handle_run_as(params, ctx, Run::NAME).await
+}
+
+async fn handle_run_as(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+) -> Result<RunResult, CepError> {
     validate_inputs(&params)?;
 
-    let _evaluation = evaluate_and_enforce_policy(&ctx, Run::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
 
     let policy = &ctx.cep_context.policy.command;
 
@@ -49,12 +57,12 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
     // 4. HardDenied -> return GuardDenied error
     if effective_impact == EffectiveImpact::HardDenied {
         let cmd = params.argv.first().map(|s| s.as_str()).unwrap_or("<empty>");
-        emit_denial_metadata(&ctx, "hard_denied", false).await;
+        emit_denial_metadata(&ctx, "hard_denied", false, method).await;
         return Err(CepError::new(
             CepErrorCode::GuardDenied,
             format!("Command '{cmd}' is hard-denied by policy"),
             CepErrorData::Guard(GuardErrorData {
-                method: Run::NAME.into(),
+                method: method.into(),
                 reason: format!("HardDenied: '{cmd}' matches denied command pattern"),
             }),
             Retriability::Permanent,
@@ -73,7 +81,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                     .iter()
                     .any(|cap| matches!(cap, Capability::RunCommand { .. }));
                 if !has_run_command {
-                    emit_denial_metadata(&ctx, "run_command_not_granted", false).await;
+                    emit_denial_metadata(&ctx, "run_command_not_granted", false, method).await;
                     return Err(CepError::new(
                         CepErrorCode::CapabilityNotGranted,
                         "Active envelope does not grant RunCommand capability",
@@ -92,12 +100,12 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                 }
                 // Check argv against allowlist
                 if !has_run_command_capability(&record.envelope.capabilities, &params.argv) {
-                    emit_denial_metadata(&ctx, "argv_not_in_allowlist", false).await;
+                    emit_denial_metadata(&ctx, "argv_not_in_allowlist", false, method).await;
                     return Err(CepError::new(
                         CepErrorCode::GuardDenied,
                         "Command argv does not match RunCommand allowlist",
                         CepErrorData::Guard(GuardErrorData {
-                            method: Run::NAME.into(),
+                            method: method.into(),
                             reason: "argv not in envelope RunCommand allowlist".into(),
                         }),
                         Retriability::Permanent,
@@ -106,13 +114,13 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                 Some(record)
             }
             None => {
-                emit_denial_metadata(&ctx, "active_envelope", false).await;
+                emit_denial_metadata(&ctx, "active_envelope", false, method).await;
                 return Err(CepError::new(
                     CepErrorCode::EnvelopeMissing,
                     "WorkspaceMutation command requires an active ExecutionEnvelope. \
                      Declare an envelope with RunCommand capability first.",
                     CepErrorData::Guard(GuardErrorData {
-                        method: Run::NAME.into(),
+                        method: method.into(),
                         reason: "EnvelopeMissing: no active envelope for WorkspaceMutation".into(),
                     }),
                     Retriability::Permanent,
@@ -217,11 +225,19 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             if effective_impact == EffectiveImpact::WorkspaceMutation {
                 if let Some(ref record) = active_record {
                     let envelope = &record.envelope;
-                    let diff =
-                        record_workspace_mutation_diff(&ctx, record, &project_root, &pre_snapshot)
-                            .await?;
+                    let diff = record_workspace_mutation_diff(
+                        &ctx,
+                        record,
+                        &project_root,
+                        &pre_snapshot,
+                        method,
+                    )
+                    .await?;
                     if !diff.out_of_scope_paths.is_empty() {
-                        return Err(out_of_scope_changed_paths_error(diff.out_of_scope_paths));
+                        return Err(out_of_scope_changed_paths_error(
+                            diff.out_of_scope_paths,
+                            method,
+                        ));
                     }
 
                     // Run verify after every successful WorkspaceMutation call.
@@ -236,7 +252,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                     .emit(
                                         "cep.verify_failed",
                                         json!({
-                                            "method": Run::NAME,
+                                            "method": method,
                                             "envelope_id": &record.envelope_id,
                                             "verify_exit_code": outcome.exit_code,
                                             "diff_retained": true,
@@ -258,7 +274,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                                     .emit(
                                         "cep.verify_failed",
                                         json!({
-                                            "method": Run::NAME,
+                                            "method": method,
                                             "envelope_id": &record.envelope_id,
                                             "verify_exit_code": -1,
                                             "diff_retained": true,
@@ -286,6 +302,7 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
 
             // Composite command mutation records both command_execution and workspace_mutation.
             // for WorkspaceMutation commands. CEP PROV replay reads this field.
+            let observation_metadata = command_observation_metadata(&effective_impact);
             ctx.record_durable_metadata(json!({
                 "classification": format!("{:?}", effective_impact),
                 "effective_effect": effective_effect,
@@ -298,16 +315,18 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                 "backend_invoked": true,
                 "policy_enforced": true,
             }));
+            ctx.record_durable_metadata(observation_metadata.clone());
 
-            emit_success_metadata(
-                &ctx,
-                &effective_impact,
-                envelope_id.as_deref(),
+            let success_audit = CommandSuccessAudit {
+                classification: &effective_impact,
+                envelope_id: envelope_id.as_deref(),
                 exit_code,
-                &stdout_meta,
-                &stderr_meta,
-            )
-            .await;
+                stdout_meta: &stdout_meta,
+                stderr_meta: &stderr_meta,
+                method,
+                observation_metadata: &observation_metadata,
+            };
+            emit_success_metadata(&ctx, success_audit).await;
 
             Ok(RunResult {
                 exit_code,
@@ -323,8 +342,14 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
             let diff = if effective_impact == EffectiveImpact::WorkspaceMutation {
                 if let Some(ref record) = active_record {
                     Some(
-                        record_workspace_mutation_diff(&ctx, record, &project_root, &pre_snapshot)
-                            .await?,
+                        record_workspace_mutation_diff(
+                            &ctx,
+                            record,
+                            &project_root,
+                            &pre_snapshot,
+                            method,
+                        )
+                        .await?,
                     )
                 } else {
                     None
@@ -341,12 +366,16 @@ async fn handle_run(params: RunParams, ctx: HandlerContext) -> Result<RunResult,
                 "backend_invoked": true,
                 "policy_enforced": true,
             }));
+            ctx.record_durable_metadata(command_observation_metadata(&effective_impact));
 
-            emit_denial_metadata(&ctx, "execution_error", true).await;
+            emit_denial_metadata(&ctx, "execution_error", true, method).await;
 
             if let Some(diff) = diff {
                 if !diff.out_of_scope_paths.is_empty() {
-                    return Err(out_of_scope_changed_paths_error(diff.out_of_scope_paths));
+                    return Err(out_of_scope_changed_paths_error(
+                        diff.out_of_scope_paths,
+                        method,
+                    ));
                 }
             }
 
@@ -365,6 +394,7 @@ async fn record_workspace_mutation_diff(
     record: &EnvelopeRecord,
     project_root: &str,
     pre_snapshot: &HashMap<String, FileSnapshot>,
+    method: &'static str,
 ) -> Result<WorkspaceMutationDiff, CepError> {
     let write_patterns = extract_write_path_patterns(&record.envelope.capabilities);
     let post_snapshot = capture_workspace_snapshot(project_root)?;
@@ -400,7 +430,7 @@ async fn record_workspace_mutation_diff(
             .emit(
                 "cep.replan_required",
                 json!({
-                    "method": Run::NAME,
+                    "method": method,
                     "active_envelope_id": &record.envelope_id,
                     "out_of_scope_paths": &out_of_scope_paths,
                     "changed_paths": &changed_paths,
@@ -421,15 +451,15 @@ async fn record_workspace_mutation_diff(
     Ok(WorkspaceMutationDiff { out_of_scope_paths })
 }
 
-fn out_of_scope_changed_paths_error(out_of_scope_paths: Vec<String>) -> CepError {
+fn out_of_scope_changed_paths_error(out_of_scope_paths: Vec<String>, method: &str) -> CepError {
     CepError::new(
         CepErrorCode::ReplanRequired,
         format!(
-            "command.run changed out-of-scope paths: {:?}",
+            "{method} changed out-of-scope paths: {:?}",
             out_of_scope_paths
         ),
         CepErrorData::Guard(GuardErrorData {
-            method: Run::NAME.into(),
+            method: method.into(),
             reason: format!(
                 "ReplanRequired: changed paths {:?} outside active WritePath scope",
                 out_of_scope_paths
@@ -592,7 +622,7 @@ fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
     if params.argv.is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "command.run requires a non-empty argv",
+            "exec.command_run requires a non-empty argv",
             CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
                 field: "argv".into(),
                 reason: "must not be empty".into(),
@@ -603,7 +633,7 @@ fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
     if params.argv[0].is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "command.run requires argv[0] to name an executable",
+            "exec.command_run requires argv[0] to name an executable",
             CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
                 field: "argv[0]".into(),
                 reason: "must not be empty".into(),
@@ -668,9 +698,45 @@ fn matches_argv_allowlist(argv: &[String], allowlist: &[String]) -> bool {
     false
 }
 
-async fn emit_denial_metadata(ctx: &HandlerContext, denial_source: &str, backend_invoked: bool) {
+fn command_observation_metadata(effective_impact: &EffectiveImpact) -> serde_json::Value {
+    match effective_impact {
+        EffectiveImpact::WorkspaceMutation => json!({
+            "effect_observation": "partial",
+            "observed_effects": ["command_execution", "workspace_mutation_diff"],
+            "unobserved_dimensions": [
+                "network",
+                "tree_out_read",
+                "tree_out_write",
+                "workspace_read_set"
+            ],
+        }),
+        EffectiveImpact::Diagnostic => json!({
+            "effect_observation": "partial",
+            "observed_effects": ["command_execution"],
+            "unobserved_dimensions": [
+                "network",
+                "tree_out_read",
+                "tree_out_write",
+                "tree_in_write",
+                "workspace_read_set"
+            ],
+        }),
+        EffectiveImpact::HardDenied => json!({
+            "effect_observation": "none",
+            "observed_effects": [],
+            "unobserved_dimensions": [],
+        }),
+    }
+}
+
+async fn emit_denial_metadata(
+    ctx: &HandlerContext,
+    denial_source: &str,
+    backend_invoked: bool,
+    method: &'static str,
+) {
     let metadata = json!({
-        "method": Run::NAME,
+        "method": method,
         "denial_source": denial_source,
         "policy_enforced": true,
         "backend_invoked": backend_invoked,
@@ -679,43 +745,56 @@ async fn emit_denial_metadata(ctx: &HandlerContext, denial_source: &str, backend
     ctx.events
         .emit(
             "cep.command_metadata",
-            json!({ "method": Run::NAME, "metadata": metadata }),
+            json!({ "method": method, "metadata": metadata }),
         )
         .await;
 }
 
-async fn emit_success_metadata(
-    ctx: &HandlerContext,
-    classification: &EffectiveImpact,
-    envelope_id: Option<&str>,
+struct CommandSuccessAudit<'a> {
+    classification: &'a EffectiveImpact,
+    envelope_id: Option<&'a str>,
     exit_code: i32,
-    stdout_meta: &BoundedStreamOutput,
-    stderr_meta: &BoundedStreamOutput,
-) {
-    let classification_str = match classification {
+    stdout_meta: &'a BoundedStreamOutput,
+    stderr_meta: &'a BoundedStreamOutput,
+    method: &'static str,
+    observation_metadata: &'a serde_json::Value,
+}
+
+async fn emit_success_metadata(ctx: &HandlerContext, audit: CommandSuccessAudit<'_>) {
+    let classification_str = match audit.classification {
         EffectiveImpact::Diagnostic => "diagnostic",
         EffectiveImpact::WorkspaceMutation => "workspace_mutation",
         EffectiveImpact::HardDenied => "hard_denied",
     };
-    let metadata = json!({
-        "method": Run::NAME,
+    let mut metadata = json!({
+        "method": audit.method,
         "classification": classification_str,
-        "envelope_id": envelope_id,
-        "exit_code": exit_code,
-        "stdout_bytes": stdout_meta.total_bytes,
-        "stderr_bytes": stderr_meta.total_bytes,
-        "stdout_truncated": stdout_meta.truncated,
-        "stderr_truncated": stderr_meta.truncated,
+        "envelope_id": audit.envelope_id,
+        "exit_code": audit.exit_code,
+        "stdout_bytes": audit.stdout_meta.total_bytes,
+        "stderr_bytes": audit.stderr_meta.total_bytes,
+        "stdout_truncated": audit.stdout_meta.truncated,
+        "stderr_truncated": audit.stderr_meta.truncated,
         "policy_enforced": true,
         "backend_invoked": true,
     });
+    merge_json_object(&mut metadata, audit.observation_metadata);
     ctx.record_durable_metadata(metadata.clone());
     ctx.events
         .emit(
             "cep.command_metadata",
-            json!({ "method": Run::NAME, "metadata": metadata }),
+            json!({ "method": audit.method, "metadata": metadata }),
         )
         .await;
+}
+
+fn merge_json_object(target: &mut serde_json::Value, source: &serde_json::Value) {
+    let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else {
+        return;
+    };
+    for (key, value) in source {
+        target.insert(key.clone(), value.clone());
+    }
 }
 
 #[cfg(test)]
@@ -1997,5 +2076,49 @@ mod tests {
         assert!(kinds.contains(&"CommandExecution".to_string()));
         assert!(!kinds.contains(&"WorkspaceMutation".to_string()));
         assert_eq!(kinds.len(), 1);
+    }
+
+    #[test]
+    fn command_observation_metadata_is_derived_for_workspace_mutation() {
+        use crate::policy::command::EffectiveImpact;
+
+        let metadata = command_observation_metadata(&EffectiveImpact::WorkspaceMutation);
+        assert_eq!(metadata["effect_observation"], "partial");
+        assert_eq!(
+            metadata["observed_effects"],
+            serde_json::json!(["command_execution", "workspace_mutation_diff"])
+        );
+        assert!(metadata["unobserved_dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|dimension| dimension.as_str() == Some("workspace_read_set")));
+        assert!(!metadata["unobserved_dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|dimension| dimension.as_str() == Some("tree_in_write")));
+    }
+
+    #[test]
+    fn command_observation_metadata_is_derived_for_diagnostic() {
+        use crate::policy::command::EffectiveImpact;
+
+        let metadata = command_observation_metadata(&EffectiveImpact::Diagnostic);
+        assert_eq!(metadata["effect_observation"], "partial");
+        assert_eq!(
+            metadata["observed_effects"],
+            serde_json::json!(["command_execution"])
+        );
+        assert!(metadata["unobserved_dimensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|dimension| dimension.as_str() == Some("tree_in_write")));
+        assert!(!metadata["observed_effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effect| effect.as_str() == Some("workspace_mutation_diff")));
     }
 }

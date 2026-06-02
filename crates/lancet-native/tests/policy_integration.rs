@@ -62,14 +62,14 @@ fn default_budget() -> PolicyBudgetSnapshot {
     }
 }
 
-// ── End-to-end: read_file allowed with base ReadPath ──────────────────
+// ── End-to-end: observe.workspace read_file allowed with base ReadPath ──────────────────
 
 #[test]
 fn integration_read_file_allowed_with_base_capability() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "workspace.read_file".into(),
-        params: json!({"path": "src/main.rs"}),
+        method: "observe.workspace".into(),
+        params: json!({"mode": "read_file", "path": "src/main.rs"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::ReadPath {
                 path_pattern: "src/**".into(),
@@ -81,13 +81,13 @@ fn integration_read_file_allowed_with_base_capability() {
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
-// ── End-to-end: write_file requires declared WritePath ─────────────────
+// ── End-to-end: mutate.create requires declared WritePath ─────────────────
 
 #[test]
-fn integration_write_file_requires_declared_envelope() {
+fn integration_create_requires_declared_envelope() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "workspace.write_file".into(),
+        method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
         envelope_snapshot: empty_envelope(),
         audit_context: audit_ctx(default_budget()),
@@ -102,13 +102,13 @@ fn integration_write_file_requires_declared_envelope() {
     ));
 }
 
-// ── End-to-end: write_file with declared WritePath allowed ─────────────
+// ── End-to-end: mutate.create with declared WritePath allowed ─────────────
 
 #[test]
-fn integration_write_file_allowed_with_declared_capability() {
+fn integration_create_allowed_with_declared_capability() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "workspace.write_file".into(),
+        method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::WritePath {
@@ -121,13 +121,13 @@ fn integration_write_file_allowed_with_declared_capability() {
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
-// ── End-to-end: command.run denied by command policy ───────────────────
+// ── End-to-end: exec.command_run denied by command policy ───────────────────
 
 #[test]
 fn integration_command_run_denied_by_policy() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "command.run".into(),
+        method: "exec.command_run".into(),
         params: json!({
             "argv": ["sh", "-c", "echo hello"],
             "declared_impact": "workspace_mutation"
@@ -150,13 +150,13 @@ fn integration_command_run_denied_by_policy() {
     ));
 }
 
-// ── End-to-end: command.run allowed for diagnostic command ─────────────
+// ── End-to-end: exec.command_run allowed for diagnostic command ─────────────
 
 #[test]
 fn integration_command_run_allowed_for_diagnostic() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "command.run".into(),
+        method: "exec.command_run".into(),
         params: json!({
             "argv": ["cargo", "test"],
             "declared_impact": "command_execution"
@@ -172,7 +172,7 @@ fn integration_command_run_allowed_for_diagnostic() {
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
 }
 
-// ── End-to-end: web.fetch denied by network policy ─────────────────────
+// ── End-to-end: fetch.web denied by network policy ─────────────────────
 
 #[test]
 fn integration_web_fetch_denied_by_network_policy() {
@@ -181,7 +181,7 @@ fn integration_web_fetch_denied_by_network_policy() {
     config.network.allow_public_https = false;
     let hook = DefaultPolicyHook::new(config);
     let input = PolicyInput {
-        method: "web.fetch".into(),
+        method: "fetch.web".into(),
         params: json!({"url": "https://evil.example.com/page"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::FetchUrl { host: "*".into() },
@@ -199,7 +199,7 @@ fn integration_web_fetch_denied_by_network_policy() {
     ));
 }
 
-// ── End-to-end: web.fetch allowed for allowed host ─────────────────────
+// ── End-to-end: fetch.web allowed for allowed host ─────────────────────
 
 #[test]
 fn integration_web_fetch_allowed_for_allowed_host() {
@@ -207,7 +207,7 @@ fn integration_web_fetch_allowed_for_allowed_host() {
     config.network.allow_public_https = true;
     let hook = DefaultPolicyHook::new(config);
     let input = PolicyInput {
-        method: "web.fetch".into(),
+        method: "fetch.web".into(),
         params: json!({"url": "https://example.com/page"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::FetchUrl {
@@ -226,8 +226,8 @@ fn integration_web_fetch_allowed_for_allowed_host() {
 fn integration_budget_exceeded_denies_observation() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = PolicyInput {
-        method: "workspace.read_file".into(),
-        params: json!({"path": "src/main.rs"}),
+        method: "observe.workspace".into(),
+        params: json!({"mode": "read_file", "path": "src/main.rs"}),
         envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
             capability: Capability::ReadPath {
                 path_pattern: "src/**".into(),
@@ -287,7 +287,7 @@ fn integration_capability_checked_before_budget() {
     let hook = DefaultPolicyHook::new(test_config());
     // No capability at all — should be denied by capability, not budget
     let input = PolicyInput {
-        method: "workspace.write_file".into(),
+        method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "x"}),
         envelope_snapshot: empty_envelope(),
         audit_context: audit_ctx(PolicyBudgetSnapshot {

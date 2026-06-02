@@ -18,8 +18,8 @@ use lattice_session::HeadTranscript;
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
-        "workspace.read_file",
-        "Read a file",
+        "observe.workspace",
+        "Observe workspace content",
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
     )
 }
@@ -207,7 +207,7 @@ async fn streaming_tool_call_assembly_and_sequential_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -254,7 +254,7 @@ async fn streaming_tool_call_assembly_and_sequential_execution() {
     assert_eq!(result.status, AgentTurnStatus::Completed);
     assert_eq!(result.tool_results.len(), 1);
     assert!(result.tool_results[0].ok);
-    assert_eq!(result.tool_results[0].name, "workspace.read_file");
+    assert_eq!(result.tool_results[0].name, "observe.workspace");
 
     // Verify execution order: c1 was executed
     let exec_order = order.lock().unwrap();
@@ -299,7 +299,7 @@ async fn streaming_incomplete_tool_call_error_no_execution() {
                 },
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -348,7 +348,7 @@ async fn streaming_invalid_tool_call_json_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -406,7 +406,7 @@ async fn streaming_tool_call_delta_after_end_is_error_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -465,7 +465,7 @@ async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -527,7 +527,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -538,7 +538,7 @@ async fn streaming_multiple_tool_calls_all_valid_sequential() {
                 },
                 LlmEvent::ToolCallStart {
                     id: "c2".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c2".to_string(),
@@ -596,7 +596,7 @@ async fn streaming_multiple_tool_calls_one_invalid_none_executed() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -758,7 +758,7 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -821,7 +821,7 @@ async fn streaming_multi_round_tool_loop() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c1".to_string(),
@@ -838,7 +838,7 @@ async fn streaming_multi_round_tool_loop() {
             .push_events(vec![
                 LlmEvent::ToolCallStart {
                     id: "c2".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 LlmEvent::ToolCallDelta {
                     id: "c2".to_string(),

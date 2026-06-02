@@ -46,12 +46,30 @@ pub enum EffectSource {
 pub enum ObservedScope {
     /// A concrete file path was affected.
     Path(PathBuf),
+    /// Concrete line-level changes in a file.
+    Lines {
+        path: PathBuf,
+        changes: Vec<ObservedLineChange>,
+    },
     /// A root/directory region was affected (e.g. project root for observations).
     Root(String),
     /// An external host was contacted.
     Host(String),
     /// Session state was mutated (e.g. todo_write).
     SessionState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ObservedLineChange {
+    pub kind: ObservedLineChangeKind,
+    pub old_hash: Option<String>,
+    pub new_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ObservedLineChangeKind {
+    Added,
+    Removed,
 }
 
 /// A single observed semantic effect recorded during method dispatch.

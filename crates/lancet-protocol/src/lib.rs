@@ -23,8 +23,8 @@ pub mod provenance;
 pub use capability::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
 pub use envelope::{
     BaseExecutionEnvelope, Capability, CepMode, Constraints, EffectDecl, EffectKindSet,
-    EffectScopeKind, ExecutionEnvelope, GuardVerdict, Impact, ImpactConfidence, ImpactKind, Intent,
-    OnFailure, Scope, VerifyCommand,
+    EffectScopeKind, ExecutionEnvelope, FailureSemantics, GuardVerdict, Impact, ImpactConfidence,
+    ImpactKind, Intent, OnFailure, OverlayBehavior, Scope, VerifyCommand,
 };
 pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability};
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};

@@ -10,10 +10,6 @@ pub struct PatchDocument {
 #[serde(tag = "operation", rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)]
 pub enum PatchOperation {
-    AddFile {
-        path: String,
-        lines: Vec<String>,
-    },
     UpdateFile {
         path: String,
         old_hash: String,
@@ -28,15 +24,14 @@ pub enum PatchOperation {
 impl PatchOperation {
     pub fn path(&self) -> &str {
         match self {
-            PatchOperation::AddFile { path, .. }
-            | PatchOperation::UpdateFile { path, .. }
-            | PatchOperation::DeleteFile { path, .. } => path,
+            PatchOperation::UpdateFile { path, .. } | PatchOperation::DeleteFile { path, .. } => {
+                path
+            }
         }
     }
 
     pub fn kind(&self) -> FileOperationKind {
         match self {
-            PatchOperation::AddFile { .. } => FileOperationKind::Add,
             PatchOperation::UpdateFile { .. } => FileOperationKind::Update,
             PatchOperation::DeleteFile { .. } => FileOperationKind::Delete,
         }
@@ -46,14 +41,13 @@ impl PatchOperation {
         match self {
             PatchOperation::UpdateFile { old_hash, .. }
             | PatchOperation::DeleteFile { old_hash, .. } => Some(old_hash),
-            PatchOperation::AddFile { .. } => None,
         }
     }
 
     pub fn hunk_count(&self) -> usize {
         match self {
             PatchOperation::UpdateFile { hunks, .. } => hunks.len(),
-            PatchOperation::AddFile { .. } | PatchOperation::DeleteFile { .. } => 0,
+            PatchOperation::DeleteFile { .. } => 0,
         }
     }
 }
@@ -70,7 +64,7 @@ impl PatchHunk {
         self.lines
             .iter()
             .filter_map(|line| match line {
-                PatchHunkLine::Context(value) => Some(value.as_str()),
+                PatchHunkLine::Context(value) => Some(value.text.as_str()),
                 PatchHunkLine::Remove(_) | PatchHunkLine::Add(_) => None,
             })
             .collect()
@@ -81,7 +75,7 @@ impl PatchHunk {
         self.lines
             .iter()
             .filter_map(|line| match line {
-                PatchHunkLine::Remove(value) => Some(value.as_str()),
+                PatchHunkLine::Remove(value) => Some(value.text.as_str()),
                 PatchHunkLine::Context(_) | PatchHunkLine::Add(_) => None,
             })
             .collect()
@@ -102,15 +96,20 @@ impl PatchHunk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "text", rename_all = "snake_case")]
 pub enum PatchHunkLine {
-    Context(String),
-    Remove(String),
+    Context(HashLine),
+    Remove(HashLine),
     Add(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HashLine {
+    pub hash: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileOperationKind {
-    Add,
     Update,
     Delete,
 }
@@ -121,7 +120,6 @@ pub enum PatchErrorCode {
     ParseError,
     BoundaryDenied,
     MissingFile,
-    AlreadyExists,
     DuplicatePath,
     HashMismatch,
     HunkMissing,
@@ -170,6 +168,24 @@ pub struct ChangedFile {
     pub lines_after: usize,
     pub hash_before: Option<String>,
     pub hash_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line_changes: Vec<LineChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineChangeKind {
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineChange {
+    pub kind: LineChangeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,13 +218,19 @@ pub struct PatchResultEnvelope {
 mod tests {
     use super::*;
 
+    fn hashline(text: &str) -> HashLine {
+        HashLine {
+            hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            text: text.into(),
+        }
+    }
+
     #[test]
     fn serializes_every_required_patch_error_code() {
         let cases = [
             (PatchErrorCode::ParseError, "parse_error"),
             (PatchErrorCode::BoundaryDenied, "boundary_denied"),
             (PatchErrorCode::MissingFile, "missing_file"),
-            (PatchErrorCode::AlreadyExists, "already_exists"),
             (PatchErrorCode::DuplicatePath, "duplicate_path"),
             (PatchErrorCode::HashMismatch, "hash_mismatch"),
             (PatchErrorCode::HunkMissing, "hunk_missing"),
@@ -251,10 +273,10 @@ mod tests {
             hunks: vec![PatchHunk {
                 index: 0,
                 lines: vec![
-                    PatchHunkLine::Context("fn main() {".into()),
-                    PatchHunkLine::Remove("    old();".into()),
+                    PatchHunkLine::Context(hashline("fn main() {")),
+                    PatchHunkLine::Remove(hashline("    old();")),
                     PatchHunkLine::Add("    new();".into()),
-                    PatchHunkLine::Context("}".into()),
+                    PatchHunkLine::Context(hashline("}")),
                 ],
             }],
         };
@@ -278,6 +300,7 @@ mod tests {
                     "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .into(),
                 ),
+                line_changes: vec![],
             }],
             attempted_operations: vec![AttemptedOperation::from_operation(0, &operation)],
         };

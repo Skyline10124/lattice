@@ -1,9 +1,9 @@
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
 //! - `lancet status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
-//!   the latest envelope.declare fields, recent calls, and last guard verdict.
+//!   the latest session.envelope fields, recent calls, and last guard verdict.
 //! - `lancet doctor`: catalog count, transport smoke, invariant-card parse, and an
-//!   isolated `submit_intent` smoke that asserts `unknowns == 0`.
+//!   isolated `session.envelope` derive-intent smoke that asserts `unknowns == 0`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,7 +13,9 @@ use clap::Subcommand;
 use colored::Colorize;
 use lancet_authority::CepTurnContext;
 use lancet_catalog::catalog::catalog;
-use lancet_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
+use lancet_catalog::methods::envelope::{
+    Envelope, EnvelopeParams, EnvelopeResult, SubmitIntentParams,
+};
 use lancet_invariants::invariants::loader::load_cards_from_dir;
 use lancet_invariants::resolve_invariants_dir;
 use lancet_native::{
@@ -93,13 +95,13 @@ pub(crate) fn collect_status(project_root: &Path) -> Result<CepStatusOutput> {
     let store =
         CepAuditStore::open(&db_path).map_err(|e| anyhow::anyhow!("open audit store: {e}"))?;
 
-    // Latest envelope.declare row — raw metadata_json only.
+    // Latest session.envelope row — raw metadata_json only.
     let declare_rows = store
         .query_rows(&AuditQueryFilters {
-            method: Some("envelope.declare".to_string()),
+            method: Some("session.envelope".to_string()),
             ..Default::default()
         })
-        .map_err(|e| anyhow::anyhow!("query envelope.declare rows: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("query session.envelope rows: {e}"))?;
 
     let active_envelope = declare_rows.last().and_then(|row| {
         row.metadata_json
@@ -225,12 +227,12 @@ pub(crate) fn run_doctor_inner(invariants_dir: &Path, json: bool) -> Result<()> 
     let mut ok_items: Vec<String> = Vec::new();
     let mut issues: Vec<String> = Vec::new();
 
-    // 1. CATALOG method count (must be exactly 14).
+    // 1. CATALOG method count (must be exactly 9).
     let catalog_len = catalog().len();
-    if catalog_len == 14 {
-        ok_items.push(format!("catalog: {catalog_len} methods (expected 14)"));
+    if catalog_len == 9 {
+        ok_items.push(format!("catalog: {catalog_len} methods (expected 9)"));
     } else {
-        issues.push(format!("catalog: expected 14 methods, got {catalog_len}"));
+        issues.push(format!("catalog: expected 9 methods, got {catalog_len}"));
     }
 
     // 2. Production method registry registers without error.
@@ -353,7 +355,7 @@ async fn submit_intent_smoke_async() -> Result<()> {
     register_production_method_registry(&mut registry)
         .map_err(|e| anyhow::anyhow!("register CEP methods: {}", e.message))?;
 
-    // submit_intent requires MutateSessionState capability to store the derived envelope.
+    // session.envelope derive_intent requires MutateSessionState capability to store the derived envelope.
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.base_envelope =
         BaseExecutionEnvelope::for_workspace_root(root_str, "lancet doctor smoke")
@@ -370,15 +372,20 @@ async fn submit_intent_smoke_async() -> Result<()> {
     });
 
     let result = client
-        .call::<SubmitIntent>(SubmitIntentParams {
+        .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
             action: "read".to_string(),
             target: "Cargo.toml".to_string(),
             params: None,
             supersede: false,
             reason: None,
-        })
+        }))
         .await
-        .map_err(|e| anyhow::anyhow!("submit_intent smoke failed: {}", e.message))?;
+        .map_err(|e| {
+            anyhow::anyhow!("session.envelope derive_intent smoke failed: {}", e.message)
+        })?;
+    let EnvelopeResult::DeriveIntent(result) = result else {
+        anyhow::bail!("session.envelope derive_intent smoke returned declare result");
+    };
 
     server_task.abort();
 
@@ -459,12 +466,12 @@ mod tests {
             model_id: "test-model".into(),
             runtime_version: "test".into(),
         };
-        // envelope.declare row with intent/capabilities in metadata_json.
+        // session.envelope row with intent/capabilities in metadata_json.
         let start = audit
             .start_call(
                 &ctx,
                 1,
-                "envelope.declare",
+                "session.envelope",
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -483,7 +490,7 @@ mod tests {
             .start_call(
                 &ctx,
                 2,
-                "workspace.read_file",
+                "observe.workspace",
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -562,10 +569,10 @@ mod tests {
         let calls = json["recent_calls"].as_array().unwrap();
         let has_declare = calls
             .iter()
-            .any(|c| c["method"].as_str() == Some("envelope.declare"));
+            .any(|c| c["method"].as_str() == Some("session.envelope"));
         assert!(
             has_declare,
-            "recent_calls should include envelope.declare row"
+            "recent_calls should include session.envelope row"
         );
     }
 

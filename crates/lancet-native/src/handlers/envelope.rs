@@ -1,4 +1,4 @@
-//! Native CEP envelope.declare handler.
+//! Native CEP session.envelope handler.
 //!
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
 
@@ -8,7 +8,9 @@ use crate::guard_l1::{normalize_write_path_pattern, WritePathPattern};
 use crate::registry::{HandlerContext, MethodRegistry};
 use crate::verify::{extract_verify_command, validate_verify_command};
 use lancet_catalog::method::RequiredCapability;
-use lancet_catalog::methods::envelope::{Declare, DeclareParams, DeclareResult};
+use lancet_catalog::methods::envelope::{
+    DeclareParams, DeclareResult, Envelope, EnvelopeParams, EnvelopeResult,
+};
 use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{Capability, ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
@@ -16,11 +18,25 @@ use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Register the native `envelope.declare` handler.
+/// Register the native `session.envelope` handler.
 pub fn register_envelope_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    registry.register_method::<Declare, _, _>(|params, ctx| async move {
-        handle_declare(params, ctx).await
-    })
+    registry.register_method::<Envelope, _, _>(handle_envelope)
+}
+
+async fn handle_envelope(
+    params: EnvelopeParams,
+    ctx: HandlerContext,
+) -> Result<EnvelopeResult, CepError> {
+    match params {
+        EnvelopeParams::Declare(params) => handle_declare(params, ctx)
+            .await
+            .map(EnvelopeResult::Declare),
+        EnvelopeParams::DeriveIntent(params) => {
+            crate::handlers::submit_intent::handle_submit_intent(params, ctx)
+                .await
+                .map(EnvelopeResult::DeriveIntent)
+        }
+    }
 }
 
 async fn handle_declare(
@@ -40,7 +56,7 @@ async fn handle_declare(
         return Err(envelope_already_active_error());
     }
 
-    let _evaluation = evaluate_and_enforce_policy(&ctx, Declare::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Envelope::NAME, &params).await?;
 
     validate_envelope_boundaries(&params.envelope, &project_root)?;
 
@@ -159,7 +175,7 @@ fn envelope_already_active_error() -> CepError {
         CepErrorCode::EnvelopeAlreadyActive,
         "an active envelope already exists; use supersede=true to replace it",
         CepErrorData::Guard(GuardErrorData {
-            method: "envelope.declare".into(),
+            method: Envelope::NAME.into(),
             reason: "envelope already active".into(),
         }),
         Retriability::Permanent,
@@ -207,7 +223,7 @@ fn validate_write_path_boundary(pattern: &str, root_canonical: &Path) -> Result<
                 existing_prefix.display()
             ),
             CepErrorData::Guard(GuardErrorData {
-                method: "envelope.declare".into(),
+                method: Envelope::NAME.into(),
                 reason: "WritePath scope escapes project root".into(),
             }),
             Retriability::Permanent,
@@ -244,7 +260,6 @@ mod tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
     use crate::registry::{Cancellation, EventSink};
-    use lancet_catalog::CepMethod;
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, Scope,
@@ -332,6 +347,24 @@ mod tests {
         registry
     }
 
+    async fn dispatch_declare(
+        registry: &MethodRegistry,
+        params: DeclareParams,
+        ctx: HandlerContext,
+    ) -> Result<DeclareResult, CepError> {
+        let result = registry
+            .dispatch(
+                Envelope::NAME,
+                serde_json::to_value(EnvelopeParams::Declare(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(result).unwrap() {
+            EnvelopeResult::Declare(result) => Ok(result),
+            other => panic!("unexpected session.envelope result: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn handle_declare_first_call_succeeds() {
         let dir = TempDir::new().unwrap();
@@ -344,11 +377,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let result = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: DeclareResult = serde_json::from_value(result).unwrap();
+        let parsed = dispatch_declare(&registry, params, ctx).await.unwrap();
         assert!(parsed.accepted);
         assert!(!parsed.envelope_hash.is_empty());
         assert!(parsed.superseded_envelope_id.is_none());
@@ -368,10 +397,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params1).unwrap(), ctx1)
-            .await
-            .unwrap();
+        dispatch_declare(&registry, params1, ctx1).await.unwrap();
 
         // Second declare without supersede
         let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
@@ -380,8 +406,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params2).unwrap(), ctx2)
+        let err = dispatch_declare(&registry, params2, ctx2)
             .await
             .unwrap_err();
         assert_eq!(
@@ -403,10 +428,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params1).unwrap(), ctx1)
-            .await
-            .unwrap();
+        dispatch_declare(&registry, params1, ctx1).await.unwrap();
 
         let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
         let mut invalid = sample_envelope("invalid second");
@@ -416,8 +438,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params2).unwrap(), ctx2)
+        let err = dispatch_declare(&registry, params2, ctx2)
             .await
             .unwrap_err();
         assert_eq!(
@@ -440,11 +461,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let result1 = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params1).unwrap(), ctx1)
-            .await
-            .unwrap();
-        let parsed1: DeclareResult = serde_json::from_value(result1).unwrap();
+        let parsed1 = dispatch_declare(&registry, params1, ctx1).await.unwrap();
 
         // Supersede
         let (ctx2, mut events2) = test_ctx_with_store(root, Arc::clone(&store));
@@ -453,11 +470,7 @@ mod tests {
             supersede: true,
             reason: Some("upgrade".into()),
         };
-        let result2 = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params2).unwrap(), ctx2)
-            .await
-            .unwrap();
-        let parsed2: DeclareResult = serde_json::from_value(result2).unwrap();
+        let parsed2 = dispatch_declare(&registry, params2, ctx2).await.unwrap();
         assert!(parsed2.accepted);
         assert_eq!(
             parsed2.superseded_envelope_id,
@@ -491,10 +504,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
+        dispatch_declare(&registry, params, ctx).await.unwrap();
 
         let mut found_declared = false;
         while let Ok(event) = events.try_recv() {
@@ -522,10 +532,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
+        let err = dispatch_declare(&registry, params, ctx).await.unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::SchemaMismatch);
     }
 
@@ -548,10 +555,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
+        let err = dispatch_declare(&registry, params, ctx).await.unwrap_err();
         assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
     }
 
@@ -574,11 +578,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let result = registry
-            .dispatch(Declare::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: DeclareResult = serde_json::from_value(result).unwrap();
+        let parsed = dispatch_declare(&registry, params, ctx).await.unwrap();
         assert!(parsed.accepted);
     }
 }

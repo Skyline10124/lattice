@@ -1018,8 +1018,8 @@ mod policy_tests {
             std::path::PathBuf::from("."),
         ));
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: serde_json::json!({}),
+            method: "observe.workspace".into(),
+            params: serde_json::json!({"mode": "read_file", "path": "src/lib.rs"}),
             envelope_snapshot: EffectiveEnvelopeSnapshot {
                 base_envelope_id: "base".into(),
                 declared_envelope_id: None,
@@ -1164,7 +1164,7 @@ mod policy_tests {
             message: "blocked".into(),
             action_required: None,
         };
-        let err = map_decision_to_cep_error(&decision, "web.fetch").unwrap_err();
+        let err = map_decision_to_cep_error(&decision, "fetch.web").unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
     }
 

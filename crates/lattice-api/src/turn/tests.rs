@@ -391,11 +391,11 @@ async fn run_turn_cancelled_outcome_is_committed() {
         vec![
             LlmEvent::ToolCallStart {
                 id: "call_1".to_string(),
-                name: "workspace.read_file".to_string(),
+                name: "observe.workspace".to_string(),
             },
             LlmEvent::ToolCallDelta {
                 id: "call_1".to_string(),
-                arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+                arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
             },
             LlmEvent::ToolCallEnd {
                 id: "call_1".to_string(),
@@ -408,7 +408,7 @@ async fn run_turn_cancelled_outcome_is_committed() {
             total_tokens: 7,
         }),
     ));
-    let fixture = setup_fixture(llm, &["workspace.read_file"]);
+    let fixture = setup_fixture(llm, &["observe.workspace"]);
     let mut request = make_request("hello");
     request.cancel_flag = Some(cancel);
 
@@ -552,7 +552,7 @@ async fn stream_turn_emits_tool_activity_before_committed() {
             .push_events(round2)
             .build(),
     );
-    let fixture = setup_fixture(llm, &["workspace.read_file"]);
+    let fixture = setup_fixture(llm, &["observe.workspace"]);
 
     let events: Vec<TurnEvent> = stream_turn(
         fixture.session_api,
@@ -788,11 +788,11 @@ async fn stream_turn_cancelled_commits_cancelled() {
         vec![
             LlmEvent::ToolCallStart {
                 id: "call_1".to_string(),
-                name: "workspace.read_file".to_string(),
+                name: "observe.workspace".to_string(),
             },
             LlmEvent::ToolCallDelta {
                 id: "call_1".to_string(),
-                arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+                arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
             },
             LlmEvent::ToolCallEnd {
                 id: "call_1".to_string(),
@@ -801,7 +801,7 @@ async fn stream_turn_cancelled_commits_cancelled() {
         "tool_calls",
         None,
     ));
-    let fixture = setup_fixture(llm, &["workspace.read_file"]);
+    let fixture = setup_fixture(llm, &["observe.workspace"]);
     let mut request = make_request("hello");
     request.cancel_flag = Some(cancel);
 

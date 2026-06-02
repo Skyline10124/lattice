@@ -3,12 +3,12 @@ use std::path::{Component, Path, PathBuf};
 
 use lattice_tooling::{ToolError, ToolLimits};
 
-use super::hash::content_hash;
+use super::hash::{content_hash, line_hash};
 use super::parser::parse_patch_document;
 use super::types::{
-    ApplyPlan, AttemptedOperation, ChangedFile, FileOperationKind, PatchDiagnostic, PatchDocument,
-    PatchErrorCode, PatchHunk, PatchHunkLine, PatchOperation, PatchResultEnvelope,
-    PlannedFileChange,
+    ApplyPlan, AttemptedOperation, ChangedFile, FileOperationKind, HashLine, LineChange,
+    LineChangeKind, PatchDiagnostic, PatchDocument, PatchErrorCode, PatchHunk, PatchHunkLine,
+    PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
 
 pub async fn apply_patch(
@@ -118,9 +118,6 @@ async fn build_apply_plan(
         };
 
         let change = match operation {
-            PatchOperation::AddFile { path, lines } => {
-                plan_add_file(path, lines, &resolved.target_path, operation_index, limits)
-            }
             PatchOperation::UpdateFile {
                 path,
                 old_hash,
@@ -180,53 +177,6 @@ async fn resolve_target(
 
     let requested = root.join(relative);
     let target_path = match operation {
-        PatchOperation::AddFile { .. } => {
-            if tokio::fs::try_exists(&requested).await.unwrap_or(false) {
-                return Err(PatchDiagnostic::new(
-                    PatchErrorCode::AlreadyExists,
-                    format!("cannot add '{path}' because it already exists"),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index));
-            }
-            let parent = requested.parent().ok_or_else(|| {
-                PatchDiagnostic::new(
-                    PatchErrorCode::MissingFile,
-                    format!("cannot resolve parent directory for '{path}'"),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index)
-            })?;
-            let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|error| {
-                PatchDiagnostic::new(
-                    PatchErrorCode::MissingFile,
-                    ToolError::IoError {
-                        path: parent.display().to_string(),
-                        error,
-                    }
-                    .to_string(),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index)
-            })?;
-            if !canonical_parent.starts_with(root) {
-                return Err(PatchDiagnostic::new(
-                    PatchErrorCode::BoundaryDenied,
-                    format!("patch path '{path}' resolves outside the project root"),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index));
-            }
-            let Some(file_name) = requested.file_name() else {
-                return Err(PatchDiagnostic::new(
-                    PatchErrorCode::MissingFile,
-                    format!("cannot resolve filename for '{path}'"),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index));
-            };
-            canonical_parent.join(file_name)
-        }
         PatchOperation::UpdateFile { .. } | PatchOperation::DeleteFile { .. } => {
             let canonical = tokio::fs::canonicalize(&requested).await.map_err(|error| {
                 PatchDiagnostic::new(
@@ -261,43 +211,6 @@ fn has_disallowed_component(path: &Path) -> bool {
             component,
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
-    })
-}
-
-fn plan_add_file(
-    path: &str,
-    lines: &[String],
-    target_path: &Path,
-    operation_index: usize,
-    limits: &ToolLimits,
-) -> Result<PlannedFileChange, PatchDiagnostic> {
-    let content = lines.join("\n");
-    let after = if lines.is_empty() {
-        Vec::new()
-    } else {
-        format!("{content}\n").into_bytes()
-    };
-    if after.len() > limits.max_write_size {
-        return Err(PatchDiagnostic::new(
-            PatchErrorCode::IoError,
-            ToolError::SizeLimit {
-                limit: limits.max_write_size,
-                actual: after.len(),
-            }
-            .to_string(),
-        )
-        .with_path(path.to_string())
-        .with_operation_index(operation_index));
-    }
-
-    Ok(PlannedFileChange {
-        path: path.to_string(),
-        target_path: target_path.to_path_buf(),
-        operation_index,
-        operation: FileOperationKind::Add,
-        bytes_before: None,
-        bytes_after: Some(after.clone()),
-        manifest: manifest(path, FileOperationKind::Add, None, Some(&after)),
     })
 }
 
@@ -342,7 +255,13 @@ async fn plan_update_file(
         operation: FileOperationKind::Update,
         bytes_before: Some(before.clone()),
         bytes_after: Some(after.clone()),
-        manifest: manifest(path, FileOperationKind::Update, Some(&before), Some(&after)),
+        manifest: manifest(
+            path,
+            FileOperationKind::Update,
+            Some(&before),
+            Some(&after),
+            update_line_changes(hunks),
+        ),
     })
 }
 
@@ -362,7 +281,13 @@ async fn plan_delete_file(
         operation: FileOperationKind::Delete,
         bytes_before: Some(before.clone()),
         bytes_after: None,
-        manifest: manifest(path, FileOperationKind::Delete, Some(&before), None),
+        manifest: manifest(
+            path,
+            FileOperationKind::Delete,
+            Some(&before),
+            None,
+            delete_line_changes(&before),
+        ),
     })
 }
 
@@ -424,7 +349,7 @@ pub(crate) fn apply_hunks(
             .with_hunk_index(hunk.index));
         }
 
-        let matches = find_matches(&lines, &original);
+        let matches = find_hashline_matches(&lines, &original);
         match matches.as_slice() {
             [] => {
                 return Err(PatchDiagnostic::new(
@@ -479,7 +404,7 @@ fn join_lines(lines: &[String], final_newline: bool) -> String {
     content
 }
 
-fn hunk_original_lines(hunk: &PatchHunk) -> Vec<String> {
+fn hunk_original_lines(hunk: &PatchHunk) -> Vec<HashLine> {
     hunk.lines
         .iter()
         .filter_map(|line| match line {
@@ -493,13 +418,14 @@ fn hunk_replacement_lines(hunk: &PatchHunk) -> Vec<String> {
     hunk.lines
         .iter()
         .filter_map(|line| match line {
-            PatchHunkLine::Context(value) | PatchHunkLine::Add(value) => Some(value.clone()),
+            PatchHunkLine::Context(value) => Some(value.text.clone()),
+            PatchHunkLine::Add(value) => Some(value.clone()),
             PatchHunkLine::Remove(_) => None,
         })
         .collect()
 }
 
-fn find_matches(lines: &[String], needle: &[String]) -> Vec<usize> {
+fn find_hashline_matches(lines: &[String], needle: &[HashLine]) -> Vec<usize> {
     if needle.is_empty() || needle.len() > lines.len() {
         return Vec::new();
     }
@@ -507,7 +433,13 @@ fn find_matches(lines: &[String], needle: &[String]) -> Vec<usize> {
     lines
         .windows(needle.len())
         .enumerate()
-        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .filter_map(|(index, window)| {
+            let matched = window
+                .iter()
+                .zip(needle.iter())
+                .all(|(line, expected)| line == &expected.text && line_hash(line) == expected.hash);
+            matched.then_some(index)
+        })
         .collect()
 }
 
@@ -516,9 +448,6 @@ async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> 
 
     for change in &plan.changes {
         let write_result = match (&change.operation, &change.bytes_after) {
-            (FileOperationKind::Add, Some(after)) => {
-                write_new_file(&change.target_path, after).await
-            }
             (FileOperationKind::Update, Some(after)) => {
                 tokio::fs::write(&change.target_path, after).await
             }
@@ -554,18 +483,6 @@ async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> 
     Ok(())
 }
 
-async fn write_new_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .await?;
-    file.write_all(content).await?;
-    file.sync_all().await
-}
-
 struct CompletedWrite {
     path: String,
     target_path: PathBuf,
@@ -579,16 +496,6 @@ async fn rollback_failed(backups: &[CompletedWrite]) -> Vec<PatchDiagnostic> {
 
     for backup in backups.iter().rev() {
         let rollback_result = match (&backup.operation, &backup.previous_bytes) {
-            (FileOperationKind::Add, None) => {
-                if tokio::fs::try_exists(&backup.target_path)
-                    .await
-                    .unwrap_or(false)
-                {
-                    tokio::fs::remove_file(&backup.target_path).await
-                } else {
-                    Ok(())
-                }
-            }
             (FileOperationKind::Update, Some(bytes)) | (FileOperationKind::Delete, Some(bytes)) => {
                 tokio::fs::write(&backup.target_path, bytes).await
             }
@@ -621,6 +528,7 @@ fn manifest(
     operation: FileOperationKind,
     before: Option<&[u8]>,
     after: Option<&[u8]>,
+    line_changes: Vec<LineChange>,
 ) -> ChangedFile {
     ChangedFile {
         path: path.to_string(),
@@ -631,7 +539,41 @@ fn manifest(
         lines_after: after.map_or(0, line_count),
         hash_before: before.map(content_hash),
         hash_after: after.map(content_hash),
+        line_changes,
     }
+}
+
+fn update_line_changes(hunks: &[PatchHunk]) -> Vec<LineChange> {
+    let mut changes = Vec::new();
+    for hunk in hunks {
+        for line in &hunk.lines {
+            match line {
+                PatchHunkLine::Remove(hashline) => changes.push(LineChange {
+                    kind: LineChangeKind::Removed,
+                    old_hash: Some(hashline.hash.clone()),
+                    new_hash: None,
+                }),
+                PatchHunkLine::Add(text) => changes.push(LineChange {
+                    kind: LineChangeKind::Added,
+                    old_hash: None,
+                    new_hash: Some(line_hash(text)),
+                }),
+                PatchHunkLine::Context(_) => {}
+            }
+        }
+    }
+    changes
+}
+
+fn delete_line_changes(before: &[u8]) -> Vec<LineChange> {
+    String::from_utf8_lossy(before)
+        .lines()
+        .map(|line| LineChange {
+            kind: LineChangeKind::Removed,
+            old_hash: Some(line_hash(line)),
+            new_hash: None,
+        })
+        .collect()
 }
 
 fn line_count(bytes: &[u8]) -> usize {
@@ -657,16 +599,7 @@ fn attempted_operations_from_headers(patch: &str) -> Vec<AttemptedOperation> {
     let mut current: Option<AttemptedOperation> = None;
 
     for line in patch.lines() {
-        if let Some(path) = line.strip_prefix("*** Add File:") {
-            push_current(&mut attempted, &mut current);
-            current = Some(AttemptedOperation {
-                index: attempted.len(),
-                path: path.trim().to_string(),
-                operation: FileOperationKind::Add,
-                old_hash: None,
-                hunk_count: 0,
-            });
-        } else if let Some(path) = line.strip_prefix("*** Update File:") {
+        if let Some(path) = line.strip_prefix("*** Update File:") {
             push_current(&mut attempted, &mut current);
             current = Some(AttemptedOperation {
                 index: attempted.len(),
@@ -715,6 +648,14 @@ mod tests {
 
     fn parse_envelope(envelope: &PatchResultEnvelope) -> serde_json::Value {
         serde_json::to_value(envelope).unwrap()
+    }
+
+    fn context(line: &str) -> String {
+        format!(" {}\t{}", line_hash(line), line)
+    }
+
+    fn remove(line: &str) -> String {
+        format!("-{}\t{}", line_hash(line), line)
     }
 
     #[tokio::test]
@@ -767,13 +708,14 @@ mod tests {
         let file = dir.path().join("sample.txt");
         std::fs::write(&file, "actual\n").unwrap();
         let stale_hash = hash("stale\n");
+        let actual = remove("actual");
         let patch = format!(
             "\
 *** Begin Patch
 *** Update File: sample.txt
 *** Old Hash: {stale_hash}
 @@
--actual
+{actual}
 +new
 *** End Patch"
         );
@@ -794,14 +736,16 @@ mod tests {
         let before = "same\nold\nsame\nold\n";
         std::fs::write(&file, before).unwrap();
         let old_hash = hash(before);
+        let same = context("same");
+        let old = remove("old");
         let patch = format!(
             "\
 *** Begin Patch
 *** Update File: sample.txt
 *** Old Hash: {old_hash}
 @@
- same
--old
+{same}
+{old}
 +new
 *** End Patch"
         );
@@ -835,6 +779,8 @@ mod tests {
         std::fs::write(&first, first_before).unwrap();
         std::fs::write(&second, second_before).unwrap();
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let first_old = remove("first old");
+        let second_old = remove("second old");
 
         let patch = format!(
             "\
@@ -842,12 +788,12 @@ mod tests {
 *** Update File: first.txt
 *** Old Hash: {}
 @@
--first old
+{first_old}
 +first new
 *** Update File: second.txt
 *** Old Hash: {}
 @@
--second old
+{second_old}
 +second new
 *** End Patch",
             hash(first_before),
@@ -873,19 +819,20 @@ mod tests {
         let delete_before = "remove me\n";
         std::fs::write(&update, update_before).unwrap();
         std::fs::write(&delete, delete_before).unwrap();
+        let alpha = context("alpha");
+        let old = remove("old");
+        let omega = context("omega");
 
         let patch = format!(
             "\
 *** Begin Patch
-*** Add File: added.txt
-+fresh
 *** Update File: update.txt
 *** Old Hash: {}
 @@
- alpha
--old
+{alpha}
+{old}
 +new
- omega
+{omega}
 *** Delete File: delete.txt
 *** Old Hash: {}
 *** End Patch",
@@ -897,18 +844,13 @@ mod tests {
         let value = parse_envelope(&result);
 
         assert!(result.ok);
-        assert_eq!(result.changed_files.len(), 3);
-        assert_eq!(value["changed_files"][0]["path"], "added.txt");
-        assert_eq!(value["changed_files"][0]["bytes_before"], 0);
-        assert!(value["changed_files"][1]["bytes_before"].as_u64().unwrap() > 0);
-        assert!(value["changed_files"][1]["bytes_after"].as_u64().unwrap() > 0);
+        assert_eq!(result.changed_files.len(), 2);
+        assert_eq!(value["changed_files"][0]["path"], "update.txt");
+        assert!(value["changed_files"][0]["bytes_before"].as_u64().unwrap() > 0);
+        assert!(value["changed_files"][0]["bytes_after"].as_u64().unwrap() > 0);
         assert_eq!(
             std::fs::read_to_string(update).unwrap(),
             "alpha\nnew\nomega\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("added.txt")).unwrap(),
-            "fresh\n"
         );
         assert!(!delete.exists());
     }
@@ -920,13 +862,14 @@ mod tests {
         let before = "actual\n";
         std::fs::write(&file, before).unwrap();
         let old_hash = hash(before);
+        let missing = remove("missing");
         let patch = format!(
             "\
 *** Begin Patch
 *** Update File: sample.txt
 *** Old Hash: {old_hash}
 @@
--missing
+{missing}
 +new
 *** End Patch"
         );
@@ -938,5 +881,43 @@ mod tests {
         assert!(result.changed_files.is_empty());
         assert_eq!(result.attempted_operations.len(), 1);
         assert_eq!(std::fs::read_to_string(file).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_engine_allows_full_file_replacement_with_hashline_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("schema.txt");
+        let before = "old one\nold two\n";
+        std::fs::write(&file, before).unwrap();
+        let old_hash = hash(before);
+        let old_one = remove("old one");
+        let old_two = remove("old two");
+        let patch = format!(
+            "\
+*** Begin Patch
+*** Update File: schema.txt
+*** Old Hash: {old_hash}
+@@
+{old_one}
+{old_two}
++new one
++new two
+*** End Patch"
+        );
+
+        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+
+        assert!(result.ok);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "new one\nnew two\n");
+        assert_eq!(result.changed_files.len(), 1);
+        assert_eq!(result.changed_files[0].line_changes.len(), 4);
+        assert!(result.changed_files[0]
+            .line_changes
+            .iter()
+            .any(|change| matches!(change.kind, LineChangeKind::Removed)));
+        assert!(result.changed_files[0]
+            .line_changes
+            .iter()
+            .any(|change| matches!(change.kind, LineChangeKind::Added)));
     }
 }

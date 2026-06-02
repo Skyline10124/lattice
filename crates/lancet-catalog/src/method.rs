@@ -51,6 +51,14 @@ impl MethodDescriptor {
 }
 
 fn params_schema<M: CepMethod>() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(M::Params))
-        .expect("schemars schema serializes to JSON")
+    let mut schema = serde_json::to_value(schemars::schema_for!(M::Params))
+        .expect("schemars schema serializes to JSON");
+    if let Some(obj) = schema.as_object_mut() {
+        let is_composite_object =
+            obj.contains_key("oneOf") || obj.contains_key("anyOf") || obj.contains_key("allOf");
+        if is_composite_object && !obj.contains_key("type") {
+            obj.insert("type".into(), serde_json::Value::String("object".into()));
+        }
+    }
+    schema
 }

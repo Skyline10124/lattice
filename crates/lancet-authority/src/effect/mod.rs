@@ -19,7 +19,10 @@ pub mod checker;
 pub mod ledger;
 pub mod region;
 
-pub use ledger::{AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect, ObservedScope};
+pub use ledger::{
+    AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect, ObservedLineChange,
+    ObservedLineChangeKind, ObservedScope,
+};
 pub use region::{AuthorizedEffectRegion, EffectiveEffect};
 
 #[cfg(test)]
@@ -51,5 +54,6 @@ pub(crate) fn shared_test_policy() -> crate::policy::CepPolicyConfig {
             max_todo_ops: 100,
         },
         command: CommandPolicy::defaults(),
+        denied_effect_kinds: Default::default(),
     }
 }

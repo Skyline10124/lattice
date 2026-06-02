@@ -65,10 +65,10 @@ fn setup_workspace() -> Workspace {
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
     let enabled = [
-        "workspace.read_file",
-        "command.run",
-        "envelope.declare",
-        "workspace.patch",
+        "observe.workspace",
+        "exec.command_run",
+        "session.envelope",
+        "mutate.patch",
     ];
     let toml_content = format!(
         r#"schema_version = 1
@@ -149,6 +149,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         extensions: serde_json::Map::new(),
     };
     let declare_args = serde_json::json!({
+        "mode": "declare",
         "envelope": envelope,
         "reason": "audit-turn"
     });
@@ -157,22 +158,22 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "c1",
-                "workspace.read_file",
-                r#"{"path":"src/lib.rs"}"#,
+                "observe.workspace",
+                r#"{"mode":"read_file","path":"src/lib.rs"}"#,
             ))
             .push_events(tool_call_events(
                 "c2",
-                "command.run",
+                "exec.command_run",
                 r#"{"argv":["echo","audit-turn"]}"#,
             ))
             .push_events(tool_call_events(
                 "c3",
-                "envelope.declare",
+                "session.envelope",
                 &declare_args.to_string(),
             ))
             .push_events(tool_call_events(
                 "c4",
-                "workspace.patch",
+                "mutate.patch",
                 &format!(
                     r#"{{"patch":{}}}"#,
                     serde_json::to_string(&patch_doc).unwrap()
@@ -243,14 +244,11 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         );
         let meta = row.metadata_json.as_deref();
         assert!(
-            metadata_has_capability(meta) || row.method == "envelope.declare",
+            metadata_has_capability(meta) || row.method == "session.envelope",
             "row {} missing capability metadata",
             row.method
         );
-        if matches!(
-            row.method.as_str(),
-            "workspace.patch" | "workspace.write_file"
-        ) {
+        if matches!(row.method.as_str(), "mutate.patch" | "mutate.create") {
             let parsed: Value = serde_json::from_str(meta.unwrap_or("{}")).unwrap_or(Value::Null);
             assert!(
                 parsed.get("envelope_id").is_some(),
@@ -281,7 +279,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
     let replay = client
         .call::<AuditReplay>(AuditReplayParams { turn_id })
         .await
-        .expect("audit.replay");
+        .expect("observe.audit_replay");
 
     assert_eq!(
         replay.trace.fragment.activities.len(),

@@ -318,16 +318,16 @@ async fn consistency_error_after_partial_token() {
 
 #[tokio::test]
 async fn consistency_tool_call_path() {
-    let ws = setup_workspace(&["workspace.read_file"]);
+    let ws = setup_workspace(&["observe.workspace"]);
 
     let round1_events = vec![
         LlmEvent::ToolCallStart {
             id: "call_1".to_string(),
-            name: "workspace.read_file".to_string(),
+            name: "observe.workspace".to_string(),
         },
         LlmEvent::ToolCallDelta {
             id: "call_1".to_string(),
-            arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+            arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
         },
         LlmEvent::ToolCallEnd {
             id: "call_1".to_string(),

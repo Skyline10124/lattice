@@ -57,9 +57,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_analyzer_end_to_end_write_file() {
+    fn test_analyzer_end_to_end_create() {
         let analyzer = ImpactAnalyzer::new();
-        let result = analyzer.analyze("workspace.write_file", "src/main.rs", None);
+        let result = analyzer.analyze("mutate.create", "src/main.rs", None);
         assert_eq!(
             result.impact.kind,
             lancet_protocol::envelope::ImpactKind::WorkspaceMutation
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn test_analyzer_end_to_end_grep_glob() {
         let analyzer = ImpactAnalyzer::new();
-        let result = analyzer.analyze("workspace.grep", "src/**/*.rs", None);
+        let result = analyzer.analyze("observe.workspace", "src/**/*.rs", None);
         assert_eq!(
             result.impact.kind,
             lancet_protocol::envelope::ImpactKind::WorkspaceObservation
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn test_analyzer_end_to_end_command_run() {
         let analyzer = ImpactAnalyzer::new();
-        let result = analyzer.analyze("command.run", "echo hello", None);
+        let result = analyzer.analyze("exec.command_run", "echo hello", None);
         assert_eq!(
             result.impact.kind,
             lancet_protocol::envelope::ImpactKind::CommandExecution

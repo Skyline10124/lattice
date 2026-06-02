@@ -98,7 +98,7 @@ fn validate_command_inputs(
     if argv.is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "command.run requires a non-empty argv",
+            "exec.command_run requires a non-empty argv",
             CepErrorData::Validation(ValidationErrorData {
                 field: "argv".into(),
                 reason: "must not be empty".into(),
@@ -109,7 +109,7 @@ fn validate_command_inputs(
     if argv[0].is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "command.run requires argv[0] to name an executable",
+            "exec.command_run requires argv[0] to name an executable",
             CepErrorData::Validation(ValidationErrorData {
                 field: "argv[0]".into(),
                 reason: "must not be empty".into(),
@@ -122,7 +122,7 @@ fn validate_command_inputs(
             return Err(CepError::new(
                 CepErrorCode::SchemaMismatch,
                 format!(
-                    "command.run argv[{index}] contains a NUL byte, which cannot be passed to exec"
+                    "exec.command_run argv[{index}] contains a NUL byte, which cannot be passed to exec"
                 ),
                 CepErrorData::Validation(ValidationErrorData {
                     field: format!("argv[{index}]"),
@@ -137,7 +137,7 @@ fn validate_command_inputs(
             return Err(CepError::new(
                 CepErrorCode::SchemaMismatch,
                 format!(
-                    "command.run env key '{key}' is invalid; keys must be non-empty and cannot contain '=' or NUL"
+                    "exec.command_run env key '{key}' is invalid; keys must be non-empty and cannot contain '=' or NUL"
                 ),
                 CepErrorData::Validation(ValidationErrorData {
                     field: format!("env.{key}"),
@@ -149,7 +149,7 @@ fn validate_command_inputs(
         if value.contains('\0') {
             return Err(CepError::new(
                 CepErrorCode::SchemaMismatch,
-                format!("command.run env value for '{key}' contains a NUL byte"),
+                format!("exec.command_run env value for '{key}' contains a NUL byte"),
                 CepErrorData::Validation(ValidationErrorData {
                     field: format!("env.{key}"),
                     reason: "value contains NUL byte".into(),
@@ -574,7 +574,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_leaked_child_processes_stress() {
-        // Stress test: 20 rapid command.run calls with mixed timeouts
+        // Stress test: 20 rapid exec.command_run calls with mixed timeouts
         for i in 0..20 {
             let policy = CommandPolicy::defaults();
             let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);

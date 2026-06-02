@@ -2,7 +2,9 @@
 
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
-use lancet_protocol::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
+use lancet_protocol::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +47,8 @@ impl CepMethod for TodoWrite {
         kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
         scope: EffectScopeKind::SessionState,
         capabilities: &[RequiredCapability::MutateSessionState],
+        overlay: OverlayBehavior::SessionState,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 

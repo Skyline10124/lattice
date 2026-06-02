@@ -98,7 +98,7 @@ pub fn validate_verify_command(
                 CepErrorCode::GuardDenied,
                 "verify command must be diagnostic/verification-class, not WorkspaceMutation",
                 CepErrorData::Guard(GuardErrorData {
-                    method: "envelope.declare".into(),
+                    method: "session.envelope".into(),
                     reason: "verify command classified as WorkspaceMutation".into(),
                 }),
                 Retriability::Permanent,
@@ -109,7 +109,7 @@ pub fn validate_verify_command(
                 CepErrorCode::GuardDenied,
                 "verify command is hard-denied by command policy",
                 CepErrorData::Guard(GuardErrorData {
-                    method: "envelope.declare".into(),
+                    method: "session.envelope".into(),
                     reason: "verify command classified as HardDenied".into(),
                 }),
                 Retriability::Permanent,
@@ -186,7 +186,7 @@ pub fn validate_verify_command(
 ///
 /// Uses command-runner safety machinery (timeout, kill/reap, output cap).
 /// Does NOT require a second active envelope.
-/// Does NOT route as normal LLM-issued command.run.
+/// Does NOT route as normal LLM-issued exec.command_run.
 /// Does NOT recursively trigger verify.
 pub async fn run_verify(
     spec: &VerifyCommandSpec,

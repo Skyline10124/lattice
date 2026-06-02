@@ -30,7 +30,7 @@ pub struct ResolvedPath {
     pub project_root: PathBuf,
 }
 
-/// Resolved command facts for `command.run`.
+/// Resolved command facts for `exec.command_run`.
 #[derive(Clone, Debug)]
 pub struct ResolvedCommand {
     pub argv: Vec<String>,
@@ -40,7 +40,7 @@ pub struct ResolvedCommand {
     pub effective_impact: EffectiveImpact,
 }
 
-/// Resolved network facts for `web.fetch`.
+/// Resolved network facts for `fetch.web`.
 #[derive(Clone, Debug)]
 pub struct ResolvedNetwork {
     pub url: String,
@@ -51,7 +51,7 @@ pub struct ResolvedNetwork {
     pub is_private_ip: bool,
 }
 
-/// Resolved session-state facts for `session.todo_write` / `envelope.declare`.
+/// Resolved session-state facts for `session.todo_write` / `session.envelope`.
 #[derive(Clone, Debug)]
 pub struct ResolvedSessionState {
     pub operation: super::capability::SessionStateOperation,
@@ -111,7 +111,7 @@ impl PolicyResolver {
     ) -> Result<ResolvedPolicyInput, lancet_protocol::CepError> {
         let descriptor = catalog()
             .iter()
-            .find(|d| d.name == input.method)
+            .find(|descriptor| descriptor.name == input.method)
             .ok_or_else(|| {
                 lancet_protocol::CepError::new(
                     lancet_protocol::CepErrorCode::SchemaMismatch,
@@ -127,7 +127,8 @@ impl PolicyResolver {
             })?;
 
         let impact_kind = descriptor.impact.clone();
-        let required_capability = descriptor.capability;
+        let required_capability =
+            required_capability_for_invocation(&input.method, &input.params, descriptor.capability);
 
         let mut invocation_facts = InvocationFacts::default();
         let mut resolved_target = None;
@@ -137,10 +138,21 @@ impl PolicyResolver {
         let mut resolved_session_state = None;
 
         match input.method.as_str() {
-            "workspace.read_file"
-            | "workspace.write_file"
-            | "workspace.list_directory"
-            | "workspace.find_files" => {
+            "observe.workspace" => {
+                if let Some(path) = extract_observe_workspace_path(&input.params) {
+                    let normalized = normalize_lexical_pure(&path)?;
+                    let canonical = self.project_root.join(&normalized);
+                    invocation_facts.path = Some(canonical.to_string_lossy().to_string());
+                    invocation_facts.normalized_path =
+                        Some(normalized.to_string_lossy().to_string());
+                    resolved_target = Some(ResolvedPath {
+                        request_path: path,
+                        normalized_path: normalized,
+                        project_root: self.project_root.clone(),
+                    });
+                }
+            }
+            "mutate.create" => {
                 if let Some(path) = extract_path_from_params(&input.params) {
                     let normalized = normalize_lexical_pure(&path)?;
                     let canonical = self.project_root.join(&normalized);
@@ -154,7 +166,7 @@ impl PolicyResolver {
                     });
                 }
             }
-            "workspace.patch" => {
+            "mutate.patch" => {
                 let all_targets = extract_all_patch_targets(&input.params);
                 invocation_facts.all_patch_targets = all_targets.clone();
                 if let Some(path) = all_targets.into_iter().next() {
@@ -170,21 +182,7 @@ impl PolicyResolver {
                     });
                 }
             }
-            "workspace.grep" => {
-                if let Some(path) = extract_optional_path_from_params(&input.params) {
-                    let normalized = normalize_lexical_pure(&path)?;
-                    let canonical = self.project_root.join(&normalized);
-                    invocation_facts.path = Some(canonical.to_string_lossy().to_string());
-                    invocation_facts.normalized_path =
-                        Some(normalized.to_string_lossy().to_string());
-                    resolved_target = Some(ResolvedPath {
-                        request_path: path,
-                        normalized_path: normalized,
-                        project_root: self.project_root.clone(),
-                    });
-                }
-            }
-            "command.run" => {
+            "exec.command_run" => {
                 let argv = extract_argv_from_params(&input.params);
                 let cwd_str = extract_cwd_from_params(&input.params);
                 let env_keys = extract_env_keys_from_params(&input.params);
@@ -215,7 +213,7 @@ impl PolicyResolver {
                     effective_impact,
                 });
             }
-            "web.fetch" => {
+            "fetch.web" => {
                 if let Some(url) = extract_url_from_params(&input.params) {
                     let (host, port, scheme, is_localhost, is_private_ip) = parse_url_facts(&url);
                     invocation_facts.host = Some(host.clone());
@@ -238,11 +236,11 @@ impl PolicyResolver {
                     todo_ops_count: todo_count,
                 });
             }
-            "envelope.declare" => {
+            "session.envelope" => {
                 invocation_facts.session_state_operation =
-                    Some(super::capability::SessionStateOperation::EnvelopeDeclare);
+                    Some(session_envelope_operation(&input.params));
                 resolved_session_state = Some(ResolvedSessionState {
-                    operation: super::capability::SessionStateOperation::EnvelopeDeclare,
+                    operation: session_envelope_operation(&input.params),
                     todo_ops_count: 0,
                 });
             }
@@ -267,6 +265,40 @@ impl PolicyResolver {
 }
 
 // ── Pure param extraction helpers ───────────────────────────────────────
+
+fn required_capability_for_invocation(
+    method: &str,
+    params: &serde_json::Value,
+    descriptor_capability: RequiredCapability,
+) -> RequiredCapability {
+    match method {
+        "observe.workspace" => match params.get("mode").and_then(|v| v.as_str()) {
+            Some("read_file") => RequiredCapability::ReadPath,
+            Some("grep" | "list_directory" | "find_files") => RequiredCapability::Inspect,
+            _ => descriptor_capability,
+        },
+        _ => descriptor_capability,
+    }
+}
+
+fn extract_observe_workspace_path(params: &serde_json::Value) -> Option<String> {
+    match params.get("mode").and_then(|v| v.as_str()) {
+        Some("read_file") | Some("list_directory") => extract_path_from_params(params),
+        Some("grep") | Some("find_files") => {
+            extract_optional_path_from_params(params).or_else(|| Some(".".to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn session_envelope_operation(
+    params: &serde_json::Value,
+) -> super::capability::SessionStateOperation {
+    match params.get("mode").and_then(|v| v.as_str()) {
+        Some("derive_intent") => super::capability::SessionStateOperation::SubmitIntent,
+        _ => super::capability::SessionStateOperation::EnvelopeDeclare,
+    }
+}
 
 fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
     params.get("path")?.as_str().map(String::from)
@@ -452,13 +484,13 @@ mod tests {
     fn resolve_workspace_read_file_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "src/main.rs"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(resolved.method, "workspace.read_file");
+        assert_eq!(resolved.method, "observe.workspace");
         assert_eq!(resolved.required_capability, RequiredCapability::ReadPath);
         assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceObservation);
         let target = resolved.resolved_target.unwrap();
@@ -467,10 +499,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_write_file_extracts_path() {
+    fn resolve_workspace_create_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.write_file".into(),
+            method: "mutate.create".into(),
             params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
@@ -485,7 +517,7 @@ mod tests {
     fn resolve_workspace_patch_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.patch".into(),
+            method: "mutate.patch".into(),
             params: json!({"patch": "*** Begin Patch\n*** Update File: src/main.rs\n*** Old Hash: blake3:0000000000000000000000000000000000000000000000000000000000000000\n@@\n-old\n+new\n*** End Patch"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
@@ -502,8 +534,8 @@ mod tests {
     fn resolve_workspace_grep_extracts_optional_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.grep".into(),
-            params: json!({"pattern": "fn main", "path": "src/"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "grep", "pattern": "fn main", "path": "src/"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };
@@ -516,8 +548,8 @@ mod tests {
     fn resolve_workspace_list_directory_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.list_directory".into(),
-            params: json!({"path": "src/"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "list_directory", "path": "src/"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };
@@ -530,8 +562,8 @@ mod tests {
     fn resolve_workspace_find_files_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.find_files".into(),
-            params: json!({"pattern": "*.rs", "path": "src/"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "find_files", "pattern": "*.rs", "path": "src/"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };
@@ -543,7 +575,7 @@ mod tests {
     fn resolve_command_run_extracts_argv_cwd_env() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             params: json!({
                 "argv": ["cargo", "test"],
                 "cwd": "/home/user/project",
@@ -566,7 +598,7 @@ mod tests {
     fn resolve_web_fetch_extracts_url_facts() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "web.fetch".into(),
+            method: "fetch.web".into(),
             params: json!({"url": "https://example.com/page"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
@@ -608,8 +640,9 @@ mod tests {
     fn resolve_envelope_declare_identifies_operation() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "envelope.declare".into(),
+            method: "session.envelope".into(),
             params: json!({
+                "mode": "declare",
                 "envelope": {
                     "intent": {"description": "test"},
                     "capabilities": [],
@@ -650,8 +683,8 @@ mod tests {
     fn resolve_path_traversal_rejected() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "../etc/passwd"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "../etc/passwd"}),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };

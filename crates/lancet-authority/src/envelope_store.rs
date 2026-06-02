@@ -84,7 +84,7 @@ impl ActiveEnvelopeStore {
                 CepErrorCode::EnvelopeAlreadyActive,
                 "an active envelope already exists; use supersede=true to replace it",
                 CepErrorData::Guard(GuardErrorData {
-                    method: "envelope.declare".into(),
+                    method: "session.envelope".into(),
                     reason: "envelope already active".into(),
                 }),
                 Retriability::Permanent,

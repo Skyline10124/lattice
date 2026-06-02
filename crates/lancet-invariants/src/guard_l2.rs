@@ -182,7 +182,7 @@ pub fn check_l2(
 
 pub fn l2_status_for_method(method: &str) -> L2Status {
     match method {
-        "workspace.write_file" | "workspace.patch" => {
+        "mutate.create" | "mutate.patch" => {
             // Caller invokes check_l2; this just gates applicability
             L2Status::Covered { categories: vec![] }
         }
@@ -297,13 +297,13 @@ mod tests {
 
     #[test]
     fn test_l2_status_for_non_mutation_method() {
-        let status = l2_status_for_method("workspace.read_file");
+        let status = l2_status_for_method("observe.workspace");
         assert!(matches!(status, L2Status::NotImplemented { .. }));
     }
 
     #[test]
     fn test_l2_status_for_mutation_method() {
-        let status = l2_status_for_method("workspace.write_file");
+        let status = l2_status_for_method("mutate.create");
         assert!(matches!(status, L2Status::Covered { .. }));
     }
 }

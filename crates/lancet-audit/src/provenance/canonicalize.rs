@@ -75,7 +75,7 @@ mod tests {
         let fragment = ProvGraphFragment {
             activities: vec![ProvActivity {
                 id: "activity:1".into(),
-                method: "workspace.read_file".into(),
+                method: "observe.workspace".into(),
                 impact_kind: ImpactKind::WorkspaceObservation,
                 started_at: Some("111".into()),
                 ended_at: Some("222".into()),
@@ -101,7 +101,7 @@ mod tests {
             calls: vec![TurnCallSummary {
                 audit_id: 1,
                 call_id: "1".into(),
-                method: "workspace.read_file".into(),
+                method: "observe.workspace".into(),
                 impact_kind: ImpactKind::WorkspaceObservation,
                 envelope_id: None,
                 outcome_summary: None,

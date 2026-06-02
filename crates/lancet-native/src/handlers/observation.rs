@@ -13,49 +13,81 @@ use crate::policy::CepPolicyConfig;
 use crate::registry::{HandlerContext, MethodRegistry};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
-    DirectoryEntry, DirectoryEntryKind, FindFiles, FindFilesParams, FindFilesResult, Grep,
-    GrepMatch, GrepParams, GrepResult, ListDirectory, ListDirectoryParams, ListDirectoryResult,
-    ReadFile, ReadFileParams, ReadFileResult,
+    DirectoryEntry, DirectoryEntryKind, FindFilesParams, FindFilesResult, GrepMatch, GrepParams,
+    GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace, ObserveWorkspaceParams,
+    ObserveWorkspaceResult, ReadFileParams, ReadFileResult,
 };
 use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::json;
 
 const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
 
-/// Register `workspace.read_file`, `workspace.grep`, `workspace.list_directory`, and `workspace.find_files`.
+/// Register the native `observe.workspace` handler.
 pub fn register_workspace_observation_methods(
     registry: &mut MethodRegistry,
 ) -> Result<(), lancet_protocol::CepError> {
-    registry.register_method::<ReadFile, _, _>(handle_read_file)?;
-    registry.register_method::<Grep, _, _>(handle_grep)?;
-    registry.register_method::<ListDirectory, _, _>(handle_list_directory)?;
-    registry.register_method::<FindFiles, _, _>(handle_find_files)?;
+    registry.register_method::<ObserveWorkspace, _, _>(handle_observe_workspace)?;
     Ok(())
 }
 
-async fn handle_read_file(
+async fn handle_observe_workspace(
+    params: ObserveWorkspaceParams,
+    ctx: HandlerContext,
+) -> Result<ObserveWorkspaceResult, CepError> {
+    match params {
+        ObserveWorkspaceParams::ReadFile(params) => {
+            let policy_params = ObserveWorkspaceParams::ReadFile(params.clone());
+            handle_read_file_as(params, ctx, ObserveWorkspace::NAME, &policy_params)
+                .await
+                .map(ObserveWorkspaceResult::ReadFile)
+        }
+        ObserveWorkspaceParams::Grep(params) => {
+            let policy_params = ObserveWorkspaceParams::Grep(params.clone());
+            handle_grep_as(params, ctx, ObserveWorkspace::NAME, &policy_params)
+                .await
+                .map(ObserveWorkspaceResult::Grep)
+        }
+        ObserveWorkspaceParams::ListDirectory(params) => {
+            let policy_params = ObserveWorkspaceParams::ListDirectory(params.clone());
+            handle_list_directory_as(params, ctx, ObserveWorkspace::NAME, &policy_params)
+                .await
+                .map(ObserveWorkspaceResult::ListDirectory)
+        }
+        ObserveWorkspaceParams::FindFiles(params) => {
+            let policy_params = ObserveWorkspaceParams::FindFiles(params.clone());
+            handle_find_files_as(params, ctx, ObserveWorkspace::NAME, &policy_params)
+                .await
+                .map(ObserveWorkspaceResult::FindFiles)
+        }
+    }
+}
+
+async fn handle_read_file_as(
     params: ReadFileParams,
     ctx: HandlerContext,
+    method: &'static str,
+    policy_params: &impl Serialize,
 ) -> Result<ReadFileResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, ReadFile::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
     let policy = &ctx.cep_context.policy;
     let target = match resolve_observation_target(policy, &params.path).await {
         Ok(t) => t,
         Err(err) => {
-            emit_denial_metadata(&ctx, ReadFile::NAME, "cep_policy", false).await;
+            emit_denial_metadata(&ctx, method, "cep_policy", false).await;
             return Err(err);
         }
     };
     #[cfg(test)]
     if let Some(err) = crate::policy::observation::check_backend_safety_net(&params.path) {
-        emit_denial_metadata(&ctx, ReadFile::NAME, "backend_safety_net", true).await;
+        emit_denial_metadata(&ctx, method, "backend_safety_net", true).await;
         return Err(err);
     }
 
@@ -104,7 +136,7 @@ async fn handle_read_file(
 
     emit_success_metadata(
         &ctx,
-        ReadFile::NAME,
+        method,
         &target,
         json!({
             "observation_source": "workspace",
@@ -124,22 +156,28 @@ async fn handle_read_file(
     })
 }
 
-async fn handle_grep(params: GrepParams, ctx: HandlerContext) -> Result<GrepResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, Grep::NAME, &params).await?;
-
+async fn handle_grep_as(
+    params: GrepParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    policy_params: &impl Serialize,
+) -> Result<GrepResult, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
     let path = params.path.clone().unwrap_or_else(|| ".".into());
-    run_grep(params, ctx, &path).await
+    run_grep(params, ctx, &path, method).await
 }
 
-async fn handle_list_directory(
+async fn handle_list_directory_as(
     params: ListDirectoryParams,
     ctx: HandlerContext,
+    method: &'static str,
+    policy_params: &impl Serialize,
 ) -> Result<ListDirectoryResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, ListDirectory::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
     let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, &params.path, ListDirectory::NAME, &ctx).await?;
-    backend_or_continue(&params.path, ListDirectory::NAME, &ctx).await?;
+    let target = resolve_target_or_deny(policy, &params.path, method, &ctx).await?;
+    backend_or_continue(&params.path, method, &ctx).await?;
 
     let limit = params
         .limit
@@ -170,7 +208,7 @@ async fn handle_list_directory(
 
     emit_success_metadata(
         &ctx,
-        ListDirectory::NAME,
+        method,
         &target,
         json!({
             "observation_source": "workspace",
@@ -189,16 +227,18 @@ async fn handle_list_directory(
     })
 }
 
-async fn handle_find_files(
+async fn handle_find_files_as(
     params: FindFilesParams,
     ctx: HandlerContext,
+    method: &'static str,
+    policy_params: &impl Serialize,
 ) -> Result<FindFilesResult, CepError> {
     let path = params.path.as_deref().unwrap_or(".");
-    let _evaluation = evaluate_and_enforce_policy(&ctx, FindFiles::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
     let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, path, FindFiles::NAME, &ctx).await?;
-    backend_or_continue(path, FindFiles::NAME, &ctx).await?;
+    let target = resolve_target_or_deny(policy, path, method, &ctx).await?;
+    backend_or_continue(path, method, &ctx).await?;
 
     let limit = params
         .limit
@@ -226,7 +266,7 @@ async fn handle_find_files(
 
     emit_success_metadata(
         &ctx,
-        FindFiles::NAME,
+        method,
         &target,
         json!({
             "observation_source": "workspace",
@@ -250,10 +290,11 @@ async fn run_grep(
     params: GrepParams,
     ctx: HandlerContext,
     path: &str,
+    method: &'static str,
 ) -> Result<GrepResult, CepError> {
     let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, path, Grep::NAME, &ctx).await?;
-    backend_or_continue(path, Grep::NAME, &ctx).await?;
+    let target = resolve_target_or_deny(policy, path, method, &ctx).await?;
+    backend_or_continue(path, method, &ctx).await?;
 
     let re = Regex::new(&params.pattern).map_err(|e| {
         CepError::new(
@@ -297,7 +338,7 @@ async fn run_grep(
 
     emit_success_metadata(
         &ctx,
-        Grep::NAME,
+        method,
         &target,
         json!({
             "observation_source": "workspace",
@@ -763,6 +804,7 @@ mod tests {
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
             project_root: cep_context.policy.project_root.clone(),
+            denied_effect_kinds: Default::default(),
         };
         let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
         let mut base = BaseExecutionEnvelope::for_workspace_root(envelope_root, "native obs test");
@@ -815,6 +857,78 @@ mod tests {
         CepTurnContext::from_policy(policy)
     }
 
+    async fn dispatch_read_file(
+        registry: &MethodRegistry,
+        params: ReadFileParams,
+        ctx: HandlerContext,
+    ) -> Result<ReadFileResult, CepError> {
+        let value = registry
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::ReadFile(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(value).unwrap() {
+            ObserveWorkspaceResult::ReadFile(result) => Ok(result),
+            other => panic!("unexpected observe.workspace result: {other:?}"),
+        }
+    }
+
+    async fn dispatch_grep(
+        registry: &MethodRegistry,
+        params: GrepParams,
+        ctx: HandlerContext,
+    ) -> Result<GrepResult, CepError> {
+        let value = registry
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::Grep(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(value).unwrap() {
+            ObserveWorkspaceResult::Grep(result) => Ok(result),
+            other => panic!("unexpected observe.workspace result: {other:?}"),
+        }
+    }
+
+    async fn dispatch_list_directory(
+        registry: &MethodRegistry,
+        params: ListDirectoryParams,
+        ctx: HandlerContext,
+    ) -> Result<ListDirectoryResult, CepError> {
+        let value = registry
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::ListDirectory(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(value).unwrap() {
+            ObserveWorkspaceResult::ListDirectory(result) => Ok(result),
+            other => panic!("unexpected observe.workspace result: {other:?}"),
+        }
+    }
+
+    async fn dispatch_find_files(
+        registry: &MethodRegistry,
+        params: FindFilesParams,
+        ctx: HandlerContext,
+    ) -> Result<FindFilesResult, CepError> {
+        let value = registry
+            .dispatch(
+                ObserveWorkspace::NAME,
+                serde_json::to_value(ObserveWorkspaceParams::FindFiles(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(value).unwrap() {
+            ObserveWorkspaceResult::FindFiles(result) => Ok(result),
+            other => panic!("unexpected observe.workspace result: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn native_read_file_returns_typed_content_and_hash() {
         let dir = TempDir::new().unwrap();
@@ -829,11 +943,7 @@ mod tests {
             limit: Some(10),
             line_numbers: Some(false),
         };
-        let result = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: ReadFileResult = serde_json::from_value(result).unwrap();
+        let parsed = dispatch_read_file(&registry, params, ctx).await.unwrap();
         assert!(parsed.content.contains("hello"));
         assert!(parsed.content_hash.as_ref().unwrap().starts_with("blake3:"));
     }
@@ -851,8 +961,7 @@ mod tests {
             limit: None,
             line_numbers: None,
         };
-        let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        let err = dispatch_read_file(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
@@ -903,8 +1012,7 @@ mod tests {
             limit: None,
             line_numbers: None,
         };
-        let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        let err = dispatch_read_file(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
@@ -952,8 +1060,7 @@ mod tests {
             limit: None,
             line_numbers: None,
         };
-        let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        let err = dispatch_read_file(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
@@ -973,8 +1080,7 @@ mod tests {
             limit: None,
             line_numbers: None,
         };
-        let err = registry
-            .dispatch(ReadFile::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        let err = dispatch_read_file(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ProjectRootViolation);
@@ -1001,10 +1107,7 @@ mod tests {
             path: Some("../outside".into()),
             max_results: None,
         };
-        let err = registry
-            .dispatch(Grep::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
+        let err = dispatch_grep(&registry, params, ctx).await.unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
         let event = events.recv().await.unwrap();
         assert_eq!(event.method, "cep.guard_verdict");
@@ -1022,10 +1125,7 @@ mod tests {
             path: Some(".".into()),
             max_results: None,
         };
-        let err = registry
-            .dispatch(Grep::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
+        let err = dispatch_grep(&registry, params, ctx).await.unwrap_err();
         assert_eq!(err.code, CepErrorCode::TypeError);
     }
 
@@ -1044,30 +1144,18 @@ mod tests {
             path: Some(".".into()),
             max_results: Some(10),
         };
-        let grep_val = registry
-            .dispatch(
-                Grep::NAME,
-                serde_json::to_value(&grep_params).unwrap(),
-                ctx.clone(),
-            )
+        let grep = dispatch_grep(&registry, grep_params, ctx.clone())
             .await
             .unwrap();
-        let grep: GrepResult = serde_json::from_value(grep_val).unwrap();
         assert!(!grep.matches.is_empty());
 
         let list_params = ListDirectoryParams {
             path: ".".into(),
             limit: Some(50),
         };
-        let list_val = registry
-            .dispatch(
-                ListDirectory::NAME,
-                serde_json::to_value(&list_params).unwrap(),
-                ctx.clone(),
-            )
+        let list = dispatch_list_directory(&registry, list_params, ctx.clone())
             .await
             .unwrap();
-        let list: ListDirectoryResult = serde_json::from_value(list_val).unwrap();
         assert!(!list.entries.is_empty());
 
         let find_params = FindFilesParams {
@@ -1075,15 +1163,9 @@ mod tests {
             path: Some(".".into()),
             limit: Some(10),
         };
-        let find_val = registry
-            .dispatch(
-                FindFiles::NAME,
-                serde_json::to_value(&find_params).unwrap(),
-                ctx,
-            )
+        let find = dispatch_find_files(&registry, find_params, ctx)
             .await
             .unwrap();
-        let find: FindFilesResult = serde_json::from_value(find_val).unwrap();
         assert!(!find.paths.is_empty());
     }
 
@@ -1105,15 +1187,9 @@ mod tests {
             path: Some("src".into()),
             max_results: Some(10),
         };
-        let grep_val = registry
-            .dispatch(
-                Grep::NAME,
-                serde_json::to_value(&grep_params).unwrap(),
-                ctx.clone(),
-            )
+        let grep = dispatch_grep(&registry, grep_params, ctx.clone())
             .await
             .unwrap();
-        let grep: GrepResult = serde_json::from_value(grep_val).unwrap();
         assert_eq!(grep.matches.len(), 1);
         assert_eq!(grep.matches[0].path, "allowed.txt");
 
@@ -1150,12 +1226,7 @@ mod tests {
             limit: None,
             line_numbers: None,
         };
-        let read_err = registry
-            .dispatch(
-                ReadFile::NAME,
-                serde_json::to_value(&read_params).unwrap(),
-                ctx.clone(),
-            )
+        let read_err = dispatch_read_file(&registry, read_params, ctx.clone())
             .await
             .unwrap_err();
         assert_eq!(read_err.code, CepErrorCode::ProjectRootViolation);
@@ -1165,15 +1236,9 @@ mod tests {
             path: Some("src".into()),
             max_results: Some(10),
         };
-        let grep_val = registry
-            .dispatch(
-                Grep::NAME,
-                serde_json::to_value(&grep_params).unwrap(),
-                ctx.clone(),
-            )
+        let grep = dispatch_grep(&registry, grep_params, ctx.clone())
             .await
             .unwrap();
-        let grep: GrepResult = serde_json::from_value(grep_val).unwrap();
         assert_eq!(grep.matches.len(), 1);
         assert_eq!(grep.matches[0].path, "allowed.txt");
         assert_eq!(grep.matches[0].text, "SECRET_ALLOWED=yes");
@@ -1183,15 +1248,9 @@ mod tests {
             path: Some("src".into()),
             limit: Some(10),
         };
-        let find_val = registry
-            .dispatch(
-                FindFiles::NAME,
-                serde_json::to_value(&find_params).unwrap(),
-                ctx,
-            )
+        let find = dispatch_find_files(&registry, find_params, ctx)
             .await
             .unwrap();
-        let find: FindFilesResult = serde_json::from_value(find_val).unwrap();
         assert!(find.paths.is_empty(), "unexpected paths: {:?}", find.paths);
     }
 
@@ -1206,12 +1265,7 @@ mod tests {
             path: "../outside".into(),
             limit: None,
         };
-        let err = registry
-            .dispatch(
-                ListDirectory::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx,
-            )
+        let err = dispatch_list_directory(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
@@ -1262,11 +1316,7 @@ mod tests {
             path: Some(".".into()),
             max_results: None,
         };
-        let val = registry
-            .dispatch(Grep::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let grep: GrepResult = serde_json::from_value(val).unwrap();
+        let grep = dispatch_grep(&registry, params, ctx).await.unwrap();
         assert_eq!(grep.matches.len(), 2);
         assert_eq!(grep.truncated, Some(true));
     }

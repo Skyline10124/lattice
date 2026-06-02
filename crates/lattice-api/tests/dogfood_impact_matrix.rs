@@ -10,7 +10,7 @@
 //! 2. Execute the representative method via [`CepClient`] typed calls.
 //! 3. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
-//! 4. Verify that all rows share one `turn_id` before calling `audit.replay`.
+//! 4. Verify that all rows share one `turn_id` before calling `observe.audit_replay`.
 //! 5. Assert PROV `activities` order and `wasInformedBy` chain from replay.
 
 use std::collections::BTreeSet;
@@ -20,10 +20,13 @@ use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
 use lancet_catalog::methods::command::{Run, RunParams};
-use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams, EnvelopeResult};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
-use lancet_catalog::methods::workspace::{Patch, PatchParams, ReadFile, ReadFileParams};
+use lancet_catalog::methods::workspace::{
+    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, Patch, PatchParams,
+    ReadFileParams,
+};
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
@@ -110,14 +113,15 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let canonical = std::fs::canonicalize(root).expect("canonicalize root");
     let canonical_str = canonical.to_str().unwrap();
 
-    // Compute blake3 hash for workspace.patch
+    // Compute blake3 hash for mutate.patch
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
+    let seed_line_hash = format!("blake3:{}", blake3::hash("hello dog04".as_bytes()).to_hex());
     let patch_doc = format!(
         "*** Begin Patch\n\
          *** Update File: src/dog04.txt\n\
          *** Old Hash: {file_hash}\n\
          @@\n\
-         -hello dog04\n\
+         -{seed_line_hash}\thello dog04\n\
          +hello dog04 patched\n\
          *** End Patch\n"
     );
@@ -146,16 +150,19 @@ async fn dogfood_impact_matrix_five_production_classes() {
     });
     tokio::task::yield_now().await;
 
-    // Row 1 — WorkspaceObservation: workspace.read_file
+    // Row 1 — WorkspaceObservation: observe.workspace read_file
     let read_result = client1
-        .call::<ReadFile>(ReadFileParams {
+        .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: "src/dog04.txt".into(),
             offset: None,
             limit: None,
             line_numbers: None,
-        })
+        }))
         .await
-        .expect("workspace.read_file");
+        .expect("observe.workspace read_file");
+    let ObserveWorkspaceResult::ReadFile(read_result) = read_result else {
+        panic!("observe.workspace returned non-read_file result");
+    };
     assert!(
         read_result.content.contains("hello dog04"),
         "read_file returned unexpected content: {:?}",
@@ -165,7 +172,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     // Declare envelope for CommandExecution (RunCommand requires Declared source).
     let run_envelope = ExecutionEnvelope {
         intent: Intent {
-            description: "dog04 command.run".into(),
+            description: "dog04 exec.command_run".into(),
         },
         capabilities: BTreeSet::from([Capability::RunCommand {
             argv_allowlist: vec!["echo".into()],
@@ -178,16 +185,19 @@ async fn dogfood_impact_matrix_five_production_classes() {
         extensions: serde_json::Map::new(),
     };
     let declare_run = client1
-        .call::<Declare>(DeclareParams {
+        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
             envelope: run_envelope,
             supersede: false,
             reason: Some("dog04 RunCommand".into()),
-        })
+        }))
         .await
-        .expect("envelope.declare for command.run");
+        .expect("session.envelope for exec.command_run");
+    let EnvelopeResult::Declare(declare_run) = declare_run else {
+        panic!("session.envelope returned non-declare result");
+    };
     assert!(declare_run.accepted, "RunCommand envelope must be accepted");
 
-    // Row 2 — CommandExecution: command.run echo
+    // Row 2 — CommandExecution: exec.command_run echo
     let run_result = client1
         .call::<Run>(RunParams {
             argv: vec!["echo".into(), "dog-impact-matrix".into()],
@@ -197,17 +207,17 @@ async fn dogfood_impact_matrix_five_production_classes() {
             declared_impact: Some(ImpactKind::CommandExecution),
         })
         .await
-        .expect("command.run");
+        .expect("exec.command_run");
     assert_eq!(run_result.exit_code, 0);
     assert!(
         run_result.stdout.contains("dog-impact-matrix"),
-        "command.run stdout must contain dog-impact-matrix"
+        "exec.command_run stdout must contain dog-impact-matrix"
     );
 
     // Declare envelope for WorkspaceMutation (WritePath requires Declared source).
     let write_envelope = ExecutionEnvelope {
         intent: Intent {
-            description: "dog04 workspace.patch".into(),
+            description: "dog04 mutate.patch".into(),
         },
         capabilities: BTreeSet::from([Capability::WritePath {
             path_pattern: "src/**".into(),
@@ -220,43 +230,46 @@ async fn dogfood_impact_matrix_five_production_classes() {
         extensions: serde_json::Map::new(),
     };
     let declare_write = client1
-        .call::<Declare>(DeclareParams {
+        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
             envelope: write_envelope,
             supersede: true, // supersede the RunCommand envelope
             reason: Some("dog04 WritePath".into()),
-        })
+        }))
         .await
-        .expect("envelope.declare for workspace.patch");
+        .expect("session.envelope for mutate.patch");
+    let EnvelopeResult::Declare(declare_write) = declare_write else {
+        panic!("session.envelope returned non-declare result");
+    };
     assert!(
         declare_write.accepted,
         "WritePath envelope must be accepted"
     );
 
-    // Row 3 — WorkspaceMutation: workspace.patch
+    // Row 3 — WorkspaceMutation: mutate.patch
     let patch_result = client1
         .call::<Patch>(PatchParams {
             patch: patch_doc.clone(),
         })
         .await
-        .expect("workspace.patch");
+        .expect("mutate.patch");
     assert_eq!(
         patch_result.changed_files.len(),
         1,
         "patch must change 1 file"
     );
 
-    // Row 4 — ExternalObservation: web.fetch (localhost echo server)
+    // Row 4 — ExternalObservation: fetch.web (localhost echo server)
     let fetch_result = client1
         .call::<Fetch>(FetchParams {
             url: fetch_url.clone(),
             headers: Default::default(),
         })
         .await
-        .expect("web.fetch");
+        .expect("fetch.web");
     assert_eq!(fetch_result.status, 200);
     assert_eq!(
         fetch_result.body, "dog04-fetch-body",
-        "web.fetch body must match echo server"
+        "fetch.web body must match echo server"
     );
 
     // Row 5 — SessionStateMutation: session.todo_write
@@ -278,7 +291,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // ── Step 2: assert audit rows ──────────────────────────────────────
 
-    // All rows (tool calls + envelope.declare calls) share the fixed turn_id.
+    // All rows (tool calls + session.envelope calls) share the fixed turn_id.
     let all_rows = audit
         .query_rows(&lancet_native::AuditQueryFilters {
             session_id: Some(FIXED_SESSION_ID.to_string()),
@@ -308,10 +321,10 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // Filter to the five representative impact-class rows (exclude envelope.declare rows).
+    // Filter to the five representative impact-class rows (exclude session.envelope rows).
     let impact_rows: Vec<_> = all_rows
         .iter()
-        .filter(|r| r.method != "envelope.declare")
+        .filter(|r| r.method != "session.envelope")
         .collect();
 
     assert_eq!(
@@ -329,10 +342,10 @@ async fn dogfood_impact_matrix_five_production_classes() {
         .collect();
 
     for (expected_impact, expected_method) in [
-        ("workspace_observation", "workspace.read_file"),
-        ("command_execution", "command.run"),
-        ("workspace_mutation", "workspace.patch"),
-        ("external_observation", "web.fetch"),
+        ("workspace_observation", "observe.workspace"),
+        ("command_execution", "exec.command_run"),
+        ("workspace_mutation", "mutate.patch"),
+        ("external_observation", "fetch.web"),
         ("session_state_mutation", "session.todo_write"),
     ] {
         let method = methods_by_impact
@@ -367,7 +380,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // ── Step 3: audit.replay PROV assertions ──────────────────────────
+    // ── Step 3: observe.audit_replay PROV assertions ───────────────────
 
     // Build a fresh server on the same audit store with ReadAudit cap for replay.
     let mut replay_registry = MethodRegistry::new();
@@ -404,12 +417,12 @@ async fn dogfood_impact_matrix_five_production_classes() {
             turn_id: FIXED_TURN_ID.to_string(),
         })
         .await
-        .expect("audit.replay");
+        .expect("observe.audit_replay");
 
     drop(replay_client);
     replay_task.abort();
 
-    // The trace covers ALL rows (5 impact rows + 2 envelope.declare rows = 7 total).
+    // The trace covers ALL rows (5 impact rows + 2 session.envelope rows = 7 total).
     let trace = &replay_result.trace;
     assert_eq!(
         trace.turn_id, FIXED_TURN_ID,

@@ -1,4 +1,4 @@
-//! Native CEP `web.fetch` CEP handler.
+//! Native CEP `fetch.web` CEP handler.
 
 use std::sync::OnceLock;
 
@@ -24,26 +24,32 @@ fn shared_http_client() -> &'static reqwest::Client {
             .redirect(Policy::none())
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .expect("native web.fetch http client")
+            .expect("native fetch.web http client")
     })
 }
 
-/// Register native `web.fetch`.
+/// Register native `fetch.web`.
 pub fn register_external_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    registry.register_method::<Fetch, _, _>(handle_web_fetch)
+    registry.register_method::<Fetch, _, _>(handle_fetch)?;
+    Ok(())
 }
 
-async fn handle_web_fetch(
+async fn handle_fetch(params: FetchParams, ctx: HandlerContext) -> Result<FetchResult, CepError> {
+    handle_fetch_as(params, ctx, Fetch::NAME).await
+}
+
+async fn handle_fetch_as(
     params: FetchParams,
     ctx: HandlerContext,
+    method: &'static str,
 ) -> Result<FetchResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, Fetch::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
 
     let policy = &ctx.cep_context.policy.network;
     let validated = match validate_fetch_url(&params.url, policy) {
         Ok(v) => v,
         Err(err) => {
-            emit_denial_metadata(&ctx, &params.url, false).await;
+            emit_denial_metadata(&ctx, &params.url, false, method).await;
             return Err(err);
         }
     };
@@ -61,7 +67,7 @@ async fn handle_web_fetch(
     {
         Ok(o) => o,
         Err(message) => {
-            emit_denial_metadata(&ctx, &params.url, true).await;
+            emit_denial_metadata(&ctx, &params.url, true, method).await;
             return Err(http_execution_error(message));
         }
     };
@@ -72,7 +78,7 @@ async fn handle_web_fetch(
         .budget
         .try_charge_observation(bytes_returned)
     {
-        emit_budget_denial_metadata(&ctx, &params.url, &budget_err).await;
+        emit_budget_denial_metadata(&ctx, &params.url, &budget_err, method).await;
         return Err(budget_err.to_cep_error());
     }
 
@@ -91,6 +97,7 @@ async fn handle_web_fetch(
         bytes_returned,
         outcome.response_size_known,
         outcome.truncated,
+        method,
     )
     .await;
 
@@ -107,7 +114,7 @@ fn http_execution_error(message: String) -> CepError {
         CepErrorCode::ExecutionFailed,
         message.clone(),
         CepErrorData::Execution(ExecutionErrorData {
-            command: "web.fetch".into(),
+            command: Fetch::NAME.into(),
             exit_code: None,
             stderr: Some(message),
         }),
@@ -122,9 +129,10 @@ async fn emit_success_metadata(
     bytes_returned: usize,
     response_size_known: bool,
     truncated: bool,
+    method: &'static str,
 ) {
     let metadata = json!({
-        "method": Fetch::NAME,
+        "method": method,
         "request_url": request_url,
         "observation_source": "external",
         "response_size": response_size,
@@ -139,14 +147,19 @@ async fn emit_success_metadata(
     ctx.events
         .emit(
             "cep.native_external_metadata",
-            json!({ "method": Fetch::NAME, "metadata": metadata }),
+            json!({ "method": method, "metadata": metadata }),
         )
         .await;
 }
 
-async fn emit_denial_metadata(ctx: &HandlerContext, request_url: &str, backend_invoked: bool) {
+async fn emit_denial_metadata(
+    ctx: &HandlerContext,
+    request_url: &str,
+    backend_invoked: bool,
+    method: &'static str,
+) {
     let metadata = json!({
-        "method": Fetch::NAME,
+        "method": method,
         "request_url": request_url,
         "denial_source": if backend_invoked { "backend" } else { "cep_policy" },
         "policy_enforced": true,
@@ -156,7 +169,7 @@ async fn emit_denial_metadata(ctx: &HandlerContext, request_url: &str, backend_i
     ctx.events
         .emit(
             "cep.native_external_metadata",
-            json!({ "method": Fetch::NAME, "metadata": metadata }),
+            json!({ "method": method, "metadata": metadata }),
         )
         .await;
 }
@@ -165,9 +178,10 @@ async fn emit_budget_denial_metadata(
     ctx: &HandlerContext,
     request_url: &str,
     budget_err: &BudgetExhausted,
+    method: &'static str,
 ) {
     let metadata = json!({
-        "method": Fetch::NAME,
+        "method": method,
         "request_url": request_url,
         "denial_source": "cep_budget",
         "policy_enforced": true,
@@ -180,7 +194,7 @@ async fn emit_budget_denial_metadata(
     ctx.events
         .emit(
             "cep.native_external_metadata",
-            json!({ "method": Fetch::NAME, "metadata": metadata }),
+            json!({ "method": method, "metadata": metadata }),
         )
         .await;
 }
@@ -199,7 +213,7 @@ mod tests {
 
     fn test_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
-        register_external_methods(&mut registry).expect("register web.fetch");
+        register_external_methods(&mut registry).expect("register fetch.web");
         registry
     }
 
@@ -216,6 +230,7 @@ mod tests {
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
             project_root: cep_context.policy.project_root.clone(),
+            denied_effect_kinds: Default::default(),
         };
         let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
         (
@@ -223,7 +238,7 @@ mod tests {
                 call_id: 7,
                 events: EventSink::new(event_tx, 7),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "web.fetch test")
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "fetch.web test")
                     .with_fetch_host("*"),
                 cep_context,
                 active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),

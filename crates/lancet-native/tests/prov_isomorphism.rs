@@ -6,7 +6,7 @@
 //! in-toto statements after a live turn.
 
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::workspace::{Grep, ReadFile};
+use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
 use lancet_catalog::CepMethod;
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{canonicalize_prov_fragment, project_rows};
@@ -61,14 +61,14 @@ fn read_only_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         1,
-        ReadFile::NAME,
+        ObserveWorkspace::NAME,
         r#"{"required_capability":"read_path","content_hash":"sha256:read1"}"#,
     );
     store_row(
         &audit,
         &ctx,
         2,
-        Grep::NAME,
+        ObserveWorkspace::NAME,
         r#"{"required_capability":"inspect","canonical_target":"src"}"#,
     );
     let rows = audit
@@ -110,21 +110,21 @@ fn mutation_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         1,
-        "envelope.declare",
+        "session.envelope",
         r#"{"required_capability":"mutate_session_state","envelope_id":"env-1"}"#,
     );
     store_row(
         &audit,
         &ctx,
         2,
-        "workspace.write_file",
+        Create::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-1","bytes_written":12}"#,
     );
     store_row(
         &audit,
         &ctx,
         3,
-        "workspace.patch",
+        Patch::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-1","changed_files":["src/a.rs"]}"#,
     );
     let rows = audit
@@ -145,7 +145,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         1,
-        ReadFile::NAME,
+        ObserveWorkspace::NAME,
         r#"{"required_capability":"read_path","content_hash":"sha256:m1"}"#,
     );
     store_row(
@@ -159,7 +159,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         3,
-        "workspace.patch",
+        Patch::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-m","changed_files":["b.txt"]}"#,
     );
     let rows = audit

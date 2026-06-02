@@ -11,14 +11,12 @@ use lancet_authority::{
     NetworkPolicyConfig, ObservationPolicyConfig,
 };
 use lancet_catalog::catalog;
-use lancet_catalog::methods::audit::{AuditQuery, AuditReplay, AuditTail};
+use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::envelope::{Declare, SubmitIntent};
+use lancet_catalog::methods::envelope::Envelope;
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::methods::workspace::{
-    FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile,
-};
+use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_invariants as invariants;
 use lancet_native::{
@@ -65,7 +63,7 @@ impl CepExecutorAdapter {
         client: CepClient,
         enabled_names: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        let catalog_names = catalog().iter().map(|d| d.name.to_string()).collect();
+        let catalog_names: HashSet<String> = catalog().iter().map(|d| d.name.to_string()).collect();
         let enabled_names = enabled_names.into_iter().map(Into::into).collect();
         Self {
             client,
@@ -92,19 +90,14 @@ impl CepExecutorAdapter {
 
     async fn dispatch_typed(&self, method: &str, params: Value) -> Result<Value, CepError> {
         match method {
-            ReadFile::NAME => self.call_typed::<ReadFile>(params).await,
-            Grep::NAME => self.call_typed::<Grep>(params).await,
-            ListDirectory::NAME => self.call_typed::<ListDirectory>(params).await,
-            FindFiles::NAME => self.call_typed::<FindFiles>(params).await,
+            ObserveWorkspace::NAME => self.call_typed::<ObserveWorkspace>(params).await,
+            Create::NAME => self.call_typed::<Create>(params).await,
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
             Run::NAME => self.call_typed::<Run>(params).await,
-            WriteFile::NAME => self.call_typed::<WriteFile>(params).await,
             Patch::NAME => self.call_typed::<Patch>(params).await,
-            Declare::NAME => self.call_typed::<Declare>(params).await,
-            SubmitIntent::NAME => self.call_typed::<SubmitIntent>(params).await,
-            AuditQuery::NAME => self.call_typed::<AuditQuery>(params).await,
-            AuditTail::NAME => self.call_typed::<AuditTail>(params).await,
+            Envelope::NAME => self.call_typed::<Envelope>(params).await,
+            AuditObserve::NAME => self.call_typed::<AuditObserve>(params).await,
             AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,
             other => Err(method_not_found(other)),
         }
@@ -260,6 +253,11 @@ pub(crate) fn cep_policy_from_profile(
         network,
         budget,
         command: command_policy_from_profile(lancet),
+        denied_effect_kinds: lancet
+            .effects
+            .as_ref()
+            .map(|effects| effects.deny.iter().cloned().collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -365,6 +363,7 @@ fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
         network: config.network.clone(),
         budget: config.budget.clone(),
         command: config.command.clone(),
+        denied_effect_kinds: config.denied_effect_kinds.clone(),
     }
 }
 
@@ -403,6 +402,7 @@ pub(crate) fn load_policy_config(
         budget: cep_context.budget,
         observation: cep_context.observation,
         project_root: cep_context.project_root,
+        denied_effect_kinds: cep_context.denied_effect_kinds,
     };
 
     if let Some(policy_section) = &lancet.policy {
@@ -495,7 +495,7 @@ fn production_base_envelope_from_policy(
         BaseExecutionEnvelope::for_workspace_root(project_root, "cep_context turn observation");
     if enabled_tools
         .iter()
-        .any(|name| name == TodoWrite::NAME || name == Declare::NAME || name == SubmitIntent::NAME)
+        .any(|name| name == TodoWrite::NAME || name == Envelope::NAME)
     {
         base_envelope = base_envelope.with_session_state();
     }
@@ -848,7 +848,9 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 mod cep_context_profile_policy {
     use super::*;
     use lancet_catalog::methods::command::RunParams;
-    use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+    use lancet_catalog::methods::envelope::{
+        DeclareParams, Envelope, EnvelopeParams, EnvelopeResult,
+    };
     use lancet_protocol::envelope::{
         Capability, CepMode, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
     };
@@ -1055,7 +1057,7 @@ allowed_diagnostic_commands = [["echo"]]
             }),
             ..Default::default()
         };
-        let enabled = vec![Run::NAME.to_string(), Declare::NAME.to_string()];
+        let enabled = vec![Run::NAME.to_string(), Envelope::NAME.to_string()];
         let fake_llm = Arc::new(lattice_agent::testing::FakeStreamingLlmClient::builder().build());
         let mut deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
@@ -1069,7 +1071,7 @@ allowed_diagnostic_commands = [["echo"]]
         .expect("turn deps");
 
         deps.cep_client
-            .call::<Declare>(DeclareParams {
+            .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
                 envelope: ExecutionEnvelope {
                     intent: Intent {
                         description: "external policy command timeout test".into(),
@@ -1086,8 +1088,12 @@ allowed_diagnostic_commands = [["echo"]]
                 },
                 supersede: false,
                 reason: Some("external policy command timeout test".into()),
-            })
+            }))
             .await
+            .map(|result| match result {
+                EnvelopeResult::Declare(result) => result,
+                EnvelopeResult::DeriveIntent(_) => panic!("unexpected derive_intent result"),
+            })
             .expect("declare RunCommand envelope");
 
         let params = RunParams {

@@ -10,8 +10,8 @@ use lattice_session::{GraphMessage, HeadTranscript};
 
 fn read_file_tool_definition() -> ToolDefinition {
     ToolDefinition::new(
-        "workspace.read_file",
-        "Read a file",
+        "observe.workspace",
+        "Observe workspace content",
         serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
     )
 }
@@ -256,7 +256,7 @@ impl LlmClient for InfiniteToolCallLlm {
             tool_calls: Some(vec![lattice_llm::ToolCall {
                 id: format!("call_{n}"),
                 function: lattice_llm::FunctionCall {
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                     arguments: r#"{"path": "x.txt"}"#.to_string(),
                 },
             }]),
@@ -329,7 +329,7 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
                 tool_calls: Some(vec![lattice_llm::ToolCall {
                     id: "call_1".to_string(),
                     function: lattice_llm::FunctionCall {
-                        name: "workspace.read_file".to_string(),
+                        name: "observe.workspace".to_string(),
                         arguments: r#"{"path":"a.txt"}"#.to_string(),
                     },
                 }]),
@@ -407,7 +407,7 @@ async fn tool_execution_error_structured_payload_preserved() {
             tool_calls: Some(vec![lattice_llm::ToolCall {
                 id: "call_err".to_string(),
                 function: lattice_llm::FunctionCall {
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                     arguments: r#"{"path":"../secret"}"#.to_string(),
                 },
             }]),
@@ -465,7 +465,7 @@ async fn tool_execution_error_structured_payload_preserved() {
             _ => None,
         })
         .expect("ToolCallFinished event for failed tool");
-    assert_eq!(finished.0, "workspace.read_file");
+    assert_eq!(finished.0, "observe.workspace");
     assert!(!finished.1);
     assert_eq!(finished.2.as_deref(), Some("path outside workspace"));
 }

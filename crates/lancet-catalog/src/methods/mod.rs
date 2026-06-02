@@ -9,40 +9,38 @@ pub mod scaffold;
 pub mod session;
 pub mod workspace;
 
-pub use audit::{AuditQuery, AuditReplay, AuditTail};
+pub use audit::{AuditObserve, AuditReplay};
 pub use command::Run;
-pub use envelope::{Declare, SubmitIntent};
+pub use envelope::Envelope;
 pub use external::Fetch;
 pub use session::TodoWrite;
-pub use workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile};
+pub use workspace::{
+    Create, FindFilesParams, FindFilesResult, GrepParams, GrepResult, ListDirectoryParams,
+    ListDirectoryResult, ObserveWorkspace, Patch, ReadFileParams, ReadFileResult,
+};
 
 #[cfg(feature = "inspect-scaffold")]
 pub use scaffold::{Inspect, Navigate, ScaffoldStubResult};
 
 mod sealed {
     use super::{
-        audit::{AuditQuery, AuditReplay, AuditTail},
+        audit::{AuditObserve, AuditReplay},
         command::Run,
-        envelope::{Declare, SubmitIntent},
+        envelope::Envelope,
         external::Fetch,
         session::TodoWrite,
-        workspace::{FindFiles, Grep, ListDirectory, Patch, ReadFile, WriteFile},
+        workspace::{Create, ObserveWorkspace, Patch},
     };
     use crate::method::sealed::Sealed;
 
-    impl Sealed for ReadFile {}
-    impl Sealed for Grep {}
-    impl Sealed for ListDirectory {}
-    impl Sealed for FindFiles {}
-    impl Sealed for WriteFile {}
+    impl Sealed for ObserveWorkspace {}
+    impl Sealed for Create {}
     impl Sealed for Patch {}
     impl Sealed for Fetch {}
     impl Sealed for TodoWrite {}
     impl Sealed for Run {}
-    impl Sealed for Declare {}
-    impl Sealed for SubmitIntent {}
-    impl Sealed for AuditQuery {}
-    impl Sealed for AuditTail {}
+    impl Sealed for Envelope {}
+    impl Sealed for AuditObserve {}
     impl Sealed for AuditReplay {}
 }
 
@@ -54,19 +52,14 @@ mod tests {
     #[test]
     fn all_catalog_method_names_are_dotted_without_slashes() {
         let names = [
-            ReadFile::NAME,
-            Grep::NAME,
-            ListDirectory::NAME,
-            FindFiles::NAME,
+            ObserveWorkspace::NAME,
+            Create::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            WriteFile::NAME,
             Patch::NAME,
-            Declare::NAME,
-            SubmitIntent::NAME,
-            AuditQuery::NAME,
-            AuditTail::NAME,
+            Envelope::NAME,
+            AuditObserve::NAME,
             AuditReplay::NAME,
         ];
         for name in names {
@@ -78,19 +71,14 @@ mod tests {
     #[test]
     fn no_legacy_slash_method_names_in_protocol() {
         let names = [
-            ReadFile::NAME,
-            Grep::NAME,
-            ListDirectory::NAME,
-            FindFiles::NAME,
+            ObserveWorkspace::NAME,
+            Create::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            WriteFile::NAME,
             Patch::NAME,
-            Declare::NAME,
-            SubmitIntent::NAME,
-            AuditQuery::NAME,
-            AuditTail::NAME,
+            Envelope::NAME,
+            AuditObserve::NAME,
             AuditReplay::NAME,
         ];
         for name in names {

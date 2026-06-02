@@ -105,7 +105,7 @@ pub struct PolicyAuditContext {
 /// Budget information enters only through `PolicyBudgetSnapshot`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PolicyInput {
-    /// Full dotted CEP method name (e.g. `workspace.read_file`).
+    /// Full dotted CEP method name (e.g. `observe.workspace`).
     pub method: String,
     /// Method parameters as opaque JSON — policy hook sees the shape
     /// but the executor owns any normalized/derived facts.
@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn policy_input_round_trips() {
         let input = PolicyInput {
-            method: "workspace.read_file".into(),
-            params: json!({"path": "/home/user/project/src/main.rs"}),
+            method: "observe.workspace".into(),
+            params: json!({"mode": "read_file", "path": "/home/user/project/src/main.rs"}),
             envelope_snapshot: EffectiveEnvelopeSnapshot {
                 base_envelope_id: "base-001".into(),
                 declared_envelope_id: None,

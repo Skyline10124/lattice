@@ -33,59 +33,59 @@ fn declared_source() -> CapabilitySource {
     }
 }
 
-/// Build the capability fixture matrix covering all 10 catalog methods.
+/// Build the capability fixture matrix covering all 9 canonical catalog methods.
 ///
 /// Each row maps a method to its RequiredCapability, representative invocation
 /// facts, and expected verdicts for Base-only and Declared-only sources.
 fn capability_fixtures() -> Vec<CapabilityFixture> {
     vec![
-        // workspace.read_file → ReadPath
+        // observe.workspace → Inspect (read_file's ReadPath special case is covered by resolver tests)
         CapabilityFixture {
-            method: "workspace.read_file",
-            required_capability: RequiredCapability::ReadPath,
+            method: "observe.workspace",
+            required_capability: RequiredCapability::Inspect,
+            invocation: InvocationFacts {
+                path: Some("src/".into()),
+                ..Default::default()
+            },
+            base_verdict: CapabilityMatchVerdict::Satisfied,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
+        // mutate.create → WritePath
+        CapabilityFixture {
+            method: "mutate.create",
+            required_capability: RequiredCapability::WritePath,
             invocation: InvocationFacts {
                 path: Some("src/main.rs".into()),
                 ..Default::default()
             },
-            base_verdict: CapabilityMatchVerdict::Satisfied,
+            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // workspace.grep → Inspect
+        // mutate.patch → WritePath
         CapabilityFixture {
-            method: "workspace.grep",
-            required_capability: RequiredCapability::Inspect,
+            method: "mutate.patch",
+            required_capability: RequiredCapability::WritePath,
             invocation: InvocationFacts {
-                path: Some("src/".into()),
+                path: Some("src/main.rs".into()),
                 ..Default::default()
             },
-            base_verdict: CapabilityMatchVerdict::Satisfied,
+            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // workspace.list_directory → Inspect
+        // exec.command_run → RunCommand
         CapabilityFixture {
-            method: "workspace.list_directory",
-            required_capability: RequiredCapability::Inspect,
+            method: "exec.command_run",
+            required_capability: RequiredCapability::RunCommand,
             invocation: InvocationFacts {
-                path: Some("src/".into()),
+                argv: Some(vec!["cargo".into(), "test".into()]),
                 ..Default::default()
             },
-            base_verdict: CapabilityMatchVerdict::Satisfied,
+            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // workspace.find_files → Inspect
+        // fetch.web → FetchUrl
         CapabilityFixture {
-            method: "workspace.find_files",
-            required_capability: RequiredCapability::Inspect,
-            invocation: InvocationFacts {
-                path: Some("src/".into()),
-                ..Default::default()
-            },
-            base_verdict: CapabilityMatchVerdict::Satisfied,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // web.fetch → FetchUrl
-        CapabilityFixture {
-            method: "web.fetch",
+            method: "fetch.web",
             required_capability: RequiredCapability::FetchUrl,
             invocation: InvocationFacts {
                 host: Some("example.com".into()),
@@ -105,44 +105,9 @@ fn capability_fixtures() -> Vec<CapabilityFixture> {
             base_verdict: CapabilityMatchVerdict::Satisfied,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // command.run → RunCommand
+        // session.envelope → MutateSessionState
         CapabilityFixture {
-            method: "command.run",
-            required_capability: RequiredCapability::RunCommand,
-            invocation: InvocationFacts {
-                argv: Some(vec!["cargo".into(), "test".into()]),
-                ..Default::default()
-            },
-            // Base-sourced RunCommand is SourceNotAllowed for command.run.
-            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // workspace.write_file → WritePath
-        CapabilityFixture {
-            method: "workspace.write_file",
-            required_capability: RequiredCapability::WritePath,
-            invocation: InvocationFacts {
-                path: Some("src/main.rs".into()),
-                ..Default::default()
-            },
-            // Base-sourced WritePath is SourceNotAllowed for mutation.
-            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // workspace.patch → WritePath
-        CapabilityFixture {
-            method: "workspace.patch",
-            required_capability: RequiredCapability::WritePath,
-            invocation: InvocationFacts {
-                path: Some("src/main.rs".into()),
-                ..Default::default()
-            },
-            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // envelope.declare → MutateSessionState
-        CapabilityFixture {
-            method: "envelope.declare",
+            method: "session.envelope",
             required_capability: RequiredCapability::MutateSessionState,
             invocation: InvocationFacts {
                 session_state_operation: Some(SessionStateOperation::EnvelopeDeclare),
@@ -151,36 +116,17 @@ fn capability_fixtures() -> Vec<CapabilityFixture> {
             base_verdict: CapabilityMatchVerdict::Satisfied,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // envelope.submit_intent uses MutateSessionState.
+        // observe.audit → ReadAudit (session-scoped, pattern-less)
         CapabilityFixture {
-            method: "envelope.submit_intent",
-            required_capability: RequiredCapability::MutateSessionState,
-            invocation: InvocationFacts {
-                session_state_operation: Some(SessionStateOperation::SubmitIntent),
-                ..Default::default()
-            },
-            base_verdict: CapabilityMatchVerdict::Satisfied,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // audit.query → ReadAudit (session-scoped, pattern-less)
-        CapabilityFixture {
-            method: "audit.query",
+            method: "observe.audit",
             required_capability: RequiredCapability::ReadAudit,
             invocation: InvocationFacts::default(),
             base_verdict: CapabilityMatchVerdict::Satisfied,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // audit.replay → ReadAudit
+        // observe.audit_replay → ReadAudit
         CapabilityFixture {
-            method: "audit.replay",
-            required_capability: RequiredCapability::ReadAudit,
-            invocation: InvocationFacts::default(),
-            base_verdict: CapabilityMatchVerdict::Satisfied,
-            declared_verdict: CapabilityMatchVerdict::Satisfied,
-        },
-        // audit.tail → ReadAudit (session-scoped streaming read)
-        CapabilityFixture {
-            method: "audit.tail",
+            method: "observe.audit_replay",
             required_capability: RequiredCapability::ReadAudit,
             invocation: InvocationFacts::default(),
             base_verdict: CapabilityMatchVerdict::Satisfied,

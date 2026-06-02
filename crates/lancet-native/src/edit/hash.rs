@@ -8,6 +8,10 @@ pub fn content_hash(bytes: &[u8]) -> String {
     format!("{HASH_PREFIX}{}", blake3::hash(bytes).to_hex())
 }
 
+pub fn line_hash(line: &str) -> String {
+    content_hash(line.as_bytes())
+}
+
 pub fn parse_old_hash(value: &str) -> Result<String, PatchDiagnostic> {
     if !value.starts_with(HASH_PREFIX) {
         return Err(parse_error(

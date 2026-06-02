@@ -226,11 +226,11 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
             .push_events(vec![
                 lattice_llm::LlmEvent::ToolCallStart {
                     id: "call_1".to_string(),
-                    name: "workspace.read_file".to_string(),
+                    name: "observe.workspace".to_string(),
                 },
                 lattice_llm::LlmEvent::ToolCallDelta {
                     id: "call_1".to_string(),
-                    arguments_delta: r#"{"path":"src/lib.rs"}"#.to_string(),
+                    arguments_delta: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
                 },
                 lattice_llm::LlmEvent::ToolCallEnd {
                     id: "call_1".to_string(),
@@ -261,7 +261,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                     system_path: None,
                 },
                 tools: lattice_profile::ToolsSection {
-                    enabled: vec!["workspace.read_file".to_string()],
+                    enabled: vec!["observe.workspace".to_string()],
                 },
                 llm: lattice_profile::LlmSection::default(),
                 lancet: lattice_profile::LancetSection::default(),
@@ -282,8 +282,8 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         result
             .tool_results
             .iter()
-            .any(|tool| tool.ok && tool.name == "workspace.read_file"),
-        "expected successful workspace.read_file via workspace-root CEP runtime"
+            .any(|tool| tool.ok && tool.name == "observe.workspace"),
+        "expected successful observe.workspace via workspace-root CEP runtime"
     );
 }
 

@@ -138,14 +138,14 @@ fn make_request(
 
 #[tokio::test]
 async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "workspace.read_file",
-                r#"{"path":"src/lib.rs"}"#,
+                "observe.workspace",
+                r#"{"mode":"read_file","path":"src/lib.rs"}"#,
             ))
             .push_events(final_response_events("Read workspace file successfully."))
             .build(),
@@ -174,8 +174,8 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     let tool_result = result
         .tool_results
         .iter()
-        .find(|t| t.name == "workspace.read_file")
-        .expect("should have a workspace.read_file tool result");
+        .find(|t| t.name == "observe.workspace")
+        .expect("should have an observe.workspace tool result");
     assert!(tool_result.output_len > 0, "tool output must be non-empty");
 
     let store = SqliteSessionGraphStore::new(&sessions_path);
@@ -232,20 +232,22 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
     assert_eq!(model_started.1, "sonnet");
 }
 
-// ── Test: profile-disabled command.run is rejected before CEP dispatch ─────
+// ── Test: profile-disabled exec.command_run is rejected before CEP dispatch ─────
 
 #[tokio::test]
 async fn rejects_profile_disabled_command_run() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "command.run",
+                "exec.command_run",
                 r#"{"argv":["echo","blocked"]}"#,
             ))
-            .push_events(final_response_events("Should not execute command.run."))
+            .push_events(final_response_events(
+                "Should not execute exec.command_run.",
+            ))
             .build(),
     );
 
@@ -255,7 +257,7 @@ async fn rejects_profile_disabled_command_run() {
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Try command.run", &session_id, fake_llm),
+        make_request(&ws, "Try exec.command_run", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -269,16 +271,16 @@ async fn rejects_profile_disabled_command_run() {
                 name,
                 ok: false,
                 ..
-            } if name == "command.run"
+            } if name == "exec.command_run"
         )),
-        "disabled command.run must surface as a failed ToolCallFinished"
+        "disabled exec.command_run must surface as a failed ToolCallFinished"
     );
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            TurnEvent::CepCallStarted { method, .. } if method == "command.run"
+            TurnEvent::CepCallStarted { method, .. } if method == "exec.command_run"
         )),
-        "disabled command.run must not emit CepCallStarted"
+        "disabled exec.command_run must not emit CepCallStarted"
     );
 }
 
@@ -288,7 +290,7 @@ async fn rejects_profile_disabled_command_run() {
 async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     let ws = setup_workspace(
         "pub fn answer() -> i32 { 1 }",
-        &["workspace.read_file", "envelope.declare", "workspace.patch"],
+        &["observe.workspace", "session.envelope", "mutate.patch"],
     );
 
     let original = "pub fn answer() -> i32 { 1 }";
@@ -300,7 +302,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 *** Update File: src/lib.rs
 *** Old Hash: {hash}
 @@
--pub fn answer() -> i32 {{ 1 }}
+-{hash}\tpub fn answer() -> i32 {{ 1 }}
 +pub fn answer() -> i32 {{ 42 }}
 *** End Patch
 "
@@ -328,6 +330,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         extensions: serde_json::Map::new(),
     };
     let declare_args = serde_json::json!({
+        "mode": "declare",
         "envelope": envelope,
         "reason": "authorize usage test patch"
     });
@@ -336,12 +339,12 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_0",
-                "envelope.declare",
+                "session.envelope",
                 &declare_args.to_string(),
             ))
             .push_events(tool_call_events(
                 "call_1",
-                "workspace.patch",
+                "mutate.patch",
                 &format!(
                     r#"{{"patch":{}}}"#,
                     serde_json::to_string(&patch_doc).unwrap()
@@ -378,20 +381,17 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
     let declare_result = result
         .tool_results
         .iter()
-        .find(|t| t.name == "envelope.declare")
-        .expect("should have an envelope.declare tool result");
+        .find(|t| t.name == "session.envelope")
+        .expect("should have a session.envelope tool result");
     assert!(
         declare_result.ok,
-        "envelope.declare must succeed before patching; error: {:?}",
+        "session.envelope must succeed before patching; error: {:?}",
         declare_result.error_summary
     );
 
     assert!(
-        result
-            .tool_results
-            .iter()
-            .any(|t| t.name == "workspace.patch"),
-        "should have a workspace.patch tool result"
+        result.tool_results.iter().any(|t| t.name == "mutate.patch"),
+        "should have a mutate.patch tool result"
     );
 }
 
@@ -399,7 +399,7 @@ async fn usage_run_turn_can_patch_workspace_file_and_commit() {
 
 #[tokio::test]
 async fn usage_resume_session_includes_previous_turn_context() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -512,7 +512,7 @@ enabled = {enabled:?}
 async fn public_https_policy_requires_fetch_capability() {
     let ws = setup_workspace_with_cep_network(
         "fn main() {}",
-        &["web.fetch"],
+        &["fetch.web"],
         "[lancet.network]\nallow_public_https = true\nallow_localhost = false\n",
     );
 
@@ -520,7 +520,7 @@ async fn public_https_policy_requires_fetch_capability() {
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "web.fetch",
+                "fetch.web",
                 r#"{"url":"https://example.com/"}"#,
             ))
             .push_events(final_response_events("Fetched public HTTPS."))
@@ -553,9 +553,9 @@ async fn public_https_policy_requires_fetch_capability() {
                 name,
                 ok: false,
                 ..
-            } if name == "web.fetch"
+            } if name == "fetch.web"
         )),
-        "web.fetch must be denied without FetchUrl capability even with allow_public_https"
+        "fetch.web must be denied without FetchUrl capability even with allow_public_https"
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -565,23 +565,23 @@ async fn public_https_policy_requires_fetch_capability() {
                 impact_kind,
                 semantic_stage,
                 ..
-            } if method == "web.fetch"
+            } if method == "fetch.web"
                 && impact_kind == "external_observation"
                 && semantic_stage == "cep_native"
         )),
-        "native web.fetch must emit CEP lifecycle with external_observation impact"
+        "native fetch.web must emit CEP lifecycle with external_observation impact"
     );
 }
 
 #[tokio::test]
 async fn rejects_profile_disabled_web_fetch() {
-    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["workspace.read_file"]);
+    let ws = setup_workspace("pub fn answer() -> i32 { 42 }", &["observe.workspace"]);
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_1",
-                "web.fetch",
+                "fetch.web",
                 r#"{"url":"https://example.com/"}"#,
             ))
             .push_events(final_response_events("Should not fetch."))
@@ -594,7 +594,7 @@ async fn rejects_profile_disabled_web_fetch() {
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
-        make_request(&ws, "Try web.fetch", &session_id, fake_llm),
+        make_request(&ws, "Try fetch.web", &session_id, fake_llm),
     )
     .await
     .expect("stream_turn must start")
@@ -608,15 +608,15 @@ async fn rejects_profile_disabled_web_fetch() {
                 name,
                 ok: false,
                 ..
-            } if name == "web.fetch"
+            } if name == "fetch.web"
         )),
-        "disabled web.fetch must surface as failed ToolCallFinished"
+        "disabled fetch.web must surface as failed ToolCallFinished"
     );
     assert!(
         !events.iter().any(|event| matches!(
             event,
-            TurnEvent::CepCallStarted { method, .. } if method == "web.fetch"
+            TurnEvent::CepCallStarted { method, .. } if method == "fetch.web"
         )),
-        "disabled web.fetch must not emit CepCallStarted"
+        "disabled fetch.web must not emit CepCallStarted"
     );
 }

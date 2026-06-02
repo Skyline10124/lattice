@@ -148,7 +148,7 @@ fn project_entities_from_metadata(
     fragment: &mut ProvGraphFragment,
 ) {
     let activity_id = activity_id_for(audit_id);
-    let is_mutation = method.starts_with("workspace.write") || method == "workspace.patch";
+    let is_mutation = method == "mutate.create" || method == "mutate.patch";
 
     if let Some(hash) = meta.get("content_hash").and_then(|v| v.as_str()) {
         let entity_id = push_entity(fragment, "file", hash);
@@ -275,7 +275,7 @@ mod tests {
         let rows = vec![
             fixture_row(
                 1,
-                "workspace.read_file",
+                "observe.workspace",
                 r#"{"content_hash":"sha256:aaa","canonical_target":"src/a.rs"}"#,
             ),
             fixture_row(2, "session.todo_write", r#"{"op_count":1}"#),
@@ -293,7 +293,7 @@ mod tests {
     fn parse_impact_kind_warns_on_unknown_label() {
         let rows = vec![AuditRow {
             impact_kind: "future_impact_kind".into(),
-            ..fixture_row(1, "workspace.read_file", r#"{}"#)
+            ..fixture_row(1, "observe.workspace", r#"{}"#)
         }];
         let fragment = project_rows(&rows);
         assert_eq!(
@@ -305,8 +305,8 @@ mod tests {
     #[test]
     fn project_turn_trace_orders_calls() {
         let rows = vec![
-            fixture_row(1, "workspace.read_file", r#"{}"#),
-            fixture_row(2, "workspace.grep", r#"{}"#),
+            fixture_row(1, "observe.workspace", r#"{}"#),
+            fixture_row(2, "observe.workspace", r#"{}"#),
         ];
         let trace = project_turn_trace("turn-a", &rows);
         assert_eq!(trace.turn_id, "turn-a");

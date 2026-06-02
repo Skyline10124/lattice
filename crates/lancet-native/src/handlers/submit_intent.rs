@@ -3,10 +3,10 @@ use crate::guard_l1::evaluate_and_enforce_policy;
 use crate::handlers::envelope::validate_envelope_boundaries;
 use crate::impact::{AnalysisResult, ImpactAnalyzer};
 use crate::invariants::{opaque_notes, InvariantCard};
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::registry::HandlerContext;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::envelope::{
-    L2Status, SubmitIntent, SubmitIntentParams, SubmitIntentResult,
+    Envelope, L2Status, SubmitIntentParams, SubmitIntentResult,
 };
 use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{
@@ -17,13 +17,7 @@ use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::BTreeSet;
 
-pub fn register_submit_intent(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    registry.register_method::<SubmitIntent, _, _>(|params, ctx| async move {
-        handle_submit_intent(params, ctx).await
-    })
-}
-
-async fn handle_submit_intent(
+pub(crate) async fn handle_submit_intent(
     params: SubmitIntentParams,
     ctx: HandlerContext,
 ) -> Result<SubmitIntentResult, CepError> {
@@ -31,7 +25,7 @@ async fn handle_submit_intent(
 
     validate_target(&params.target, &ctx)?;
 
-    let _evaluation = evaluate_and_enforce_policy(&ctx, SubmitIntent::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, Envelope::NAME, &params).await?;
 
     let method_name = resolve_method_name(&params.action, &params.target);
 
@@ -152,7 +146,7 @@ fn validate_target(target: &str, ctx: &HandlerContext) -> Result<(), CepError> {
                     CepErrorCode::ProjectRootViolation,
                     format!("target '{target}' is outside project root"),
                     CepErrorData::Guard(GuardErrorData {
-                        method: "envelope.submit_intent".into(),
+                        method: Envelope::NAME.into(),
                         reason: "target outside project root".into(),
                     }),
                     Retriability::Permanent,
@@ -166,29 +160,26 @@ fn validate_target(target: &str, ctx: &HandlerContext) -> Result<(), CepError> {
 
 fn resolve_method_name(action: &str, target: &str) -> String {
     match action {
-        "write" | "write_file" => "workspace.write_file".to_string(),
-        "patch" => "workspace.patch".to_string(),
-        "run" | "execute" | "command" => "command.run".to_string(),
-        "read" | "read_file" => "workspace.read_file".to_string(),
-        "grep" | "search" => "workspace.grep".to_string(),
-        "list" | "ls" | "list_directory" => "workspace.list_directory".to_string(),
-        "find" | "find_files" => "workspace.find_files".to_string(),
-        "fetch" => "web.fetch".to_string(),
-        "todo" | "todo_write" => "session.todo_write".to_string(),
-        "declare" | "declare_envelope" => "envelope.declare".to_string(),
+        "write" => "mutate.create".to_string(),
+        "patch" => "mutate.patch".to_string(),
+        "run" | "execute" | "command" => "exec.command_run".to_string(),
+        "read" | "grep" | "search" | "list" | "ls" | "find" => "observe.workspace".to_string(),
+        "fetch" => "fetch.web".to_string(),
+        "todo" => "session.todo_write".to_string(),
+        "declare" => "session.envelope".to_string(),
         _ => heuristic_fallback(target),
     }
 }
 
 fn heuristic_fallback(target: &str) -> String {
     if target.starts_with("http") {
-        "web.fetch".to_string()
+        "fetch.web".to_string()
     } else if target.contains('.') && !target.ends_with('/') {
-        "workspace.write_file".to_string()
+        "mutate.create".to_string()
     } else if target.contains('/') {
-        "workspace.list_directory".to_string()
+        "observe.workspace".to_string()
     } else {
-        "command.run".to_string()
+        "exec.command_run".to_string()
     }
 }
 
@@ -325,7 +316,7 @@ fn envelope_already_active_error() -> CepError {
         CepErrorCode::EnvelopeAlreadyActive,
         "an active envelope already exists; use supersede=true to replace it",
         CepErrorData::Guard(GuardErrorData {
-            method: "envelope.submit_intent".into(),
+            method: Envelope::NAME.into(),
             reason: "envelope already active".into(),
         }),
         Retriability::Permanent,
@@ -336,9 +327,10 @@ fn envelope_already_active_error() -> CepError {
 mod tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
+    use crate::handlers::register_envelope_methods;
     use crate::invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
-    use crate::registry::{Cancellation, EventSink};
-    use lancet_catalog::CepMethod;
+    use crate::registry::{Cancellation, EventSink, MethodRegistry};
+    use lancet_catalog::methods::envelope::{EnvelopeParams, EnvelopeResult};
     use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactConfidence};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -346,8 +338,26 @@ mod tests {
 
     fn test_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
-        register_submit_intent(&mut registry).unwrap();
+        register_envelope_methods(&mut registry).unwrap();
         registry
+    }
+
+    async fn dispatch_derive_intent(
+        registry: &MethodRegistry,
+        params: SubmitIntentParams,
+        ctx: HandlerContext,
+    ) -> Result<SubmitIntentResult, CepError> {
+        let result = registry
+            .dispatch(
+                Envelope::NAME,
+                serde_json::to_value(EnvelopeParams::DeriveIntent(params)).unwrap(),
+                ctx,
+            )
+            .await?;
+        match serde_json::from_value(result).unwrap() {
+            EnvelopeResult::DeriveIntent(result) => Ok(result),
+            other => panic!("unexpected session.envelope result: {other:?}"),
+        }
     }
 
     fn test_ctx_with_index(
@@ -417,15 +427,9 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let result = registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx,
-            )
+        let parsed = dispatch_derive_intent(&registry, params, ctx)
             .await
             .unwrap();
-        let parsed: SubmitIntentResult = serde_json::from_value(result).unwrap();
         assert!(parsed.accepted);
         assert!(!parsed.envelope_id.is_empty());
         assert!(!parsed.envelope_hash.is_empty());
@@ -462,12 +466,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx,
-            )
+        dispatch_derive_intent(&registry, params, ctx)
             .await
             .unwrap();
 
@@ -499,22 +498,12 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx1,
-            )
+        dispatch_derive_intent(&registry, params.clone(), ctx1)
             .await
             .unwrap();
 
         let (ctx2, _events2) = test_ctx_with_index(root, store, index);
-        let err = registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx2,
-            )
+        let err = dispatch_derive_intent(&registry, params, ctx2)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::EnvelopeAlreadyActive);
@@ -536,12 +525,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&first).unwrap(),
-                ctx1,
-            )
+        dispatch_derive_intent(&registry, first, ctx1)
             .await
             .unwrap();
         let first_id = store.active_envelope_id().await.unwrap();
@@ -554,15 +538,9 @@ mod tests {
             supersede: true,
             reason: Some("new target".into()),
         };
-        let result = registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&second).unwrap(),
-                ctx2,
-            )
+        let parsed = dispatch_derive_intent(&registry, second, ctx2)
             .await
             .unwrap();
-        let parsed: SubmitIntentResult = serde_json::from_value(result).unwrap();
         assert_eq!(
             parsed.superseded_envelope_id.as_deref(),
             Some(first_id.as_str())
@@ -584,12 +562,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx,
-            )
+        let err = dispatch_derive_intent(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::SchemaMismatch);
@@ -609,12 +582,7 @@ mod tests {
             supersede: false,
             reason: None,
         };
-        let err = registry
-            .dispatch(
-                SubmitIntent::NAME,
-                serde_json::to_value(&params).unwrap(),
-                ctx,
-            )
+        let err = dispatch_derive_intent(&registry, params, ctx)
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::SchemaMismatch);

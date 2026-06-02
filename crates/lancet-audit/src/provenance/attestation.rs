@@ -7,11 +7,15 @@ use lancet_protocol::provenance::{
 };
 use serde_json::json;
 
-/// Rows that contribute to a turn attestation (excludes meta `audit.*` calls).
+/// Rows that contribute to a turn attestation (excludes meta audit observation calls).
 fn substantive_turn_rows(rows: &[AuditRow]) -> Vec<&AuditRow> {
     rows.iter()
-        .filter(|r| !r.method.starts_with("audit."))
+        .filter(|r| !is_meta_audit_method(&r.method))
         .collect()
+}
+
+fn is_meta_audit_method(method: &str) -> bool {
+    method.starts_with("audit.") || method == "observe.audit" || method == "observe.audit_replay"
 }
 
 /// Blake3 hex digest over ordered audit ids for `source_audit_range_or_hash`.
@@ -137,10 +141,14 @@ mod tests {
         let rows = vec![
             row(
                 1,
-                "workspace.read_file",
+                "observe.workspace",
                 r#"{"required_capability":"read_path","content_hash":"sha256:abc"}"#,
             ),
-            row(2, "workspace.grep", r#"{"required_capability":"inspect"}"#),
+            row(
+                2,
+                "observe.workspace",
+                r#"{"required_capability":"inspect"}"#,
+            ),
         ];
         let stmt = build_in_toto_statement("turn-x", &rows, "lattice/1");
         assert_eq!(stmt.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE);

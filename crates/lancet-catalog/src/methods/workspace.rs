@@ -2,12 +2,50 @@
 
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
-use lancet_protocol::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
+use lancet_protocol::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// `workspace.read_file`
-pub struct ReadFile;
+/// `observe.workspace`
+pub struct ObserveWorkspace;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ObserveWorkspaceParams {
+    ReadFile(ReadFileParams),
+    Grep(GrepParams),
+    ListDirectory(ListDirectoryParams),
+    FindFiles(FindFilesParams),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", content = "result", rename_all = "snake_case")]
+pub enum ObserveWorkspaceResult {
+    ReadFile(ReadFileResult),
+    Grep(GrepResult),
+    ListDirectory(ListDirectoryResult),
+    FindFiles(FindFilesResult),
+}
+
+impl CepMethod for ObserveWorkspace {
+    const NAME: &'static str = "observe.workspace";
+    const DESCRIPTION: &'static str = "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root.";
+    type Params = ObserveWorkspaceParams;
+    type Result = ObserveWorkspaceResult;
+    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
+    const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
+        scope: EffectScopeKind::ObservationRoot,
+        capabilities: &[RequiredCapability::ReadPath, RequiredCapability::Inspect],
+        overlay: OverlayBehavior::ReadWorkspace,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
+    };
+}
+
+impl CatalogMethod for ObserveWorkspace {}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileParams {
@@ -26,26 +64,6 @@ pub struct ReadFileResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
 }
-
-impl CepMethod for ReadFile {
-    const NAME: &'static str = "workspace.read_file";
-    const DESCRIPTION: &'static str =
-        "Read a text file with optional 1-based line offset/limit and line-number output.";
-    type Params = ReadFileParams;
-    type Result = ReadFileResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::ReadPath;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
-        scope: EffectScopeKind::PathRead,
-        capabilities: &[RequiredCapability::ReadPath],
-    };
-}
-
-impl CatalogMethod for ReadFile {}
-
-/// `workspace.grep`
-pub struct Grep;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct GrepParams {
@@ -69,26 +87,6 @@ pub struct GrepResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
 }
-
-impl CepMethod for Grep {
-    const NAME: &'static str = "workspace.grep";
-    const DESCRIPTION: &'static str =
-        "Search for a regex pattern in files under a path. Results may be capped.";
-    type Params = GrepParams;
-    type Result = GrepResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
-        scope: EffectScopeKind::ObservationRoot,
-        capabilities: &[RequiredCapability::Inspect],
-    };
-}
-
-impl CatalogMethod for Grep {}
-
-/// `workspace.list_directory`
-pub struct ListDirectory;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ListDirectoryParams {
@@ -119,26 +117,6 @@ pub struct ListDirectoryResult {
     pub truncated: Option<bool>,
 }
 
-impl CepMethod for ListDirectory {
-    const NAME: &'static str = "workspace.list_directory";
-    const DESCRIPTION: &'static str =
-        "List files and directories in a path with stable sorting and output limits.";
-    type Params = ListDirectoryParams;
-    type Result = ListDirectoryResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
-        scope: EffectScopeKind::ObservationRoot,
-        capabilities: &[RequiredCapability::Inspect],
-    };
-}
-
-impl CatalogMethod for ListDirectory {}
-
-/// `workspace.find_files`
-pub struct FindFiles;
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FindFilesParams {
     pub pattern: String,
@@ -155,55 +133,40 @@ pub struct FindFilesResult {
     pub truncated: Option<bool>,
 }
 
-impl CepMethod for FindFiles {
-    const NAME: &'static str = "workspace.find_files";
-    const DESCRIPTION: &'static str =
-        "Find files or directories by glob-like pattern. Results are stable and capped.";
-    type Params = FindFilesParams;
-    type Result = FindFilesResult;
-    const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::Inspect;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
-        scope: EffectScopeKind::ObservationRoot,
-        capabilities: &[RequiredCapability::Inspect],
-    };
-}
-
-impl CatalogMethod for FindFiles {}
-
-/// `workspace.write_file`
-pub struct WriteFile;
+/// `mutate.create`
+pub struct Create;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct WriteFileParams {
+pub struct CreateParams {
     pub path: String,
     pub content: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct WriteFileResult {
+pub struct CreateResult {
     pub path: String,
     pub bytes_written: u64,
 }
 
-impl CepMethod for WriteFile {
-    const NAME: &'static str = "workspace.write_file";
-    const DESCRIPTION: &'static str = "Write content to a file under the declared workspace scope.";
-    type Params = WriteFileParams;
-    type Result = WriteFileResult;
+impl CepMethod for Create {
+    const NAME: &'static str = "mutate.create";
+    const DESCRIPTION: &'static str = "Create a new file under the declared workspace scope. The target file must not already exist, and parent directories must already exist.";
+    type Params = CreateParams;
+    type Result = CreateResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
         scope: EffectScopeKind::WorkspaceWrite,
         capabilities: &[RequiredCapability::WritePath],
+        overlay: OverlayBehavior::WriteWorkspace,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 
-impl CatalogMethod for WriteFile {}
+impl CatalogMethod for Create {}
 
-/// `workspace.patch`
+/// `mutate.patch`
 pub struct Patch;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -217,8 +180,8 @@ pub struct PatchResult {
 }
 
 impl CepMethod for Patch {
-    const NAME: &'static str = "workspace.patch";
-    const DESCRIPTION: &'static str = "Apply LATTICE structured patch text with multi-file add, update, and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Add File: path / *** Update File: path / *** Delete File: path operations, then *** End Patch. Update and delete operations require *** Old Hash: blake3:<64 hex> from workspace.read_file content_hash. Hunk lines after @@ use a leading space for context, - for removals, and + for additions. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
+    const NAME: &'static str = "mutate.patch";
+    const DESCRIPTION: &'static str = "Apply LATTICE hashline patch text with multi-file update and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Update File: path / *** Delete File: path operations, then *** End Patch. Every operation requires *** Old Hash: blake3:<64 hex> from observe.workspace read_file content_hash. Hunk context/removal lines after @@ must carry the current line hash as '<prefix>blake3:<64 hex><tab>text' using a leading space for context or - for removals; additions use +text. New files must use mutate.create. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
     type Params = PatchParams;
     type Result = PatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -227,6 +190,8 @@ impl CepMethod for Patch {
         kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
         scope: EffectScopeKind::WorkspaceWrite,
         capabilities: &[RequiredCapability::WritePath],
+        overlay: OverlayBehavior::WriteWorkspace,
+        failure: FailureSemantics::RetainDiffOnVerifyFailure,
     };
 }
 
@@ -239,14 +204,7 @@ mod tests {
 
     #[test]
     fn workspace_method_names_are_full_dotted_names() {
-        for name in [
-            ReadFile::NAME,
-            Grep::NAME,
-            ListDirectory::NAME,
-            FindFiles::NAME,
-            WriteFile::NAME,
-            Patch::NAME,
-        ] {
+        for name in [ObserveWorkspace::NAME, Create::NAME, Patch::NAME] {
             assert!(name.contains('.'), "expected dotted name: {name}");
             assert!(!name.contains('/'), "slash names forbidden: {name}");
         }

@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use lancet_catalog::catalog;
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::envelope::{Declare, DeclareParams};
+use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
-use lancet_catalog::methods::workspace::{ReadFile, WriteFile};
+use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_catalog::CepMethod;
 use lancet_native::{
     register_production_method_registry, to_tool_definitions, CepAuditStore, CepTransport,
@@ -102,8 +102,8 @@ fn envelope_declare_call(
         reason: Some(description.to_string()),
     };
     llm_tool_call(
-        Declare::NAME,
-        serde_json::to_value(params).expect("serialize declare params"),
+        Envelope::NAME,
+        serde_json::to_value(EnvelopeParams::Declare(params)).expect("serialize declare params"),
     )
 }
 
@@ -127,11 +127,11 @@ async fn cep_round_trip_impact_matrix() {
     let (adapter, _audit) = production_adapter(
         root.to_str().unwrap(),
         &[
-            ReadFile::NAME,
-            WriteFile::NAME,
+            ObserveWorkspace::NAME,
+            Create::NAME,
             Run::NAME,
             TodoWrite::NAME,
-            Declare::NAME,
+            Envelope::NAME,
         ],
         false,
     )
@@ -140,20 +140,22 @@ async fn cep_round_trip_impact_matrix() {
     let rows = [
         ImpactRow {
             impact: ImpactKind::WorkspaceObservation,
-            method: ReadFile::NAME,
+            method: ObserveWorkspace::NAME,
             arguments: serde_json::json!({
+                "mode": "read_file",
                 "path": "hello.txt",
                 "offset": 1,
                 "limit": 10
             }),
             assert_result: |value| {
-                let content = value["content"].as_str().unwrap_or_default();
+                assert_eq!(value["mode"].as_str(), Some("read_file"));
+                let content = value["result"]["content"].as_str().unwrap_or_default();
                 assert!(content.contains("hello impact matrix"));
             },
         },
         ImpactRow {
             impact: ImpactKind::WorkspaceMutation,
-            method: WriteFile::NAME,
+            method: Create::NAME,
             arguments: serde_json::json!({
                 "path": "created.txt",
                 "content": "written via adapter"
@@ -206,7 +208,7 @@ async fn cep_round_trip_impact_matrix() {
                 .await
                 .expect("declare RunCommand envelope");
         }
-        if row.method == WriteFile::NAME {
+        if row.method == Create::NAME {
             let declare_write = envelope_declare_call(
                 "cep round-trip write",
                 BTreeSet::from([Capability::WritePath {
@@ -237,7 +239,7 @@ async fn cep_round_trip_impact_matrix() {
     let fetch_result = fetch_adapter
         .execute(&fetch_call)
         .await
-        .expect("web.fetch round-trip");
+        .expect("fetch.web round-trip");
     let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch result JSON");
     assert_eq!(
         fetch_parsed["body"].as_str(),
@@ -249,8 +251,12 @@ async fn cep_round_trip_impact_matrix() {
 #[tokio::test]
 async fn cep_round_trip_unknown_method_rejected_at_adapter() {
     let dir = TempDir::new().unwrap();
-    let (adapter, _audit) =
-        production_adapter(dir.path().to_str().unwrap(), &[ReadFile::NAME], false).await;
+    let (adapter, _audit) = production_adapter(
+        dir.path().to_str().unwrap(),
+        &[ObserveWorkspace::NAME],
+        false,
+    )
+    .await;
 
     let err = adapter
         .execute(&ToolCall {
@@ -269,11 +275,18 @@ async fn cep_round_trip_unknown_method_rejected_at_adapter() {
 #[tokio::test]
 async fn cep_round_trip_schema_mismatch_preserves_field_path() {
     let dir = TempDir::new().unwrap();
-    let (adapter, _audit) =
-        production_adapter(dir.path().to_str().unwrap(), &[ReadFile::NAME], false).await;
+    let (adapter, _audit) = production_adapter(
+        dir.path().to_str().unwrap(),
+        &[ObserveWorkspace::NAME],
+        false,
+    )
+    .await;
 
     let err = adapter
-        .execute(&llm_tool_call(ReadFile::NAME, serde_json::json!({})))
+        .execute(&llm_tool_call(
+            ObserveWorkspace::NAME,
+            serde_json::json!({ "mode": "read_file" }),
+        ))
         .await
         .expect_err("missing required path must fail");
 
@@ -438,7 +451,7 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     .await;
 
     let fetch_call = llm_tool_call(Fetch::NAME, serde_json::json!({ "url": fetch_url }));
-    let fetch_result = adapter.execute(&fetch_call).await.expect("web.fetch");
+    let fetch_result = adapter.execute(&fetch_call).await.expect("fetch.web");
     let fetch_parsed: Value = serde_json::from_str(&fetch_result).expect("fetch json");
     assert_eq!(fetch_parsed["body"].as_str(), Some("cep-body"));
 
@@ -450,7 +463,7 @@ async fn web_fetch_and_todo_write_audit_without_workspace_envelope() {
     );
     adapter.execute(&todo_call).await.expect("todo_write");
 
-    let fetch_row = audit.row_by_audit_id(1).expect("web.fetch audit row");
+    let fetch_row = audit.row_by_audit_id(1).expect("fetch.web audit row");
     assert_eq!(fetch_row.method, Fetch::NAME);
     assert_eq!(fetch_row.impact_kind, "external_observation");
     assert_eq!(fetch_row.semantic_stage, SEMANTIC_STAGE_NATIVE);

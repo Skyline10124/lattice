@@ -4,7 +4,7 @@ use futures::StreamExt;
 use lattice_llm::security;
 use lattice_tooling::ToolError;
 
-/// Structured HTTP fetch outcome for native `web.fetch`.
+/// Structured HTTP fetch outcome for native `fetch.web`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WebFetchOutcome {
     pub status: u16,

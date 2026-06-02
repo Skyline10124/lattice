@@ -91,6 +91,33 @@ pub enum EffectScopeKind {
     SessionState,
 }
 
+/// Static overlay behavior declaration for a method.
+///
+/// v1.3.1 does not add overlay isolation; this field exists so every tool
+/// contract explicitly states how it is expected to compose with a future
+/// lower/upper filesystem boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayBehavior {
+    NotApplicable,
+    ReadWorkspace,
+    WriteWorkspace,
+    CommandOpaque,
+    ExternalOpaque,
+    SessionState,
+    AuditRead,
+}
+
+/// Static failure semantics declaration for a method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureSemantics {
+    NoBackendEffectOnFailure,
+    AllOrNothing,
+    PartialEffectsAudited,
+    RetainDiffOnVerifyFailure,
+}
+
 /// Static method-level effect declaration (the permission ceiling).
 ///
 /// Catalog methods carry one of these as `const EFFECT`. The `kinds` field is a
@@ -102,6 +129,28 @@ pub struct EffectDecl {
     #[serde(serialize_with = "serialize_static_slice")]
     #[schemars(with = "Vec<RequiredCapability>")]
     pub capabilities: &'static [RequiredCapability],
+    pub overlay: OverlayBehavior,
+    pub failure: FailureSemantics,
+}
+
+impl EffectDecl {
+    /// Registry-time completeness check for method contracts.
+    pub fn validate_complete(&self, method: &str) -> Result<(), String> {
+        if self.kinds.0.is_empty() {
+            return Err(format!("{method} has an empty effect kind set"));
+        }
+        if self.capabilities.is_empty() {
+            return Err(format!("{method} has no required capability declaration"));
+        }
+        if matches!(self.failure, FailureSemantics::PartialEffectsAudited)
+            && !self.kinds.contains(&ImpactKind::CommandExecution)
+        {
+            return Err(format!(
+                "{method} declares partial-effects failure semantics without command execution"
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn serialize_static_slice<T: Serialize, S: serde::Serializer>(

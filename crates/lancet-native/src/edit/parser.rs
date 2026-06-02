@@ -2,11 +2,12 @@ use std::fmt;
 
 use super::diagnostics::parse_error;
 use super::hash::parse_old_hash;
-use super::types::{PatchDiagnostic, PatchDocument, PatchHunk, PatchHunkLine, PatchOperation};
+use super::types::{
+    HashLine, PatchDiagnostic, PatchDocument, PatchHunk, PatchHunkLine, PatchOperation,
+};
 
 const BEGIN_MARKER: &str = "*** Begin Patch";
 const END_MARKER: &str = "*** End Patch";
-const ADD_FILE_PREFIX: &str = "*** Add File:";
 const UPDATE_FILE_PREFIX: &str = "*** Update File:";
 const DELETE_FILE_PREFIX: &str = "*** Delete File:";
 const OLD_HASH_PREFIX: &str = "*** Old Hash:";
@@ -100,11 +101,6 @@ impl Parser {
             return Err(self.error("unexpected end of patch document"));
         };
 
-        if let Some(path) = parse_header_path(line, ADD_FILE_PREFIX) {
-            self.position += 1;
-            return self.parse_add_file(path, operation_index);
-        }
-
         if let Some(path) = parse_header_path(line, UPDATE_FILE_PREFIX) {
             self.position += 1;
             return self.parse_update_file(path, operation_index);
@@ -116,31 +112,6 @@ impl Parser {
         }
 
         Err(self.error(format!("unexpected patch line: {line}")))
-    }
-
-    fn parse_add_file(
-        &mut self,
-        path: String,
-        operation_index: usize,
-    ) -> Result<PatchOperation, PatchParseError> {
-        let mut lines = Vec::new();
-        while let Some(line) = self.current() {
-            if is_operation_or_end(line) {
-                break;
-            }
-
-            let Some(content) = line.strip_prefix('+') else {
-                return Err(self.error_with_operation(
-                    "add file content lines must start with '+'",
-                    path.clone(),
-                    operation_index,
-                ));
-            };
-            lines.push(content.to_string());
-            self.position += 1;
-        }
-
-        Ok(PatchOperation::AddFile { path, lines })
     }
 
     fn parse_update_file(
@@ -322,22 +293,30 @@ fn parse_header_path(line: &str, prefix: &str) -> Option<String> {
 
 fn is_operation_or_end(line: &str) -> bool {
     line == END_MARKER
-        || line.starts_with(ADD_FILE_PREFIX)
         || line.starts_with(UPDATE_FILE_PREFIX)
         || line.starts_with(DELETE_FILE_PREFIX)
 }
 
 fn parse_hunk_line(line: &str) -> Option<PatchHunkLine> {
     if let Some(content) = line.strip_prefix(' ') {
-        return Some(PatchHunkLine::Context(content.to_string()));
+        return parse_hashline(content).map(PatchHunkLine::Context);
     }
     if let Some(content) = line.strip_prefix('-') {
-        return Some(PatchHunkLine::Remove(content.to_string()));
+        return parse_hashline(content).map(PatchHunkLine::Remove);
     }
     if let Some(content) = line.strip_prefix('+') {
         return Some(PatchHunkLine::Add(content.to_string()));
     }
     None
+}
+
+fn parse_hashline(content: &str) -> Option<HashLine> {
+    let (hash, text) = content.split_once('\t')?;
+    let hash = parse_old_hash(hash.trim()).ok()?;
+    Some(HashLine {
+        hash,
+        text: text.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -348,20 +327,17 @@ mod tests {
     const HASH_B: &str = "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     #[test]
-    fn parse_patch_document_accepts_begin_add_update_delete() {
+    fn parse_patch_document_accepts_begin_update_delete() {
         let patch = format!(
             "\
 *** Begin Patch
-*** Add File: src/new.rs
-+pub fn added() {{}}
-+
 *** Update File: src/lib.rs
 *** Old Hash: {HASH_A}
 @@
- pub fn existing() {{
--    old();
+ {HASH_A}\tpub fn existing() {{
+-{HASH_B}\t    old();
 +    new();
- }}
+ {HASH_A}\t}}
 *** Delete File: src/old.rs
 *** Old Hash: {HASH_B}
 *** End Patch"
@@ -369,13 +345,8 @@ mod tests {
 
         let document = parse_patch_document(&patch).unwrap();
 
-        assert_eq!(document.operations.len(), 3);
-        assert!(matches!(
-            &document.operations[0],
-            PatchOperation::AddFile { path, lines }
-                if path == "src/new.rs" && lines == &vec!["pub fn added() {}".to_string(), "".to_string()]
-        ));
-        match &document.operations[1] {
+        assert_eq!(document.operations.len(), 2);
+        match &document.operations[0] {
             PatchOperation::UpdateFile {
                 path,
                 old_hash,
@@ -391,7 +362,7 @@ mod tests {
             operation => panic!("unexpected operation: {operation:?}"),
         }
         assert!(matches!(
-            &document.operations[2],
+            &document.operations[1],
             PatchOperation::DeleteFile { path, old_hash }
                 if path == "src/old.rs" && old_hash == HASH_B
         ));
@@ -430,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_patch_document_rejects_malformed_patch_text() {
+    fn parse_patch_document_rejects_add_file_operation() {
         let patch = "\
 *** Begin Patch
 *** Add File: src/lib.rs
@@ -440,18 +411,18 @@ plain text without add marker
         let err = parse_patch_document(patch).unwrap_err();
 
         assert_eq!(err.diagnostics[0].code.as_str(), "parse_error");
-        assert_eq!(err.diagnostics[0].path.as_deref(), Some("src/lib.rs"));
-        assert!(err.diagnostics[0]
-            .message
-            .contains("content lines must start with '+'"));
+        assert!(err.diagnostics[0].message.contains("*** Add File"));
     }
 
     #[test]
     fn parse_patch_document_rejects_unterminated_patch_text() {
         let patch = "\
 *** Begin Patch
-*** Add File: src/lib.rs
-+pub fn added() {}";
+*** Update File: src/lib.rs
+*** Old Hash: blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+@@
+ blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tpub fn old() {}
++pub fn new() {}";
 
         let err = parse_patch_document(patch).unwrap_err();
 

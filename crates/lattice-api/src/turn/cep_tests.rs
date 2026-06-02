@@ -3,7 +3,9 @@ use std::sync::Arc;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lancet_catalog::methods::workspace::{ReadFile, ReadFileResult};
+use lancet_catalog::methods::workspace::{
+    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
+};
 use lancet_catalog::CepMethod;
 use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::envelope::ImpactKind;
@@ -79,8 +81,10 @@ async fn cep_executor_adapter_parse_error_maps_to_32700() {
 
 #[tokio::test]
 async fn cep_executor_adapter_rejects_profile_disabled_command_run() {
-    let adapter =
-        CepExecutorAdapter::new(CepTransport::pair(8).0, ["workspace.read_file".to_string()]);
+    let adapter = CepExecutorAdapter::new(
+        CepTransport::pair(8).0,
+        [ObserveWorkspace::NAME.to_string()],
+    );
     let err = adapter
         .execute(&ToolCall {
             id: "call_1".to_string(),
@@ -99,11 +103,14 @@ async fn cep_executor_adapter_rejects_profile_disabled_command_run() {
 async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<ReadFile, _, _>(|params, _ctx| async move {
-            Ok(ReadFileResult {
+        .register_method::<ObserveWorkspace, _, _>(|params, _ctx| async move {
+            let ObserveWorkspaceParams::ReadFile(params) = params else {
+                panic!("expected read_file mode");
+            };
+            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
                 content: params.path,
                 content_hash: None,
-            })
+            }))
         })
         .unwrap();
     let (client, server) = CepTransport::pair(8);
@@ -112,7 +119,7 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
             .run(registry, ServerRunConfig::in_memory_for_tests())
             .await;
     });
-    let adapter = CepExecutorAdapter::new(client, [ReadFile::NAME.to_string()]);
+    let adapter = CepExecutorAdapter::new(client, [ObserveWorkspace::NAME.to_string()]);
     tokio::task::yield_now().await;
     std::mem::forget(server_task);
 
@@ -120,8 +127,8 @@ async fn cep_executor_adapter_allows_enabled_workspace_read_file() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: ReadFile::NAME.to_string(),
-                arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+                name: ObserveWorkspace::NAME.to_string(),
+                arguments: r#"{"mode":"read_file","path":"src/lib.rs"}"#.to_string(),
             },
         })
         .await
@@ -151,11 +158,14 @@ async fn cep_executor_adapter_unknown_method_maps_to_32601() {
 async fn cep_executor_adapter_invalid_params_maps_to_32602() {
     let mut registry = MethodRegistry::new();
     registry
-        .register_method::<ReadFile, _, _>(|params, _ctx| async move {
-            Ok(ReadFileResult {
+        .register_method::<ObserveWorkspace, _, _>(|params, _ctx| async move {
+            let ObserveWorkspaceParams::ReadFile(params) = params else {
+                panic!("expected read_file mode");
+            };
+            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
                 content: params.path,
                 content_hash: None,
-            })
+            }))
         })
         .unwrap();
     let adapter = adapter_over_registry(registry).await;
@@ -164,8 +174,8 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
         .execute(&ToolCall {
             id: "call_1".to_string(),
             function: FunctionCall {
-                name: ReadFile::NAME.to_string(),
-                arguments: r#"{}"#.to_string(),
+                name: ObserveWorkspace::NAME.to_string(),
+                arguments: r#"{"mode":"read_file"}"#.to_string(),
             },
         })
         .await
@@ -277,7 +287,7 @@ cep_family_test!(
     cep_executor_adapter_effect_family_preserves_payload,
     CepErrorCode::EffectViolation,
     CepErrorData::Effect(Box::new(EffectErrorData {
-        method: "workspace.read_file".into(),
+        method: ObserveWorkspace::NAME.into(),
         declared_effect: vec![ImpactKind::WorkspaceObservation],
         authorized_effect: vec![ImpactKind::WorkspaceObservation],
         observed_effects: vec![
@@ -327,7 +337,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 
     let deps2 = build_production_turn_deps(
         dir.path().to_str().unwrap(),
-        &["workspace.read_file".to_string()],
+        &[ObserveWorkspace::NAME.to_string()],
         Arc::new(RealLlmClient),
         false,
         None,
@@ -342,10 +352,11 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::envelope::{Declare, SubmitIntent};
+    use lancet_catalog::methods::audit::AuditObserve;
+    use lancet_catalog::methods::envelope::Envelope;
     use lancet_catalog::methods::external::Fetch;
     use lancet_catalog::methods::session::TodoWrite;
-    use lancet_catalog::methods::workspace::ReadFile;
+    use lancet_catalog::methods::workspace::{ObserveWorkspace, ObserveWorkspaceParams};
     use lancet_native::SEMANTIC_STAGE_NATIVE;
     use lancet_protocol::envelope::Capability;
     use lattice_profile::LancetNetworkSection;
@@ -372,7 +383,7 @@ mod cep_native_registry {
     #[test]
     fn production_base_envelope_grants_read_audit() {
         let dir = TempDir::new().unwrap();
-        let enabled = vec![ReadFile::NAME.to_string()];
+        let enabled = vec![AuditObserve::NAME.to_string()];
         let envelope =
             production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
         assert!(
@@ -381,14 +392,14 @@ mod cep_native_registry {
                 .capabilities
                 .iter()
                 .any(|c| matches!(c, Capability::ReadAudit)),
-            "base envelope must grant ReadAudit for audit.query/replay"
+            "base envelope must grant ReadAudit for observe.audit/observe.audit_replay"
         );
     }
 
     #[test]
     fn production_base_envelope_grants_session_state_for_envelope_methods() {
         let dir = TempDir::new().unwrap();
-        let enabled = vec![Declare::NAME.to_string(), SubmitIntent::NAME.to_string()];
+        let enabled = vec![Envelope::NAME.to_string()];
         let envelope =
             production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
         assert!(
@@ -397,7 +408,7 @@ mod cep_native_registry {
                 .capabilities
                 .iter()
                 .any(|c| matches!(c, Capability::MutateSessionState)),
-            "base envelope must grant MutateSessionState for envelope session-state methods"
+            "base envelope must grant MutateSessionState for session.envelope"
         );
     }
 
@@ -442,7 +453,7 @@ mod cep_native_registry {
 
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ReadFile::NAME.to_string()],
+            &[ObserveWorkspace::NAME.to_string()],
             llm,
             true,
             None,
@@ -452,14 +463,14 @@ mod cep_native_registry {
         .expect("production deps");
 
         deps.cep_client
-            .call::<ReadFile>(ReadFileParams {
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
                 path: "hello.txt".into(),
                 offset: None,
                 limit: None,
                 line_numbers: None,
-            })
+            }))
             .await
-            .expect("native read_file");
+            .expect("native observe.workspace read_file");
 
         let row = deps.audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
@@ -477,8 +488,10 @@ mod cep_native_registry {
 mod attestation_and_dispatch {
     use super::*;
     use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-    use lancet_catalog::methods::envelope::{SubmitIntent, SubmitIntentParams};
-    use lancet_catalog::methods::workspace::{ReadFile, ReadFileParams};
+    use lancet_catalog::methods::envelope::{Envelope, EnvelopeParams, SubmitIntentParams};
+    use lancet_catalog::methods::workspace::{
+        ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
+    };
     use lancet_native::canonicalize_in_toto_statement;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
@@ -502,7 +515,7 @@ mod attestation_and_dispatch {
         );
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[SubmitIntent::NAME.to_string()],
+            &[Envelope::NAME.to_string()],
             llm,
             true,
             None,
@@ -512,27 +525,30 @@ mod attestation_and_dispatch {
         .expect("deps");
 
         let adapter =
-            CepExecutorAdapter::new(deps.cep_client.clone(), [SubmitIntent::NAME.to_string()]);
+            CepExecutorAdapter::new(deps.cep_client.clone(), [Envelope::NAME.to_string()]);
         let call = ToolCall {
             id: "call_submit".into(),
             function: FunctionCall {
-                name: SubmitIntent::NAME.to_string(),
-                arguments: serde_json::to_string(&SubmitIntentParams {
-                    action: "write".into(),
-                    target: "workspace.write_file".into(),
-                    params: None,
-                    supersede: false,
-                    reason: None,
-                })
+                name: Envelope::NAME.to_string(),
+                arguments: serde_json::to_string(&EnvelopeParams::DeriveIntent(
+                    SubmitIntentParams {
+                        action: "write".into(),
+                        target: "mutate.create".into(),
+                        params: None,
+                        supersede: false,
+                        reason: None,
+                    },
+                ))
                 .unwrap(),
             },
         };
         let output = adapter
             .execute(&call)
             .await
-            .expect("SubmitIntent must route through the typed CEP adapter");
+            .expect("session.envelope derive_intent must route through the typed CEP adapter");
         let result: serde_json::Value = serde_json::from_str(&output).expect("json result");
-        assert_eq!(result["accepted"], true);
+        assert_eq!(result["mode"], "derive_intent");
+        assert_eq!(result["result"]["accepted"], true);
     }
 
     #[tokio::test]
@@ -549,7 +565,7 @@ mod attestation_and_dispatch {
         );
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ReadFile::NAME.to_string()],
+            &[ObserveWorkspace::NAME.to_string()],
             llm,
             true,
             None,
@@ -568,12 +584,12 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<ReadFile>(ReadFileParams {
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
                 path: "hello.txt".into(),
                 offset: None,
                 limit: None,
                 line_numbers: None,
-            })
+            }))
             .await
             .expect("read");
 
@@ -618,7 +634,7 @@ mod attestation_and_dispatch {
         );
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ReadFile::NAME.to_string()],
+            &[ObserveWorkspace::NAME.to_string()],
             llm,
             true,
             None,
@@ -635,12 +651,12 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<ReadFile>(ReadFileParams {
+            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
                 path: "a.txt".into(),
                 offset: None,
                 limit: None,
                 line_numbers: None,
-            })
+            }))
             .await
             .expect("read");
 

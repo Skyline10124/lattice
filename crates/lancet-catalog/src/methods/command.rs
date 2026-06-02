@@ -2,12 +2,14 @@
 
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
-use lancet_protocol::{EffectDecl, EffectKindSet, EffectScopeKind, ImpactKind};
+use lancet_protocol::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// `command.run`
+/// `exec.command_run`
 pub struct Run;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -39,13 +41,13 @@ pub struct RunResult {
 }
 
 impl CepMethod for Run {
-    const NAME: &'static str = "command.run";
+    const NAME: &'static str = "exec.command_run";
     const DESCRIPTION: &'static str = "Run a command with argv, optional cwd/env/timeout, and declared_impact metadata. Use JSON argv arrays, never shell strings. Diagnostic commands such as cargo check/test/clippy/doc and git diff/status/log/show should use declared_impact workspace_observation or omit it. Unknown or possibly mutating commands must declare workspace_mutation and require an active envelope with RunCommand plus any needed WritePath scope. Do not use command_execution to claim an unknown command is read-only; policy rejects that as too weak.";
     type Params = RunParams;
     type Result = RunResult;
     const IMPACT: ImpactKind = ImpactKind::CommandExecution;
     const CAPABILITY: RequiredCapability = RequiredCapability::RunCommand;
-    // command.run may execute a command and, for workspace-mutation commands,
+    // exec.command_run may execute a command and, for workspace-mutation commands,
     // mutate files within the declared scope.
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[
@@ -57,6 +59,8 @@ impl CepMethod for Run {
             RequiredCapability::RunCommand,
             RequiredCapability::WritePath,
         ],
+        overlay: OverlayBehavior::CommandOpaque,
+        failure: FailureSemantics::PartialEffectsAudited,
     };
 }
 
@@ -68,7 +72,7 @@ mod tests {
 
     #[test]
     fn command_run_name_is_dotted() {
-        assert_eq!(Run::NAME, "command.run");
+        assert_eq!(Run::NAME, "exec.command_run");
         assert!(Run::NAME.contains('.'));
         assert!(!Run::NAME.contains('/'));
     }

@@ -172,6 +172,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         &authorized_region_slot,
         cep_mode,
         &durable_metadata,
+        &cep_context.policy.denied_effect_kinds,
     );
 
     let durable_metadata_json = durable_metadata.take_json();
@@ -230,6 +231,7 @@ fn apply_effect_check(
     authorized_region_slot: &crate::effect::ledger::AuthorizedRegionSlot,
     cep_mode: CepMode,
     durable_metadata: &CallDurableMetadata,
+    denied_effect_kinds: &std::collections::BTreeSet<lancet_protocol::envelope::ImpactKind>,
 ) -> Result<Value, CepError> {
     if is_incomplete_dispatch(&dispatch_result) {
         if !observed_effects.is_empty() {
@@ -248,41 +250,50 @@ fn apply_effect_check(
         return dispatch_result;
     };
 
-    if cep_mode == CepMode::Off {
-        return Ok(dispatch_value);
-    }
-
     let effect_decl = lancet_catalog::catalog()
         .iter()
-        .find(|d| d.name == method)
-        .map(|d| &d.effect);
+        .find(|descriptor| descriptor.name == method)
+        .map(|descriptor| &descriptor.effect);
 
     let Some(effect_decl) = effect_decl else {
         return Ok(dispatch_value);
     };
 
+    crate::effect::checker::check_denied_effect_kinds(
+        method,
+        observed_effects,
+        effect_decl,
+        denied_effect_kinds,
+    )?;
+
+    if cep_mode == CepMode::Off {
+        return Ok(dispatch_value);
+    }
+
     let region = authorized_region_slot.get();
 
     match region {
-        Some(ref authorized) => match crate::effect::checker::check_effects_against_region(
-            method,
-            observed_effects,
-            authorized,
-            effect_decl,
-        ) {
-            Ok(()) => Ok(dispatch_value),
-            Err(violation_err) => match cep_mode {
-                CepMode::Enforce => Err(violation_err),
-                CepMode::Warn => {
-                    durable_metadata.record(json!({
-                        "effect_warning": true,
-                        "violation": violation_err.message,
-                    }));
-                    Ok(dispatch_value)
-                }
-                CepMode::Off => unreachable!("Off early-returned above"),
-            },
-        },
+        Some(ref authorized) => {
+            match crate::effect::checker::check_effects_against_region(
+                method,
+                observed_effects,
+                authorized,
+                effect_decl,
+            ) {
+                Ok(()) => Ok(dispatch_value),
+                Err(violation_err) => match cep_mode {
+                    CepMode::Enforce => Err(violation_err),
+                    CepMode::Warn => {
+                        durable_metadata.record(json!({
+                            "effect_warning": true,
+                            "violation": violation_err.message,
+                        }));
+                        Ok(dispatch_value)
+                    }
+                    CepMode::Off => unreachable!("Off early-returned above"),
+                },
+            }
+        }
         None => match cep_mode {
             CepMode::Enforce => Err(CepError::new(
                 CepErrorCode::EffectViolation,
@@ -406,7 +417,6 @@ fn compact_success_summary(method: &str, value: &Value) -> String {
                 .unwrap_or(0);
             format!("todo_count={count}")
         }
-        "workspace.read_file" => "read_file".to_string(),
         _ => format!("method={method}"),
     }
 }
@@ -430,7 +440,7 @@ fn compact_success_metadata(
                 r#"{{"outcome":"todo_write","op_count":{count},"backend_invoked":{backend_invoked}}}"#
             ))
         }
-        "web.fetch" => {
+        "fetch.web" => {
             let response_size = value
                 .get("body")
                 .and_then(|v| v.as_str())
@@ -441,7 +451,7 @@ fn compact_success_metadata(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             Some(format!(
-                r#"{{"outcome":"web_fetch","response_size":{response_size},"truncated":{truncated},"backend_invoked":{backend_invoked}}}"#
+                r#"{{"outcome":"fetch_web","response_size":{response_size},"truncated":{truncated},"backend_invoked":{backend_invoked}}}"#
             ))
         }
         "workspace.inspect" | "workspace.navigate" => {

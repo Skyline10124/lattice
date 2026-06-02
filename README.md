@@ -4,6 +4,11 @@
 
 LATTICE is a Rust LLM runtime for session-centered agent work: sessions own the active agent profile, profile changes are explicit session operations, and every turn lands as a commit-backed session history entry. Tool execution runs through **LANCET**, which uses CEP (Controlled Execution Protocol) internally for typed JSON-RPC methods, capability envelopes, policy gating, path guards, and audit trails.
 
+The current LANCET tool surface is organized by effect contract: observation,
+mutation, command execution, external fetch, session-state mutation, and audit
+observation. The canonical catalog has 9 methods; legacy pre-v1.3.1 method names
+are removed and are not accepted by the adapter or native registry.
+
 ## Workspace
 
 ```

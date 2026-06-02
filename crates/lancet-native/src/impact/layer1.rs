@@ -8,7 +8,9 @@ pub struct Layer1Result {
 }
 
 pub fn derive_layer1(method_name: &str, target: &str) -> Layer1Result {
-    let descriptor = catalog::catalog().iter().find(|d| d.name == method_name);
+    let descriptor = catalog()
+        .iter()
+        .find(|descriptor| descriptor.name == method_name);
 
     let (kind, scope_kind) = match descriptor {
         Some(d) => (d.impact.clone(), d.effect.scope),
@@ -56,22 +58,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_layer1_write_file_single_path() {
-        let result = derive_layer1("workspace.write_file", "src/main.rs");
+    fn test_layer1_create_single_path() {
+        let result = derive_layer1("mutate.create", "src/main.rs");
         assert_eq!(result.kind, ImpactKind::WorkspaceMutation);
         assert!(matches!(result.base_scope, Some(ImpactScope::ExactFile(_))));
     }
 
     #[test]
     fn test_layer1_grep_directory() {
-        let result = derive_layer1("workspace.grep", "src/");
+        let result = derive_layer1("observe.workspace", "src/");
         assert_eq!(result.kind, ImpactKind::WorkspaceObservation);
         assert!(matches!(result.base_scope, Some(ImpactScope::Directory(_))));
     }
 
     #[test]
     fn test_layer1_directory_with_dot_suffix_stays_directory() {
-        let result = derive_layer1("workspace.write_file", "config.d/");
+        let result = derive_layer1("mutate.create", "config.d/");
         assert!(matches!(result.base_scope, Some(ImpactScope::Directory(_))));
     }
 
@@ -83,14 +85,14 @@ mod tests {
 
     #[test]
     fn test_layer1_read_file_is_observation() {
-        let result = derive_layer1("workspace.read_file", "src/lib.rs");
+        let result = derive_layer1("observe.workspace", "src/lib.rs");
         assert_eq!(result.kind, ImpactKind::WorkspaceObservation);
-        assert!(matches!(result.base_scope, Some(ImpactScope::ExactFile(_))));
+        assert!(matches!(result.base_scope, Some(ImpactScope::Directory(_))));
     }
 
     #[test]
     fn test_layer1_fetch_is_host_scope() {
-        let result = derive_layer1("web.fetch", "example.com");
+        let result = derive_layer1("fetch.web", "example.com");
         assert_eq!(result.kind, ImpactKind::ExternalObservation);
         assert!(matches!(result.base_scope, Some(ImpactScope::Host(_))));
     }

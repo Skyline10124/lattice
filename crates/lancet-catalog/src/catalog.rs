@@ -2,27 +2,21 @@
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
-    AuditQuery, AuditReplay, AuditTail, Declare, Fetch, FindFiles, Grep, ListDirectory, Patch,
-    ReadFile, Run, SubmitIntent, TodoWrite, WriteFile,
+    AuditObserve, AuditReplay, Create, Envelope, Fetch, ObserveWorkspace, Patch, Run, TodoWrite,
 };
 use std::sync::LazyLock;
 
 /// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 14]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 9]> = LazyLock::new(|| {
     [
-        MethodDescriptor::for_method::<ReadFile>(),
-        MethodDescriptor::for_method::<Grep>(),
-        MethodDescriptor::for_method::<ListDirectory>(),
-        MethodDescriptor::for_method::<FindFiles>(),
+        MethodDescriptor::for_method::<ObserveWorkspace>(),
+        MethodDescriptor::for_method::<Create>(),
+        MethodDescriptor::for_method::<Patch>(),
+        MethodDescriptor::for_method::<Run>(),
         MethodDescriptor::for_method::<Fetch>(),
         MethodDescriptor::for_method::<TodoWrite>(),
-        MethodDescriptor::for_method::<Run>(),
-        MethodDescriptor::for_method::<WriteFile>(),
-        MethodDescriptor::for_method::<Patch>(),
-        MethodDescriptor::for_method::<Declare>(),
-        MethodDescriptor::for_method::<SubmitIntent>(),
-        MethodDescriptor::for_method::<AuditQuery>(),
-        MethodDescriptor::for_method::<AuditTail>(),
+        MethodDescriptor::for_method::<Envelope>(),
+        MethodDescriptor::for_method::<AuditObserve>(),
         MethodDescriptor::for_method::<AuditReplay>(),
     ]
 });
@@ -57,26 +51,20 @@ mod tests {
     use super::*;
     use crate::method::CepMethod;
     use crate::methods::{
-        AuditQuery, AuditReplay, AuditTail, Declare, Fetch, FindFiles, Grep, ListDirectory, Patch,
-        ReadFile, Run, SubmitIntent, TodoWrite, WriteFile,
+        AuditObserve, AuditReplay, Create, Envelope, Fetch, ObserveWorkspace, Patch, Run, TodoWrite,
     };
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 14] = [
-        "workspace.read_file",
-        "workspace.grep",
-        "workspace.list_directory",
-        "workspace.find_files",
-        "web.fetch",
+    const EXPECTED_ORDER: [&str; 9] = [
+        "observe.workspace",
+        "mutate.create",
+        "mutate.patch",
+        "exec.command_run",
+        "fetch.web",
         "session.todo_write",
-        "command.run",
-        "workspace.write_file",
-        "workspace.patch",
-        "envelope.declare",
-        "envelope.submit_intent",
-        "audit.query",
-        "audit.tail",
-        "audit.replay",
+        "session.envelope",
+        "observe.audit",
+        "observe.audit_replay",
     ];
 
     #[test]
@@ -136,25 +124,20 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 14] = [
-            (&catalog[0], ReadFile::IMPACT, ReadFile::CAPABILITY),
-            (&catalog[1], Grep::IMPACT, Grep::CAPABILITY),
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 9] = [
             (
-                &catalog[2],
-                ListDirectory::IMPACT,
-                ListDirectory::CAPABILITY,
+                &catalog[0],
+                ObserveWorkspace::IMPACT,
+                ObserveWorkspace::CAPABILITY,
             ),
-            (&catalog[3], FindFiles::IMPACT, FindFiles::CAPABILITY),
+            (&catalog[1], Create::IMPACT, Create::CAPABILITY),
+            (&catalog[2], Patch::IMPACT, Patch::CAPABILITY),
+            (&catalog[3], Run::IMPACT, Run::CAPABILITY),
             (&catalog[4], Fetch::IMPACT, Fetch::CAPABILITY),
             (&catalog[5], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
-            (&catalog[6], Run::IMPACT, Run::CAPABILITY),
-            (&catalog[7], WriteFile::IMPACT, WriteFile::CAPABILITY),
-            (&catalog[8], Patch::IMPACT, Patch::CAPABILITY),
-            (&catalog[9], Declare::IMPACT, Declare::CAPABILITY),
-            (&catalog[10], SubmitIntent::IMPACT, SubmitIntent::CAPABILITY),
-            (&catalog[11], AuditQuery::IMPACT, AuditQuery::CAPABILITY),
-            (&catalog[12], AuditTail::IMPACT, AuditTail::CAPABILITY),
-            (&catalog[13], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
+            (&catalog[6], Envelope::IMPACT, Envelope::CAPABILITY),
+            (&catalog[7], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
+            (&catalog[8], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -172,8 +155,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_14() {
-        assert_eq!(catalog().len(), 14);
+    fn catalog_len_is_9() {
+        assert_eq!(catalog().len(), 9);
     }
 
     #[test]
@@ -238,25 +221,20 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 14);
+        assert_eq!(catalog().len(), 9);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
             [
-                "workspace.read_file",
-                "workspace.grep",
-                "workspace.list_directory",
-                "workspace.find_files",
-                "web.fetch",
+                "observe.workspace",
+                "mutate.create",
+                "mutate.patch",
+                "exec.command_run",
+                "fetch.web",
                 "session.todo_write",
-                "command.run",
-                "workspace.write_file",
-                "workspace.patch",
-                "envelope.declare",
-                "envelope.submit_intent",
-                "audit.query",
-                "audit.tail",
-                "audit.replay",
+                "session.envelope",
+                "observe.audit",
+                "observe.audit_replay",
             ]
         );
         for descriptor in catalog() {

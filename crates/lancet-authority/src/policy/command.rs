@@ -1,4 +1,4 @@
-//! Command execution policy for CEP command.run handler.
+//! Command execution policy for CEP exec.command_run handler.
 //!
 //! Classifies commands into three tiers: Diagnostic, WorkspaceMutation, HardDenied.
 //! Enforces env and timeout policy with typed CEP errors.
@@ -109,7 +109,7 @@ pub fn classify_command(
     if argv.is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "command.run requires a non-empty argv",
+            "exec.command_run requires a non-empty argv",
             CepErrorData::Validation(ValidationErrorData {
                 field: "argv".into(),
                 reason: "must not be empty".into(),
@@ -237,7 +237,7 @@ fn impact_required(argv: &[String]) -> CepError {
              Commands not in the diagnostic allowlist must declare their impact."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             reason: format!("ImpactRequired: unknown command '{cmd}' requires declared_impact"),
         }),
         Retriability::Permanent,
@@ -253,7 +253,7 @@ fn impact_mismatch(argv: &[String]) -> CepError {
              Declare WorkspaceMutation or use a diagnostic allowlist command."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             reason: format!(
                 "ImpactMismatch: command '{cmd}' risk exceeds declared CommandExecution"
             ),
@@ -267,7 +267,7 @@ fn env_not_allowed(key: &str) -> CepError {
         CepErrorCode::GuardDenied,
         format!("Environment variable '{key}' is not in the allowed_env list"),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
-            method: "command.run".into(),
+            method: "exec.command_run".into(),
             reason: format!("EnvNotAllowed: '{key}' is not permitted by command policy"),
         }),
         Retriability::Permanent,

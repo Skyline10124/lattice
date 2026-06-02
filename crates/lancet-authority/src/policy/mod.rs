@@ -8,6 +8,7 @@ pub mod network;
 pub mod observation;
 pub mod resolved;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,6 +18,7 @@ pub use budget::{
 pub use command::{
     build_effective_env, classify_command, validate_timeout, CommandPolicy, EffectiveImpact,
 };
+use lancet_protocol::envelope::ImpactKind;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 
@@ -28,6 +30,7 @@ pub struct CepPolicyConfig {
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
     pub command: CommandPolicy,
+    pub denied_effect_kinds: BTreeSet<ImpactKind>,
 }
 
 impl CepPolicyConfig {
@@ -49,6 +52,7 @@ impl CepPolicyConfig {
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
             command: CommandPolicy::defaults(),
+            denied_effect_kinds: BTreeSet::new(),
         }
     }
 

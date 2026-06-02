@@ -47,7 +47,7 @@ use crate::policy::CepPolicyConfig;
 /// Per-invocation materialized effect — the middle layer of the effect model.
 ///
 /// For most methods this is derived from the static `EffectDecl`. For
-/// `command.run` it is computed from the existing `EffectiveImpact`
+/// `exec.command_run` it is computed from the existing `EffectiveImpact`
 /// classification (single source — no parallel classifier).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectiveEffect {
@@ -58,7 +58,7 @@ pub struct EffectiveEffect {
 impl EffectiveEffect {
     /// Materialize an effective effect from a static `EffectKindSet`.
     ///
-    /// Used for fixed-effect methods (read_file, grep, write_file, etc.)
+    /// Used for fixed-effect methods (observe.workspace, mutate.create, etc.)
     /// where the effective kinds are the same as the declared ceiling.
     pub fn from_effect_kind_set(kinds: &EffectKindSet) -> Self {
         Self {
@@ -66,7 +66,7 @@ impl EffectiveEffect {
         }
     }
 
-    /// Derive command.run's effective effect from the existing `EffectiveImpact`
+    /// Derive exec.command_run's effective effect from the existing `EffectiveImpact`
     /// classification.
     ///
     /// - `WorkspaceMutation` → Ok({CommandExecution, WorkspaceMutation})
@@ -329,6 +329,13 @@ impl AuthorizedEffectRegion {
             (ImpactKind::WorkspaceMutation, ObservedScope::Path(path)) => {
                 // Exact-file WritePath grants authorize only the exact path. Directory-glob
                 // WritePath grants authorize descendants under the normalized prefix.
+                self.write_paths.iter().any(|wp| path == wp)
+                    || self
+                        .write_path_prefixes
+                        .iter()
+                        .any(|wp| path.starts_with(wp))
+            }
+            (ImpactKind::WorkspaceMutation, ObservedScope::Lines { path, .. }) => {
                 self.write_paths.iter().any(|wp| path == wp)
                     || self
                         .write_path_prefixes

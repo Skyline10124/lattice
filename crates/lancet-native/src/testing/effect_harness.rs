@@ -156,7 +156,7 @@ pub fn assert_negative_no_backend_effects(outcome: &HarnessOutcome) {
 /// Post-backend overreach assertion: the dispatch result must be an
 /// `EffectViolation` (-32050).
 ///
-/// Use this for command.run post-backend overreach cases where the handler
+/// Use this for exec.command_run post-backend overreach cases where the handler
 /// completed successfully but the effect checker caught the overreach.
 ///
 /// # Panics

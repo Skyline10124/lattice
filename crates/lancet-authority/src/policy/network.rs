@@ -1,4 +1,4 @@
-//! CEP network policy configuration for `web.fetch`.
+//! CEP network policy configuration for `fetch.web`.
 
 use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};

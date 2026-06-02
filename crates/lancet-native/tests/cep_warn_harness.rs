@@ -7,16 +7,16 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 14 CATALOG methods through `CepMode::Warn`, collects
+//! Runs each of the 9 CATALOG methods through `CepMode::Warn`, collects
 //! `effect_warning` / `l2_warn_violations` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
 //! Method categories
-//! - **Overreach-capable (9):** use a custom handler that deliberately sets an
+//! - **Overreach-capable:** use a custom handler that deliberately sets an
 //!   empty `AuthorizedEffectRegion` and records an out-of-scope effect so
 //!   `effect_warning` appears in the audit metadata.
-//! - **Success-only (5):** `session.todo_write`, `envelope.submit_intent`,
-//!   `audit.query`, `audit.tail`, `audit.replay` — no meaningful effect-region
+//! - **Success-only:** `session.todo_write`, `observe.audit`, `observe.audit_replay` —
+//!   no meaningful effect-region
 //!   warn surface; run via the production registry with valid params only.
 //!
 //! Filter: `cep_warn_harness`
@@ -31,18 +31,17 @@ use lancet_authority::effect::{
 use lancet_authority::CepTurnContext;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
-    AuditQuery, AuditQueryParams, AuditReplay, AuditReplayParams, AuditTail, AuditTailParams,
+    AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
 };
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::envelope::{
-    Declare, DeclareParams, DeclareResult, SubmitIntent, SubmitIntentParams,
+    DeclareParams, Envelope, EnvelopeParams, EnvelopeResult, SubmitIntentParams,
 };
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    FindFiles, FindFilesParams, FindFilesResult, Grep, GrepParams, GrepResult, ListDirectory,
-    ListDirectoryParams, ListDirectoryResult, Patch, PatchParams, PatchResult, ReadFile,
-    ReadFileParams, ReadFileResult, WriteFile, WriteFileParams, WriteFileResult,
+    Create, CreateParams, CreateResult, ObserveWorkspace, ObserveWorkspaceParams,
+    ObserveWorkspaceResult, Patch, PatchParams, PatchResult, ReadFileParams, ReadFileResult,
 };
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
@@ -92,98 +91,43 @@ async fn has_effect_warning(audit: Arc<CepAuditStore>, row_before: i64) -> bool 
 // ── Per-method overreach handlers ────────────────────────────────────────────
 // Each registers one method with an overreach handler that triggers effect_warning.
 
-fn overreach_registry_read_file() -> MethodRegistry {
+fn overreach_registry_observe_workspace() -> MethodRegistry {
     let mut r = MethodRegistry::new();
-    r.register_method::<ReadFile, _, _>(|_params: ReadFileParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceObservation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/read")),
-            required_capability: RequiredCapability::ReadPath,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(ReadFileResult {
-            content: "mock".into(),
-            content_hash: None,
-        })
-    })
-    .expect("overreach ReadFile");
+    r.register_method::<ObserveWorkspace, _, _>(
+        |_params: ObserveWorkspaceParams, ctx| async move {
+            ctx.authorized_region.set(AuthorizedEffectRegion::empty());
+            ctx.record_effect(ObservedEffect {
+                kind: ImpactKind::WorkspaceObservation,
+                scope: ObservedScope::Path(PathBuf::from("/out/of/scope/observe")),
+                required_capability: RequiredCapability::ReadPath,
+                source: EffectSource::HandlerBackend,
+            });
+            Ok(ObserveWorkspaceResult::ReadFile(ReadFileResult {
+                content: "mock".into(),
+                content_hash: None,
+            }))
+        },
+    )
+    .expect("overreach ObserveWorkspace");
     r
 }
 
-fn overreach_registry_grep() -> MethodRegistry {
+fn overreach_registry_create() -> MethodRegistry {
     let mut r = MethodRegistry::new();
-    r.register_method::<Grep, _, _>(|_params: GrepParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceObservation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/grep")),
-            required_capability: RequiredCapability::Inspect,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(GrepResult {
-            matches: vec![],
-            truncated: None,
-        })
-    })
-    .expect("overreach Grep");
-    r
-}
-
-fn overreach_registry_list_directory() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<ListDirectory, _, _>(|_params: ListDirectoryParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceObservation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/list")),
-            required_capability: RequiredCapability::Inspect,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(ListDirectoryResult {
-            entries: vec![],
-            truncated: None,
-        })
-    })
-    .expect("overreach ListDirectory");
-    r
-}
-
-fn overreach_registry_find_files() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<FindFiles, _, _>(|_params: FindFilesParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceObservation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/find")),
-            required_capability: RequiredCapability::Inspect,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(FindFilesResult {
-            paths: vec![],
-            truncated: None,
-        })
-    })
-    .expect("overreach FindFiles");
-    r
-}
-
-fn overreach_registry_write_file() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<WriteFile, _, _>(|_params: WriteFileParams, ctx| async move {
+    r.register_method::<Create, _, _>(|_params: CreateParams, ctx| async move {
         ctx.authorized_region.set(AuthorizedEffectRegion::empty());
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/write")),
+            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/create")),
             required_capability: RequiredCapability::WritePath,
             source: EffectSource::HandlerBackend,
         });
-        Ok(WriteFileResult {
+        Ok(CreateResult {
             path: "mock".into(),
             bytes_written: 0,
         })
     })
-    .expect("overreach WriteFile");
+    .expect("overreach Create");
     r
 }
 
@@ -250,24 +194,26 @@ fn overreach_registry_run() -> MethodRegistry {
     r
 }
 
-fn overreach_registry_declare() -> MethodRegistry {
+fn overreach_registry_envelope() -> MethodRegistry {
     let mut r = MethodRegistry::new();
-    r.register_method::<Declare, _, _>(|_params: DeclareParams, ctx| async move {
+    r.register_method::<Envelope, _, _>(|_params: EnvelopeParams, ctx| async move {
         ctx.authorized_region.set(AuthorizedEffectRegion::empty());
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::SessionStateMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/declare")),
+            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/envelope")),
             required_capability: RequiredCapability::MutateSessionState,
             source: EffectSource::HandlerBackend,
         });
-        Ok(DeclareResult {
-            envelope_id: "mock-id".into(),
-            envelope_hash: "mock-hash".into(),
-            accepted: true,
-            superseded_envelope_id: None,
-        })
+        Ok(EnvelopeResult::Declare(
+            lancet_catalog::methods::envelope::DeclareResult {
+                envelope_id: "mock-id".into(),
+                envelope_hash: "mock-hash".into(),
+                accepted: true,
+                superseded_envelope_id: None,
+            },
+        ))
     })
-    .expect("overreach Declare");
+    .expect("overreach Envelope");
     r
 }
 
@@ -340,60 +286,31 @@ async fn generate_warn_report() -> String {
     use lancet_protocol::envelope::{Constraints, ExecutionEnvelope, Intent, Scope};
     use std::collections::BTreeSet;
 
-    // ── 9 overreach-capable methods ──────────────────────────────────────
+    // ── Overreach-capable canonical methods ──────────────────────────────
 
     let overreach_results = vec![
-        run_overreach::<ReadFile>(
-            "workspace.read_file",
-            overreach_registry_read_file(),
-            ReadFileParams {
+        run_overreach::<ObserveWorkspace>(
+            "observe.workspace",
+            overreach_registry_observe_workspace(),
+            ObserveWorkspaceParams::ReadFile(ReadFileParams {
                 path: "src/lib.rs".into(),
                 offset: None,
                 limit: None,
                 line_numbers: None,
-            },
+            }),
         )
         .await,
-        run_overreach::<Grep>(
-            "workspace.grep",
-            overreach_registry_grep(),
-            GrepParams {
-                pattern: "fn ".into(),
-                path: None,
-                max_results: None,
-            },
-        )
-        .await,
-        run_overreach::<ListDirectory>(
-            "workspace.list_directory",
-            overreach_registry_list_directory(),
-            ListDirectoryParams {
-                path: ".".into(),
-                limit: None,
-            },
-        )
-        .await,
-        run_overreach::<FindFiles>(
-            "workspace.find_files",
-            overreach_registry_find_files(),
-            FindFilesParams {
-                pattern: "*.rs".into(),
-                path: None,
-                limit: None,
-            },
-        )
-        .await,
-        run_overreach::<WriteFile>(
-            "workspace.write_file",
-            overreach_registry_write_file(),
-            WriteFileParams {
+        run_overreach::<Create>(
+            "mutate.create",
+            overreach_registry_create(),
+            CreateParams {
                 path: "mock.txt".into(),
                 content: "mock".into(),
             },
         )
         .await,
         run_overreach::<Patch>(
-            "workspace.patch",
+            "mutate.patch",
             overreach_registry_patch(),
             PatchParams {
                 patch: "*** Begin Patch\n*** End Patch\n".into(),
@@ -401,7 +318,7 @@ async fn generate_warn_report() -> String {
         )
         .await,
         run_overreach::<Fetch>(
-            "web.fetch",
+            "fetch.web",
             overreach_registry_fetch(),
             FetchParams {
                 url: "http://localhost/mock".into(),
@@ -410,7 +327,7 @@ async fn generate_warn_report() -> String {
         )
         .await,
         run_overreach::<Run>(
-            "command.run",
+            "exec.command_run",
             overreach_registry_run(),
             RunParams {
                 argv: vec!["echo".into(), "overreach-test".into()],
@@ -421,10 +338,10 @@ async fn generate_warn_report() -> String {
             },
         )
         .await,
-        run_overreach::<Declare>(
-            "envelope.declare",
-            overreach_registry_declare(),
-            DeclareParams {
+        run_overreach::<Envelope>(
+            "session.envelope",
+            overreach_registry_envelope(),
+            EnvelopeParams::Declare(DeclareParams {
                 envelope: ExecutionEnvelope {
                     intent: Intent {
                         description: "overreach test".into(),
@@ -439,12 +356,12 @@ async fn generate_warn_report() -> String {
                 },
                 supersede: false,
                 reason: None,
-            },
+            }),
         )
         .await,
     ];
 
-    // ── 5 success-only methods via production registry ───────────────────
+    // ── Success-only methods via production registry ─────────────────────
 
     // Build a temp workspace for methods that need a valid root.
     let ws_dir = TempDir::new().expect("temp dir");
@@ -482,31 +399,40 @@ async fn generate_warn_report() -> String {
         .await
         .is_ok();
 
-    // envelope.submit_intent — base MutateSessionState; target must be a valid path
+    // session.envelope derive_intent — base MutateSessionState; target must be a valid path
     let si_ok = success_client
-        .call::<SubmitIntent>(SubmitIntentParams {
+        .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
             action: "patch".into(),
             target: "src/lib.rs".into(),
             params: None,
             supersede: false,
             reason: None,
+        }))
+        .await
+        .is_ok();
+
+    // observe.audit query — base ReadAudit
+    let aq_ok = success_client
+        .call::<AuditObserve>(AuditObserveParams {
+            stream: false,
+            query: AuditQueryParams::default(),
         })
         .await
         .is_ok();
 
-    // audit.query — base ReadAudit
-    let aq_ok = success_client
-        .call::<AuditQuery>(AuditQueryParams::default())
-        .await
-        .is_ok();
-
-    // audit.tail — base ReadAudit
+    // observe.audit tail — base ReadAudit
     let at_ok = success_client
-        .call::<AuditTail>(AuditTailParams { since_audit_id: 0 })
+        .call::<AuditObserve>(AuditObserveParams {
+            stream: true,
+            query: AuditQueryParams {
+                since_audit_id: Some(0),
+                ..Default::default()
+            },
+        })
         .await
         .is_ok();
 
-    // audit.replay — base ReadAudit; replaying an empty turn returns an empty trace
+    // observe.audit_replay — base ReadAudit; replaying an empty turn returns an empty trace
     let ar_ok = success_client
         .call::<AuditReplay>(AuditReplayParams {
             turn_id: "test-turn".into(),
@@ -521,10 +447,10 @@ async fn generate_warn_report() -> String {
 
     let success_results = [
         ("session.todo_write", todo_ok),
-        ("envelope.submit_intent", si_ok),
-        ("audit.query", aq_ok),
-        ("audit.tail", at_ok),
-        ("audit.replay", ar_ok),
+        ("session.envelope", si_ok),
+        ("observe.audit query", aq_ok),
+        ("observe.audit tail", at_ok),
+        ("observe.audit_replay", ar_ok),
     ];
 
     // ── Count leaks ──────────────────────────────────────────────────────
@@ -600,7 +526,7 @@ async fn generate_warn_report() -> String {
 /// **Default CI path:** reads `docs/lancet-warn-report.md` and asserts no
 /// `fix-now` entries are present.
 ///
-/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 14 CATALOG methods
+/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 9 CATALOG methods
 /// in `CepMode::Warn`, checks audit metadata, and rewrites the committed report.
 #[tokio::test]
 async fn cep_warn_harness() {

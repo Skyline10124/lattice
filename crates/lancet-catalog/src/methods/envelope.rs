@@ -3,17 +3,11 @@
 use crate::method::{CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
 use lancet_protocol::{
-    EffectDecl, EffectKindSet, EffectScopeKind, ExecutionEnvelope, Impact, ImpactKind,
+    EffectDecl, EffectKindSet, EffectScopeKind, ExecutionEnvelope, FailureSemantics, Impact,
+    ImpactKind, OverlayBehavior,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// `envelope.declare`
-///
-/// Declares an execution envelope for subsequent mutation/command methods.
-/// Active-envelope storage is not implemented in CEP — this method only
-/// defines the wire shape and catalog metadata for CEP guard integration.
-pub struct Declare;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct DeclareParams {
@@ -36,31 +30,6 @@ pub struct DeclareResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_envelope_id: Option<String>,
 }
-
-impl CepMethod for Declare {
-    const NAME: &'static str = "envelope.declare";
-    const DESCRIPTION: &'static str =
-        "Declare an execution envelope granting capabilities for subsequent controlled operations.";
-    type Params = DeclareParams;
-    type Result = DeclareResult;
-    // Session-state mutation: declaring an envelope updates guard/session context.
-    // Full active-envelope storage lands in CEP.
-    const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
-    const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
-    const EFFECT: EffectDecl = EffectDecl {
-        kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
-        scope: EffectScopeKind::SessionState,
-        capabilities: &[RequiredCapability::MutateSessionState],
-    };
-}
-
-impl CatalogMethod for Declare {}
-
-/// `envelope.submit_intent`
-///
-/// Submit an intent to the CEP runtime and receive a derived execution envelope
-/// enriched with impact analysis results.
-pub struct SubmitIntent;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SubmitIntentParams {
@@ -104,37 +73,49 @@ pub struct SubmitIntentResult {
     pub superseded_envelope_id: Option<String>,
 }
 
-impl CepMethod for SubmitIntent {
-    const NAME: &'static str = "envelope.submit_intent";
-    const DESCRIPTION: &'static str = "Submit an intent and receive a derived execution envelope.";
-    type Params = SubmitIntentParams;
-    type Result = SubmitIntentResult;
+/// `session.envelope`
+pub struct Envelope;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum EnvelopeParams {
+    Declare(DeclareParams),
+    DeriveIntent(SubmitIntentParams),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", content = "result", rename_all = "snake_case")]
+pub enum EnvelopeResult {
+    Declare(DeclareResult),
+    DeriveIntent(SubmitIntentResult),
+}
+
+impl CepMethod for Envelope {
+    const NAME: &'static str = "session.envelope";
+    const DESCRIPTION: &'static str = "Declare or derive an execution envelope, mutating the active session authorization state. Use mode=declare for an explicit envelope, or mode=derive_intent to derive one from natural intent fields.";
+    type Params = EnvelopeParams;
+    type Result = EnvelopeResult;
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
         scope: EffectScopeKind::SessionState,
         capabilities: &[RequiredCapability::MutateSessionState],
+        overlay: OverlayBehavior::SessionState,
+        failure: FailureSemantics::NoBackendEffectOnFailure,
     };
 }
 
-impl CatalogMethod for SubmitIntent {}
+impl CatalogMethod for Envelope {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn envelope_declare_name_is_dotted() {
-        assert_eq!(Declare::NAME, "envelope.declare");
-        assert!(Declare::NAME.contains('.'));
-        assert!(!Declare::NAME.contains('/'));
-    }
-
-    #[test]
-    fn submit_intent_name_is_dotted() {
-        assert_eq!(SubmitIntent::NAME, "envelope.submit_intent");
-        assert!(SubmitIntent::NAME.contains('.'));
-        assert!(!SubmitIntent::NAME.contains('/'));
+    fn envelope_name_is_dotted() {
+        assert_eq!(Envelope::NAME, "session.envelope");
+        assert!(Envelope::NAME.contains('.'));
+        assert!(!Envelope::NAME.contains('/'));
     }
 }

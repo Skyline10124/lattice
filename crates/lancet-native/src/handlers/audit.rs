@@ -1,4 +1,4 @@
-//! Native `audit.query` and `audit.replay` handlers (PROV-02 / PROV-04).
+//! Native `observe.audit` and `observe.audit_replay` handlers.
 
 use crate::audit::{AuditError, AuditQueryFilters, AUDIT_QUERY_MAX_ROWS};
 use crate::guard_l1::evaluate_and_enforce_policy;
@@ -6,8 +6,8 @@ use crate::provenance::{project_rows, project_turn_trace};
 use crate::registry::{HandlerContext, MethodRegistry};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
-    AuditQuery, AuditQueryParams, AuditQueryResult, AuditReplay, AuditReplayParams,
-    AuditReplayResult, AuditTail, AuditTailParams, AuditTailResult,
+    AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditQueryResult,
+    AuditReplay, AuditReplayParams, AuditReplayResult, AuditTailParams, AuditTailResult,
 };
 use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
@@ -16,22 +16,41 @@ use lancet_protocol::provenance::InTotoStatement;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use serde_json::json;
 
-/// Maximum rows emitted per `audit.tail` invocation (T-26-05b DoS mitigation).
+/// Maximum rows emitted per `observe.audit` streaming invocation.
 pub const AUDIT_TAIL_MAX_ROWS: usize = 1000;
 
-/// Register `audit.query`, `audit.tail`, and `audit.replay`.
+/// Register `observe.audit` and `observe.audit_replay`.
 pub fn register_audit_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    registry.register_method::<AuditQuery, _, _>(handle_audit_query)?;
-    registry.register_method::<AuditTail, _, _>(handle_audit_tail)?;
+    registry.register_method::<AuditObserve, _, _>(handle_audit_observe)?;
     registry.register_method::<AuditReplay, _, _>(handle_audit_replay)?;
     Ok(())
+}
+
+async fn handle_audit_observe(
+    params: AuditObserveParams,
+    ctx: HandlerContext,
+) -> Result<AuditObserveResult, CepError> {
+    if params.stream {
+        handle_audit_tail(
+            AuditTailParams {
+                since_audit_id: params.query.since_audit_id.unwrap_or_default(),
+            },
+            ctx,
+        )
+        .await
+        .map(AuditObserveResult::Tail)
+    } else {
+        handle_audit_query(params.query, ctx)
+            .await
+            .map(AuditObserveResult::Query)
+    }
 }
 
 async fn handle_audit_query(
     params: AuditQueryParams,
     ctx: HandlerContext,
 ) -> Result<AuditQueryResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, AuditQuery::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, AuditObserve::NAME, &params).await?;
 
     let session_id = effective_session_id(&ctx, params.session_id.as_deref()).await;
     let mut filters = audit_query_filters_from_params(&params, &session_id);
@@ -73,7 +92,7 @@ async fn handle_audit_tail(
     params: AuditTailParams,
     ctx: HandlerContext,
 ) -> Result<AuditTailResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, AuditTail::NAME, &params).await?;
+    let _evaluation = evaluate_and_enforce_policy(&ctx, AuditObserve::NAME, &params).await?;
 
     let session_id = effective_session_id(&ctx, None).await;
     let since_filter = if params.since_audit_id > 0 {
@@ -84,7 +103,7 @@ async fn handle_audit_tail(
     let filters = AuditQueryFilters {
         session_id: Some(session_id.clone()),
         since_audit_id: since_filter,
-        exclude_method_prefix: Some("audit.".into()),
+        exclude_method_prefix: Some("observe.audit".into()),
         limit: Some(AUDIT_TAIL_MAX_ROWS + 1),
         ..Default::default()
     };
@@ -149,7 +168,13 @@ async fn handle_audit_replay(
     ctx: HandlerContext,
 ) -> Result<AuditReplayResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, AuditReplay::NAME, &params).await?;
+    handle_audit_replay_after_policy(params, ctx).await
+}
 
+async fn handle_audit_replay_after_policy(
+    params: AuditReplayParams,
+    ctx: HandlerContext,
+) -> Result<AuditReplayResult, CepError> {
     if params.turn_id.trim().is_empty() {
         return Err(validation_error("turn_id", "turn_id is required"));
     }
@@ -283,8 +308,7 @@ mod tests {
     use crate::native_registry::register_production_method_registry;
     use crate::policy::CepTurnContext;
     use crate::{CepTransport, ServerRunConfig};
-    use lancet_catalog::methods::audit::{AuditTail, AuditTailParams};
-    use lancet_catalog::methods::workspace::ReadFile;
+    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -306,7 +330,7 @@ mod tests {
             .start_call(
                 &ctx,
                 1,
-                ReadFile::NAME,
+                ObserveWorkspace::NAME,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -347,12 +371,18 @@ mod tests {
         });
 
         let result = client
-            .call::<AuditQuery>(AuditQueryParams {
-                session_id: Some("sess-audit".into()),
-                ..Default::default()
+            .call::<AuditObserve>(AuditObserveParams {
+                stream: false,
+                query: AuditQueryParams {
+                    session_id: Some("sess-audit".into()),
+                    ..Default::default()
+                },
             })
             .await
             .unwrap();
+        let AuditObserveResult::Query(result) = result else {
+            panic!("expected query result");
+        };
 
         assert!(result.row_count >= 1);
         assert!(!result.fragment.activities.is_empty());
@@ -435,9 +465,8 @@ mod tests {
     #[test]
     fn production_registry_registers_audit_query_and_replay() {
         let registry = registry_with_audit();
-        assert!(registry.contains(AuditQuery::NAME));
+        assert!(registry.contains(AuditObserve::NAME));
         assert!(registry.contains(AuditReplay::NAME));
-        assert!(registry.contains(AuditTail::NAME));
     }
 
     fn seed_rows(audit: &CepAuditStore, session_id: &str, turn_id: &str, count: usize) {
@@ -452,7 +481,7 @@ mod tests {
                 .start_call(
                     &ctx,
                     i as u64 + 1,
-                    ReadFile::NAME,
+                    ObserveWorkspace::NAME,
                     &CallAuditMetadata::native_policy_enforced(Some("started")),
                 )
                 .unwrap();
@@ -493,7 +522,13 @@ mod tests {
             server.run(registry, config).await.unwrap();
         });
 
-        let call = client.call::<AuditTail>(AuditTailParams { since_audit_id: 0 });
+        let call = client.call::<AuditObserve>(AuditObserveParams {
+            stream: true,
+            query: AuditQueryParams {
+                since_audit_id: Some(0),
+                ..Default::default()
+            },
+        });
         let mut collected = Vec::new();
         let collect = async {
             loop {
@@ -509,7 +544,9 @@ mod tests {
         };
 
         let (result, _) = tokio::join!(call, collect);
-        let tail_result = result.unwrap();
+        let AuditObserveResult::Tail(tail_result) = result.unwrap() else {
+            panic!("expected tail result");
+        };
         assert!(tail_result.done);
         assert_eq!(tail_result.last_audit_id, 3);
 

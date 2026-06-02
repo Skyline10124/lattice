@@ -49,7 +49,7 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authori
 | Crate | Role |
 |---|---|
 | `lancet-protocol` | Pure CEP wire/data contract: JSON-RPC 2.0 envelopes, frame aliases (`ToolCall`/`ToolResult`/`ToolEvent`), execution envelopes (intent/capabilities/scope/impact/guard), typed `CepError` families, policy hook types, provenance wire types. No I/O, no tokio. |
-| `lancet-catalog` | Typed CEP methods: `CepMethod`, params/results, `MethodDescriptor`, static 14-method `CATALOG`, and schema data needed for catalog projection. |
+| `lancet-catalog` | Typed CEP methods: `CepMethod`, params/results, `MethodDescriptor`, static 9-method `CATALOG`, and schema data needed for catalog projection. |
 | `lancet-dispatch` | CEP typed dispatch and in-process transport: generic `MethodRegistry`, `CepClient`/`CepTransport`, cancellation, and event sink. Does not depend on native policy/audit/effect implementations. |
 | `lancet-audit` | Audit persistence: `CepAuditStore`, query filters, row model, stage labels, impact/capability labels, PROV projection, and attestation persistence. SQLite dependency is kept here. |
 | `lancet-authority` | CEP authority semantics: default policy, capability matching, command/network/observation/budget policy, Guard L1 path/scope checks, active envelope store, effect ledger, authorized effect regions, and effect-region checker. |
@@ -68,7 +68,7 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authori
 - `ResolvedModel` — canonical model + provider + protocol + credential status
 - `LlmEvent` / `TurnEvent` — provider streaming events and public turn stream events
 - `AgentLoop` — multi-turn agent loop with tool execution and injectable `LlmClient`/`ToolCallExecutor`
-- `CepMethod` / `MethodDescriptor` / `CATALOG` — typed CEP methods and the static 14-method catalog
+- `CepMethod` / `MethodDescriptor` / `CATALOG` — typed CEP methods and the static 9-method catalog
 - `ExecutionEnvelope` / `Capability` / `GuardVerdict` — CEP capability/scope/guard model
 - `PolicyHook` / `PolicyDecision` — pluggable capability/command/network/budget policy
 - `CepClient` / `CepTransport` / `MethodRegistry` — CEP client + in-process transport + server registry
@@ -77,12 +77,11 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authori
 
 ### LANCET Method Catalog
 
-The catalog is exactly 14 methods (`lancet-catalog/src/catalog.rs`):
+The catalog is exactly 9 methods (`lancet-catalog/src/catalog.rs`):
 
-`workspace.read_file`, `workspace.grep`, `workspace.list_directory`,
-`workspace.find_files`, `workspace.write_file`, `workspace.patch`, `web.fetch`,
-`session.todo_write`, `command.run`, `envelope.declare`,
-`envelope.submit_intent`, `audit.query`, `audit.tail`, `audit.replay`.
+`observe.workspace`, `mutate.create`, `mutate.patch`, `exec.command_run`,
+`fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`,
+`observe.audit_replay`.
 
 LLM-facing tool schemas are generated **only** via `to_tool_definitions` from
 the catalog — there is no legacy `default_tool_definitions()` path.
@@ -94,7 +93,7 @@ The main agent turn path is:
 1. `lattice-api` exposes `run_turn` / `stream_turn`; `stream_turn` is the single live execution core and `run_turn` drains it via `RunTurnCollector`.
 2. `turn/cep.rs` composes a **turn-scoped LANCET runtime**: it builds a native `MethodRegistry` (`register_production_method_registry`), a dispatch `CepTransport` server + `CepClient`, installs the authority policy hook from the profile `[lancet]` sections, runs the server with `run_native`, and wraps the client in a `CepExecutorAdapter`.
 3. `AgentLoop` reads session state, builds messages, calls the LLM via `LlmClient`, and for each requested tool call invokes the adapter, which sends a typed CEP JSON-RPC frame over the transport.
-4. The native server lifecycle records audit start/finish and effect checks; native handlers invoke authority policy/Guard L1/effect helpers and invariant Guard L2 checks around execution and verify. Mutating methods require a prior `envelope.declare` authority.
+4. The native server lifecycle records audit start/finish and effect checks; native handlers invoke authority policy/Guard L1/effect helpers and invariant Guard L2 checks around execution and verify. Mutating methods require a prior `session.envelope` authority.
 5. Turn outcomes are persisted as commits in the session graph via `SessionGraphStore`.
 6. CLI renders events and requires successful completion (exit-code semantics).
 
@@ -102,15 +101,15 @@ The main agent turn path is:
 
 Safety is enforced by the LANCET runtime, configured via profile `[lancet]` sub-tables:
 
-- **`mode`** — `enforce` (default), `warn`, or `off` for effect-region enforcement. `off` skips the effect-region check only; policy, capability checks, and native LANCET routing remain active.
+- **`mode`** — `enforce` (default), `warn`, or `off` for effect-region enforcement. `off` skips the effect-region check only; policy, capability checks, effect-kind denial, and native LANCET routing remain active.
 - **`[lancet.project_root]`** — effective workspace scope; the `guard` enforces no escape and no `..` traversal.
 - **`[lancet.observation]`** — read/grep/list/find/todo budgets and allowed roots.
-- **`[lancet.network]`** — `web.fetch` host allow policy (public HTTPS / localhost / allowlist) and response size cap.
-- **`[lancet.command]`** — `command.run` timeouts, output cap, inline-shell toggle, diagnostic allowlist/denylist, env passthrough.
+- **`[lancet.network]`** — `fetch.web` host allow policy (public HTTPS / localhost / allowlist) and response size cap.
+- **`[lancet.command]`** — `exec.command_run` timeouts, output cap, inline-shell toggle, diagnostic allowlist/denylist, env passthrough.
 - **`[lancet.policy]`** — pointer to an external structured TOML policy file.
 
-Mutations (`workspace.write_file` / `workspace.patch`) require an active
-`envelope.declare` capability scope (Guard L1) and run an optional post-mutation
+Mutations (`mutate.create` / `mutate.patch`) require an active
+`session.envelope` capability scope (Guard L1) and run an optional post-mutation
 `verify` command. The pre-CEP "removed sandbox/approval" note no longer applies.
 
 ## Where to make changes

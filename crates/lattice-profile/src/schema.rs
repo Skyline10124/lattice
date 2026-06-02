@@ -1,4 +1,5 @@
 use lancet_protocol::CepMode;
+use lancet_protocol::ImpactKind;
 use serde::{de, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -41,6 +42,8 @@ pub struct LancetSection {
     pub policy: Option<LancetPolicySection>,
     #[serde(default)]
     pub invariants: Option<LancetInvariantsSection>,
+    #[serde(default)]
+    pub effects: Option<LancetEffectsSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -67,7 +70,7 @@ pub struct LancetObservationSection {
     pub max_todo_ops: Option<usize>,
 }
 
-/// `[lancet.network]` — `web.fetch` host policy and response size cap.
+/// `[lancet.network]` — `fetch.web` host policy and response size cap.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LancetNetworkSection {
@@ -120,6 +123,14 @@ pub struct LancetInvariantsSection {
     pub dir: Option<String>,
 }
 
+/// `[lancet.effects]` — runtime effect-kind deny switch.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LancetEffectsSection {
+    #[serde(default)]
+    pub deny: Vec<ImpactKind>,
+}
+
 fn default_lancet_mode() -> CepMode {
     CepMode::Enforce
 }
@@ -134,6 +145,7 @@ impl Default for LancetSection {
             command: None,
             policy: None,
             invariants: None,
+            effects: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -182,6 +194,10 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("invariants")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let effects = raw
+            .remove("effects")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
 
         Ok(Self {
             mode,
@@ -191,6 +207,7 @@ impl<'de> Deserialize<'de> for LancetSection {
             command,
             policy,
             invariants,
+            effects,
             extensions: raw,
         })
     }
@@ -312,7 +329,7 @@ description = "A full-featured agent"
 system_path = "prompt.md"
 
 [tools]
-enabled = ["workspace.grep", "workspace.read_file", "command.run"]
+enabled = ["observe.workspace", "exec.command_run"]
 
 [llm.retry]
 max_retries = 2
@@ -326,10 +343,7 @@ max_delay_ms = 1000
         );
         assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
         let tools = &profile.tools;
-        assert_eq!(
-            tools.enabled,
-            vec!["workspace.grep", "workspace.read_file", "command.run"]
-        );
+        assert_eq!(tools.enabled, vec!["observe.workspace", "exec.command_run"]);
         assert_eq!(profile.llm.retry.max_retries, 2);
         assert_eq!(profile.llm.retry.initial_delay_ms, 250);
         assert_eq!(profile.llm.retry.max_delay_ms, 1000);
@@ -919,6 +933,7 @@ default_timeout_ms = 60000
             command: None,
             policy: None,
             invariants: None,
+            effects: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();

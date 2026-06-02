@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use lancet_catalog::methods::audit::{
-    AuditQuery, AuditQueryParams, AuditTail, AuditTailParams, AuditTailResult,
+    AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditTailResult,
 };
 use lancet_native::{
     impact_kind_from_label, register_production_method_registry, CepAuditStore, CepClient,
@@ -35,7 +35,7 @@ pub struct AuditCmd {
     /// Filter by verdict (`success`, `denied`, `error`, `cancelled`).
     #[arg(long)]
     pub verdict: Option<String>,
-    /// Stream audit rows via `audit.tail` (auto-continues 1000-row batches until drained).
+    /// Stream audit rows via `observe.audit` (auto-continues 1000-row batches until drained).
     #[arg(long)]
     pub tail: bool,
     /// Tail cursor (`audit_id`); only the first batch uses this (continuation is automatic).
@@ -135,19 +135,25 @@ async fn run_query(
 
     with_audit_client(project_root, session_id, |client| async move {
         let result = client
-            .call::<AuditQuery>(AuditQueryParams {
-                method: cmd.method.clone(),
-                impact_kind,
-                capability: cmd.capability.clone(),
-                verdict: cmd.verdict.clone(),
-                since_audit_id: cmd.since,
-                until_audit_id: None,
-                envelope_id: None,
-                turn_id: cmd.turn.clone(),
-                session_id: None,
+            .call::<AuditObserve>(AuditObserveParams {
+                stream: false,
+                query: AuditQueryParams {
+                    method: cmd.method.clone(),
+                    impact_kind,
+                    capability: cmd.capability.clone(),
+                    verdict: cmd.verdict.clone(),
+                    since_audit_id: cmd.since,
+                    until_audit_id: None,
+                    envelope_id: None,
+                    turn_id: cmd.turn.clone(),
+                    session_id: None,
+                },
             })
             .await
-            .map_err(|e| anyhow::anyhow!("audit.query: {}", e.message))?;
+            .map_err(|e| anyhow::anyhow!("observe.audit: {}", e.message))?;
+        let AuditObserveResult::Query(result) = result else {
+            bail!("observe.audit returned a tail result for stream=false");
+        };
 
         if json {
             println!(
@@ -202,8 +208,12 @@ async fn run_tail(project_root: &Path, session_id: &str, cmd: &AuditCmd, json: b
             }
 
             let events = client.events();
-            let call = client.call::<AuditTail>(AuditTailParams {
-                since_audit_id: since,
+            let call = client.call::<AuditObserve>(AuditObserveParams {
+                stream: true,
+                query: AuditQueryParams {
+                    since_audit_id: Some(since),
+                    ..Default::default()
+                },
             });
 
             let mut batch_lines = Vec::new();
@@ -223,7 +233,11 @@ async fn run_tail(project_root: &Path, session_id: &str, cmd: &AuditCmd, json: b
             };
 
             let (result, _) = tokio::join!(call, collect);
-            tail_result = result.map_err(|e| anyhow::anyhow!("audit.tail: {}", e.message))?;
+            let result = result.map_err(|e| anyhow::anyhow!("observe.audit: {}", e.message))?;
+            let AuditObserveResult::Tail(result) = result else {
+                bail!("observe.audit returned a query result for stream=true");
+            };
+            tail_result = result;
             all_tail_lines.extend(batch_lines);
 
             if tail_result.done {
@@ -278,7 +292,7 @@ fn parse_impact_kind(label: Option<&str>) -> Result<Option<ImpactKind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_catalog::methods::workspace::ReadFile;
+    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_catalog::CepMethod;
     use lancet_native::audit::{CallAuditMetadata, CepAuditContext};
     use tempfile::TempDir;
@@ -297,7 +311,7 @@ mod tests {
             .start_call(
                 &ctx,
                 1,
-                ReadFile::NAME,
+                ObserveWorkspace::NAME,
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();

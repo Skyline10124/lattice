@@ -72,7 +72,7 @@ pub struct ProvWasInformedBy {
     pub informing_activity_id: String,
 }
 
-/// Projected PROV graph fragment returned by `audit.query` / embedded in replay.
+/// Projected PROV graph fragment returned by `observe.audit` / embedded in replay.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProvGraphFragment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -159,7 +159,7 @@ mod tests {
         let fragment = ProvGraphFragment {
             activities: vec![ProvActivity {
                 id: "act-1".into(),
-                method: "workspace.read_file".into(),
+                method: "observe.workspace".into(),
                 impact_kind: ImpactKind::WorkspaceObservation,
                 started_at: Some("2026-05-31T00:00:00Z".into()),
                 ended_at: None,

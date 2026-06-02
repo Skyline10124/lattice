@@ -170,10 +170,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let (ctx, _events) = test_handler_context(root);
-        let input = build_policy_input(&ctx, "workspace.read_file", &serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(input.method, "workspace.read_file");
+        let input = build_policy_input(
+            &ctx,
+            "observe.workspace",
+            &serde_json::json!({"mode": "read_file", "path": "src/lib.rs"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(input.method, "observe.workspace");
         assert_eq!(input.audit_context.turn_id, "test-turn");
         assert_eq!(input.audit_context.session_id, "test-session");
         assert!(

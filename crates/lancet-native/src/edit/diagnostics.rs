@@ -7,7 +7,6 @@ impl PatchErrorCode {
             PatchErrorCode::ParseError => "parse_error",
             PatchErrorCode::BoundaryDenied => "boundary_denied",
             PatchErrorCode::MissingFile => "missing_file",
-            PatchErrorCode::AlreadyExists => "already_exists",
             PatchErrorCode::DuplicatePath => "duplicate_path",
             PatchErrorCode::HashMismatch => "hash_mismatch",
             PatchErrorCode::HunkMissing => "hunk_missing",
