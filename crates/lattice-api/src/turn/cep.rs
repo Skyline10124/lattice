@@ -19,7 +19,7 @@ use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_invariants as invariants;
-use lancet_native::isolation::{
+use lancet_native::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
     CommandIsolationUnsupportedHostBehavior,
 };
@@ -1133,7 +1133,7 @@ mod cep_context_profile_policy {
 
         assert_eq!(
             config.mode,
-            lancet_native::isolation::CommandIsolationMode::Enforce
+            lancet_native::enforcement::isolation::CommandIsolationMode::Enforce
         );
         assert_eq!(
             config.required_boundaries,
@@ -1153,7 +1153,7 @@ mod cep_context_profile_policy {
         assert_eq!(config.scratch_paths, vec![dir.path().join("build/tmp")]);
         assert_eq!(
             config.unsupported_host,
-            lancet_native::isolation::CommandIsolationUnsupportedHostBehavior::FailClosed
+            lancet_native::enforcement::isolation::CommandIsolationUnsupportedHostBehavior::FailClosed
         );
     }
 

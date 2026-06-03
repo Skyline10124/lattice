@@ -1,14 +1,14 @@
-use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
-use crate::guard_l1::evaluate_and_enforce_policy;
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::handlers::envelope::validate_envelope_boundaries;
 use crate::impact::{AnalysisResult, ImpactAnalyzer};
-use crate::invariants::{opaque_notes, InvariantCard};
-use crate::registry::HandlerContext;
+use crate::server::registry::HandlerContext;
+use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::envelope::{
     Envelope, L2Status, SubmitIntentParams, SubmitIntentResult,
 };
 use lancet_catalog::CepMethod;
+use lancet_invariants::{opaque_notes, InvariantCard};
 use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
@@ -326,11 +326,11 @@ fn envelope_already_active_error() -> CepError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope_store::ActiveEnvelopeStore;
     use crate::handlers::register_envelope_methods;
-    use crate::invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
-    use crate::registry::{Cancellation, EventSink, MethodRegistry};
+    use crate::server::registry::{Cancellation, EventSink, MethodRegistry};
+    use lancet_authority::envelope_store::ActiveEnvelopeStore;
     use lancet_catalog::methods::envelope::{EnvelopeParams, EnvelopeResult};
+    use lancet_invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
     use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactConfidence};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -367,8 +367,8 @@ mod tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
-            crate::policy::default::PolicyConfig::defaults_for_project_root(
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
             ),
         ));
@@ -382,14 +382,15 @@ mod tests {
                     "submit_intent test",
                 )
                 .with_session_state(),
-                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
-                    root,
-                )),
+                cep_context: Arc::new(
+                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
+                ),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -400,7 +401,8 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )

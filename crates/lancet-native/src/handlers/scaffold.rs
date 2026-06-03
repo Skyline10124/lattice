@@ -1,6 +1,6 @@
 //! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold stubs (OBS-05).
 
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_catalog::methods::scaffold::{
     Inspect, InspectParams, Navigate, NavigateParams, ScaffoldStubResult,
 };
@@ -64,13 +64,13 @@ async fn emit_scaffold_metadata(ctx: &HandlerContext, method: &str, result: &Sca
 mod scaffold_tests {
     use super::*;
     use crate::audit::{CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD};
-    use crate::invariants::InvariantCardIndex;
-    use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use crate::policy::CepTurnContext;
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
     use crate::wire_code_for_error;
     use crate::{CepTransport, ServerRunConfig};
+    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::methods::scaffold::InspectParams;
+    use lancet_invariants::InvariantCardIndex;
     use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::policy::PolicyHook;
@@ -97,11 +97,11 @@ mod scaffold_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold test"),
             cep_context,
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
             policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
             default_policy_hook: Some(default_hook),
             audit_context: Arc::new(RwLock::new(CepAuditContext {
@@ -112,7 +112,8 @@ mod scaffold_tests {
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
             cep_mode: CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         }
     }
 

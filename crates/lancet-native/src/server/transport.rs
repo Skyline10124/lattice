@@ -1,18 +1,18 @@
 //! Native CEP server lifecycle layered on dispatch transport.
 
-use crate::call_durable_metadata::CallDurableMetadata;
-use crate::envelope_store::ActiveEnvelopeStore;
-use crate::invariants::InvariantCardIndex;
-use crate::isolation::CommandIsolationRuntimeConfig;
-use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
-use crate::policy::CepTurnContext;
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
+use crate::server::call_durable_metadata::CallDurableMetadata;
+use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{
     impact_kind_for_method, impact_kind_label, merge_finalize_metadata, AuditOutcome, AuditStart,
     CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD,
     SEMANTIC_STAGE_UNROUTED,
 };
+use lancet_authority::envelope_store::ActiveEnvelopeStore;
+use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lancet_authority::policy::CepTurnContext;
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
+use lancet_invariants::InvariantCardIndex;
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     envelope::{BaseExecutionEnvelope, CepMode},
@@ -145,8 +145,8 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     emit_cep_call_started(&events, &method, audit_start.audit_id, &call_audit_metadata).await;
 
     let durable_metadata = CallDurableMetadata::default();
-    let effect_ledger = crate::effect::ledger::EffectLedger::new();
-    let authorized_region_slot = crate::effect::ledger::AuthorizedRegionSlot::new();
+    let effect_ledger = lancet_authority::effect::ledger::EffectLedger::new();
+    let authorized_region_slot = lancet_authority::effect::ledger::AuthorizedRegionSlot::new();
     let turn_id = ctx_snapshot.turn_id.clone();
     let ctx = HandlerContext {
         call_id: id,
@@ -233,8 +233,8 @@ fn is_incomplete_dispatch(result: &Result<Value, CepError>) -> bool {
 fn apply_effect_check(
     method: &str,
     dispatch_result: Result<Value, CepError>,
-    observed_effects: &[crate::effect::ledger::ObservedEffect],
-    authorized_region_slot: &crate::effect::ledger::AuthorizedRegionSlot,
+    observed_effects: &[lancet_authority::effect::ledger::ObservedEffect],
+    authorized_region_slot: &lancet_authority::effect::ledger::AuthorizedRegionSlot,
     cep_mode: CepMode,
     durable_metadata: &CallDurableMetadata,
     denied_effect_kinds: &std::collections::BTreeSet<lancet_protocol::envelope::ImpactKind>,
@@ -265,7 +265,7 @@ fn apply_effect_check(
         return Ok(dispatch_value);
     };
 
-    crate::effect::checker::check_denied_effect_kinds(
+    lancet_authority::effect::checker::check_denied_effect_kinds(
         method,
         observed_effects,
         effect_decl,
@@ -280,7 +280,7 @@ fn apply_effect_check(
 
     match region {
         Some(ref authorized) => {
-            match crate::effect::checker::check_effects_against_region(
+            match lancet_authority::effect::checker::check_effects_against_region(
                 method,
                 observed_effects,
                 authorized,

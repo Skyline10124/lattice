@@ -5,8 +5,8 @@
 //! diff, and leaves the envelope valid for same-turn repair.
 
 use crate::executor::shell::{execute_argv, ExecuteConfig};
-use crate::policy::command::{classify_command, CommandPolicy, EffectiveImpact};
-use crate::registry::Cancellation;
+use crate::server::registry::Cancellation;
+use lancet_authority::policy::command::{classify_command, CommandPolicy, EffectiveImpact};
 use lancet_protocol::envelope::ExecutionEnvelope;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -231,7 +231,7 @@ pub async fn run_verify(
 #[cfg(test)]
 mod verify_tests {
     use super::*;
-    use crate::policy::CommandPolicy;
+    use lancet_authority::policy::CommandPolicy;
 
     fn default_policy() -> CommandPolicy {
         CommandPolicy::defaults()

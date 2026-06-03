@@ -15,7 +15,16 @@ mod mapping;
 mod types;
 
 #[cfg(test)]
-mod tests;
+mod test_support;
+
+#[cfg(test)]
+mod run_tests;
+
+#[cfg(test)]
+mod stream_tests;
+
+#[cfg(test)]
+mod types_tests;
 
 #[cfg(test)]
 mod cep_tests;

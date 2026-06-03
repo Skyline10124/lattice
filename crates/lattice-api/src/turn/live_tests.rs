@@ -13,8 +13,7 @@ use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::SessionGraphStore;
 
-use super::live::stream_turn_live_with_agent;
-use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent};
+use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -48,6 +47,31 @@ fn make_agent_loop(client: FakeStreamingLlmClient) -> Arc<AgentLoop> {
         llm: Arc::new(client),
         tool_executor: Arc::new(NoOpToolExecutor),
     }))
+}
+
+async fn stream_turn_live_with_agent(
+    session: SessionApi,
+    agent_loop: Arc<AgentLoop>,
+    request: RunTurnRequest,
+    tool_definitions: Vec<lattice_llm::ToolDefinition>,
+) -> crate::session::Result<TurnEventStream> {
+    let (cep_client, _server) = lancet_native::CepTransport::pair(1);
+    let deps = super::cep::ProductionTurnDeps {
+        agent_loop,
+        tool_definitions,
+        runtime: super::cep::CepTurnRuntime::dummy(),
+        cep_client,
+        audit: Arc::new(lancet_native::CepAuditStore::in_memory().expect("in-memory audit store")),
+        audit_context: Arc::new(tokio::sync::RwLock::new(
+            lancet_native::CepAuditContext::default(),
+        )),
+        build_metrics: super::cep::CepRuntimeBuildMetrics {
+            adapter_instances: 0,
+            transport_pairs: 0,
+        },
+    };
+
+    super::live::stream_turn_live(session, request, deps).await
 }
 
 fn make_request(input: &str) -> RunTurnRequest {

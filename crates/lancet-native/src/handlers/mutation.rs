@@ -8,22 +8,22 @@
 use crate::edit::content_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::types::PatchOperation;
-use crate::effect::ledger::{
-    EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
-};
-use crate::guard_l1::{
+use crate::enforcement::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
-use crate::guard_l2;
-use crate::registry::{HandlerContext, MethodRegistry};
-use crate::verify::{
+use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
+};
+use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_authority::effect::ledger::{
+    EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
     Create, CreateParams, CreateResult, Patch, PatchParams, PatchResult,
 };
 use lancet_catalog::CepMethod;
+use lancet_invariants::guard_l2;
 use lancet_protocol::envelope::{CepMode, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -136,8 +136,8 @@ async fn handle_create_as(
 
     // 6. Opaque invariant cards require human review before mutation.
     let cards = ctx.invariant_index.match_target(&params.path);
-    if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
-        return Err(crate::invariants::opaque_human_review_error(
+    if let Some(message) = lancet_invariants::opaque_human_review_message(&cards) {
+        return Err(lancet_invariants::opaque_human_review_error(
             method, &message,
         ));
     }
@@ -310,8 +310,8 @@ async fn handle_patch_as(
     for operation in &document.operations {
         let path = operation.path();
         let cards = ctx.invariant_index.match_target(path);
-        if let Some(message) = crate::invariants::opaque_human_review_message(&cards) {
-            return Err(crate::invariants::opaque_human_review_error(
+        if let Some(message) = lancet_invariants::opaque_human_review_message(&cards) {
+            return Err(lancet_invariants::opaque_human_review_error(
                 method, &message,
             ));
         }
@@ -780,11 +780,11 @@ async fn emit_verify_failed(
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use crate::envelope_store::ActiveEnvelopeStore;
     use crate::handlers::register_envelope_methods;
-    use crate::invariants::InvariantCardIndex;
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
+    use lancet_authority::envelope_store::ActiveEnvelopeStore;
     use lancet_catalog::methods::envelope::{Envelope, EnvelopeParams, SubmitIntentParams};
+    use lancet_invariants::InvariantCardIndex;
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
@@ -797,8 +797,8 @@ mod create_tests {
     fn test_ctx(root: &str) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
-            crate::policy::default::PolicyConfig::defaults_for_project_root(
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
             ),
         ));
@@ -809,14 +809,15 @@ mod create_tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
                     .with_session_state(),
-                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
-                    root,
-                )),
+                cep_context: Arc::new(
+                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
+                ),
                 active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -825,9 +826,10 @@ mod create_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )
@@ -840,7 +842,7 @@ mod create_tests {
         test_ctx_with_store_and_index(
             root,
             store,
-            Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             lancet_protocol::envelope::CepMode::Off,
         )
     }
@@ -853,8 +855,8 @@ mod create_tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
-            crate::policy::default::PolicyConfig::defaults_for_project_root(
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
             ),
         ));
@@ -865,14 +867,15 @@ mod create_tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
                     .with_session_state(),
-                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
-                    root,
-                )),
+                cep_context: Arc::new(
+                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
+                ),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -883,7 +886,8 @@ mod create_tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )
@@ -1170,9 +1174,9 @@ mod create_tests {
 #[cfg(test)]
 mod patch_tests {
     use super::*;
-    use crate::envelope_store::ActiveEnvelopeStore;
-    use crate::invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
+    use lancet_authority::envelope_store::ActiveEnvelopeStore;
+    use lancet_invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
@@ -1202,8 +1206,8 @@ mod patch_tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
-            crate::policy::default::PolicyConfig::defaults_for_project_root(
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
             ),
         ));
@@ -1213,14 +1217,15 @@ mod patch_tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "patch test"),
-                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
-                    root,
-                )),
+                cep_context: Arc::new(
+                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
+                ),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -1231,7 +1236,8 @@ mod patch_tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index,
                 cep_mode,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )

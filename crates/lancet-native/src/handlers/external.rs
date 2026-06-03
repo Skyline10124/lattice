@@ -2,12 +2,12 @@
 
 use std::sync::OnceLock;
 
-use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::executor::web::fetch_url;
-use crate::guard_l1::evaluate_and_enforce_policy;
-use crate::policy::budget::BudgetExhausted;
-use crate::policy::network::validate_fetch_url;
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_authority::policy::budget::BudgetExhausted;
+use lancet_authority::policy::network::validate_fetch_url;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::CepMethod;
@@ -202,8 +202,8 @@ async fn emit_budget_denial_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::CepTurnContext;
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
+    use lancet_authority::policy::CepTurnContext;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -222,7 +222,7 @@ mod tests {
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let policy_cfg = crate::policy::default::PolicyConfig {
+        let policy_cfg = lancet_authority::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
             command: cep_context.policy.command.clone(),
@@ -232,7 +232,9 @@ mod tests {
             project_root: cep_context.policy.project_root.clone(),
             denied_effect_kinds: Default::default(),
         };
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            policy_cfg,
+        ));
         (
             HandlerContext {
                 call_id: 7,
@@ -241,11 +243,14 @@ mod tests {
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "fetch.web test")
                     .with_fetch_host("*"),
                 cep_context,
-                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                active_envelope: Arc::new(
+                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
+                ),
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -254,9 +259,10 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )
@@ -286,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn native_web_fetch_returns_real_status_not_hardcoded_200() {
         let url = spawn_echo_server("404 Not Found", "missing").await;
-        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;
@@ -319,7 +325,7 @@ mod tests {
     async fn native_web_fetch_truncates_over_cap_response() {
         let big_body = "x".repeat(500);
         let url = spawn_echo_server("200 OK", &big_body).await;
-        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;
@@ -389,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn native_web_fetch_turn_observation_budget_error() {
         let url = spawn_echo_server("200 OK", "payload").await;
-        let mut policy = crate::policy::CepPolicyConfig::defaults_for_project_root(
+        let mut policy = lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(
             TempDir::new().unwrap().path(),
         );
         policy.network.allow_localhost = true;

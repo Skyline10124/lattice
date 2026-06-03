@@ -5,7 +5,7 @@ use crate::handlers::{
     register_external_methods, register_mutation_methods, register_session_state_methods,
     register_workspace_observation_methods,
 };
-use crate::registry::MethodRegistry;
+use crate::server::registry::MethodRegistry;
 use lancet_protocol::CepError;
 
 /// Register all six LANCET native handlers (observation, external, session-state).
@@ -60,10 +60,10 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
 mod cep_native_registry_tests {
     use super::*;
     use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
-    use crate::policy::observation::BACKEND_SAFETY_NET_TEST_PATH;
-    use crate::policy::CepTurnContext;
-    use crate::registry::{Cancellation, EventSink, HandlerContext};
+    use crate::handlers::observation::BACKEND_SAFETY_NET_TEST_PATH;
+    use crate::server::registry::{Cancellation, EventSink, HandlerContext};
     use crate::{CepTransport, ServerRunConfig};
+    use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::command::Run;
     use lancet_catalog::methods::workspace::{
@@ -117,13 +117,13 @@ mod cep_native_registry_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "native error test"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                crate::policy::default::PolicyConfig::defaults_for_project_root(
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
                 ),
             )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -134,9 +134,10 @@ mod cep_native_registry_tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = ReadFileParams {
@@ -165,8 +166,8 @@ mod cep_native_registry_tests {
         let mut config = ServerRunConfig::in_memory_for_tests();
         config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "audit routing");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(
-            crate::policy::default::PolicyConfig::defaults_for_project_root(
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
             ),
         ));
@@ -250,13 +251,13 @@ mod cep_native_registry_tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "safety net"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                crate::policy::default::PolicyConfig::defaults_for_project_root(
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
                 ),
             )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -267,9 +268,10 @@ mod cep_native_registry_tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = ReadFileParams {

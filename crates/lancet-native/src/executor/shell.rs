@@ -5,7 +5,7 @@ use std::time::Duration;
 use lattice_tooling::ToolLimits;
 use tokio::process::Child;
 
-use crate::registry::Cancellation;
+use crate::server::registry::Cancellation;
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
@@ -432,7 +432,7 @@ fn child_kill_failed(command: &str, err: std::io::Error) -> CepError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::CommandPolicy;
+    use lancet_authority::policy::CommandPolicy;
 
     #[tokio::test]
     async fn execute_argv_echo_succeeds() {

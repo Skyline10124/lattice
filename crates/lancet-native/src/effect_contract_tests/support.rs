@@ -9,8 +9,8 @@
 //! `rt().block_on(async { … })`. Do NOT combine with `#[tokio::test]` — the
 //! two macros conflict during expansion.
 //!
-//! This module is public so integration tests can reuse the harness scaffolding
-//! without duplicating registry and ledger setup.
+//! This module is crate-private test support so effect-contract tests can reuse
+//! registry and ledger scaffolding without exposing it as public API.
 
 use std::sync::{Arc, OnceLock};
 
@@ -24,14 +24,16 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 use crate::audit::CepAuditContext;
-use crate::call_durable_metadata::CallDurableMetadata;
-use crate::effect::ledger::{AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect};
-use crate::effect::region::AuthorizedEffectRegion;
-use crate::envelope_store::ActiveEnvelopeStore;
-use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
-use crate::policy::network::NetworkPolicyConfig;
-use crate::policy::{CepPolicyConfig, CepTurnContext};
-use crate::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
+use crate::server::call_durable_metadata::CallDurableMetadata;
+use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
+use lancet_authority::effect::ledger::{
+    AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect,
+};
+use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_authority::envelope_store::ActiveEnvelopeStore;
+use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lancet_authority::policy::network::NetworkPolicyConfig;
+use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
 
 /// Module-level Tokio runtime for bridging sync `proptest!` bodies to async dispatch.
 ///
@@ -131,9 +133,6 @@ pub fn assert_positive(outcome: &HarnessOutcome, authority: &AuthorizedEffectReg
 /// Negative assertion: on a preflight-denied (Err) dispatch result,
 /// no `HandlerBackend` effects must have leaked into the ledger.
 ///
-/// For post-backend overreach (dispatch returned Ok but the effect checker
-/// would produce an EffectViolation), use [`assert_effect_violation`] instead.
-///
 /// # Panics
 ///
 /// Panics if dispatch returned Err but HandlerBackend effects exist in the ledger.
@@ -150,32 +149,6 @@ pub fn assert_negative_no_backend_effects(outcome: &HarnessOutcome) {
             backend_effects.len(),
             backend_effects
         );
-    }
-}
-
-/// Post-backend overreach assertion: the dispatch result must be an
-/// `EffectViolation` (-32050).
-///
-/// Use this for exec.command_run post-backend overreach cases where the handler
-/// completed successfully but the effect checker caught the overreach.
-///
-/// # Panics
-///
-/// Panics if the dispatch result is not `Err(EffectViolation)`.
-pub fn assert_effect_violation(outcome: &HarnessOutcome) {
-    match &outcome.dispatch_result {
-        Err(err) => {
-            assert_eq!(
-                err.code,
-                lancet_protocol::CepErrorCode::EffectViolation,
-                "expected EffectViolation, got {:?}: {}",
-                err.code,
-                err.message
-            );
-        }
-        Ok(_) => {
-            panic!("expected EffectViolation but dispatch succeeded");
-        }
     }
 }
 
@@ -232,9 +205,9 @@ pub fn build_test_context(
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
-        command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+        command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
     (ctx, event_rx, canonical_root)
 }

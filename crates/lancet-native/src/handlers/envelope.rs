@@ -2,11 +2,11 @@
 //!
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
 
-use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
-use crate::guard_l1::evaluate_and_enforce_policy;
-use crate::guard_l1::{normalize_write_path_pattern, WritePathPattern};
-use crate::registry::{HandlerContext, MethodRegistry};
-use crate::verify::{extract_verify_command, validate_verify_command};
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
+use crate::enforcement::guard_l1::{normalize_write_path_pattern, WritePathPattern};
+use crate::enforcement::verify::{extract_verify_command, validate_verify_command};
+use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::envelope::{
     DeclareParams, DeclareResult, Envelope, EnvelopeParams, EnvelopeResult,
@@ -258,8 +258,8 @@ fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, CepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope_store::ActiveEnvelopeStore;
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
+    use lancet_authority::envelope_store::ActiveEnvelopeStore;
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, Scope,
@@ -282,16 +282,17 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "declare test")
                     .with_session_state(),
-                cep_context: Arc::new(crate::policy::CepTurnContext::defaults_for_project_root(
-                    root,
-                )),
+                cep_context: Arc::new(
+                    lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
+                ),
                 active_envelope: store,
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                    crate::policy::default::PolicyConfig::defaults_for_project_root(
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                    lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                         std::path::PathBuf::from(root),
                     ),
                 )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -302,9 +303,10 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )

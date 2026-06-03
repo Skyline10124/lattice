@@ -1,9 +1,9 @@
 //! Native `observe.audit` and `observe.audit_replay` handlers.
 
 use crate::audit::{AuditError, AuditQueryFilters, AUDIT_QUERY_MAX_ROWS};
-use crate::guard_l1::evaluate_and_enforce_policy;
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::provenance::{project_rows, project_turn_trace};
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditQueryResult,
@@ -75,11 +75,11 @@ async fn handle_audit_query(
         "filter_summary": filter_summary,
     }));
 
-    ctx.record_effect(crate::effect::ledger::ObservedEffect {
+    ctx.record_effect(lancet_authority::effect::ledger::ObservedEffect {
         kind: ImpactKind::AuditObservation,
-        scope: crate::effect::ledger::ObservedScope::SessionState,
+        scope: lancet_authority::effect::ledger::ObservedScope::SessionState,
         required_capability: RequiredCapability::ReadAudit,
-        source: crate::effect::ledger::EffectSource::HandlerBackend,
+        source: lancet_authority::effect::ledger::EffectSource::HandlerBackend,
     });
 
     Ok(AuditQueryResult {
@@ -143,11 +143,11 @@ async fn handle_audit_tail(
         "session_id": session_id,
     }));
 
-    ctx.record_effect(crate::effect::ledger::ObservedEffect {
+    ctx.record_effect(lancet_authority::effect::ledger::ObservedEffect {
         kind: ImpactKind::AuditObservation,
-        scope: crate::effect::ledger::ObservedScope::SessionState,
+        scope: lancet_authority::effect::ledger::ObservedScope::SessionState,
         required_capability: RequiredCapability::ReadAudit,
-        source: crate::effect::ledger::EffectSource::HandlerBackend,
+        source: lancet_authority::effect::ledger::EffectSource::HandlerBackend,
     });
 
     Ok(AuditTailResult {
@@ -231,11 +231,11 @@ async fn handle_audit_replay_after_policy(
         "source_audit_range_or_hash": crate::provenance::source_audit_range_hash(&rows),
     }));
 
-    ctx.record_effect(crate::effect::ledger::ObservedEffect {
+    ctx.record_effect(lancet_authority::effect::ledger::ObservedEffect {
         kind: ImpactKind::AuditObservation,
-        scope: crate::effect::ledger::ObservedScope::SessionState,
+        scope: lancet_authority::effect::ledger::ObservedScope::SessionState,
         required_capability: RequiredCapability::ReadAudit,
-        source: crate::effect::ledger::EffectSource::HandlerBackend,
+        source: lancet_authority::effect::ledger::EffectSource::HandlerBackend,
     });
 
     Ok(AuditReplayResult { trace, statement })
@@ -305,9 +305,9 @@ fn validation_error(field: &str, reason: impl Into<String>) -> CepError {
 mod tests {
     use super::*;
     use crate::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
-    use crate::native_registry::register_production_method_registry;
-    use crate::policy::CepTurnContext;
+    use crate::server::native_registry::register_production_method_registry;
     use crate::{CepTransport, ServerRunConfig};
+    use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;

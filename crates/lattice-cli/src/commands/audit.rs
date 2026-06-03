@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use lancet_authority::CepTurnContext;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditTailResult,
 };
 use lancet_native::{
     impact_kind_from_label, register_production_method_registry, CepAuditStore, CepClient,
-    CepTransport, CepTurnContext, MethodRegistry, ServerRunConfig,
+    CepTransport, MethodRegistry, ServerRunConfig,
 };
 use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use tokio::sync::RwLock;

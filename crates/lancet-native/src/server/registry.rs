@@ -1,13 +1,13 @@
 //! Native handler context and registry type binding.
 
-use crate::call_durable_metadata::CallDurableMetadata;
-use crate::envelope_store::ActiveEnvelopeStore;
-use crate::invariants::InvariantCardIndex;
-use crate::isolation::CommandIsolationRuntimeConfig;
-use crate::policy::default::DefaultPolicyHook;
-use crate::policy::CepTurnContext;
+use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
+use crate::server::call_durable_metadata::CallDurableMetadata;
 use lancet_audit::{CepAuditContext, CepAuditStore};
+use lancet_authority::envelope_store::ActiveEnvelopeStore;
+use lancet_authority::policy::default::DefaultPolicyHook;
+use lancet_authority::policy::CepTurnContext;
 pub use lancet_dispatch::{Cancellation, EventSink};
+use lancet_invariants::InvariantCardIndex;
 use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 use lancet_protocol::policy::PolicyHook;
 use serde_json::Value;
@@ -28,8 +28,8 @@ pub struct HandlerContext {
     pub active_envelope: Arc<ActiveEnvelopeStore>,
     pub turn_id: String,
     pub(crate) durable_metadata: CallDurableMetadata,
-    pub effect_ledger: crate::effect::ledger::EffectLedger,
-    pub authorized_region: crate::effect::ledger::AuthorizedRegionSlot,
+    pub effect_ledger: lancet_authority::effect::ledger::EffectLedger,
+    pub authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot,
     pub policy_hook: Arc<dyn PolicyHook>,
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
@@ -68,7 +68,7 @@ impl HandlerContext {
     }
 
     /// Record an observed effect into the per-call effect ledger.
-    pub fn record_effect(&self, effect: crate::effect::ledger::ObservedEffect) {
+    pub fn record_effect(&self, effect: lancet_authority::effect::ledger::ObservedEffect) {
         self.effect_ledger.record(effect);
     }
 }
@@ -76,7 +76,7 @@ impl HandlerContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_registry::register_production_method_registry;
+    use crate::server::native_registry::register_production_method_registry;
     use lancet_catalog::catalog;
 
     #[test]

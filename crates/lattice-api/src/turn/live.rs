@@ -5,16 +5,10 @@
 //! that drains agent events concurrently via `tokio::select!`, and emits public
 //! [`TurnEvent`] values through a bounded channel before committing.
 
-#[cfg(test)]
-use std::sync::Arc;
-
 use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-
-#[cfg(test)]
-use lattice_agent::AgentLoop;
 
 use lattice_agent::{AgentTurnEvent, AgentTurnResult};
 use lattice_session::GraphHead;
@@ -155,8 +149,6 @@ async fn run_live_turn_task(
         cep_client,
         audit,
         audit_context,
-        #[cfg(test)]
-            build_metrics: _build_metrics,
         ..
     } = &mut deps;
 
@@ -305,33 +297,4 @@ pub(super) async fn stream_turn_live(
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
-}
-
-/// Test-only live path that injects a prebuilt AgentLoop without Cep runtime construction.
-#[cfg(test)]
-pub(super) async fn stream_turn_live_with_agent(
-    session: SessionApi,
-    agent_loop: Arc<AgentLoop>,
-    request: RunTurnRequest,
-    tool_definitions: Vec<lattice_llm::ToolDefinition>,
-) -> Result<TurnEventStream> {
-    let _prepared = prepare_live_turn(&session, &request)?;
-    let deps = ProductionTurnDeps {
-        agent_loop,
-        tool_definitions,
-        runtime: super::cep::CepTurnRuntime::dummy(),
-        cep_client: {
-            let (client, _server) = lancet_native::CepTransport::pair(1);
-            client
-        },
-        audit: Arc::new(lancet_native::CepAuditStore::in_memory().expect("in-memory audit store")),
-        audit_context: Arc::new(tokio::sync::RwLock::new(
-            lancet_native::CepAuditContext::default(),
-        )),
-        build_metrics: super::cep::CepRuntimeBuildMetrics {
-            adapter_instances: 0,
-            transport_pairs: 0,
-        },
-    };
-    stream_turn_live(session, request, deps).await
 }

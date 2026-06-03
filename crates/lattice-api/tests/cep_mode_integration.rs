@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
-use lancet_native::isolation::{
+use lancet_native::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
     CommandIsolationUnsupportedHostBehavior,
 };

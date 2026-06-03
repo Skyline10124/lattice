@@ -8,53 +8,41 @@
 pub mod audit {
     pub use lancet_audit::*;
 }
-pub(crate) mod call_durable_metadata;
 pub(crate) mod edit;
-pub mod effect;
-pub mod envelope_store;
+pub mod enforcement;
 pub(crate) mod executor;
-pub mod guard_l1;
-pub(crate) mod guard_l2;
 mod handlers;
 pub mod impact;
-pub mod invariants;
-pub mod isolation;
-mod native_registry;
-pub mod policy;
+pub mod projection;
 pub mod provenance {
     pub use lancet_audit::provenance::*;
 }
-pub mod registry;
-pub mod testing;
-pub mod tool_definitions;
-pub mod transport;
-pub mod verify;
+mod server;
 
-pub use envelope_store::ActiveEnvelopeStore;
-#[cfg(feature = "inspect-scaffold")]
-pub use handlers::register_inspect_scaffold_methods;
-pub use isolation::{
+pub use enforcement::isolation::{
     probe_host_capabilities, unavailable_required_boundaries, HostProbeEntry, HostProbeReport,
     MissingRequiredBoundary,
 };
+#[cfg(feature = "inspect-scaffold")]
+pub use handlers::register_inspect_scaffold_methods;
 pub use lancet_audit::{
     impact_kind_for_method, impact_kind_from_label, impact_kind_label, AttestationRecord,
     AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_NATIVE,
 };
 pub use lancet_dispatch::{wire_code_for_error, CepClient, CepServer, CepTransport};
-pub use native_registry::register_production_method_registry;
-pub use policy::{
-    command::CommandPolicy, BudgetLimits, CepPolicyConfig, CepTurnContext, NetworkPolicyConfig,
-    ObservationPolicyConfig,
-};
+#[cfg(feature = "inspect-scaffold")]
+pub use projection::scaffold_tool_definitions;
+pub use projection::to_tool_definitions;
 pub use provenance::{
     build_in_toto_statement, canonicalize_in_toto_statement, source_audit_range_hash,
 };
-pub use registry::{HandlerContext, MethodRegistry};
-#[cfg(feature = "inspect-scaffold")]
-pub use tool_definitions::scaffold_tool_definitions;
-pub use tool_definitions::to_tool_definitions;
-pub use transport::{CepServerNativeExt, ServerRunConfig};
+pub use server::{
+    register_production_method_registry, CepServerNativeExt, HandlerContext, MethodRegistry,
+    ServerRunConfig,
+};
+
+#[cfg(test)]
+mod effect_contract_tests;
 
 #[cfg(test)]
 mod public_api_tests {

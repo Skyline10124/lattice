@@ -4,13 +4,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::edit::content_hash;
-use crate::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::executor::render::render_file_slice;
-use crate::guard_l1::evaluate_and_enforce_policy;
-use crate::policy::budget::BudgetExhausted;
-use crate::policy::observation::{resolve_observation_target, ResolvedObservationTarget};
-use crate::policy::CepPolicyConfig;
-use crate::registry::{HandlerContext, MethodRegistry};
+use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_authority::policy::budget::BudgetExhausted;
+use lancet_authority::policy::observation::{
+    resolve_observation_target, ResolvedObservationTarget,
+};
+use lancet_authority::policy::CepPolicyConfig;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
     DirectoryEntry, DirectoryEntryKind, FindFilesParams, FindFilesResult, GrepMatch, GrepParams,
@@ -28,6 +30,18 @@ use serde_json::json;
 const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
+
+#[cfg(test)]
+pub(crate) const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
+
+#[cfg(test)]
+fn check_backend_safety_net(path: &str) -> Option<CepError> {
+    if path == BACKEND_SAFETY_NET_TEST_PATH {
+        Some(lancet_authority::policy::observation::backend_safety_net_denial(path))
+    } else {
+        None
+    }
+}
 
 /// Register the native `observe.workspace` handler.
 pub fn register_workspace_observation_methods(
@@ -86,7 +100,7 @@ async fn handle_read_file_as(
         }
     };
     #[cfg(test)]
-    if let Some(err) = crate::policy::observation::check_backend_safety_net(&params.path) {
+    if let Some(err) = check_backend_safety_net(&params.path) {
         emit_denial_metadata(&ctx, method, "backend_safety_net", true).await;
         return Err(err);
     }
@@ -379,7 +393,7 @@ async fn backend_or_continue(
     method: &str,
     ctx: &HandlerContext,
 ) -> Result<(), CepError> {
-    if let Some(err) = crate::policy::observation::check_backend_safety_net(path) {
+    if let Some(err) = check_backend_safety_net(path) {
         emit_denial_metadata(ctx, method, "backend_safety_net", true).await;
         return Err(err);
     }
@@ -769,9 +783,9 @@ async fn emit_denial_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::observation::{reject_parent_traversal, BACKEND_SAFETY_NET_TEST_PATH};
-    use crate::policy::CepTurnContext;
-    use crate::registry::{Cancellation, EventSink};
+    use crate::server::registry::{Cancellation, EventSink};
+    use lancet_authority::policy::observation::reject_parent_traversal;
+    use lancet_authority::policy::CepTurnContext;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::fs;
     use std::sync::Arc;
@@ -796,7 +810,7 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let cep_context = Arc::new(CepTurnContext::from_policy(policy));
-        let policy_cfg = crate::policy::default::PolicyConfig {
+        let policy_cfg = lancet_authority::policy::default::PolicyConfig {
             capability_sources: Default::default(),
             methods: Default::default(),
             command: cep_context.policy.command.clone(),
@@ -806,7 +820,9 @@ mod tests {
             project_root: cep_context.policy.project_root.clone(),
             denied_effect_kinds: Default::default(),
         };
-        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(policy_cfg));
+        let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            policy_cfg,
+        ));
         let mut base = BaseExecutionEnvelope::for_workspace_root(envelope_root, "native obs test");
         base.inner.capabilities = base
             .inner
@@ -828,11 +844,14 @@ mod tests {
                 cancellation: Cancellation::new(cancel_rx),
                 base_envelope: base,
                 cep_context,
-                active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+                active_envelope: Arc::new(
+                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
+                ),
                 turn_id: "test-turn".into(),
-                durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: crate::effect::ledger::EffectLedger::new(),
-                authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
                 policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
                 default_policy_hook: Some(default_hook),
                 audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
@@ -841,9 +860,10 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
-                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )
@@ -987,13 +1007,13 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "budget test"),
             cep_context,
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                crate::policy::default::PolicyConfig::defaults_for_project_root(
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
                 ),
             )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -1004,9 +1024,10 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         };
         let params = ReadFileParams {
             path: "big.txt".into(),
@@ -1036,13 +1057,13 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "turn budget"),
             cep_context,
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                crate::policy::default::PolicyConfig::defaults_for_project_root(
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
                 ),
             )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -1053,9 +1074,10 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         };
         let params = ReadFileParams {
             path: "a.txt".into(),
@@ -1294,13 +1316,13 @@ mod tests {
             cancellation: Cancellation::new(cancel_rx),
             base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "grep cap"),
             cep_context: Arc::new(CepTurnContext::from_policy(policy)),
-            active_envelope: Arc::new(crate::envelope_store::ActiveEnvelopeStore::new()),
+            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
-            durable_metadata: crate::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: crate::effect::ledger::EffectLedger::new(),
-            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
-                crate::policy::default::PolicyConfig::defaults_for_project_root(
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                     std::path::PathBuf::from(root),
                 ),
             )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
@@ -1311,9 +1333,10 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
-            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
         };
         let params = GrepParams {
             pattern: "match".into(),
