@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
-use lattice_tooling::{ToolError, ToolLimits};
-
 use super::hash::{content_hash, line_hash};
 use super::parser::parse_patch_document;
 use super::types::{
@@ -10,6 +8,8 @@ use super::types::{
     LineChangeKind, PatchDiagnostic, PatchDocument, PatchErrorCode, PatchHunk, PatchHunkLine,
     PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
+use crate::executor::error::ToolError;
+use crate::executor::limits::ToolLimits;
 
 pub async fn apply_patch(
     project_root: &Path,

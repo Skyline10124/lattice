@@ -39,11 +39,11 @@ enforces a layered internal dependency flow:
 
 ```
 Layer 0 (leaf):  lancet-protocol   lattice-llm   lattice-session
-Layer 1:         lancet-catalog(→protocol)  lattice-profile(→protocol)  lattice-tooling(→llm)  lattice-agent(→llm,session)
+Layer 1:         lancet-catalog(→protocol)  lattice-profile(→protocol)  lattice-agent(→llm,session)
 Layer 2:         lancet-dispatch(→protocol,catalog)  lancet-audit(→protocol,catalog)  lancet-authority(→protocol,catalog,llm)  lancet-invariants(→catalog)
-Layer 3:         lancet-native(→protocol,catalog,dispatch,audit,authority,invariants,llm,tooling)
+Layer 3:         lancet-native(→protocol,catalog,dispatch,audit,authority,invariants,llm)
 Layer 4:         lattice-api(→ all of the above)
-Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authority/invariants)
+Layer 5:         lattice-cli(→ api + llm/session/agent/profile/authority/invariants)
 ```
 
 | Crate | Role |
@@ -58,7 +58,6 @@ Layer 5:         lattice-cli(→ api + llm/session/agent/profile/tooling/authori
 | `lattice-llm` | Transport adapters, SSE streaming, model resolution/routing, tool types, SSRF/URL security, logging |
 | `lattice-session` | Git-style conversation graph with SQLite persistence and branch refs |
 | `lattice-profile` | Agent `agent.toml` profile schema (incl. `[lancet]` policy sections), discovery, defaults |
-| `lattice-tooling` | `ToolLimits`, `ToolError`, and enabled-tools resolution shared types |
 | `lattice-agent` | Multi-turn async agent loop (`AgentLoop`), state machine, injectable `LlmClient`/`ToolCallExecutor` |
 | `lattice-api` | Thin public facade for create/open/turn execution/session; composes the per-turn LANCET runtime |
 | `lattice-cli` | Binary entry point, subcommands (session, models, resolve, doctor, lancet, audit) |
@@ -129,7 +128,7 @@ Use this table to skip the "which crate owns this?" exploration step.
 | Low-level native helpers | `lancet-native/src/executor/` | `shell.rs`, `web.rs`, `render.rs` |
 | Edit/diff application logic | `lancet-native/src/edit/` | `apply.rs`, `parser.rs`, `diagnostics.rs`, `hash.rs` |
 | LLM-facing tool schema generation | `lancet-native/src/` | `tool_definitions.rs` |
-| Enabled-tools resolution | `lattice-tooling/src/` | `enabled_tools.rs` |
+| Enabled-tools resolution | `lattice-api/src/turn/` | `enabled_tools.rs`, `cep.rs` |
 | Provider protocol adapters | `lattice-llm/src/providers/` | `anthropic.rs`, `openai.rs`, `gemini.rs` |
 | SSE streaming parser | `lattice-llm/src/` | `sse.rs`, `client.rs` |
 | Model resolution / aliases | `lattice-llm/src/` | `router.rs`, `endpoints.rs` |

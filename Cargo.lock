@@ -1079,7 +1079,6 @@ dependencies = [
  "lancet-invariants",
  "lancet-protocol",
  "lattice-llm",
- "lattice-tooling",
  "libc",
  "proptest",
  "regex",
@@ -1134,7 +1133,6 @@ dependencies = [
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
- "lattice-tooling",
  "reqwest",
  "serde",
  "serde_json",
@@ -1213,16 +1211,6 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "uuid",
-]
-
-[[package]]
-name = "lattice-tooling"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "lattice-llm",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]

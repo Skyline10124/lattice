@@ -24,6 +24,24 @@
 - **当前状态**: v1.3-alpha CLI 场景工作区规模可控，非 bug。
 - **计划**: `tokio::task::spawn_blocking` 包装 + 加深度/文件数上限；或改用 mtime 比较 + 按需 hash。与 command handler async 签名无关（snapshot 函数独立）。
 
+### M-24-03: `ToolLimits` 在 CEP policy 之后成为隐藏 native 限制 — `architecture` / `policy-consistency`
+- **位置**: `crates/lancet-native/src/executor/limits.rs`、`crates/lancet-native/src/executor/shell.rs:214-256`、`crates/lancet-native/src/edit/apply.rs:14-248`
+- **问题**: `ToolLimits` 仍以 legacy “tool limit” 形状存在，但 CEP 之后 read/network/command 限制已经分别由 `ObservationPolicyConfig`、`NetworkPolicyConfig`、`CommandPolicy` 管理。当前字段中 `max_read_size`、`max_http_response_size` 无读取点；`max_command_timeout` 只作为 `execute_argv(timeout_ms=None)` fallback，生产 command/verify 路径已传入 CEP policy 计算出的 timeout；只有 `max_write_size` 仍作为 `mutate.patch` 应用后的单文件写入硬上限生效。
+- **当前状态**: 已从公共 `lattice-tooling` surface 收回到 `lancet-native` crate-private 实现细节，行为正确；但该结构会让后续读者误以为 native 层仍有一套独立 tool policy。
+- **计划**: 后续统一重构时删除 `ToolLimits`。候选方案：将 patch 写入上限改成局部 `PatchApplyLimits { max_write_size }`；或提升为 CEP mutation policy（例如 `mutation.max_single_write_bytes`）并从 profile/external policy 下发。command fallback 应改为显式使用 `CommandPolicy::default_timeout_ms/max_timeout_ms`，避免 native helper 自带第二套 timeout 默认。
+
+### M-24-04: `tools.enabled` 同时承担 LLM 暴露白名单和 CEP base authority 派生 — `architecture` / `policy-consistency`
+- **位置**: `crates/lattice-api/src/turn/enabled_tools.rs`、`crates/lattice-api/src/turn/cep.rs:197-208`、`crates/lattice-api/src/turn/cep.rs:582-602`、`crates/lattice-api/src/turn/cep.rs:788-793`
+- **问题**: `tools.enabled` 目前不只是 agent-visible method whitelist。它先过滤 catalog-derived LLM tool schemas，再生成 `CepExecutorAdapter` 的 enabled method set；同时又被 `production_base_envelope_from_policy` 用来派生 turn base envelope 能力：`session.envelope` / `session.todo_write` 触发 `MutateSessionState`，`fetch.web` 触发 allowed-host `FetchUrl` capabilities。这样 `tools.enabled` 同时承担 exposure 和部分 authority shaping，和 CEP policy/envelope 语义重叠。
+- **当前状态**: 行为正确，且 adapter disabled-method 拒绝、base envelope session/audit/fetch capability 映射已有测试覆盖；但该路径容易让后续读者误以为 tool enablement 本身就是授权边界。实际最终 authority 仍应由 CEP policy、Guard、active envelope 和 native handler enforcement 决定。
+- **计划**: 后续统一重构时拆开两层语义。`tools.enabled` 保留为 LLM exposure / adapter whitelist；base envelope 从 explicit CEP base-policy、catalog method requirements、profile `[lancet]` policy 或独立 authority builder 生成，不直接由 exposure list 推导。可将 `enabled_tools.rs` 重命名为 `tool_exposure.rs`，并把 base envelope 派生迁到 CEP authority composition 代码中。
+
+### M-24-05: `lattice-api` 从薄 facade 膨胀为 turn runtime composition 层 — `architecture` / `crate-boundary`
+- **位置**: `crates/lattice-api/src/lib.rs:1-11`、`crates/lattice-api/src/turn/cep.rs`、`crates/lattice-api/src/turn/live.rs`、`crates/lattice-api/Cargo.toml`
+- **问题**: `lattice-api` 对外仍宣称是 thin public API facade，但内部已经承载 turn-scoped LANCET runtime composition：`CepExecutorAdapter`、catalog tool projection、profile → CEP policy lowering、command isolation lowering、external policy load/merge、base envelope 派生、attestation persistence、native registry/transport/audit/invariant 装配，以及 CEP event → public `TurnEvent` 映射。`turn/cep.rs` 已成为上千行的 dependency magnet，`Cargo.toml` 也直接依赖多枚 LANCET 内部 crate。
+- **当前状态**: 对外 `run_turn` / `stream_turn` / `SessionApi` surface 仍然可用，行为正确；问题是 crate boundary 已经漂移，public facade 和内部 turn control plane 混在同一个 crate，后续 CLI/TUI/daemon 复用时容易把 API crate 变成事实上的 runtime 聚合层。
+- **计划**: 后续统一重构时切出内部 turn/LANCET composition crate（命名需随边界再定，优先避免泛化成无边界的 `runtime` 桶）。`lattice-api` 保留 public request/response/event types、`SessionApi`、`run_turn` / `stream_turn` facade 和 session commit 入口；把 `CepExecutorAdapter`、`build_production_turn_deps`、profile/policy lowering、base envelope builder、native LANCET 装配、attestation/event mapping 迁到内部 crate。CLI/TUI/daemon 继续依赖 `lattice-api`，不直接穿透到 native internals。
+
 ## LOW
 
 ### L-20: `SqliteSessionGraphStore` 单连接 `Mutex` 应用层串行化 — `performance` / `architecture`

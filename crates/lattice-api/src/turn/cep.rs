@@ -42,12 +42,12 @@ use lattice_profile::{
     LancetIsolationMode, LancetLandlockBehavior, LancetNetworkSection, LancetObservationSection,
     LancetSection, LancetUnsupportedHostBehavior,
 };
-use lattice_tooling::resolve_enabled_tools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use super::enabled_tools::resolve_enabled_tools;
 use crate::session::ApiError;
 
 /// Per-build construction metrics (test-only; each production build is exactly one pair + adapter).
@@ -199,13 +199,13 @@ pub(crate) fn resolve_catalog_tool_definitions(
     enabled: &[String],
 ) -> Result<Vec<lattice_llm::ToolDefinition>, ApiError> {
     let inventory = to_tool_definitions(catalog());
-    let resolved = resolve_enabled_tools(enabled, &inventory).map_err(|err| {
+    let definitions = resolve_enabled_tools(enabled, &inventory).map_err(|err| {
         ApiError::BadRequest(format!(
             "unknown enabled tools {:?}; available catalog tools: {:?}",
             err.unknown, err.available
         ))
     })?;
-    Ok(resolved.definitions)
+    Ok(definitions)
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.

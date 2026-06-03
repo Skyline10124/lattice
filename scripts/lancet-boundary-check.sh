@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/lancet-boundary-check.sh
 
 LANCET boundary gate:
-  - lattice-agent must not depend on lancet-native or lattice-tooling
+  - lattice-agent must not depend on lancet-native
   - active source must not reintroduce legacy executor bypass symbols
 
 Scans Cargo.toml manifests, crates/*/src/**/*.rs, and crate integration tests.
@@ -100,7 +100,7 @@ else
         .packages[]
         | select(.name == "lattice-agent")
         | .dependencies[]
-        | select(.name == "lancet-native" or .name == "lattice-tooling")
+        | select(.name == "lancet-native")
         | "lattice-agent -> \(.name)"
       ' 2>/dev/null || true
     )
@@ -108,7 +108,7 @@ else
 fi
 
 manifest_forbidden=$(
-  grep -nE 'lancet-native|lattice-tooling' crates/lattice-agent/Cargo.toml 2>/dev/null || true
+  grep -nE 'lancet-native' crates/lattice-agent/Cargo.toml 2>/dev/null || true
 )
 
 graph_output=""

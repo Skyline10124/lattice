@@ -14,6 +14,7 @@ use crate::enforcement::guard_l1::{
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
+use crate::executor::limits::ToolLimits;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{
     EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
@@ -328,7 +329,7 @@ async fn handle_patch_as(
     }
 
     // 7. Apply patch using existing edit/ machinery
-    let limits = lattice_tooling::ToolLimits::default();
+    let limits = ToolLimits::default();
     let result =
         crate::edit::apply_patch(std::path::Path::new(&project_root), &limits, &params.patch).await;
 

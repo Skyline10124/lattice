@@ -5,7 +5,6 @@ members = [
     "crates/lattice-api",
     "crates/lattice-session",
     "crates/lattice-agent",
-    "crates/lattice-tooling",
     "crates/lancet-protocol",
     "crates/lancet-catalog",
     "crates/lancet-dispatch",
@@ -30,7 +29,6 @@ lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-agent    = { path = "crates/lattice-agent" }
-lattice-tooling  = { path = "crates/lattice-tooling" }
 lancet-protocol = { path = "crates/lancet-protocol" }
 lancet-catalog  = { path = "crates/lancet-catalog" }
 lancet-dispatch = { path = "crates/lancet-dispatch" }

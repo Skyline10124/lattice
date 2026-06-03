@@ -217,7 +217,6 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice-session",
         "lattice-profile",
         "lattice-agent",
-        "lattice-tooling",
         "lancet-protocol",
         "lancet-catalog",
         "lancet-dispatch",
@@ -232,6 +231,7 @@ fn focused_tests_import_no_removed_crate_names() {
         "lattice_prompt",
         "lattice_sandbox",
         "lattice_policy",
+        "lattice_tooling",
         "cep_protocol",
         "cep_executor",
     ];

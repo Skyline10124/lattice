@@ -24,7 +24,6 @@ lattice/
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
 │   ├── lattice-profile/     # Agent profile schema ([lancet] policy sections), discovery, defaults
-│   ├── lattice-tooling/     # Tool limits/errors, enabled-tools resolution
 │   ├── lattice-agent/       # Multi-turn agent loop (AgentLoop), state machine
 │   ├── lattice-api/         # Public facade (turn execution/session); composes the per-turn LANCET runtime
 │   └── lattice-cli/         # CLI (session, models, resolve, doctor, lancet, audit)
@@ -39,9 +38,10 @@ Internal dependency flow:
 lancet-protocol ─┬─> lancet-catalog ─┬─> lancet-dispatch ─┐
                       ├─> lattice-profile       ├─> lancet-audit     ├─> lancet-native
                       └─> lancet-authority └─> lancet-invariants┘
-lattice-llm ─────────────> lattice-tooling ───────────────┐
+lattice-llm ─────────────> lattice-agent ─────────────────┐
+lattice-session ─────────> lattice-agent <────────────────┤
                                                            ├─> lattice-api ─> lattice-cli
-lattice-session ─────────> lattice-agent <─────────────────┘
+lattice-profile ──────────────────────────────────────────┘
 ```
 
 ## Build

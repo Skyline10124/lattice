@@ -8,7 +8,6 @@ description = "LANCET native production handlers, transport integration, verify,
 
 [dependencies]
 lattice-llm = { workspace = true }
-lattice-tooling = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-dispatch = { workspace = true }

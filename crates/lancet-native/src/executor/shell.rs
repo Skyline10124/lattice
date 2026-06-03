@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lattice_tooling::ToolLimits;
 use tokio::process::Child;
 
+use crate::executor::limits::ToolLimits;
 use crate::server::registry::Cancellation;
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};

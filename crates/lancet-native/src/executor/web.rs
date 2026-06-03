@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use futures::StreamExt;
 use lattice_llm::security;
-use lattice_tooling::ToolError;
+
+use crate::executor::error::ToolError;
 
 /// Structured HTTP fetch outcome for native `fetch.web`.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -41,8 +41,7 @@ echo ""
 
 # ── Step 3: LANCET crate tests ─────────────────────────────────────────────
 # Explicit per-crate targets. Does NOT use `cargo test --workspace` so test
-# scope is deterministic. `lattice-tools` is the old stale name — this gate
-# always uses the correct package name `lattice-tooling`.
+# scope is deterministic. Retired tooling crates are not release-gate targets.
 
 echo "==> [3/9] LANCET crate tests"
 

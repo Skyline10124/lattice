@@ -4,6 +4,7 @@
 //! is executed if configured. Verify failure returns `VerifyFailed`, retains the
 //! diff, and leaves the envelope valid for same-turn repair.
 
+use crate::executor::limits::ToolLimits;
 use crate::executor::shell::{execute_argv, ExecuteConfig};
 use crate::server::registry::Cancellation;
 use lancet_authority::policy::command::{classify_command, CommandPolicy, EffectiveImpact};
@@ -206,7 +207,7 @@ pub async fn run_verify(
 
     let (output, _stdout_meta, _stderr_meta) = execute_argv(ExecuteConfig {
         project_root,
-        limits: &lattice_tooling::ToolLimits::default(),
+        limits: &ToolLimits::default(),
         argv: &spec.argv,
         cwd: spec.cwd.as_deref(),
         env: &env,

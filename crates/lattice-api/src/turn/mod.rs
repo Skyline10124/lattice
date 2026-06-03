@@ -8,6 +8,7 @@
 
 mod cep;
 mod collector;
+mod enabled_tools;
 mod execute;
 mod live;
 mod llm;

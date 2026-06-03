@@ -15,6 +15,7 @@ use crate::enforcement::isolation::{
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
+use crate::executor::limits::ToolLimits;
 use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
@@ -223,7 +224,7 @@ async fn handle_run_as(
 
     let result = execute_argv(ExecuteConfig {
         project_root: &project_root,
-        limits: &lattice_tooling::ToolLimits::default(),
+        limits: &ToolLimits::default(),
         argv: &params.argv,
         cwd: params.cwd.as_deref(),
         env: &effective_env,

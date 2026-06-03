@@ -18,7 +18,7 @@ The documented public LANCET contract is split across **`lancet-protocol`** and
 
 Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics), `lancet-invariants` (invariant cards and Guard L2), and `lancet-native` (production handlers, transport lifecycle, verify/edit/shell/web integration).
 
-**Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority/invariant implementation details, `lattice-tooling` shared types, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
+**Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority/invariant implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
 native registry, and LLM-facing tool definitions are projected only from the 9

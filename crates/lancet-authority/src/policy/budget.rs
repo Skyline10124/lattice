@@ -16,7 +16,7 @@ pub struct BudgetLimits {
 }
 
 impl BudgetLimits {
-    /// Defaults aligned with [`lattice_tooling::ToolLimits`] and legacy search caps.
+    /// Defaults aligned with native single-read caps and legacy search caps.
     pub fn defaults() -> Self {
         Self {
             max_single_read_bytes: 10 * 1024 * 1024,

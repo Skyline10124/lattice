@@ -17,7 +17,6 @@ lattice-agent = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-session = { workspace = true }
-lattice-tooling = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,6 +32,5 @@ uuid = { workspace = true }
 tokio = { workspace = true }
 tempfile = { workspace = true }
 lattice-agent = { workspace = true, features = ["test-utils"] }
-lattice-tooling = { workspace = true }
 lattice-profile = { workspace = true }
 blake3 = { workspace = true }

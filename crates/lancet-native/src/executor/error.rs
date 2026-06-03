@@ -1,7 +1,7 @@
-/// Internal error type for native tool execution helpers.
+/// Internal error type for native execution helpers.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum ToolError {
+pub(crate) enum ToolError {
     #[error("IO error accessing {path}: {error}")]
     IoError {
         path: String,
@@ -9,21 +9,9 @@ pub enum ToolError {
         error: std::io::Error,
     },
 
-    #[error("tool boundary violation: {0}")]
-    BoundaryViolation(String),
-
-    #[error("invalid regex pattern: {0}")]
-    RegexError(String),
-
     #[error("HTTP error: {0}")]
     HttpError(String),
 
-    #[error("command error: {0}")]
-    CommandError(String),
-
     #[error("size limit exceeded: {actual} > {limit}")]
     SizeLimit { limit: usize, actual: usize },
-
-    #[error("file not found: {0}")]
-    FileNotFound(String),
 }
