@@ -112,6 +112,7 @@ mod scaffold_tests {
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
             cep_mode: CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         }
     }
 

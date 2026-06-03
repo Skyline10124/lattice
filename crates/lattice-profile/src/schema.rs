@@ -1,7 +1,9 @@
+use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepMode;
 use lancet_protocol::ImpactKind;
 use serde::{de, Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 /// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
 ///
@@ -40,6 +42,8 @@ pub struct LancetSection {
     pub command: Option<LancetCommandSection>,
     #[serde(default)]
     pub policy: Option<LancetPolicySection>,
+    #[serde(default)]
+    pub isolation: Option<LancetIsolationSection>,
     #[serde(default)]
     pub invariants: Option<LancetInvariantsSection>,
     #[serde(default)]
@@ -115,6 +119,230 @@ pub struct LancetPolicySection {
     pub path: Option<String>,
 }
 
+/// `[lancet.isolation]` — physical boundary configuration namespace.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct LancetIsolationSection {
+    #[serde(default)]
+    pub command: Option<LancetCommandIsolationSection>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, toml::Value>,
+}
+
+impl<'de> Deserialize<'de> for LancetIsolationSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut raw = BTreeMap::<String, toml::Value>::deserialize(deserializer)?;
+        for (key, value) in &raw {
+            if !matches!(value, toml::Value::Table(_)) {
+                return Err(de::Error::custom(format!(
+                    "unknown scalar field `lancet.isolation.{key}`; only typed or future sub-tables are supported"
+                )));
+            }
+        }
+        let command = raw
+            .remove("command")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
+        Ok(Self {
+            command,
+            extensions: raw,
+        })
+    }
+}
+
+/// `[lancet.isolation.command]` — command physical-boundary policy.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LancetCommandIsolationSection {
+    pub mode: LancetIsolationMode,
+    pub required_boundaries: Vec<BoundaryDimension>,
+    pub optional_boundaries: Vec<BoundaryDimension>,
+    pub read_only_toolchain_paths: Vec<String>,
+    pub scratch_paths: Vec<String>,
+    pub landlock: LancetLandlockBehavior,
+    pub unsupported_host: LancetUnsupportedHostBehavior,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLancetCommandIsolationSection {
+    pub mode: LancetIsolationMode,
+    #[serde(default)]
+    pub required_boundaries: Vec<BoundaryDimension>,
+    #[serde(default)]
+    pub optional_boundaries: Vec<BoundaryDimension>,
+    #[serde(default)]
+    pub read_only_toolchain_paths: Vec<String>,
+    #[serde(default)]
+    pub scratch_paths: Vec<String>,
+    #[serde(default = "default_lancet_landlock_behavior")]
+    pub landlock: LancetLandlockBehavior,
+    #[serde(default = "default_lancet_unsupported_host_behavior")]
+    pub unsupported_host: LancetUnsupportedHostBehavior,
+}
+
+impl<'de> Deserialize<'de> for LancetCommandIsolationSection {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawLancetCommandIsolationSection::deserialize(deserializer)?;
+        let section = Self {
+            mode: raw.mode,
+            required_boundaries: raw.required_boundaries,
+            optional_boundaries: raw.optional_boundaries,
+            read_only_toolchain_paths: raw.read_only_toolchain_paths,
+            scratch_paths: raw.scratch_paths,
+            landlock: raw.landlock,
+            unsupported_host: raw.unsupported_host,
+        };
+        section.validate().map_err(de::Error::custom)?;
+        Ok(section)
+    }
+}
+
+impl LancetCommandIsolationSection {
+    fn validate(&self) -> Result<(), String> {
+        validate_boundary_list("required_boundaries", &self.required_boundaries)?;
+        validate_boundary_list("optional_boundaries", &self.optional_boundaries)?;
+        for boundary in &self.required_boundaries {
+            if self.optional_boundaries.contains(boundary) {
+                return Err(format!(
+                    "boundary `{}` cannot appear in both required_boundaries and optional_boundaries",
+                    boundary.label()
+                ));
+            }
+        }
+
+        if self.landlock == LancetLandlockBehavior::Off
+            && self
+                .required_boundaries
+                .contains(&BoundaryDimension::Landlock)
+        {
+            return Err(
+                "landlock = \"off\" contradicts required_boundaries containing `landlock`"
+                    .to_string(),
+            );
+        }
+
+        validate_unsupported_host_behavior(self.mode, self.unsupported_host)?;
+        validate_path_list("read_only_toolchain_paths", &self.read_only_toolchain_paths)?;
+        validate_path_list("scratch_paths", &self.scratch_paths)?;
+        Ok(())
+    }
+}
+
+fn validate_boundary_list(field: &str, boundaries: &[BoundaryDimension]) -> Result<(), String> {
+    let mut seen = Vec::new();
+    for boundary in boundaries {
+        if seen.contains(boundary) {
+            return Err(format!(
+                "duplicate boundary `{}` in {field}",
+                boundary.label()
+            ));
+        }
+        seen.push(*boundary);
+    }
+    Ok(())
+}
+
+fn validate_unsupported_host_behavior(
+    mode: LancetIsolationMode,
+    behavior: LancetUnsupportedHostBehavior,
+) -> Result<(), String> {
+    let allowed = match mode {
+        LancetIsolationMode::Enforce => LancetUnsupportedHostBehavior::FailClosed,
+        LancetIsolationMode::Audit => LancetUnsupportedHostBehavior::AllowUnbounded,
+        LancetIsolationMode::Off => LancetUnsupportedHostBehavior::NotRequested,
+    };
+    if behavior == LancetUnsupportedHostBehavior::ModeDefault || behavior == allowed {
+        return Ok(());
+    }
+    Err(format!(
+        "unsupported_host = \"{}\" contradicts mode = \"{}\"; use \"mode_default\" or \"{}\"",
+        behavior.label(),
+        mode.label(),
+        allowed.label()
+    ))
+}
+
+fn validate_path_list(field: &str, paths: &[String]) -> Result<(), String> {
+    for path in paths {
+        if path.trim().is_empty() {
+            return Err(format!("{field} entries must be nonempty"));
+        }
+        if path.contains('\0') {
+            return Err(format!("{field} entries must not contain NUL bytes"));
+        }
+        if Path::new(path)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(format!(
+                "{field} entry `{path}` must not contain parent-directory traversal"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Physical-boundary enforcement mode for `exec.command_run`.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LancetIsolationMode {
+    Enforce,
+    Audit,
+    Off,
+}
+
+impl LancetIsolationMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            LancetIsolationMode::Enforce => "enforce",
+            LancetIsolationMode::Audit => "audit",
+            LancetIsolationMode::Off => "off",
+        }
+    }
+}
+
+/// Landlock filesystem-refinement behavior for command isolation.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LancetLandlockBehavior {
+    Auto,
+    Off,
+}
+
+/// Unsupported-host behavior for requested command physical boundaries.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LancetUnsupportedHostBehavior {
+    ModeDefault,
+    FailClosed,
+    AllowUnbounded,
+    NotRequested,
+}
+
+impl LancetUnsupportedHostBehavior {
+    pub const fn label(self) -> &'static str {
+        match self {
+            LancetUnsupportedHostBehavior::ModeDefault => "mode_default",
+            LancetUnsupportedHostBehavior::FailClosed => "fail_closed",
+            LancetUnsupportedHostBehavior::AllowUnbounded => "allow_unbounded",
+            LancetUnsupportedHostBehavior::NotRequested => "not_requested",
+        }
+    }
+}
+
+fn default_lancet_landlock_behavior() -> LancetLandlockBehavior {
+    LancetLandlockBehavior::Auto
+}
+
+fn default_lancet_unsupported_host_behavior() -> LancetUnsupportedHostBehavior {
+    LancetUnsupportedHostBehavior::ModeDefault
+}
+
 /// `[lancet.invariants]` — invariant card directory configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -144,6 +372,7 @@ impl Default for LancetSection {
             network: None,
             command: None,
             policy: None,
+            isolation: None,
             invariants: None,
             effects: None,
             extensions: BTreeMap::new(),
@@ -190,6 +419,10 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("policy")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let isolation = raw
+            .remove("isolation")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
         let invariants = raw
             .remove("invariants")
             .map(|value| value.try_into().map_err(de::Error::custom))
@@ -206,6 +439,7 @@ impl<'de> Deserialize<'de> for LancetSection {
             network,
             command,
             policy,
+            isolation,
             invariants,
             effects,
             extensions: raw,
@@ -917,6 +1151,270 @@ default_timeout_ms = 60000
         assert!(!profile.lancet.extensions.contains_key("command"));
     }
 
+    // ── LancetIsolationSection ─────────────────────────────────────────
+
+    #[test]
+    fn cep_isolation_command_section_parses_required_boundaries() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "enforce"
+required_boundaries = ["network", "filesystem", "landlock"]
+optional_boundaries = []
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let isolation = profile.lancet.isolation.as_ref().unwrap();
+        let command = isolation.command.as_ref().unwrap();
+        assert_eq!(command.mode, LancetIsolationMode::Enforce);
+        assert_eq!(
+            command.required_boundaries,
+            vec![
+                BoundaryDimension::Network,
+                BoundaryDimension::Filesystem,
+                BoundaryDimension::Landlock
+            ]
+        );
+        assert!(command.optional_boundaries.is_empty());
+    }
+
+    #[test]
+    fn cep_isolation_command_section_parses_full_contract() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "audit"
+required_boundaries = ["network", "filesystem"]
+optional_boundaries = ["landlock"]
+read_only_toolchain_paths = ["/usr", "/bin"]
+scratch_paths = ["build/tmp", "/tmp/lattice"]
+landlock = "auto"
+unsupported_host = "allow_unbounded"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let command = profile
+            .lancet
+            .isolation
+            .as_ref()
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(command.mode, LancetIsolationMode::Audit);
+        assert_eq!(
+            command.required_boundaries,
+            vec![BoundaryDimension::Network, BoundaryDimension::Filesystem]
+        );
+        assert_eq!(
+            command.optional_boundaries,
+            vec![BoundaryDimension::Landlock]
+        );
+        assert_eq!(command.read_only_toolchain_paths, vec!["/usr", "/bin"]);
+        assert_eq!(command.scratch_paths, vec!["build/tmp", "/tmp/lattice"]);
+        assert_eq!(command.landlock, LancetLandlockBehavior::Auto);
+        assert_eq!(
+            command.unsupported_host,
+            LancetUnsupportedHostBehavior::AllowUnbounded
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_section_parses_all_modes() {
+        for (raw_mode, expected) in [
+            ("enforce", LancetIsolationMode::Enforce),
+            ("audit", LancetIsolationMode::Audit),
+            ("off", LancetIsolationMode::Off),
+        ] {
+            let toml = format!(
+                r#"{prefix}
+
+[lancet.isolation.command]
+mode = "{raw_mode}"
+"#,
+                prefix = minimal_profile_prefix()
+            );
+            let profile = parse(&toml).unwrap();
+            let command = profile
+                .lancet
+                .isolation
+                .as_ref()
+                .unwrap()
+                .command
+                .as_ref()
+                .unwrap();
+            assert_eq!(command.mode, expected);
+        }
+    }
+
+    #[test]
+    fn cep_isolation_command_section_rejects_unknown_field() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "enforce"
+required_boundaries = ["network"]
+unknown = true
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown"),
+            "should reject unknown isolation command field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_section_rejects_unknown_boundary() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "enforce"
+required_boundaries = ["seccomp"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("seccomp"),
+            "should reject unknown boundary name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_rejects_required_landlock_when_disabled() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "enforce"
+required_boundaries = ["landlock"]
+landlock = "off"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("landlock"),
+            "should reject disabled required Landlock, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_rejects_duplicate_boundary_declarations() {
+        let duplicate_required = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "enforce"
+required_boundaries = ["network", "network"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&duplicate_required).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "should reject duplicate required boundary, got: {err}"
+        );
+
+        let required_optional_overlap = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "audit"
+required_boundaries = ["filesystem"]
+optional_boundaries = ["filesystem"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&required_optional_overlap).unwrap_err();
+        assert!(
+            err.to_string().contains("optional"),
+            "should reject required/optional overlap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_rejects_unsupported_host_mode_contradictions() {
+        for (mode, unsupported_host) in [
+            ("enforce", "allow_unbounded"),
+            ("audit", "fail_closed"),
+            ("off", "allow_unbounded"),
+        ] {
+            let toml = format!(
+                r#"{prefix}
+
+[lancet.isolation.command]
+mode = "{mode}"
+required_boundaries = ["network"]
+unsupported_host = "{unsupported_host}"
+"#,
+                prefix = minimal_profile_prefix()
+            );
+            let err = parse(&toml).unwrap_err();
+            assert!(
+                err.to_string().contains("unsupported_host"),
+                "should reject {mode}/{unsupported_host}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cep_isolation_command_rejects_empty_or_traversing_paths() {
+        let empty_toolchain = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "audit"
+read_only_toolchain_paths = [""]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&empty_toolchain).unwrap_err();
+        assert!(
+            err.to_string().contains("read_only_toolchain_paths"),
+            "should reject empty toolchain path, got: {err}"
+        );
+
+        let traversing_scratch = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "audit"
+scratch_paths = ["../tmp"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&traversing_scratch).unwrap_err();
+        assert!(
+            err.to_string().contains("scratch_paths"),
+            "should reject traversing scratch path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cep_isolation_command_moved_from_extensions_to_typed() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.isolation.command]
+mode = "audit"
+required_boundaries = ["network"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        assert!(profile.lancet.isolation.is_some());
+        assert!(!profile.lancet.extensions.contains_key("isolation"));
+    }
+
     #[test]
     fn cep_serializes_extensions_flattened() {
         let mut future = toml::map::Map::new();
@@ -932,6 +1430,7 @@ default_timeout_ms = 60000
             network: None,
             command: None,
             policy: None,
+            isolation: None,
             invariants: None,
             effects: None,
             extensions,

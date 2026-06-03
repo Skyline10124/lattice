@@ -12,6 +12,7 @@ use crate::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
     has_run_command_capability,
 };
+use crate::isolation::{command_boundary_metadata, evaluate_command_boundary_preflight};
 use crate::policy::command::{
     build_effective_env, classify_command, validate_timeout, EffectiveImpact,
 };
@@ -180,6 +181,25 @@ async fn handle_run_as(
     // 8. Build effective env
     let effective_env = build_effective_env(&params.env, policy)?;
 
+    // 8b. Command physical-boundary preflight. This is independent from
+    // cep_mode: CepMode::Off only skips effect-region checking, not requested
+    // command isolation boundaries.
+    let boundary_preflight = evaluate_command_boundary_preflight(&ctx.command_isolation);
+    let boundary_metadata = command_boundary_metadata(&ctx.command_isolation, &boundary_preflight);
+    ctx.record_durable_metadata(boundary_metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": boundary_metadata }),
+        )
+        .await;
+    if boundary_preflight.should_fail_closed() {
+        return Err(command_boundary_fail_closed_error(
+            method,
+            &boundary_preflight,
+        ));
+    }
+
     // 9. Execute via rewritten execute_argv with bounded tail reader
     let project_root = ctx
         .cep_context
@@ -213,6 +233,16 @@ async fn handle_run_as(
         Ok((output, stdout_meta, stderr_meta)) => {
             // 11. Build RunResult with truncation metadata
             let exit_code = output.status.code().unwrap_or(-1);
+            let observation_metadata = command_observation_metadata(&effective_impact);
+            let execution_metadata = command_execution_metadata(CommandExecutionMetadata {
+                classification: &effective_impact,
+                envelope_id: envelope_id.as_deref(),
+                exit_code,
+                stdout_meta: &stdout_meta,
+                stderr_meta: &stderr_meta,
+                method,
+                observation_metadata: &observation_metadata,
+            });
 
             ctx.record_effect(ObservedEffect {
                 kind: ImpactKind::CommandExecution,
@@ -220,6 +250,13 @@ async fn handle_run_as(
                 required_capability: RequiredCapability::RunCommand,
                 source: EffectSource::HandlerBackend,
             });
+            ctx.record_durable_metadata(execution_metadata.clone());
+            ctx.events
+                .emit(
+                    "cep.command_metadata",
+                    json!({ "method": method, "metadata": execution_metadata }),
+                )
+                .await;
 
             // 12. Post-execution diff check for WorkspaceMutation.
             if effective_impact == EffectiveImpact::WorkspaceMutation {
@@ -288,33 +325,8 @@ async fn handle_run_as(
                 }
             }
 
-            // 13. Record durable metadata
-            let effective_effect =
-                crate::effect::region::EffectiveEffect::from_command_impact(&effective_impact)
-                    .ok()
-                    .map(|ee| {
-                        ee.kinds
-                            .iter()
-                            .map(|k| format!("{:?}", k))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-
-            // Composite command mutation records both command_execution and workspace_mutation.
-            // for WorkspaceMutation commands. CEP PROV replay reads this field.
-            let observation_metadata = command_observation_metadata(&effective_impact);
-            ctx.record_durable_metadata(json!({
-                "classification": format!("{:?}", effective_impact),
-                "effective_effect": effective_effect,
-                "envelope_id": envelope_id,
-                "exit_code": exit_code,
-                "stdout_bytes": stdout_meta.total_bytes,
-                "stderr_bytes": stderr_meta.total_bytes,
-                "stdout_truncated": stdout_meta.truncated,
-                "stderr_truncated": stderr_meta.truncated,
-                "backend_invoked": true,
-                "policy_enforced": true,
-            }));
+            // Keep observation metadata available as top-level durable fields for
+            // provenance readers that do not inspect command_metadata events.
             ctx.record_durable_metadata(observation_metadata.clone());
 
             let success_audit = CommandSuccessAudit {
@@ -382,6 +394,22 @@ async fn handle_run_as(
             Err(err)
         }
     }
+}
+
+fn command_boundary_fail_closed_error(
+    method: &str,
+    preflight: &crate::isolation::CommandBoundaryPreflight,
+) -> CepError {
+    let message = preflight.failure_message();
+    CepError::new(
+        CepErrorCode::GuardDenied,
+        message.clone(),
+        CepErrorData::Guard(GuardErrorData {
+            method: method.into(),
+            reason: message,
+        }),
+        Retriability::Permanent,
+    )
 }
 
 #[derive(Debug, Default)]
@@ -729,6 +757,54 @@ fn command_observation_metadata(effective_impact: &EffectiveImpact) -> serde_jso
     }
 }
 
+struct CommandExecutionMetadata<'a> {
+    classification: &'a EffectiveImpact,
+    envelope_id: Option<&'a str>,
+    exit_code: i32,
+    stdout_meta: &'a BoundedStreamOutput,
+    stderr_meta: &'a BoundedStreamOutput,
+    method: &'static str,
+    observation_metadata: &'a serde_json::Value,
+}
+
+fn command_execution_metadata(input: CommandExecutionMetadata<'_>) -> serde_json::Value {
+    let mut metadata = json!({
+        "method": input.method,
+        "classification": command_classification_label(input.classification),
+        "effective_effect": command_effective_effect_labels(input.classification),
+        "envelope_id": input.envelope_id,
+        "exit_code": input.exit_code,
+        "stdout_bytes": input.stdout_meta.total_bytes,
+        "stderr_bytes": input.stderr_meta.total_bytes,
+        "stdout_truncated": input.stdout_meta.truncated,
+        "stderr_truncated": input.stderr_meta.truncated,
+        "backend_invoked": true,
+        "policy_enforced": true,
+    });
+    merge_json_object(&mut metadata, input.observation_metadata);
+    metadata
+}
+
+fn command_effective_effect_labels(effective_impact: &EffectiveImpact) -> Vec<String> {
+    crate::effect::region::EffectiveEffect::from_command_impact(effective_impact)
+        .ok()
+        .map(|ee| {
+            ee.kinds
+                .iter()
+                .map(|kind| format!("{:?}", kind))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn command_classification_label(effective_impact: &EffectiveImpact) -> &'static str {
+    match effective_impact {
+        EffectiveImpact::Diagnostic => "diagnostic",
+        EffectiveImpact::WorkspaceMutation => "workspace_mutation",
+        EffectiveImpact::HardDenied => "hard_denied",
+    }
+}
+
 async fn emit_denial_metadata(
     ctx: &HandlerContext,
     denial_source: &str,
@@ -761,14 +837,9 @@ struct CommandSuccessAudit<'a> {
 }
 
 async fn emit_success_metadata(ctx: &HandlerContext, audit: CommandSuccessAudit<'_>) {
-    let classification_str = match audit.classification {
-        EffectiveImpact::Diagnostic => "diagnostic",
-        EffectiveImpact::WorkspaceMutation => "workspace_mutation",
-        EffectiveImpact::HardDenied => "hard_denied",
-    };
     let mut metadata = json!({
         "method": audit.method,
-        "classification": classification_str,
+        "classification": command_classification_label(audit.classification),
         "envelope_id": audit.envelope_id,
         "exit_code": audit.exit_code,
         "stdout_bytes": audit.stdout_meta.total_bytes,
@@ -805,7 +876,7 @@ mod tests {
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact,
-        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
+        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope, VerifyCommand,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
@@ -850,6 +921,7 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
+                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
             cancel_tx,
@@ -861,6 +933,219 @@ mod tests {
         register_command_methods(&mut registry).unwrap();
         let _ = root;
         registry
+    }
+
+    fn command_boundary_probe(
+        entries: &[(
+            lancet_protocol::BoundaryPrimitive,
+            lancet_protocol::HostProbeStatus,
+            &str,
+        )],
+    ) -> crate::isolation::HostProbeReport {
+        crate::isolation::HostProbeReport::from_entries(entries.iter().map(
+            |(primitive, status, reason)| {
+                crate::isolation::HostProbeEntry::new(*primitive, *status, *reason)
+            },
+        ))
+    }
+
+    fn command_boundary_config(
+        mode: crate::isolation::CommandIsolationMode,
+        required_boundaries: Vec<lancet_protocol::BoundaryDimension>,
+        host_probe: crate::isolation::HostProbeReport,
+    ) -> crate::isolation::CommandIsolationRuntimeConfig {
+        crate::isolation::CommandIsolationRuntimeConfig {
+            mode,
+            required_boundaries,
+            optional_boundaries: Vec::new(),
+            read_only_toolchain_paths: Vec::new(),
+            scratch_paths: Vec::new(),
+            landlock: crate::isolation::CommandIsolationLandlockBehavior::Auto,
+            unsupported_host: match mode {
+                crate::isolation::CommandIsolationMode::Enforce => {
+                    crate::isolation::CommandIsolationUnsupportedHostBehavior::FailClosed
+                }
+                crate::isolation::CommandIsolationMode::Audit => {
+                    crate::isolation::CommandIsolationUnsupportedHostBehavior::AllowUnbounded
+                }
+                crate::isolation::CommandIsolationMode::Off => {
+                    crate::isolation::CommandIsolationUnsupportedHostBehavior::NotRequested
+                }
+            },
+            host_probe: Some(host_probe),
+        }
+    }
+
+    fn command_boundary_metadata_json(
+        durable: &crate::call_durable_metadata::CallDurableMetadata,
+    ) -> serde_json::Value {
+        serde_json::from_str(
+            &durable
+                .take_json()
+                .expect("command boundary durable metadata"),
+        )
+        .expect("durable metadata json")
+    }
+
+    async fn run_echo_with_context(
+        registry: &MethodRegistry,
+        ctx: HandlerContext,
+    ) -> Result<serde_json::Value, CepError> {
+        let params = RunParams {
+            argv: vec!["echo".into(), "command-boundary".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: Some(ImpactKind::CommandExecution),
+        };
+        registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+    }
+
+    async fn next_command_metadata_event(
+        events: &mut mpsc::Receiver<lancet_protocol::ToolEvent>,
+    ) -> lancet_protocol::ToolEvent {
+        while let Some(event) = events.recv().await {
+            if event.method == "cep.command_metadata" {
+                return event;
+            }
+        }
+        panic!("command metadata event not emitted");
+    }
+
+    #[tokio::test]
+    async fn command_boundary_enforce_unavailable_required_fails_before_backend_with_metadata() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (mut ctx, mut events, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
+        ctx.command_isolation = command_boundary_config(
+            crate::isolation::CommandIsolationMode::Enforce,
+            vec![lancet_protocol::BoundaryDimension::Network],
+            command_boundary_probe(&[(
+                lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+                lancet_protocol::HostProbeStatus::Unavailable,
+                "netns unavailable in test",
+            )]),
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let err = run_echo_with_context(&registry, ctx)
+            .await
+            .expect_err("enforce mode must fail before execute_argv");
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        let metadata = command_boundary_metadata_json(&durable);
+        assert_eq!(metadata["backend_invoked"], false);
+        assert_eq!(
+            metadata["effective_boundary"]["network"]["status"],
+            "failed_closed"
+        );
+        assert_eq!(
+            metadata["host_probe_summary"]["primitives"]["network_namespace"]["status"],
+            "unavailable"
+        );
+        let event = next_command_metadata_event(&mut events).await;
+        assert_eq!(event.method, "cep.command_metadata");
+        assert_eq!(
+            event.params["metadata"]["effective_boundary"]["network"]["status"],
+            "failed_closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_boundary_enforce_unknown_required_probe_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (mut ctx, _events, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
+        ctx.command_isolation = command_boundary_config(
+            crate::isolation::CommandIsolationMode::Enforce,
+            vec![lancet_protocol::BoundaryDimension::Network],
+            command_boundary_probe(&[(
+                lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+                lancet_protocol::HostProbeStatus::Unknown,
+                "netns probe unknown in test",
+            )]),
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let err = run_echo_with_context(&registry, ctx)
+            .await
+            .expect_err("unknown required probe result must fail closed");
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        let metadata = command_boundary_metadata_json(&durable);
+        assert_eq!(metadata["backend_invoked"], false);
+        assert_eq!(
+            metadata["effective_boundary"]["network"]["status"],
+            "unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_boundary_audit_unavailable_required_runs_and_records_unbounded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (mut ctx, _events, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
+        ctx.command_isolation = command_boundary_config(
+            crate::isolation::CommandIsolationMode::Audit,
+            vec![lancet_protocol::BoundaryDimension::Network],
+            command_boundary_probe(&[(
+                lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+                lancet_protocol::HostProbeStatus::Unavailable,
+                "netns unavailable in audit test",
+            )]),
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let value = run_echo_with_context(&registry, ctx)
+            .await
+            .expect("audit mode may execute unbounded command");
+        let parsed: RunResult = serde_json::from_value(value).unwrap();
+
+        assert_eq!(parsed.exit_code, 0);
+        assert!(parsed.stdout.contains("command-boundary"));
+        let metadata = command_boundary_metadata_json(&durable);
+        assert_eq!(metadata["backend_invoked"], true);
+        assert_eq!(
+            metadata["effective_boundary"]["network"]["status"],
+            "unbounded"
+        );
+    }
+
+    #[tokio::test]
+    async fn command_boundary_off_runs_and_records_not_requested_for_every_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (mut ctx, _events, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["echo".into()]).await;
+        ctx.command_isolation = command_boundary_config(
+            crate::isolation::CommandIsolationMode::Off,
+            vec![lancet_protocol::BoundaryDimension::Network],
+            command_boundary_probe(&[]),
+        );
+        let durable = ctx.durable_metadata.clone();
+
+        let value = run_echo_with_context(&registry, ctx)
+            .await
+            .expect("off mode must keep existing command policy semantics");
+        let parsed: RunResult = serde_json::from_value(value).unwrap();
+
+        assert_eq!(parsed.exit_code, 0);
+        let metadata = command_boundary_metadata_json(&durable);
+        for boundary in ["network", "filesystem", "landlock"] {
+            assert_eq!(
+                metadata["effective_boundary"][boundary]["status"],
+                "not_requested"
+            );
+        }
     }
 
     async fn test_ctx_with_run_command(
@@ -925,6 +1210,7 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
+                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
             cancel_tx,
@@ -1066,6 +1352,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1147,6 +1434,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1231,6 +1519,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1315,6 +1604,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1432,6 +1722,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1533,6 +1824,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1780,6 +2072,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let registry = native_command_registry(root);
@@ -1885,6 +2178,7 @@ mod tests {
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
         };
 
         let params = RunParams {
@@ -1900,6 +2194,113 @@ mod tests {
             .unwrap();
         let parsed: RunResult = serde_json::from_value(result).unwrap();
         assert_eq!(parsed.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn workspace_mutation_verify_failure_records_backend_invoked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::RunCommand {
+            argv_allowlist: vec!["touch".into()],
+        });
+        capabilities.insert(Capability::WritePath {
+            path_pattern: ".".into(),
+        });
+        let envelope = ExecutionEnvelope {
+            intent: Intent {
+                description: "verify failure metadata test".into(),
+            },
+            capabilities,
+            scope: Scope {
+                workspace_root: Some(root.into()),
+                extensions: serde_json::Map::new(),
+            },
+            impact: vec![EnvImpact {
+                kind: ImpactKind::WorkspaceMutation,
+                target: root.into(),
+                scope: None,
+                confidence: ImpactConfidence::Conservative,
+                unknowns: vec![],
+            }],
+            constraints: Constraints::default(),
+            verify: Some(VerifyCommand {
+                command: "echo verify".into(),
+                expected_exit_code: Some(1),
+            }),
+            on_failure: Some(OnFailure::RetainDiff),
+            extensions: serde_json::Map::new(),
+        };
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let durable_metadata = crate::call_durable_metadata::CallDurableMetadata::default();
+        let ctx = HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "verify failure test"),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: durable_metadata.clone(),
+            effect_ledger: crate::effect::ledger::EffectLedger::new(),
+            authorized_region: crate::effect::ledger::AuthorizedRegionSlot::new(),
+            policy_hook: Arc::new(crate::policy::default::DefaultPolicyHook::new(
+                crate::policy::default::PolicyConfig::defaults_for_project_root(
+                    std::path::PathBuf::from(root),
+                ),
+            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: None,
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+                ..Default::default()
+            })),
+            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
+            invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
+        };
+
+        let params = RunParams {
+            argv: vec!["touch".into(), "verify_failed_file.txt".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: Some(5000),
+            declared_impact: Some(ImpactKind::WorkspaceMutation),
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .expect_err("verify failure must abort the command result");
+
+        assert_eq!(err.code, CepErrorCode::VerifyFailed);
+        assert!(dir.path().join("verify_failed_file.txt").exists());
+        let metadata = command_boundary_metadata_json(&durable_metadata);
+        assert_eq!(metadata["backend_invoked"], true);
+        assert_eq!(metadata["classification"], "workspace_mutation");
+        assert_eq!(metadata["exit_code"], 0);
+        assert_eq!(metadata["effect_observation"], "partial");
+
+        let mut saw_backend_invoked_event = false;
+        let mut saw_verify_failed_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if event.method == "cep.command_metadata"
+                && event.params["metadata"]["backend_invoked"] == true
+            {
+                saw_backend_invoked_event = true;
+            }
+            if event.method == "cep.verify_failed" {
+                saw_verify_failed_event = true;
+            }
+        }
+        assert!(saw_backend_invoked_event);
+        assert!(saw_verify_failed_event);
     }
 
     #[tokio::test]

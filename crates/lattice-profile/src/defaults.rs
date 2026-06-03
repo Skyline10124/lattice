@@ -31,6 +31,17 @@ system = "You are a helpful assistant. Be concise and accurate."
 [tools]
 enabled = ["observe.workspace"]
 
+# Optional command physical-boundary configuration.
+# Uncomment to request command isolation boundaries.
+# [lancet.isolation.command]
+# mode = "enforce"
+# required_boundaries = ["network", "filesystem"]
+# optional_boundaries = []
+# read_only_toolchain_paths = ["/usr", "/bin"]
+# scratch_paths = ["build/tmp"]
+# landlock = "auto"
+# unsupported_host = "mode_default"
+
 [llm.retry]
 max_retries = 3
 initial_delay_ms = 500
@@ -64,6 +75,17 @@ system = "You are a code reader and reviewer. Read and analyze code carefully. D
 
 [tools]
 enabled = ["observe.workspace"]
+
+# Optional command physical-boundary configuration.
+# Uncomment to request command isolation boundaries.
+# [lancet.isolation.command]
+# mode = "enforce"
+# required_boundaries = ["network", "filesystem"]
+# optional_boundaries = []
+# read_only_toolchain_paths = ["/usr", "/bin"]
+# scratch_paths = ["build/tmp"]
+# landlock = "auto"
+# unsupported_host = "mode_default"
 
 [llm.retry]
 max_retries = 3
@@ -99,6 +121,17 @@ system = "You are a code editor. Read, edit, and refactor code within the projec
 [tools]
 enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write"]
 
+# Optional command physical-boundary configuration.
+# Uncomment to request command isolation boundaries.
+# [lancet.isolation.command]
+# mode = "enforce"
+# required_boundaries = ["network", "filesystem"]
+# optional_boundaries = []
+# read_only_toolchain_paths = ["/usr", "/bin"]
+# scratch_paths = ["build/tmp"]
+# landlock = "auto"
+# unsupported_host = "mode_default"
+
 [llm.retry]
 max_retries = 3
 initial_delay_ms = 500
@@ -130,6 +163,17 @@ system = "You are a full-stack developer. Read, write, edit, and refactor code. 
 
 [tools]
 enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write", "exec.command_run", "fetch.web"]
+
+# Optional command physical-boundary configuration.
+# Uncomment to request command isolation boundaries.
+# [lancet.isolation.command]
+# mode = "enforce"
+# required_boundaries = ["network", "filesystem"]
+# optional_boundaries = []
+# read_only_toolchain_paths = ["/usr", "/bin"]
+# scratch_paths = ["build/tmp"]
+# landlock = "auto"
+# unsupported_host = "mode_default"
 
 [llm.retry]
 max_retries = 3
@@ -405,6 +449,31 @@ mod tests {
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         expected_sorted.sort();
         assert_eq!(enabled, expected_sorted);
+    }
+
+    #[test]
+    fn all_templates_document_command_isolation_without_requesting_boundaries() {
+        for (name, toml_str) in [
+            ("default", default_agent_template("t", "sonnet")),
+            ("reader", default_reader_template("t", "sonnet")),
+            ("editor", default_editor_template("t", "sonnet")),
+            ("dev", default_dev_template("t", "sonnet")),
+        ] {
+            assert!(
+                toml_str.contains("# [lancet.isolation.command]"),
+                "{name} template must document the command isolation table"
+            );
+            assert!(
+                !toml_str.contains("\n[lancet.isolation.command]"),
+                "{name} template must not enable command isolation by default"
+            );
+            let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
+            assert!(
+                profile.lancet.isolation.is_none(),
+                "{name} template must not request physical boundaries by default"
+            );
+        }
     }
 
     // ── Cross-template checks ──────────────────────────────────────────

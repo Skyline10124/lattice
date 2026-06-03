@@ -3,6 +3,7 @@
 use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::invariants::InvariantCardIndex;
+use crate::isolation::CommandIsolationRuntimeConfig;
 use crate::policy::default::{DefaultPolicyHook, PolicyConfig};
 use crate::policy::CepTurnContext;
 use crate::registry::{HandlerContext, MethodRegistry};
@@ -38,6 +39,8 @@ pub struct ServerRunConfig {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
+    /// Independent command physical-boundary runtime configuration.
+    pub command_isolation: CommandIsolationRuntimeConfig,
     /// Invariant cards indexed for this turn/session.
     pub invariant_index: Arc<InvariantCardIndex>,
 }
@@ -63,6 +66,7 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
+            command_isolation: CommandIsolationRuntimeConfig::default(),
             invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
         }
     }
@@ -117,6 +121,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         policy_hook,
         default_policy_hook,
         cep_mode,
+        command_isolation,
         invariant_index,
     } = config;
 
@@ -160,6 +165,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit: Arc::clone(&audit),
         invariant_index: Arc::clone(&invariant_index),
         cep_mode: cep_mode.clone(),
+        command_isolation,
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;

@@ -11,6 +11,7 @@
 //!
 //! This crate is pure data: no I/O, no runtime, no tokio.
 
+pub mod boundary;
 pub mod capability;
 pub mod envelope;
 pub mod error;
@@ -20,6 +21,10 @@ pub mod policy;
 pub mod provenance;
 
 // Public re-exports of common types
+pub use boundary::{
+    BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryEntry, EffectiveBoundaryReport,
+    EffectiveBoundaryStatus, HostProbeEntry, HostProbeReport, HostProbeStatus,
+};
 pub use capability::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
 pub use envelope::{
     BaseExecutionEnvelope, Capability, CepMode, Constraints, EffectDecl, EffectKindSet,

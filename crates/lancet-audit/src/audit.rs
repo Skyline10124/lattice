@@ -1089,6 +1089,79 @@ mod tests {
     }
 
     #[test]
+    fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
+        let store = CepAuditStore::in_memory().unwrap();
+        let metadata = json!({
+            "command_isolation_mode": "audit",
+            "effective_boundary": {
+                "network": {"boundary": "network", "status": "unbounded", "reason": "netns unavailable"},
+                "filesystem": {"boundary": "filesystem", "status": "failed_closed", "reason": "overlay missing"},
+                "landlock": {"boundary": "landlock", "status": "unsupported", "reason": "landlock disabled"}
+            },
+            "host_probe_summary": {
+                "network_namespace": {"status": "unavailable", "reason": "operation not permitted"}
+            },
+            "backend_invoked": false,
+            "policy_enforced": true
+        });
+        let metadata_json = serde_json::to_string(&metadata).unwrap();
+        let start = store
+            .start_call(
+                &test_context(),
+                11,
+                "exec.command_run",
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
+            )
+            .unwrap();
+        store
+            .finalize_call(
+                start,
+                AuditOutcome::Error {
+                    code: "GuardDenied".into(),
+                    summary: "command boundary failed closed".into(),
+                },
+                Some("native_handler_denied"),
+                Some(&metadata_json),
+            )
+            .unwrap();
+
+        let rows = store
+            .query_rows(&AuditQueryFilters {
+                method: Some("exec.command_run".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let loaded = rows[0].metadata_json.as_deref().expect("metadata_json");
+        let loaded_json: serde_json::Value = serde_json::from_str(loaded).unwrap();
+        assert_eq!(
+            loaded_json["effective_boundary"]["network"]["status"],
+            "unbounded"
+        );
+        assert_eq!(
+            loaded_json["effective_boundary"]["filesystem"]["status"],
+            "failed_closed"
+        );
+        assert_eq!(
+            loaded_json["effective_boundary"]["landlock"]["status"],
+            "unsupported"
+        );
+        for forbidden in [
+            "argv",
+            "stdin",
+            "stdout",
+            "stderr",
+            "command_request",
+            "command_response",
+        ] {
+            assert!(
+                !loaded.contains(forbidden),
+                "compact boundary metadata must not contain full payload key `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
     fn impact_kind_label_round_trips_all_variants() {
         for kind in &ALL_IMPACT_KINDS {
             let label = impact_kind_label(kind);

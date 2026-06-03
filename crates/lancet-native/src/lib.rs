@@ -18,6 +18,7 @@ pub(crate) mod guard_l2;
 mod handlers;
 pub mod impact;
 pub mod invariants;
+pub mod isolation;
 mod native_registry;
 pub mod policy;
 pub mod provenance {
@@ -32,6 +33,10 @@ pub mod verify;
 pub use envelope_store::ActiveEnvelopeStore;
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
+pub use isolation::{
+    probe_host_capabilities, unavailable_required_boundaries, HostProbeEntry, HostProbeReport,
+    MissingRequiredBoundary,
+};
 pub use lancet_audit::{
     impact_kind_for_method, impact_kind_from_label, impact_kind_label, AttestationRecord,
     AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_NATIVE,

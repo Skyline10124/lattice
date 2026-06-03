@@ -160,6 +160,7 @@ mod tests {
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 invariant_index: Arc::new(crate::invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
+                command_isolation: crate::isolation::CommandIsolationRuntimeConfig::default(),
             },
             event_rx,
         )

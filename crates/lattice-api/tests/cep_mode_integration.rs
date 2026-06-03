@@ -25,11 +25,16 @@ use std::sync::Arc;
 
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
+use lancet_native::isolation::{
+    CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
+    CommandIsolationUnsupportedHostBehavior,
+};
 use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
 use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepErrorCode;
 use lattice_profile::LancetSection;
 use tempfile::TempDir;
@@ -130,6 +135,99 @@ fn command_composite_handler() -> MethodRegistry {
         })
         .expect("command composite handler registration");
     registry
+}
+
+fn command_isolation_config_observer_handler() -> MethodRegistry {
+    let mut registry = MethodRegistry::new();
+    registry
+        .register_method::<Run, _, _>(|_params: RunParams, ctx| async move {
+            assert_eq!(ctx.command_isolation.mode, CommandIsolationMode::Enforce);
+            assert_eq!(
+                ctx.command_isolation.required_boundaries,
+                vec![BoundaryDimension::Network, BoundaryDimension::Landlock]
+            );
+            assert_eq!(
+                ctx.command_isolation.optional_boundaries,
+                vec![BoundaryDimension::Filesystem]
+            );
+            assert_eq!(
+                ctx.command_isolation.read_only_toolchain_paths,
+                vec![PathBuf::from("/usr/bin")]
+            );
+            assert_eq!(
+                ctx.command_isolation.scratch_paths,
+                vec![PathBuf::from("build/tmp")]
+            );
+            assert_eq!(
+                ctx.command_isolation.landlock,
+                CommandIsolationLandlockBehavior::Auto
+            );
+            assert_eq!(
+                ctx.command_isolation.unsupported_host,
+                CommandIsolationUnsupportedHostBehavior::FailClosed
+            );
+            Ok(RunResult {
+                exit_code: 0,
+                stdout: "command isolation config visible".into(),
+                stderr: String::new(),
+                stdout_truncated: None,
+                stderr_truncated: None,
+                stdout_bytes: Some("command isolation config visible".len()),
+                stderr_bytes: Some(0),
+            })
+        })
+        .expect("command isolation observer handler registration");
+    registry
+}
+
+#[tokio::test]
+async fn cep_mode_integration_off_keeps_command_isolation_config_visible_to_handlers() {
+    let mut config = ServerRunConfig::in_memory_for_tests();
+    config.cep_mode = CepMode::Off;
+    config.command_isolation = CommandIsolationRuntimeConfig {
+        mode: CommandIsolationMode::Enforce,
+        required_boundaries: vec![BoundaryDimension::Network, BoundaryDimension::Landlock],
+        optional_boundaries: vec![BoundaryDimension::Filesystem],
+        read_only_toolchain_paths: vec![PathBuf::from("/usr/bin")],
+        scratch_paths: vec![PathBuf::from("build/tmp")],
+        landlock: CommandIsolationLandlockBehavior::Auto,
+        unsupported_host: CommandIsolationUnsupportedHostBehavior::FailClosed,
+        host_probe: None,
+    };
+
+    let (client, server) = CepTransport::pair(8);
+    let registry = command_isolation_config_observer_handler();
+    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+    let result = client
+        .call::<Run>(RunParams {
+            argv: vec!["echo".into(), "ignored-by-observer".into()],
+            cwd: None,
+            env: Default::default(),
+            timeout_ms: None,
+            declared_impact: Some(ImpactKind::CommandExecution),
+        })
+        .await
+        .expect("cep_mode Off must not erase command isolation runtime config");
+
+    assert_eq!(result.stdout, "command isolation config visible");
+
+    drop(client);
+    server_task.abort();
+}
+
+#[test]
+fn cep_mode_integration_missing_command_isolation_defaults_to_off() {
+    let config = ServerRunConfig::in_memory_for_tests();
+    assert_eq!(config.command_isolation.mode, CommandIsolationMode::Off);
+    assert!(
+        config.command_isolation.required_boundaries.is_empty(),
+        "missing [lancet.isolation.command] must not request physical boundaries"
+    );
+    assert!(
+        config.command_isolation.optional_boundaries.is_empty(),
+        "missing [lancet.isolation.command] must not imply optional protection"
+    );
 }
 
 // ── Enforce test ───────────────────────────────────────────────────────

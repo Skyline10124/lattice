@@ -19,6 +19,10 @@ use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_invariants as invariants;
+use lancet_native::isolation::{
+    CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
+    CommandIsolationUnsupportedHostBehavior,
+};
 use lancet_native::{
     build_in_toto_statement, impact_kind_for_method, impact_kind_label,
     register_production_method_registry, source_audit_range_hash, to_tool_definitions,
@@ -34,7 +38,10 @@ use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
 };
 use lattice_llm::ToolCall;
-use lattice_profile::{LancetNetworkSection, LancetObservationSection, LancetSection};
+use lattice_profile::{
+    LancetIsolationMode, LancetLandlockBehavior, LancetNetworkSection, LancetObservationSection,
+    LancetSection, LancetUnsupportedHostBehavior,
+};
 use lattice_tooling::resolve_enabled_tools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -353,6 +360,92 @@ fn command_policy_from_profile(lancet: &LancetSection) -> CommandPolicy {
     }
 }
 
+fn command_isolation_config_from_profile(
+    lancet: &LancetSection,
+    runtime_project_root: &Path,
+) -> Result<CommandIsolationRuntimeConfig, ApiError> {
+    let Some(section) = lancet.isolation.as_ref().and_then(|s| s.command.as_ref()) else {
+        return Ok(CommandIsolationRuntimeConfig::default());
+    };
+
+    let runtime_root = std::fs::canonicalize(runtime_project_root).map_err(|err| {
+        ApiError::BadRequest(format!(
+            "cannot canonicalize project root '{}': {err}",
+            runtime_project_root.display()
+        ))
+    })?;
+
+    Ok(CommandIsolationRuntimeConfig {
+        mode: command_isolation_mode_from_profile(section.mode),
+        required_boundaries: section.required_boundaries.clone(),
+        optional_boundaries: section.optional_boundaries.clone(),
+        read_only_toolchain_paths: section
+            .read_only_toolchain_paths
+            .iter()
+            .map(|path| resolve_runtime_config_path(&runtime_root, path))
+            .collect(),
+        scratch_paths: section
+            .scratch_paths
+            .iter()
+            .map(|path| resolve_runtime_config_path(&runtime_root, path))
+            .collect(),
+        landlock: command_landlock_behavior_from_profile(section.landlock),
+        unsupported_host: command_unsupported_host_behavior_from_profile(
+            section.mode,
+            section.unsupported_host,
+        ),
+        host_probe: None,
+    })
+}
+
+fn command_isolation_mode_from_profile(mode: LancetIsolationMode) -> CommandIsolationMode {
+    match mode {
+        LancetIsolationMode::Enforce => CommandIsolationMode::Enforce,
+        LancetIsolationMode::Audit => CommandIsolationMode::Audit,
+        LancetIsolationMode::Off => CommandIsolationMode::Off,
+    }
+}
+
+fn command_landlock_behavior_from_profile(
+    behavior: LancetLandlockBehavior,
+) -> CommandIsolationLandlockBehavior {
+    match behavior {
+        LancetLandlockBehavior::Auto => CommandIsolationLandlockBehavior::Auto,
+        LancetLandlockBehavior::Off => CommandIsolationLandlockBehavior::Off,
+    }
+}
+
+fn command_unsupported_host_behavior_from_profile(
+    mode: LancetIsolationMode,
+    behavior: LancetUnsupportedHostBehavior,
+) -> CommandIsolationUnsupportedHostBehavior {
+    match behavior {
+        LancetUnsupportedHostBehavior::FailClosed => {
+            CommandIsolationUnsupportedHostBehavior::FailClosed
+        }
+        LancetUnsupportedHostBehavior::AllowUnbounded => {
+            CommandIsolationUnsupportedHostBehavior::AllowUnbounded
+        }
+        LancetUnsupportedHostBehavior::NotRequested => {
+            CommandIsolationUnsupportedHostBehavior::NotRequested
+        }
+        LancetUnsupportedHostBehavior::ModeDefault => match mode {
+            LancetIsolationMode::Enforce => CommandIsolationUnsupportedHostBehavior::FailClosed,
+            LancetIsolationMode::Audit => CommandIsolationUnsupportedHostBehavior::AllowUnbounded,
+            LancetIsolationMode::Off => CommandIsolationUnsupportedHostBehavior::NotRequested,
+        },
+    }
+}
+
+fn resolve_runtime_config_path(runtime_root: &Path, path: &str) -> PathBuf {
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        runtime_root.join(candidate)
+    }
+}
+
 /// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
 ///
 /// Merge precedence: compiled defaults < profile inline `[lancet.*]` < external policy file.
@@ -619,6 +712,12 @@ pub(crate) fn build_production_turn_deps(
         Some(lancet_section) => load_policy_config(lancet_section, Path::new(project_root))?,
         None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
     };
+    let command_isolation = match lancet {
+        Some(lancet_section) => {
+            command_isolation_config_from_profile(lancet_section, Path::new(project_root))?
+        }
+        None => CommandIsolationRuntimeConfig::default(),
+    };
     let cep_policy = cep_policy_from_policy_config(&policy_config);
     let base_envelope =
         production_base_envelope_from_policy(project_root, enabled_tools, &cep_policy)?;
@@ -672,6 +771,7 @@ pub(crate) fn build_production_turn_deps(
         cep_mode: lancet
             .map(|c| c.mode.clone())
             .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
+        command_isolation,
         invariant_index,
     };
 
@@ -1003,6 +1103,58 @@ mod cep_context_profile_policy {
         let cep = LancetSection::default();
         let policy = cep_policy_from_profile(&cep, dir.path()).expect("policy");
         assert_eq!(policy.command, CommandPolicy::defaults());
+    }
+
+    #[test]
+    fn cep_mode_integration_profile_command_isolation_maps_independently_from_lancet_mode_off() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            mode: CepMode::Off,
+            isolation: Some(lattice_profile::LancetIsolationSection {
+                command: Some(lattice_profile::LancetCommandIsolationSection {
+                    mode: lattice_profile::LancetIsolationMode::Enforce,
+                    required_boundaries: vec![
+                        lancet_protocol::BoundaryDimension::Network,
+                        lancet_protocol::BoundaryDimension::Landlock,
+                    ],
+                    optional_boundaries: vec![lancet_protocol::BoundaryDimension::Filesystem],
+                    read_only_toolchain_paths: vec!["/usr/bin".into()],
+                    scratch_paths: vec!["build/tmp".into()],
+                    landlock: lattice_profile::LancetLandlockBehavior::Auto,
+                    unsupported_host: lattice_profile::LancetUnsupportedHostBehavior::ModeDefault,
+                }),
+                extensions: BTreeMap::new(),
+            }),
+            ..Default::default()
+        };
+
+        let config = command_isolation_config_from_profile(&cep, dir.path())
+            .expect("command isolation runtime config");
+
+        assert_eq!(
+            config.mode,
+            lancet_native::isolation::CommandIsolationMode::Enforce
+        );
+        assert_eq!(
+            config.required_boundaries,
+            vec![
+                lancet_protocol::BoundaryDimension::Network,
+                lancet_protocol::BoundaryDimension::Landlock,
+            ]
+        );
+        assert_eq!(
+            config.optional_boundaries,
+            vec![lancet_protocol::BoundaryDimension::Filesystem]
+        );
+        assert_eq!(
+            config.read_only_toolchain_paths,
+            vec![PathBuf::from("/usr/bin")]
+        );
+        assert_eq!(config.scratch_paths, vec![dir.path().join("build/tmp")]);
+        assert_eq!(
+            config.unsupported_host,
+            lancet_native::isolation::CommandIsolationUnsupportedHostBehavior::FailClosed
+        );
     }
 
     #[test]

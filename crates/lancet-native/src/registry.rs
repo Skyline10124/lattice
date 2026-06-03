@@ -3,6 +3,7 @@
 use crate::call_durable_metadata::CallDurableMetadata;
 use crate::envelope_store::ActiveEnvelopeStore;
 use crate::invariants::InvariantCardIndex;
+use crate::isolation::CommandIsolationRuntimeConfig;
 use crate::policy::default::DefaultPolicyHook;
 use crate::policy::CepTurnContext;
 use lancet_audit::{CepAuditContext, CepAuditStore};
@@ -35,6 +36,7 @@ pub struct HandlerContext {
     pub audit: Arc<CepAuditStore>,
     pub invariant_index: Arc<InvariantCardIndex>,
     pub cep_mode: CepMode,
+    pub command_isolation: CommandIsolationRuntimeConfig,
 }
 
 impl std::fmt::Debug for HandlerContext {
@@ -54,6 +56,7 @@ impl std::fmt::Debug for HandlerContext {
             .field("audit_context", &self.audit_context)
             .field("invariant_index", &self.invariant_index)
             .field("cep_mode", &self.cep_mode)
+            .field("command_isolation", &self.command_isolation)
             .finish()
     }
 }
