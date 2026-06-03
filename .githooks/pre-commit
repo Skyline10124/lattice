@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install with:
+#   git config core.hooksPath .githooks
+#
+# Blocks files that are staged even though they match the repository's ignore
+# rules. This catches force-added private state such as .env, .codex/, .agents/,
+# .planning/, build outputs, and local databases before they enter history.
+
+blocked=()
+matches=()
+
+while IFS= read -r -d '' path; do
+    if match=$(git check-ignore --no-index -v -- "$path" 2>/dev/null); then
+        blocked+=("$path")
+        matches+=("$match")
+    fi
+done < <(git diff --cached --name-only -z --diff-filter=ACMRT)
+
+if (( ${#blocked[@]} == 0 )); then
+    exit 0
+fi
+
+{
+    printf 'error: commit blocked: staged files match Git ignore rules\n'
+    printf '\n'
+    printf 'Ignored staged paths:\n'
+    for i in "${!blocked[@]}"; do
+        printf '  - %s\n' "${blocked[$i]}"
+        printf '    %s\n' "${matches[$i]}"
+    done
+    printf '\n'
+    printf 'Unstage them with:\n'
+    printf '  git restore --staged -- <path>\n'
+    printf '\n'
+    printf 'If a path really belongs in the repo, update the ignore rules first.\n'
+} >&2
+
+exit 1
