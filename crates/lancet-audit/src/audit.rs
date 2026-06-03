@@ -246,6 +246,8 @@ pub enum AuditError {
         path: PathBuf,
         source: rusqlite::Error,
     },
+    #[error("unsafe audit database path at {path}: {reason}")]
+    UnsafePath { path: PathBuf, reason: String },
 }
 
 /// Durable flat SQLite store for CEP call audit rows.
@@ -261,11 +263,14 @@ impl CepAuditStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
+            reject_symlink_path(parent)?;
             std::fs::create_dir_all(parent).map_err(|source| AuditError::Database {
                 path: path.clone(),
                 source: rusqlite::Error::ToSqlConversionFailure(Box::new(source)),
             })?;
+            reject_symlink_path(parent)?;
         }
+        reject_symlink_path(&path)?;
         let conn = Connection::open(&path).map_err(|source| AuditError::Database {
             path: path.clone(),
             source,
@@ -672,6 +677,21 @@ fn null_if_empty(value: &str) -> Option<&str> {
     }
 }
 
+fn reject_symlink_path(path: &Path) -> Result<(), AuditError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(AuditError::UnsafePath {
+            path: path.to_path_buf(),
+            reason: "audit store refuses to follow symlink paths".to_string(),
+        }),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(AuditError::Database {
+            path: path.to_path_buf(),
+            source: rusqlite::Error::ToSqlConversionFailure(Box::new(err)),
+        }),
+    }
+}
+
 fn map_audit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRow> {
     Ok(AuditRow {
         audit_id: row.get(0)?,
@@ -759,6 +779,7 @@ mod tests {
     };
     use lancet_catalog::CepMethod;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn test_context() -> CepAuditContext {
         CepAuditContext {
@@ -766,6 +787,67 @@ mod tests {
             session_id: "session-1".into(),
             ..Default::default()
         }
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "lancet-audit-{name}-{unique}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symlinked_audit_parent() {
+        let root = unique_test_dir("symlink-parent-root");
+        let outside = unique_test_dir("symlink-parent-outside");
+        std::os::unix::fs::symlink(&outside, root.join(".lattice")).unwrap();
+
+        let err = match CepAuditStore::open(root.join(".lattice").join("cep_audit.db")) {
+            Ok(_) => panic!("symlinked audit parent should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, AuditError::UnsafePath { .. }));
+        assert!(
+            !outside.join("cep_audit.db").exists(),
+            "audit open must not create a database through a symlinked .lattice directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symlinked_audit_database_file() {
+        let root = unique_test_dir("symlink-file-root");
+        let outside = unique_test_dir("symlink-file-outside");
+        let lattice_dir = root.join(".lattice");
+        std::fs::create_dir_all(&lattice_dir).unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("forged-audit.db"),
+            lattice_dir.join("cep_audit.db"),
+        )
+        .unwrap();
+
+        let err = match CepAuditStore::open(lattice_dir.join("cep_audit.db")) {
+            Ok(_) => panic!("symlinked audit database should be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, AuditError::UnsafePath { .. }));
+        assert!(
+            !outside.join("forged-audit.db").exists(),
+            "audit open must not create a database through a symlinked file path"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

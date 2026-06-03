@@ -176,7 +176,7 @@ async fn handle_run_as(
     // 6. Diagnostic: no envelope required, but still enforce policy
 
     // 7. Validate timeout
-    let _effective_timeout = validate_timeout(params.timeout_ms, policy)?;
+    let effective_timeout = validate_timeout(params.timeout_ms, policy)?;
 
     // 8. Build effective env
     let effective_env = build_effective_env(&params.env, policy)?;
@@ -222,7 +222,7 @@ async fn handle_run_as(
         argv: &params.argv,
         cwd: params.cwd.as_deref(),
         env: &effective_env,
-        timeout_ms: params.timeout_ms,
+        timeout_ms: Some(effective_timeout),
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
     })
@@ -872,7 +872,7 @@ fn merge_json_object(target: &mut serde_json::Value, source: &serde_json::Value)
 mod tests {
     use super::*;
     use crate::envelope_store::ActiveEnvelopeStore;
-    use crate::policy::CepTurnContext;
+    use crate::policy::{CepPolicyConfig, CepTurnContext};
     use crate::registry::{Cancellation, EventSink};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact,
@@ -1955,6 +1955,45 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::SchemaMismatch);
         assert!(err.message.contains("999999999"));
+    }
+
+    #[tokio::test]
+    async fn omitted_timeout_uses_policy_default_timeout() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (mut ctx, _event_rx, _cancel_tx) =
+            test_ctx_with_run_command(root, vec!["sleep".into()]).await;
+        let mut cep_policy = CepPolicyConfig::defaults_for_project_root(root);
+        cep_policy
+            .command
+            .allowed_diagnostic_commands
+            .push(vec!["sleep".into()]);
+        cep_policy.command.default_timeout_ms = 50;
+        cep_policy.command.max_timeout_ms = 5_000;
+        let mut hook_policy = crate::policy::default::PolicyConfig::defaults_for_project_root(
+            std::path::PathBuf::from(root),
+        );
+        hook_policy.command = cep_policy.command.clone();
+        let default_hook = Arc::new(crate::policy::default::DefaultPolicyHook::new(hook_policy));
+        ctx.policy_hook = default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>;
+        ctx.default_policy_hook = Some(default_hook);
+        ctx.cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
+
+        let registry = native_command_registry(root);
+        let params = RunParams {
+            argv: vec!["sleep".into(), "1".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            declared_impact: None,
+        };
+        let err = registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::CommandTimeout);
+        assert!(err.message.contains("50ms"));
     }
 
     #[tokio::test]
