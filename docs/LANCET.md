@@ -2,7 +2,7 @@
 
 LATTICE agents execute tools through **LANCET**, the controlled execution and failure-learning subsystem. LANCET uses **CEP** (Controlled Execution Protocol) internally: JSON-RPC methods with capability envelopes, policy gating, path guards, and a flat append-only audit store.
 
-## Public surface (v1.3.1-alpha)
+## Public surface (v1.4-alpha boundary contract)
 
 The documented public LANCET contract is split across **`lancet-protocol`** and
 **`lancet-catalog`**:
@@ -60,6 +60,50 @@ than disabling a method prefix: a command whose primary method is
 `exec.command_run` can still produce a `WorkspaceMutation` side effect, and that
 side effect is caught only by effect-kind denial.
 
+### Command physical-boundary configuration
+
+Physical command-boundary requests live under `[lancet.isolation.command]`.
+This namespace is independent from `[lancet] mode` / `cep_mode`: setting
+`[lancet] mode = "off"` disables only effect-region checking and does not
+disable command isolation preflight, command policy, capability checks,
+effect-kind denial, or native LANCET routing.
+
+```toml
+[lancet.isolation.command]
+mode = "enforce"                 # enforce | audit | off
+required_boundaries = ["network", "filesystem", "landlock"]
+optional_boundaries = []
+read_only_toolchain_paths = ["/usr", "/bin"]
+scratch_paths = ["build/tmp"]
+landlock = "auto"                # auto | off
+unsupported_host = "mode_default" # mode_default | fail_closed | allow_unbounded | not_requested
+```
+
+The exact fields are:
+
+| Field | Meaning |
+|-------|---------|
+| `mode` | Command physical-boundary mode: `enforce`, `audit`, or `off`. Missing command isolation config defaults to `off`. |
+| `required_boundaries` | Boundary dimensions that must be satisfied for this command mode. Valid labels are `network`, `filesystem`, and `landlock`. |
+| `optional_boundaries` | Boundary dimensions to attempt/report without failing `enforce` when unavailable. The same labels are accepted. A boundary cannot be both required and optional. |
+| `read_only_toolchain_paths` | Declared toolchain/cache paths that later supervisor phases may expose read-only to command children. Phase 28 validates the path syntax but does not mount them. |
+| `scratch_paths` | Declared scratch paths that later supervisor phases may expose as scratch space. Phase 28 validates the path syntax but does not create tmpfs or overlay scratch behavior. |
+| `landlock` | Landlock behavior: `auto` or `off`. `landlock = "off"` is rejected when `required_boundaries` contains `landlock`. Landlock is filesystem refinement only. |
+| `unsupported_host` | Unsupported-host policy: `mode_default`, `fail_closed`, `allow_unbounded`, or `not_requested`. Contradictory combinations are rejected. |
+
+Mode behavior is intentionally conservative:
+
+| Command isolation mode | Required boundary unavailable, disabled, unknown, or unsupported |
+|------------------------|------------------------------------------------------------------|
+| `enforce` | Fail closed before the command backend runs and record `effective_boundary` metadata with `failed_closed`, `unsupported`, or `unknown`. |
+| `audit` | Allow the existing command backend to run, but record the requested boundary as `unbounded` or `unknown`. Audit mode is measurement, not protection. |
+| `off` | Do not request physical boundaries. Per-command metadata is `not_requested`, while normal CEP command policy still applies. |
+
+On non-Linux or otherwise unsupported hosts, `host_probe` reports each primitive
+as unavailable with a reason. The same `enforce` / `audit` / `off` rules then
+decide whether a requested command fails closed, runs with unbounded labels, or
+is marked `not_requested`.
+
 ## Mutation and command observation
 
 ### Hashline patches
@@ -81,10 +125,69 @@ metadata records changed files and line-level add/remove effects.
 not create missing parent directories. Existing-file edits must go through
 `mutate.patch`.
 
-### Command opacity boundary
+### Command boundary metadata
 
-`exec.command_run` is a partial observation boundary, not a sound effect gate for
-every dimension of the child process.
+`exec.command_run` is still a partial observation boundary in v1.3. v1.4 adds
+metadata that separates host capability probes from per-command protection
+claims; it does not turn LANCET into a generalized sandbox.
+
+Two metadata layers must stay distinct:
+
+- `host_probe` reports whether the current process/host can use Linux
+  primitives such as `overlayfs`, `network_namespace`, `mount_namespace`, and
+  `landlock`.
+- `effective_boundary` reports what a specific command requested, attempted,
+  applied, failed closed on, or did not request for safety dimensions such as
+  `network`, `filesystem`, and `landlock`.
+
+`host_probe` is primitive-centered and current-host scoped. The stable primitive
+labels are `network_namespace`, `mount_namespace`, `overlayfs`, and `landlock`.
+The stable status labels are `available`, `unavailable`, `disabled`, and
+`unknown`. Probe diagnostics describe helper availability, errno-style failures,
+kernel/container/user-namespace policy, or unsupported platform details; they
+are not themselves protection claims.
+
+`effective_boundary` is command-centered and boundary-keyed. The stable boundary
+labels are `network`, `filesystem`, and `landlock`. The stable status labels are:
+
+| Status | Meaning |
+|--------|---------|
+| `physically_bounded` | The command has applied primitive evidence for that boundary. Network credit requires `network_namespace` evidence. Phase 28 does not emit this status from command preflight because the supervisor has not applied primitives yet. |
+| `unbounded` | The boundary was requested but the command ran without applied primitive evidence. |
+| `not_requested` | The boundary was not requested or command isolation mode is `off`. |
+| `failed_closed` | `enforce` mode blocked execution before the backend because a required boundary lacked applied evidence. |
+| `unsupported` | The required boundary maps only to unsupported host primitives. |
+| `unknown` | Probe data was missing, inconclusive, malformed, or otherwise not reliable enough to claim a boundary. |
+
+Audit/status JSON is keyed by boundary dimension:
+
+```json
+{
+  "effective_boundary": {
+    "network": {
+      "boundary": "network",
+      "status": "not_requested",
+      "reason": "command isolation mode is off"
+    },
+    "filesystem": {
+      "boundary": "filesystem",
+      "status": "failed_closed",
+      "reason": "required filesystem boundary requested but no applied primitive evidence exists"
+    },
+    "landlock": {
+      "boundary": "landlock",
+      "status": "unsupported",
+      "reason": "required landlock boundary unsupported on this host"
+    }
+  }
+}
+```
+
+For future `physically_bounded` entries, `source_primitives` must name an
+allowed source primitive. `network` accepts only `network_namespace`;
+`filesystem` accepts `overlayfs`, `mount_namespace`, or `landlock`; and
+`landlock` accepts only `landlock`. Landlock, OverlayFS, and mount namespaces
+never earn network credit.
 
 Observed:
 
@@ -112,7 +215,58 @@ Audit metadata is derived from `effective_impact`:
 
 Command allowlists are admission control only. They constrain which executable
 argv prefixes may run; they do not describe everything a permitted binary can do
-after it starts. OS-level sandboxing remains future work.
+after it starts.
+
+Boundary credit is attributed, not inferred:
+
+- `network: physically_bounded` can only be constructed from netns evidence.
+  Landlock, OverlayFS, and mount namespaces never earn network credit.
+- `filesystem` credit may come only from the allowed primitive attribution set:
+  OverlayFS, mount namespace, or Landlock.
+- `landlock` credit may come only from Landlock evidence, and Landlock remains a
+  filesystem refinement. It is not a network boundary.
+
+`lancet.mode = "off"` / `cep_mode=off` skips only effect-region enforcement. It
+does not disable `[lancet.isolation.command]` physical-boundary mode, policy,
+capability checks, effect-kind denial, or native LANCET routing.
+
+## LANCET CLI boundary reporting
+
+`lattice lancet doctor` is informational by default. It prints or emits JSON for
+the current `host_probe`, and unavailable primitives are warnings unless another
+doctor check fails. Use `lattice lancet doctor --enforce-profile <profile>` when
+the current host must satisfy a profile's
+`[lancet.isolation.command].required_boundaries`; that gate exits nonzero when a
+required boundary is unavailable, disabled, unknown, or unsupported.
+
+`lattice lancet status` reports two different boundary layers:
+
+- A current `host_probe` summary at the top, describing host primitive
+  availability now.
+- Recent `exec.command_run` `effective_boundary` metadata from audit rows,
+  describing what those command attempts requested or failed to bound.
+
+`status --json` includes the same split. It treats malformed
+`effective_boundary` metadata or invalid `physically_bounded` attribution as
+`unknown` rather than silently displaying a stronger protection claim.
+
+## Phase 28 non-claims
+
+Phase 28 documents and validates configuration, probing, preflight metadata, and
+CLI/audit vocabulary. It does not implement or claim:
+
+- A generalized sandbox for arbitrary process behavior.
+- Side-channel protection, cgroups, seccomp, resource containment, or broad
+  host compromise resistance.
+- Project read-set observation for arbitrary commands.
+- Network rollback. OverlayFS, mount namespaces, and Landlock do not make network
+  effects reversible or bounded.
+- Cross-platform physical isolation. Non-Linux and unsupported Linux hosts are
+  reported through unavailable/unsupported metadata.
+- The Phase 29 command supervisor, mount setup, fd/env hygiene, or no-egress
+  network namespace execution.
+- The Phase 30 overlay commit/discard artifact pipeline.
+- The Phase 31 HashLine commit boundary or effect/audit-centered projection.
 
 ## Provenance Audit
 
