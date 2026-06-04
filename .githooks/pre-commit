@@ -12,7 +12,8 @@ blocked=()
 matches=()
 
 while IFS= read -r -d '' path; do
-    if match=$(git check-ignore --no-index -v -- "$path" 2>/dev/null); then
+    if git check-ignore --quiet --no-index -- "$path" 2>/dev/null; then
+        match=$(git check-ignore --no-index -v -- "$path" 2>/dev/null || true)
         blocked+=("$path")
         matches+=("$match")
     fi

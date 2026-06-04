@@ -88,6 +88,7 @@ pub(crate) struct RecentCallEntry {
     pub verdict: Option<String>,
     pub duration_ms: Option<i64>,
     pub effective_boundary: Option<serde_json::Map<String, serde_json::Value>>,
+    pub boundary_setup_failed_closed: Option<bool>,
 }
 
 /// Build status data from the audit store without spawning a CEP server.
@@ -154,6 +155,10 @@ fn collect_status_with_probe(
                 &row.method,
                 row.metadata_json.as_deref(),
             ),
+            boundary_setup_failed_closed: parse_boundary_setup_failed_closed_metadata(
+                &row.method,
+                row.metadata_json.as_deref(),
+            ),
         })
         .collect();
 
@@ -211,6 +216,19 @@ fn parse_effective_boundary_metadata(
     }
 }
 
+fn parse_boundary_setup_failed_closed_metadata(
+    method: &str,
+    metadata_json: Option<&str>,
+) -> Option<bool> {
+    if method != "exec.command_run" {
+        return None;
+    }
+    let metadata = serde_json::from_str::<serde_json::Value>(metadata_json?).ok()?;
+    metadata
+        .get("boundary_setup_failed_closed")
+        .and_then(|value| value.as_bool())
+}
+
 fn normalize_effective_boundary_entry(
     boundary: BoundaryDimension,
     entry: &serde_json::Value,
@@ -265,11 +283,22 @@ fn validate_physically_bounded_attribution(
             )
         })?;
 
-    let parsed_sources = source_primitives
-        .iter()
-        .filter_map(|value| value.as_str())
-        .filter_map(boundary_primitive_from_label)
-        .collect::<Vec<_>>();
+    let mut parsed_sources = Vec::new();
+    for value in source_primitives {
+        let Some(label) = value.as_str() else {
+            return Err(format!(
+                "physically_bounded {} boundary source_primitives must contain only primitive labels",
+                boundary.label()
+            ));
+        };
+        let Some(primitive) = boundary_primitive_from_label(label) else {
+            return Err(format!(
+                "physically_bounded {} boundary source_primitives contains unknown primitive `{label}`",
+                boundary.label()
+            ));
+        };
+        parsed_sources.push(primitive);
+    }
 
     if parsed_sources
         .iter()
@@ -351,6 +380,7 @@ fn status_json_value(output: &CepStatusOutput) -> serde_json::Value {
             "verdict": c.verdict,
             "duration_ms": c.duration_ms,
             "effective_boundary": c.effective_boundary,
+            "boundary_setup_failed_closed": c.boundary_setup_failed_closed,
         })).collect::<Vec<_>>(),
         "last_guard_verdict": output.last_guard_verdict,
     })
@@ -444,7 +474,14 @@ fn format_effective_boundary_compact(
             .and_then(|entry| entry.get("status"))
             .and_then(|status| status.as_str())
         {
-            parts.push(format!("{label}={status}"));
+            let details = format_effective_boundary_details(
+                effective_boundary.get(label).expect("entry checked above"),
+            );
+            if details.is_empty() {
+                parts.push(format!("{label}={status}"));
+            } else {
+                parts.push(format!("{label}={status}[{details}]"));
+            }
         }
     }
     if parts.is_empty() {
@@ -452,6 +489,43 @@ fn format_effective_boundary_compact(
     } else {
         parts.join(", ")
     }
+}
+
+fn format_effective_boundary_details(entry: &serde_json::Value) -> String {
+    let mut details = Vec::new();
+    if let Some(sources) = entry
+        .get("source_primitives")
+        .and_then(|value| value.as_array())
+    {
+        let labels = sources
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>();
+        if !labels.is_empty() {
+            details.push(format!("source_primitives={}", labels.join("+")));
+        }
+    }
+
+    let diagnostic_keys = [
+        "namespace_status",
+        "mount_view_status",
+        "env_policy",
+        "fd_cleanup_status",
+        "fd_cleanup_method",
+        "landlock_status",
+        "landlock_abi_version",
+        "landlock_rights_mask",
+        "boundary_setup_failed_closed",
+    ];
+    if let Some(diagnostics) = entry.get("diagnostics").and_then(|value| value.as_object()) {
+        for key in diagnostic_keys {
+            if let Some(value) = diagnostics.get(key).and_then(|value| value.as_str()) {
+                details.push(format!("{key}={value}"));
+            }
+        }
+    }
+
+    details.join(";")
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,7 +1333,8 @@ mod tests {
                         "network": {"boundary":"network","status":"unbounded","reason":"netns unavailable"},
                         "filesystem": {"boundary":"filesystem","status":"failed_closed","reason":"overlay missing"},
                         "landlock": {"boundary":"landlock","status":"unsupported","reason":"ABI disabled"}
-                    }
+                    },
+                    "boundary_setup_failed_closed": true
                 }"#,
             ),
         );
@@ -1284,6 +1359,10 @@ mod tests {
                 .and_then(|entry| entry.get("status"))
                 .and_then(|status| status.as_str()),
             Some("failed_closed")
+        );
+        assert_eq!(
+            json["recent_calls"][0]["boundary_setup_failed_closed"].as_bool(),
+            Some(true)
         );
     }
 
@@ -1412,6 +1491,314 @@ mod tests {
                 .contains("network_namespace"),
             "network downgrade should explain netns requirement"
         );
+    }
+
+    #[test]
+    fn lancet_status_preserves_phase29_applied_boundary_diagnostics() {
+        let dir = TempDir::new().unwrap();
+        seed_command_boundary_audit_db(
+            dir.path(),
+            "exec.command_run",
+            Some(
+                r#"{
+                    "effective_boundary": {
+                        "network": {
+                            "boundary": "network",
+                            "status": "physically_bounded",
+                            "source_primitives": ["network_namespace"],
+                            "diagnostics": {
+                                "namespace_status": "applied",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied",
+                                "fd_cleanup_method": "close_range",
+                                "boundary_setup_failed_closed": "false"
+                            }
+                        },
+                        "filesystem": {
+                            "boundary": "filesystem",
+                            "status": "physically_bounded",
+                            "source_primitives": ["mount_namespace"],
+                            "diagnostics": {
+                                "namespace_status": "applied",
+                                "mount_view_status": "applied",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied"
+                            }
+                        },
+                        "landlock": {
+                            "boundary": "landlock",
+                            "status": "physically_bounded",
+                            "source_primitives": ["landlock"],
+                            "diagnostics": {
+                                "landlock_status": "applied",
+                                "landlock_abi_version": "5",
+                                "landlock_rights_mask": "0xffff",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied"
+                            }
+                        }
+                    },
+                    "boundary_setup_failed_closed": false
+                }"#,
+            ),
+        );
+
+        let output = collect_status_with_probe(dir.path(), mixed_probe_for_tests()).unwrap();
+        let json = status_json_value(&output);
+        let boundary = &json["recent_calls"][0]["effective_boundary"];
+
+        assert_eq!(boundary["network"]["status"], "physically_bounded");
+        assert_eq!(
+            boundary["network"]["source_primitives"][0],
+            "network_namespace"
+        );
+        assert_eq!(
+            boundary["network"]["diagnostics"]["namespace_status"],
+            "applied"
+        );
+        assert_eq!(
+            boundary["network"]["diagnostics"]["env_policy"],
+            "allowlist"
+        );
+        assert_eq!(
+            boundary["network"]["diagnostics"]["fd_cleanup_status"],
+            "applied"
+        );
+        assert_eq!(
+            boundary["network"]["diagnostics"]["fd_cleanup_method"],
+            "close_range"
+        );
+        assert_eq!(
+            boundary["filesystem"]["diagnostics"]["mount_view_status"],
+            "applied"
+        );
+        assert_eq!(
+            boundary["landlock"]["diagnostics"]["landlock_status"],
+            "applied"
+        );
+        assert_eq!(
+            boundary["landlock"]["diagnostics"]["landlock_abi_version"],
+            "5"
+        );
+        assert_eq!(
+            boundary["landlock"]["diagnostics"]["landlock_rights_mask"],
+            "0xffff"
+        );
+        assert_eq!(
+            json["recent_calls"][0]["boundary_setup_failed_closed"].as_bool(),
+            Some(false)
+        );
+
+        let text = status_text_lines(&output).join("\n");
+        assert!(
+            text.contains("network=physically_bounded[source_primitives=network_namespace;namespace_status=applied;env_policy=allowlist;fd_cleanup_status=applied;fd_cleanup_method=close_range")
+        );
+        assert!(text.contains("landlock_status=applied"));
+        assert!(text.contains("landlock_rights_mask=0xffff"));
+    }
+
+    #[test]
+    fn lancet_status_preserves_all_landlock_status_diagnostics() {
+        for (status, expected_boundary_status) in [
+            ("unsupported", "unsupported"),
+            ("not_applied", "unbounded"),
+            ("applied", "physically_bounded"),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let source = if status == "applied" {
+                r#","source_primitives":["landlock"]"#
+            } else {
+                ""
+            };
+            let metadata = format!(
+                r#"{{
+                    "effective_boundary": {{
+                        "landlock": {{
+                            "boundary": "landlock",
+                            "status": "{expected_boundary_status}",
+                            "diagnostics": {{
+                                "landlock_status": "{status}",
+                                "landlock_abi_version": "3",
+                                "landlock_rights_mask": "0x7fff"
+                            }}
+                            {source}
+                        }}
+                    }}
+                }}"#
+            );
+            seed_command_boundary_audit_db(dir.path(), "exec.command_run", Some(&metadata));
+
+            let output = collect_status_with_probe(dir.path(), mixed_probe_for_tests()).unwrap();
+            let boundary = output.recent_calls[0]
+                .effective_boundary
+                .as_ref()
+                .expect("effective_boundary");
+
+            assert_eq!(
+                boundary["landlock"]["diagnostics"]["landlock_status"].as_str(),
+                Some(status)
+            );
+            assert_eq!(
+                boundary["landlock"]["diagnostics"]["landlock_abi_version"].as_str(),
+                Some("3")
+            );
+            assert_eq!(
+                boundary["landlock"]["diagnostics"]["landlock_rights_mask"].as_str(),
+                Some("0x7fff")
+            );
+            assert_eq!(
+                boundary["landlock"]["status"].as_str(),
+                Some(expected_boundary_status)
+            );
+        }
+    }
+
+    #[test]
+    fn lancet_status_preserves_landlock_applied_with_mount_view_failure() {
+        let dir = TempDir::new().unwrap();
+        seed_command_boundary_audit_db(
+            dir.path(),
+            "exec.command_run",
+            Some(
+                r#"{
+                    "effective_boundary": {
+                        "filesystem": {
+                            "boundary": "filesystem",
+                            "status": "failed_closed",
+                            "diagnostics": {
+                                "namespace_status": "applied",
+                                "mount_view_status": "failed_closed",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied"
+                            }
+                        },
+                        "landlock": {
+                            "boundary": "landlock",
+                            "status": "physically_bounded",
+                            "source_primitives": ["landlock"],
+                            "diagnostics": {
+                                "landlock_status": "applied",
+                                "landlock_abi_version": "4",
+                                "landlock_rights_mask": "0xffff"
+                            }
+                        }
+                    }
+                }"#,
+            ),
+        );
+
+        let output = collect_status_with_probe(dir.path(), mixed_probe_for_tests()).unwrap();
+        let boundary = output.recent_calls[0]
+            .effective_boundary
+            .as_ref()
+            .expect("effective_boundary");
+
+        assert_eq!(
+            boundary["filesystem"]["diagnostics"]["mount_view_status"].as_str(),
+            Some("failed_closed")
+        );
+        assert_eq!(
+            boundary["filesystem"]["status"].as_str(),
+            Some("failed_closed")
+        );
+        assert_eq!(
+            boundary["landlock"]["diagnostics"]["landlock_status"].as_str(),
+            Some("applied")
+        );
+        assert_eq!(
+            boundary["landlock"]["status"].as_str(),
+            Some("physically_bounded")
+        );
+    }
+
+    #[test]
+    fn lancet_status_accepts_only_netns_for_network_physical_credit() {
+        let invalid_cases = [
+            (
+                "landlock",
+                r#""source_primitives": ["landlock"]"#,
+                "network_namespace",
+            ),
+            (
+                "mount namespace",
+                r#""source_primitives": ["mount_namespace"]"#,
+                "network_namespace",
+            ),
+            (
+                "overlayfs",
+                r#""source_primitives": ["overlayfs"]"#,
+                "network_namespace",
+            ),
+            (
+                "missing source primitives",
+                r#""reason": "stale preflight""#,
+                "source_primitives",
+            ),
+            (
+                "malformed source primitives",
+                r#""source_primitives": ["network_namespace", 7]"#,
+                "source_primitives must contain only primitive labels",
+            ),
+            (
+                "stale preflight-only metadata",
+                r#""diagnostics": {"host_probe_network_namespace": "available"}"#,
+                "source_primitives",
+            ),
+        ];
+
+        let valid_dir = TempDir::new().unwrap();
+        seed_command_boundary_audit_db(
+            valid_dir.path(),
+            "exec.command_run",
+            Some(
+                r#"{
+                    "effective_boundary": {
+                        "network": {
+                            "boundary": "network",
+                            "status": "physically_bounded",
+                            "source_primitives": ["network_namespace"]
+                        }
+                    }
+                }"#,
+            ),
+        );
+        let valid = collect_status_with_probe(valid_dir.path(), mixed_probe_for_tests()).unwrap();
+        assert_eq!(
+            valid.recent_calls[0].effective_boundary.as_ref().unwrap()["network"]["status"]
+                .as_str(),
+            Some("physically_bounded")
+        );
+
+        for (name, source_fragment, expected_reason) in invalid_cases {
+            let dir = TempDir::new().unwrap();
+            let metadata = format!(
+                r#"{{
+                    "effective_boundary": {{
+                        "network": {{
+                            "boundary": "network",
+                            "status": "physically_bounded",
+                            {source_fragment}
+                        }}
+                    }}
+                }}"#
+            );
+            seed_command_boundary_audit_db(dir.path(), "exec.command_run", Some(&metadata));
+            let output = collect_status_with_probe(dir.path(), mixed_probe_for_tests()).unwrap();
+            let network = &output.recent_calls[0].effective_boundary.as_ref().unwrap()["network"];
+
+            assert_eq!(
+                network["status"].as_str(),
+                Some("unknown"),
+                "{name} must not earn network physical credit"
+            );
+            assert!(
+                network["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(expected_reason),
+                "{name} reason should mention {expected_reason}: {network}"
+            );
+        }
     }
 
     #[test]

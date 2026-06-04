@@ -94,6 +94,13 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 - For partial fixes, record the completed work in `FIX.md` and keep the
   remaining risk in `FINDINGS.md` with an explicit residual status and plan.
 
+## Repository Hygiene
+
+- Do not modify `.gitignore` in agent-driven changes. In particular, do not add
+  ignore exceptions or whitelist rules to force ignored private/planning/build
+  paths into commits. If a path appears to need tracking despite ignore rules,
+  stop and ask a human maintainer to change the policy explicitly.
+
 ## Ownership Rules
 
 - Start protocol shape changes in `lancet-protocol`, then update catalog,

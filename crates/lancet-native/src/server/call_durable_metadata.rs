@@ -36,3 +36,47 @@ impl CallDurableMetadata {
             .map(|value| value.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn command_boundary_metadata_survives_backend_invoked_update() {
+        let metadata = CallDurableMetadata::default();
+        metadata.record(json!({
+            "command_isolation_mode": "enforce",
+            "effective_boundary": {
+                "network": {
+                    "boundary": "network",
+                    "status": "failed_closed",
+                    "diagnostics": {
+                        "boundary_setup_failed_closed": "true"
+                    }
+                }
+            },
+            "host_probe_summary": {
+                "primitives": {}
+            },
+            "boundary_setup_failed_closed": true,
+            "backend_invoked": false,
+            "policy_enforced": true
+        }));
+        metadata.record(json!({
+            "backend_invoked": true,
+            "exit_code": 127,
+            "policy_enforced": true
+        }));
+
+        let merged: Value =
+            serde_json::from_str(&metadata.take_json().expect("metadata json")).unwrap();
+        assert_eq!(merged["backend_invoked"], true);
+        assert_eq!(
+            merged["effective_boundary"]["network"]["status"],
+            "failed_closed"
+        );
+        assert_eq!(merged["boundary_setup_failed_closed"], true);
+        assert_eq!(merged["exit_code"], 127);
+    }
+}

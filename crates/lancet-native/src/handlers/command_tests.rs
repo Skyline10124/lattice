@@ -199,7 +199,7 @@ async fn command_boundary_enforce_unavailable_required_fails_before_backend_with
 }
 
 #[tokio::test]
-async fn command_boundary_enforce_unknown_required_probe_fails_closed() {
+async fn command_boundary_enforce_unknown_required_probe_fails_closed_after_setup_attempt() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -224,6 +224,11 @@ async fn command_boundary_enforce_unknown_required_probe_fails_closed() {
     assert_eq!(metadata["backend_invoked"], false);
     assert_eq!(
         metadata["effective_boundary"]["network"]["status"],
+        "unknown"
+    );
+    assert_eq!(metadata["boundary_setup_failed_closed"], false);
+    assert_eq!(
+        metadata["host_probe_summary"]["primitives"]["network_namespace"]["status"],
         "unknown"
     );
 }
@@ -254,9 +259,154 @@ async fn command_boundary_audit_unavailable_required_runs_and_records_unbounded(
     assert!(parsed.stdout.contains("command-boundary"));
     let metadata = command_boundary_metadata_json(&durable);
     assert_eq!(metadata["backend_invoked"], true);
+    assert_eq!(metadata["boundary_setup_failed_closed"], true);
     assert_eq!(
         metadata["effective_boundary"]["network"]["status"],
         "unbounded"
+    );
+    assert!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["setup_failure_stage"]
+            .as_str()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn command_boundary_audit_available_required_runs_with_live_setup_fallback_unbounded() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Audit,
+        vec![lancet_protocol::BoundaryDimension::Network],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "netns available in probe",
+        )]),
+    );
+    ctx.command_isolation
+        .read_only_toolchain_paths
+        .push(std::path::PathBuf::from("/usr/bin"));
+    let durable = ctx.durable_metadata.clone();
+
+    let value = run_echo_with_context(&registry, ctx)
+        .await
+        .expect("audit mode may execute with honest unbounded labels");
+    let parsed: RunResult = serde_json::from_value(value).unwrap();
+
+    assert_eq!(parsed.exit_code, 0);
+    assert!(parsed.stdout.contains("command-boundary"));
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["backend_invoked"], true);
+    assert_eq!(metadata["boundary_setup_failed_closed"], true);
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["status"],
+        "unbounded"
+    );
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["supervisor_backend"],
+        "native_linux"
+    );
+    assert!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["setup_failure_stage"]
+            .as_str()
+            .is_some_and(|stage| stage != "pre_exec_setup")
+    );
+    assert!(
+        metadata["effective_boundary"]["network"]["source_primitives"]
+            .as_array()
+            .is_none_or(|primitives| primitives.is_empty())
+    );
+}
+
+#[tokio::test]
+async fn command_boundary_enforce_required_network_uses_supervisor_attempt_before_backend() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Enforce,
+        vec![lancet_protocol::BoundaryDimension::Network],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "netns available in probe",
+        )]),
+    );
+    ctx.command_isolation
+        .read_only_toolchain_paths
+        .push(std::path::PathBuf::from("/usr/bin"));
+    let durable = ctx.durable_metadata.clone();
+
+    let err = run_echo_with_context(&registry, ctx)
+        .await
+        .expect_err("required network must fail closed without applied netns evidence");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["backend_invoked"], false);
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["status"],
+        "failed_closed"
+    );
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["supervisor_backend"],
+        "native_linux"
+    );
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["namespace_status"],
+        "failed_closed"
+    );
+    assert!(
+        metadata["effective_boundary"]["network"]["diagnostics"]["setup_failure_stage"]
+            .as_str()
+            .is_some_and(|stage| stage != "pre_exec_setup")
+    );
+    assert_eq!(metadata["boundary_setup_failed_closed"], true);
+}
+
+#[tokio::test]
+async fn command_boundary_enforce_required_filesystem_requires_mount_view_evidence() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Enforce,
+        vec![lancet_protocol::BoundaryDimension::Filesystem],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::MountNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "mount namespace available in probe",
+        )]),
+    );
+    ctx.command_isolation
+        .read_only_toolchain_paths
+        .push(std::path::PathBuf::from("/usr/bin"));
+    let durable = ctx.durable_metadata.clone();
+
+    let err = run_echo_with_context(&registry, ctx)
+        .await
+        .expect_err("required filesystem must fail closed without applied mount view evidence");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["backend_invoked"], false);
+    assert_eq!(
+        metadata["effective_boundary"]["filesystem"]["status"],
+        "failed_closed"
+    );
+    assert_eq!(
+        metadata["effective_boundary"]["filesystem"]["diagnostics"]["mount_view_status"],
+        "failed_closed"
+    );
+    assert!(
+        metadata["effective_boundary"]["filesystem"]["source_primitives"]
+            .as_array()
+            .is_none_or(|primitives| primitives.is_empty())
     );
 }
 

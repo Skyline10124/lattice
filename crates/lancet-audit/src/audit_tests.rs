@@ -402,12 +402,13 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
         "command_isolation_mode": "audit",
         "effective_boundary": {
             "network": {"boundary": "network", "status": "unbounded", "reason": "netns unavailable"},
-            "filesystem": {"boundary": "filesystem", "status": "failed_closed", "reason": "overlay missing"},
-            "landlock": {"boundary": "landlock", "status": "unsupported", "reason": "landlock disabled"}
+            "filesystem": {"boundary": "filesystem", "status": "failed_closed", "reason": "mount view missing", "diagnostics": {"mount_view_status": "failed_closed"}},
+            "landlock": {"boundary": "landlock", "status": "unsupported", "reason": "landlock disabled", "diagnostics": {"landlock_status": "unsupported", "landlock_abi_version": "unknown"}}
         },
         "host_probe_summary": {
             "network_namespace": {"status": "unavailable", "reason": "operation not permitted"}
         },
+        "boundary_setup_failed_closed": true,
         "backend_invoked": false,
         "policy_enforced": true
     });
@@ -453,8 +454,18 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
         loaded_json["effective_boundary"]["landlock"]["status"],
         "unsupported"
     );
+    assert_eq!(loaded_json["boundary_setup_failed_closed"], true);
+    assert_eq!(
+        loaded_json["effective_boundary"]["filesystem"]["diagnostics"]["mount_view_status"],
+        "failed_closed"
+    );
+    assert_eq!(
+        loaded_json["effective_boundary"]["landlock"]["diagnostics"]["landlock_status"],
+        "unsupported"
+    );
     for forbidden in [
         "argv",
+        "env",
         "stdin",
         "stdout",
         "stderr",

@@ -105,6 +105,31 @@ mod tests {
             assert_ne!(tool.name, "workspace.navigate");
         }
     }
+
+    #[test]
+    fn projection_keeps_exec_command_run_as_only_command_tool_without_boundary_params() {
+        let projected = to_tool_definitions(catalog());
+        let command_tools: Vec<_> = projected
+            .iter()
+            .filter(|tool| tool.name.starts_with("exec."))
+            .collect();
+
+        assert_eq!(command_tools.len(), 1);
+        assert_eq!(command_tools[0].name, "exec.command_run");
+        let rendered_schema = command_tools[0].parameters.to_string();
+        for forbidden in [
+            "supervisor",
+            "effective_boundary",
+            "host_probe_summary",
+            "boundary_setup_failed_closed",
+            "backend_invoked",
+        ] {
+            assert!(
+                !rendered_schema.contains(forbidden),
+                "agent-visible command schema leaked native metadata field {forbidden}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "inspect-scaffold"))]

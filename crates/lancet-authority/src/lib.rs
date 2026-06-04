@@ -12,8 +12,8 @@ pub mod policy;
 
 pub use boundary_credit::{
     allowed_primitives_for, validate_credit_attribution, BoundaryCreditError,
-    EffectiveBoundaryCredit, FilesystemBoundaryEvidence, LandlockApplied, MountNamespaceApplied,
-    NetnsApplied, NetworkCreditRequiresNetnsEvidence, OverlayfsApplied,
+    EffectiveBoundaryCredit, FilesystemBoundaryEvidence, LandlockApplied, MinimalMountViewApplied,
+    MountNamespaceApplied, NetnsApplied, NetworkCreditRequiresNetnsEvidence, OverlayfsApplied,
 };
 pub use envelope_store::ActiveEnvelopeStore;
 pub use policy::{

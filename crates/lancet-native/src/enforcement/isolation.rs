@@ -1,6 +1,9 @@
 //! Host capability probes and boundary gate helpers.
 
-use lancet_authority::allowed_primitives_for;
+use lancet_authority::{
+    allowed_primitives_for, EffectiveBoundaryCredit, LandlockApplied, MinimalMountViewApplied,
+    MountNamespaceApplied, NetnsApplied,
+};
 use lancet_protocol::{
     BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryEntry, EffectiveBoundaryReport,
     EffectiveBoundaryStatus, HostProbeStatus,
@@ -11,6 +14,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use crate::executor::supervisor::landlock;
 
 /// Runtime mode for command physical-boundary preflight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +63,148 @@ pub struct CommandIsolationRuntimeConfig {
     /// Optional test/embedder-supplied host probe. Production leaves this unset
     /// so command preflight evaluates the live host on each exec.command_run.
     pub host_probe: Option<HostProbeReport>,
+}
+
+/// Applied evidence reported by the native command supervisor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppliedBoundaryEvidence {
+    NetworkNamespace(NetnsApplied),
+    MountNamespace(MountNamespaceApplied),
+    MinimalMountView(MinimalMountViewApplied),
+    Landlock(LandlockApplied),
+}
+
+/// Stable setup status for supervisor stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupervisorSetupStatus {
+    NotAttempted,
+    Applied,
+    NotApplied,
+    FailedClosed,
+    Unsupported,
+}
+
+impl SupervisorSetupStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            SupervisorSetupStatus::NotAttempted => "not_attempted",
+            SupervisorSetupStatus::Applied => "applied",
+            SupervisorSetupStatus::NotApplied => "not_applied",
+            SupervisorSetupStatus::FailedClosed => "failed_closed",
+            SupervisorSetupStatus::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Stable status for the Phase 29 minimal mount-view setup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MinimalMountViewStatus {
+    NotAttempted,
+    Applied,
+    NotApplied,
+    FailedClosed,
+}
+
+impl MinimalMountViewStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            MinimalMountViewStatus::NotAttempted => "not_attempted",
+            MinimalMountViewStatus::Applied => "applied",
+            MinimalMountViewStatus::NotApplied => "not_applied",
+            MinimalMountViewStatus::FailedClosed => "failed_closed",
+        }
+    }
+}
+
+/// Stable Landlock application status values carried in boundary diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandlockApplicationStatus {
+    Unsupported,
+    NotApplied,
+    Applied,
+}
+
+impl LandlockApplicationStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            LandlockApplicationStatus::Unsupported => "unsupported",
+            LandlockApplicationStatus::NotApplied => "not_applied",
+            LandlockApplicationStatus::Applied => "applied",
+        }
+    }
+}
+
+/// Supervisor setup result used to build command effective-boundary metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundaryAttemptOutcome {
+    pub evidence: Vec<AppliedBoundaryEvidence>,
+    pub network_namespace_status: SupervisorSetupStatus,
+    pub mount_namespace_status: SupervisorSetupStatus,
+    pub minimal_mount_view_status: MinimalMountViewStatus,
+    pub privilege_strategy: Option<String>,
+    pub userns_status: Option<String>,
+    pub setgroups_status: Option<String>,
+    pub uid_map_status: Option<String>,
+    pub gid_map_status: Option<String>,
+    pub read_only_bind_scope: Option<String>,
+    pub landlock_status: LandlockApplicationStatus,
+    pub landlock_abi_version: Option<u32>,
+    pub landlock_rights_mask: Option<u64>,
+    pub landlock_ruleset_status: Option<String>,
+    pub landlock_required: Option<bool>,
+    pub supervisor_backend: Option<String>,
+    pub project_view_path: Option<PathBuf>,
+    pub cwd_view_path: Option<PathBuf>,
+    pub fd_cleanup_status: Option<String>,
+    pub fd_cleanup_method: Option<String>,
+    pub env_policy: Option<String>,
+    pub setup_failure_stage: Option<String>,
+    pub setup_failure_reason: Option<String>,
+    pub failed_closed: bool,
+}
+
+impl Default for BoundaryAttemptOutcome {
+    fn default() -> Self {
+        Self {
+            evidence: Vec::new(),
+            network_namespace_status: SupervisorSetupStatus::NotAttempted,
+            mount_namespace_status: SupervisorSetupStatus::NotAttempted,
+            minimal_mount_view_status: MinimalMountViewStatus::NotAttempted,
+            privilege_strategy: None,
+            userns_status: None,
+            setgroups_status: None,
+            uid_map_status: None,
+            gid_map_status: None,
+            read_only_bind_scope: None,
+            landlock_status: LandlockApplicationStatus::NotApplied,
+            landlock_abi_version: None,
+            landlock_rights_mask: None,
+            landlock_ruleset_status: None,
+            landlock_required: None,
+            supervisor_backend: None,
+            project_view_path: None,
+            cwd_view_path: None,
+            fd_cleanup_status: None,
+            fd_cleanup_method: None,
+            env_policy: None,
+            setup_failure_stage: None,
+            setup_failure_reason: None,
+            failed_closed: false,
+        }
+    }
+}
+
+/// One command isolation attempt. Later plans wire this to the live supervisor;
+/// Wave 0 tests construct it directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandIsolationAttempt {
+    pub outcome: BoundaryAttemptOutcome,
+}
+
+impl CommandIsolationAttempt {
+    pub fn new(outcome: BoundaryAttemptOutcome) -> Self {
+        Self { outcome }
+    }
 }
 
 impl Default for CommandIsolationRuntimeConfig {
@@ -384,28 +531,13 @@ fn classify_command_failure(label: &str, output: &Output) -> ProbeOutcome {
 
 #[cfg(target_os = "linux")]
 fn probe_landlock_abi() -> ProbeOutcome {
-    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
-    let abi = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            std::ptr::null::<libc::c_void>(),
-            0usize,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        )
-    };
-    if abi > 0 {
-        return ProbeOutcome::new(HostProbeStatus::Available, format!("landlock ABI v{abi}"));
+    let probe = landlock::probe_landlock_abi();
+    if let Some(abi) = probe.abi_version {
+        ProbeOutcome::new(HostProbeStatus::Available, probe.reason)
+            .with_diagnostic("landlock_abi_version", abi.to_string())
+    } else {
+        ProbeOutcome::new(HostProbeStatus::Disabled, probe.reason)
     }
-
-    let err = io::Error::last_os_error();
-    let raw = err.raw_os_error();
-    let status = match raw {
-        Some(code) if code == libc::ENOSYS => HostProbeStatus::Disabled,
-        Some(code) if code == libc::EOPNOTSUPP => HostProbeStatus::Disabled,
-        Some(code) if code == libc::EINVAL => HostProbeStatus::Unknown,
-        _ => HostProbeStatus::Unknown,
-    };
-    ProbeOutcome::new(status, format!("landlock ABI probe failed: {err}"))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -468,6 +600,7 @@ pub fn unavailable_required_boundaries(
 pub struct CommandBoundaryPreflight {
     pub effective_boundary: EffectiveBoundaryReport,
     pub host_probe: HostProbeReport,
+    pub boundary_setup_failed_closed: bool,
     pub failed_closed: bool,
     pub fail_reasons: Vec<String>,
 }
@@ -494,6 +627,16 @@ impl CommandBoundaryPreflight {
 pub fn evaluate_command_boundary_preflight(
     config: &CommandIsolationRuntimeConfig,
 ) -> CommandBoundaryPreflight {
+    evaluate_command_boundary_attempt(config, None)
+}
+
+/// Build command effective-boundary metadata from host probes plus optional
+/// applied supervisor evidence. Host probe availability alone never becomes
+/// physically-bounded credit.
+pub fn evaluate_command_boundary_attempt(
+    config: &CommandIsolationRuntimeConfig,
+    attempt: Option<&CommandIsolationAttempt>,
+) -> CommandBoundaryPreflight {
     let host_probe = config
         .host_probe
         .clone()
@@ -501,7 +644,7 @@ pub fn evaluate_command_boundary_preflight(
 
     let entries: Vec<_> = BoundaryDimension::ALL
         .iter()
-        .map(|boundary| effective_boundary_entry(config, &host_probe, *boundary))
+        .map(|boundary| effective_boundary_entry(config, &host_probe, *boundary, attempt))
         .collect();
     let effective_boundary = EffectiveBoundaryReport::from_entries(entries);
     let mut fail_reasons = Vec::new();
@@ -521,6 +664,9 @@ pub fn evaluate_command_boundary_preflight(
     CommandBoundaryPreflight {
         effective_boundary,
         host_probe,
+        boundary_setup_failed_closed: attempt
+            .map(|attempt| attempt.outcome.failed_closed)
+            .unwrap_or(false),
         failed_closed: !fail_reasons.is_empty(),
         fail_reasons,
     }
@@ -530,6 +676,7 @@ fn effective_boundary_entry(
     config: &CommandIsolationRuntimeConfig,
     host_probe: &HostProbeReport,
     boundary: BoundaryDimension,
+    attempt: Option<&CommandIsolationAttempt>,
 ) -> EffectiveBoundaryEntry {
     if config.mode == CommandIsolationMode::Off {
         return EffectiveBoundaryEntry::new(boundary, EffectiveBoundaryStatus::NotRequested)
@@ -541,6 +688,49 @@ fn effective_boundary_entry(
     if !required && !optional {
         return EffectiveBoundaryEntry::new(boundary, EffectiveBoundaryStatus::NotRequested)
             .with_reason("boundary not requested");
+    }
+
+    if let Some(attempt) = attempt {
+        if let Some(credit) = applied_credit_for_boundary(boundary, &attempt.outcome) {
+            return with_attempt_diagnostics(
+                EffectiveBoundaryEntry::new(boundary, credit.status())
+                    .with_reason("applied supervisor evidence accepted")
+                    .with_source_primitive(credit.source_primitive())
+                    .with_diagnostic("request", if required { "required" } else { "optional" }),
+                boundary,
+                &attempt.outcome,
+            );
+        }
+
+        let status = attempted_missing_status(config, boundary, required, &attempt.outcome);
+        let request_kind = if required { "required" } else { "optional" };
+        let reason = match status {
+            EffectiveBoundaryStatus::FailedClosed => format!(
+                "{request_kind} {} boundary requested but supervisor attempt lacked applied evidence",
+                boundary.label()
+            ),
+            EffectiveBoundaryStatus::Unsupported => format!(
+                "{request_kind} {} boundary unsupported by supervisor attempt",
+                boundary.label()
+            ),
+            EffectiveBoundaryStatus::Unbounded => format!(
+                "{request_kind} {} boundary requested but supervisor attempt did not apply it",
+                boundary.label()
+            ),
+            EffectiveBoundaryStatus::Unknown => format!(
+                "{request_kind} {} boundary attempt status unknown",
+                boundary.label()
+            ),
+            EffectiveBoundaryStatus::NotRequested => "boundary not requested".to_string(),
+            EffectiveBoundaryStatus::PhysicallyBounded => "boundary physically bounded".to_string(),
+        };
+        return with_attempt_diagnostics(
+            EffectiveBoundaryEntry::new(boundary, status)
+                .with_reason(reason)
+                .with_diagnostic("request", request_kind),
+            boundary,
+            &attempt.outcome,
+        );
     }
 
     let primitive_entries = primitive_entries_for_boundary(boundary, host_probe);
@@ -604,6 +794,185 @@ fn effective_boundary_entry(
         .with_diagnostic("request", request_kind)
 }
 
+fn applied_credit_for_boundary(
+    boundary: BoundaryDimension,
+    outcome: &BoundaryAttemptOutcome,
+) -> Option<EffectiveBoundaryCredit> {
+    if !has_env_fd_hygiene(outcome) {
+        return None;
+    }
+
+    match boundary {
+        BoundaryDimension::Network => has_netns_evidence(outcome).then(|| {
+            EffectiveBoundaryCredit::network_physically_bounded(
+                NetnsApplied::from_supervisor_netns_success(),
+            )
+        }),
+        BoundaryDimension::Filesystem => {
+            if has_mount_namespace_evidence(outcome)
+                && has_minimal_mount_view_evidence(outcome)
+                && outcome.minimal_mount_view_status == MinimalMountViewStatus::Applied
+            {
+                EffectiveBoundaryCredit::filesystem_physically_bounded_from_supervisor_minimal_mount_view_success(
+                    MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+                    MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
+                )
+                .ok()
+            } else {
+                None
+            }
+        }
+        BoundaryDimension::Landlock => {
+            if has_landlock_evidence(outcome)
+                && outcome.landlock_status == LandlockApplicationStatus::Applied
+            {
+                Some(EffectiveBoundaryCredit::landlock_physically_bounded(
+                    LandlockApplied::from_supervisor_landlock_success(),
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn attempted_missing_status(
+    config: &CommandIsolationRuntimeConfig,
+    boundary: BoundaryDimension,
+    required: bool,
+    outcome: &BoundaryAttemptOutcome,
+) -> EffectiveBoundaryStatus {
+    if boundary == BoundaryDimension::Landlock
+        && outcome.landlock_status == LandlockApplicationStatus::Unsupported
+    {
+        return EffectiveBoundaryStatus::Unsupported;
+    }
+    if config.mode == CommandIsolationMode::Audit
+        && config.unsupported_host == CommandIsolationUnsupportedHostBehavior::AllowUnbounded
+    {
+        return EffectiveBoundaryStatus::Unbounded;
+    }
+    if outcome.failed_closed || (config.mode == CommandIsolationMode::Enforce && required) {
+        EffectiveBoundaryStatus::FailedClosed
+    } else {
+        EffectiveBoundaryStatus::Unbounded
+    }
+}
+
+fn has_netns_evidence(outcome: &BoundaryAttemptOutcome) -> bool {
+    outcome
+        .evidence
+        .iter()
+        .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::NetworkNamespace(_)))
+}
+
+fn has_mount_namespace_evidence(outcome: &BoundaryAttemptOutcome) -> bool {
+    outcome
+        .evidence
+        .iter()
+        .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::MountNamespace(_)))
+}
+
+fn has_minimal_mount_view_evidence(outcome: &BoundaryAttemptOutcome) -> bool {
+    outcome
+        .evidence
+        .iter()
+        .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::MinimalMountView(_)))
+}
+
+fn has_landlock_evidence(outcome: &BoundaryAttemptOutcome) -> bool {
+    outcome
+        .evidence
+        .iter()
+        .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::Landlock(_)))
+}
+
+fn has_env_fd_hygiene(outcome: &BoundaryAttemptOutcome) -> bool {
+    outcome.env_policy.as_deref() == Some("allowlist")
+        && outcome.fd_cleanup_status.as_deref() == Some("applied")
+}
+
+fn with_attempt_diagnostics(
+    mut entry: EffectiveBoundaryEntry,
+    boundary: BoundaryDimension,
+    outcome: &BoundaryAttemptOutcome,
+) -> EffectiveBoundaryEntry {
+    entry = entry
+        .with_diagnostic(
+            "supervisor_backend",
+            diagnostic_or_unknown(&outcome.supervisor_backend),
+        )
+        .with_diagnostic(
+            "fd_cleanup_status",
+            diagnostic_or_unknown(&outcome.fd_cleanup_status),
+        )
+        .with_diagnostic("env_policy", diagnostic_or_unknown(&outcome.env_policy))
+        .with_diagnostic(
+            "boundary_setup_failed_closed",
+            outcome.failed_closed.to_string(),
+        );
+
+    for (key, value) in [
+        ("privilege_strategy", &outcome.privilege_strategy),
+        ("userns_status", &outcome.userns_status),
+        ("setgroups_status", &outcome.setgroups_status),
+        ("uid_map_status", &outcome.uid_map_status),
+        ("gid_map_status", &outcome.gid_map_status),
+        ("read_only_bind_scope", &outcome.read_only_bind_scope),
+        ("setup_failure_stage", &outcome.setup_failure_stage),
+        ("setup_failure_reason", &outcome.setup_failure_reason),
+    ] {
+        if let Some(value) = value {
+            entry = entry.with_diagnostic(key, value.clone());
+        }
+    }
+
+    if let Some(path) = &outcome.project_view_path {
+        entry = entry.with_diagnostic("project_view_path", path.display().to_string());
+    }
+    if let Some(path) = &outcome.cwd_view_path {
+        entry = entry.with_diagnostic("cwd_view_path", path.display().to_string());
+    }
+    if let Some(method) = &outcome.fd_cleanup_method {
+        entry = entry.with_diagnostic("fd_cleanup_method", method.clone());
+    }
+
+    match boundary {
+        BoundaryDimension::Network => {
+            entry.with_diagnostic("namespace_status", outcome.network_namespace_status.label())
+        }
+        BoundaryDimension::Filesystem => entry
+            .with_diagnostic("namespace_status", outcome.mount_namespace_status.label())
+            .with_diagnostic(
+                "mount_view_status",
+                outcome.minimal_mount_view_status.label(),
+            ),
+        BoundaryDimension::Landlock => {
+            let abi = outcome
+                .landlock_abi_version
+                .map(|version| version.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            entry = entry
+                .with_diagnostic("landlock_status", outcome.landlock_status.label())
+                .with_diagnostic("landlock_abi_version", abi);
+            if let Some(mask) = outcome.landlock_rights_mask {
+                entry = entry.with_diagnostic("landlock_rights_mask", format!("0x{mask:x}"));
+            }
+            if let Some(status) = &outcome.landlock_ruleset_status {
+                entry = entry.with_diagnostic("landlock_ruleset_status", status.clone());
+            }
+            if let Some(required) = outcome.landlock_required {
+                entry = entry.with_diagnostic("landlock_required", required.to_string());
+            }
+            entry
+        }
+    }
+}
+
+fn diagnostic_or_unknown(value: &Option<String>) -> String {
+    value.clone().unwrap_or_else(|| "unknown".to_string())
+}
+
 fn primitive_entries_for_boundary(
     boundary: BoundaryDimension,
     host_probe: &HostProbeReport,
@@ -633,6 +1002,7 @@ pub fn command_boundary_metadata(
         "command_isolation_mode": config.mode.label(),
         "effective_boundary": effective_boundary_metadata_json(&preflight.effective_boundary),
         "host_probe_summary": host_probe_summary_json(&preflight.host_probe),
+        "boundary_setup_failed_closed": preflight.boundary_setup_failed_closed,
         "boundary_preflight_failed_closed": preflight.failed_closed,
         "backend_invoked": false,
         "policy_enforced": true,
@@ -926,6 +1296,639 @@ mod tests {
         let missing = unavailable_required_boundaries(&probe, &[BoundaryDimension::Network]);
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].boundary, BoundaryDimension::Network);
+    }
+
+    fn enforce_config(
+        required_boundaries: Vec<BoundaryDimension>,
+        host_probe: HostProbeReport,
+    ) -> CommandIsolationRuntimeConfig {
+        CommandIsolationRuntimeConfig {
+            mode: CommandIsolationMode::Enforce,
+            required_boundaries,
+            host_probe: Some(host_probe),
+            ..CommandIsolationRuntimeConfig::default()
+        }
+    }
+
+    fn audit_config(
+        optional_boundaries: Vec<BoundaryDimension>,
+        host_probe: HostProbeReport,
+    ) -> CommandIsolationRuntimeConfig {
+        CommandIsolationRuntimeConfig {
+            mode: CommandIsolationMode::Audit,
+            optional_boundaries,
+            host_probe: Some(host_probe),
+            ..CommandIsolationRuntimeConfig::default()
+        }
+    }
+
+    fn fake_attempt(evidence: Vec<AppliedBoundaryEvidence>) -> CommandIsolationAttempt {
+        CommandIsolationAttempt::new(BoundaryAttemptOutcome {
+            evidence,
+            supervisor_backend: Some("fake-supervisor".to_string()),
+            project_view_path: Some(PathBuf::from("/project")),
+            cwd_view_path: Some(PathBuf::from("/project/crates")),
+            fd_cleanup_status: Some("applied".to_string()),
+            fd_cleanup_method: Some("close_range".to_string()),
+            env_policy: Some("allowlist".to_string()),
+            ..BoundaryAttemptOutcome::default()
+        })
+    }
+
+    #[test]
+    fn command_boundary_host_probe_available_without_attempt_is_not_physically_bounded() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Network],
+            report(&[(
+                BoundaryPrimitive::NetworkNamespace,
+                HostProbeStatus::Available,
+                "netns probe ok",
+            )]),
+        );
+
+        let preflight = evaluate_command_boundary_preflight(&config);
+        let network = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Network)
+            .expect("network boundary");
+
+        assert_eq!(network.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(network.source_primitives.is_empty());
+        assert!(preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_fake_netns_attempt_yields_network_physical_credit() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Network],
+            report(&[(
+                BoundaryPrimitive::NetworkNamespace,
+                HostProbeStatus::Unavailable,
+                "host probe does not matter without applied evidence",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![AppliedBoundaryEvidence::NetworkNamespace(
+            NetnsApplied::from_supervisor_netns_success(),
+        )]);
+        attempt.outcome.network_namespace_status = SupervisorSetupStatus::Applied;
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let network = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Network)
+            .expect("network boundary");
+
+        assert_eq!(network.status, EffectiveBoundaryStatus::PhysicallyBounded);
+        assert_eq!(
+            network.source_primitives,
+            vec![BoundaryPrimitive::NetworkNamespace]
+        );
+        assert_eq!(
+            network
+                .diagnostics
+                .get("namespace_status")
+                .map(String::as_str),
+            Some("applied")
+        );
+        assert!(!preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_fake_mount_view_requires_mount_namespace_and_view_applied() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Filesystem],
+            report(&[(
+                BoundaryPrimitive::MountNamespace,
+                HostProbeStatus::Available,
+                "mount ns probe ok",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![
+            AppliedBoundaryEvidence::MountNamespace(
+                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+            ),
+            AppliedBoundaryEvidence::MinimalMountView(
+                MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
+            ),
+        ]);
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::Applied;
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let filesystem = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Filesystem)
+            .expect("filesystem boundary");
+
+        assert_eq!(
+            filesystem.status,
+            EffectiveBoundaryStatus::PhysicallyBounded
+        );
+        assert_eq!(
+            filesystem.source_primitives,
+            vec![BoundaryPrimitive::MountNamespace]
+        );
+        assert_eq!(
+            filesystem
+                .diagnostics
+                .get("mount_view_status")
+                .map(String::as_str),
+            Some("applied")
+        );
+        assert_eq!(
+            filesystem.diagnostics.get("env_policy").map(String::as_str),
+            Some("allowlist")
+        );
+    }
+
+    #[test]
+    fn command_boundary_metadata_preserves_compact_env_fd_hygiene_diagnostics() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Filesystem],
+            report(&[(
+                BoundaryPrimitive::MountNamespace,
+                HostProbeStatus::Available,
+                "mount ns probe ok",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![
+            AppliedBoundaryEvidence::MountNamespace(
+                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+            ),
+            AppliedBoundaryEvidence::MinimalMountView(
+                MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
+            ),
+        ]);
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::Applied;
+        attempt.outcome.fd_cleanup_method = Some("rlimit_loop".to_string());
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let metadata = command_boundary_metadata(&config, &preflight);
+        let diagnostics = &metadata["effective_boundary"]["filesystem"]["diagnostics"];
+
+        assert_eq!(diagnostics["env_policy"], "allowlist");
+        assert_eq!(diagnostics["fd_cleanup_status"], "applied");
+        assert_eq!(diagnostics["fd_cleanup_method"], "rlimit_loop");
+        assert!(metadata.to_string().len() < 4096);
+        assert!(!metadata.to_string().contains("OPENAI_API_KEY"));
+        assert!(!metadata.to_string().contains("AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn command_boundary_mount_namespace_without_mount_view_is_failed_not_physical() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Filesystem],
+            report(&[(
+                BoundaryPrimitive::MountNamespace,
+                HostProbeStatus::Available,
+                "mount ns probe ok",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![AppliedBoundaryEvidence::MountNamespace(
+            MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+        )]);
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::FailedClosed;
+        attempt.outcome.failed_closed = true;
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let filesystem = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Filesystem)
+            .expect("filesystem boundary");
+
+        assert_eq!(filesystem.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(filesystem.source_primitives.is_empty());
+        assert_eq!(
+            filesystem
+                .diagnostics
+                .get("mount_view_status")
+                .map(String::as_str),
+            Some("failed_closed")
+        );
+        assert!(preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_landlock_success_does_not_backfill_failed_mount_view() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Filesystem],
+            report(&[
+                (
+                    BoundaryPrimitive::MountNamespace,
+                    HostProbeStatus::Available,
+                    "mount ns probe ok",
+                ),
+                (
+                    BoundaryPrimitive::Landlock,
+                    HostProbeStatus::Available,
+                    "landlock probe ok",
+                ),
+            ]),
+        );
+        let mut attempt = fake_attempt(vec![
+            AppliedBoundaryEvidence::MountNamespace(
+                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+            ),
+            AppliedBoundaryEvidence::Landlock(LandlockApplied::from_supervisor_landlock_success()),
+        ]);
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::FailedClosed;
+        attempt.outcome.landlock_status = LandlockApplicationStatus::Applied;
+        attempt.outcome.landlock_abi_version = Some(3);
+        attempt.outcome.failed_closed = true;
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let filesystem = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Filesystem)
+            .expect("filesystem boundary");
+
+        assert_eq!(filesystem.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(filesystem.source_primitives.is_empty());
+        assert_eq!(
+            filesystem
+                .diagnostics
+                .get("mount_view_status")
+                .map(String::as_str),
+            Some("failed_closed")
+        );
+    }
+
+    #[test]
+    fn command_boundary_landlock_evidence_never_backfills_network_credit() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Network],
+            report(&[
+                (
+                    BoundaryPrimitive::NetworkNamespace,
+                    HostProbeStatus::Unavailable,
+                    "netns setup unavailable",
+                ),
+                (
+                    BoundaryPrimitive::Landlock,
+                    HostProbeStatus::Available,
+                    "landlock probe ok",
+                ),
+            ]),
+        );
+        let mut attempt = fake_attempt(vec![AppliedBoundaryEvidence::Landlock(
+            LandlockApplied::from_supervisor_landlock_success(),
+        )]);
+        attempt.outcome.landlock_status = LandlockApplicationStatus::Applied;
+        attempt.outcome.landlock_abi_version = Some(3);
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let network = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Network)
+            .expect("network boundary");
+
+        assert_eq!(network.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(network.source_primitives.is_empty());
+        assert!(preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_host_inherited_env_cannot_satisfy_required_physical_credit() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Network],
+            report(&[(
+                BoundaryPrimitive::NetworkNamespace,
+                HostProbeStatus::Available,
+                "netns probe ok",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![AppliedBoundaryEvidence::NetworkNamespace(
+            NetnsApplied::from_supervisor_netns_success(),
+        )]);
+        attempt.outcome.network_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.env_policy = Some("host_inherited".to_string());
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let network = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Network)
+            .expect("network boundary");
+
+        assert_eq!(network.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(network.source_primitives.is_empty());
+        assert_eq!(
+            network.diagnostics.get("env_policy").map(String::as_str),
+            Some("host_inherited")
+        );
+        assert!(preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_failed_fd_cleanup_cannot_satisfy_required_physical_credit() {
+        let config = enforce_config(
+            vec![BoundaryDimension::Filesystem],
+            report(&[(
+                BoundaryPrimitive::MountNamespace,
+                HostProbeStatus::Available,
+                "mount ns probe ok",
+            )]),
+        );
+        let mut attempt = fake_attempt(vec![
+            AppliedBoundaryEvidence::MountNamespace(
+                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+            ),
+            AppliedBoundaryEvidence::MinimalMountView(
+                MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
+            ),
+        ]);
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::Applied;
+        attempt.outcome.fd_cleanup_status = Some("failed".to_string());
+        attempt.outcome.failed_closed = true;
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let filesystem = preflight
+            .effective_boundary
+            .status_for(BoundaryDimension::Filesystem)
+            .expect("filesystem boundary");
+
+        assert_eq!(filesystem.status, EffectiveBoundaryStatus::FailedClosed);
+        assert!(filesystem.source_primitives.is_empty());
+        assert_eq!(
+            filesystem
+                .diagnostics
+                .get("fd_cleanup_status")
+                .map(String::as_str),
+            Some("failed")
+        );
+        assert!(preflight.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_landlock_diagnostics_use_stable_status_labels() {
+        for (status, expected) in [
+            (LandlockApplicationStatus::Unsupported, "unsupported"),
+            (LandlockApplicationStatus::NotApplied, "not_applied"),
+            (LandlockApplicationStatus::Applied, "applied"),
+        ] {
+            let config = audit_config(
+                vec![BoundaryDimension::Landlock],
+                report(&[(
+                    BoundaryPrimitive::Landlock,
+                    HostProbeStatus::Available,
+                    "abi ok",
+                )]),
+            );
+            let mut attempt = fake_attempt(Vec::new());
+            attempt.outcome.landlock_status = status;
+            attempt.outcome.landlock_abi_version = Some(3);
+            attempt.outcome.landlock_rights_mask = Some(0x7fff);
+            attempt.outcome.landlock_ruleset_status = Some(expected.to_string());
+            attempt.outcome.landlock_required = Some(false);
+            if status == LandlockApplicationStatus::Applied {
+                attempt
+                    .outcome
+                    .evidence
+                    .push(AppliedBoundaryEvidence::Landlock(
+                        LandlockApplied::from_supervisor_landlock_success(),
+                    ));
+            }
+
+            let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+            let landlock = preflight
+                .effective_boundary
+                .status_for(BoundaryDimension::Landlock)
+                .expect("landlock boundary");
+
+            assert_eq!(
+                landlock
+                    .diagnostics
+                    .get("landlock_status")
+                    .map(String::as_str),
+                Some(expected)
+            );
+            assert_eq!(
+                landlock
+                    .diagnostics
+                    .get("landlock_abi_version")
+                    .map(String::as_str),
+                Some("3")
+            );
+            assert_eq!(
+                landlock
+                    .diagnostics
+                    .get("landlock_rights_mask")
+                    .map(String::as_str),
+                Some("0x7fff")
+            );
+            assert_eq!(
+                landlock
+                    .diagnostics
+                    .get("landlock_ruleset_status")
+                    .map(String::as_str),
+                Some(expected)
+            );
+            assert_eq!(
+                landlock
+                    .diagnostics
+                    .get("landlock_required")
+                    .map(String::as_str),
+                Some("false")
+            );
+            if status == LandlockApplicationStatus::Applied {
+                assert_eq!(landlock.status, EffectiveBoundaryStatus::PhysicallyBounded);
+            }
+        }
+    }
+
+    #[test]
+    fn command_boundary_landlock_required_optional_matrix_is_mode_specific() {
+        let probe = report(&[(
+            BoundaryPrimitive::Landlock,
+            HostProbeStatus::Available,
+            "abi ok",
+        )]);
+
+        let mut unsupported = fake_attempt(Vec::new());
+        unsupported.outcome.landlock_status = LandlockApplicationStatus::Unsupported;
+        unsupported.outcome.landlock_required = Some(true);
+
+        let mut not_applied = fake_attempt(Vec::new());
+        not_applied.outcome.landlock_status = LandlockApplicationStatus::NotApplied;
+        not_applied.outcome.landlock_abi_version = Some(3);
+        not_applied.outcome.landlock_required = Some(false);
+
+        let enforce_required = evaluate_command_boundary_attempt(
+            &enforce_config(vec![BoundaryDimension::Landlock], probe.clone()),
+            Some(&unsupported),
+        );
+        let enforce_optional = evaluate_command_boundary_attempt(
+            &CommandIsolationRuntimeConfig {
+                mode: CommandIsolationMode::Enforce,
+                optional_boundaries: vec![BoundaryDimension::Landlock],
+                host_probe: Some(probe.clone()),
+                ..CommandIsolationRuntimeConfig::default()
+            },
+            Some(&not_applied),
+        );
+        let audit_required = evaluate_command_boundary_attempt(
+            &CommandIsolationRuntimeConfig {
+                mode: CommandIsolationMode::Audit,
+                required_boundaries: vec![BoundaryDimension::Landlock],
+                host_probe: Some(probe.clone()),
+                ..CommandIsolationRuntimeConfig::default()
+            },
+            Some(&unsupported),
+        );
+        let audit_optional = evaluate_command_boundary_attempt(
+            &audit_config(vec![BoundaryDimension::Landlock], probe),
+            Some(&not_applied),
+        );
+
+        assert_eq!(
+            enforce_required
+                .effective_boundary
+                .status_for(BoundaryDimension::Landlock)
+                .unwrap()
+                .status,
+            EffectiveBoundaryStatus::Unsupported
+        );
+        assert!(enforce_required.should_fail_closed());
+        assert_eq!(
+            enforce_optional
+                .effective_boundary
+                .status_for(BoundaryDimension::Landlock)
+                .unwrap()
+                .status,
+            EffectiveBoundaryStatus::Unbounded
+        );
+        assert!(!enforce_optional.should_fail_closed());
+        assert_eq!(
+            audit_required
+                .effective_boundary
+                .status_for(BoundaryDimension::Landlock)
+                .unwrap()
+                .status,
+            EffectiveBoundaryStatus::Unsupported
+        );
+        assert!(!audit_required.should_fail_closed());
+        assert_eq!(
+            audit_optional
+                .effective_boundary
+                .status_for(BoundaryDimension::Landlock)
+                .unwrap()
+                .status,
+            EffectiveBoundaryStatus::Unbounded
+        );
+        assert!(!audit_optional.should_fail_closed());
+    }
+
+    #[test]
+    fn command_boundary_metadata_preserves_landlock_matrix_statuses() {
+        let probe = report(&[(
+            BoundaryPrimitive::Landlock,
+            HostProbeStatus::Available,
+            "abi ok",
+        )]);
+        let cases = [
+            (
+                CommandIsolationRuntimeConfig {
+                    mode: CommandIsolationMode::Enforce,
+                    required_boundaries: vec![BoundaryDimension::Landlock],
+                    host_probe: Some(probe.clone()),
+                    ..CommandIsolationRuntimeConfig::default()
+                },
+                LandlockApplicationStatus::Unsupported,
+                "unsupported",
+                true,
+            ),
+            (
+                CommandIsolationRuntimeConfig {
+                    mode: CommandIsolationMode::Enforce,
+                    optional_boundaries: vec![BoundaryDimension::Landlock],
+                    host_probe: Some(probe.clone()),
+                    ..CommandIsolationRuntimeConfig::default()
+                },
+                LandlockApplicationStatus::NotApplied,
+                "not_applied",
+                false,
+            ),
+            (
+                CommandIsolationRuntimeConfig {
+                    mode: CommandIsolationMode::Audit,
+                    required_boundaries: vec![BoundaryDimension::Landlock],
+                    host_probe: Some(probe.clone()),
+                    ..CommandIsolationRuntimeConfig::default()
+                },
+                LandlockApplicationStatus::NotApplied,
+                "not_applied",
+                true,
+            ),
+            (
+                CommandIsolationRuntimeConfig {
+                    mode: CommandIsolationMode::Audit,
+                    optional_boundaries: vec![BoundaryDimension::Landlock],
+                    host_probe: Some(probe),
+                    ..CommandIsolationRuntimeConfig::default()
+                },
+                LandlockApplicationStatus::Unsupported,
+                "unsupported",
+                false,
+            ),
+        ];
+
+        for (config, status, expected_status, required) in cases {
+            let mut attempt = fake_attempt(Vec::new());
+            attempt.outcome.landlock_status = status;
+            attempt.outcome.landlock_abi_version = Some(5);
+            attempt.outcome.landlock_rights_mask = Some(0xffff);
+            attempt.outcome.landlock_ruleset_status = Some(expected_status.to_string());
+            attempt.outcome.landlock_required = Some(required);
+
+            let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+            let metadata = command_boundary_metadata(&config, &preflight);
+            let diagnostics = &metadata["effective_boundary"]["landlock"]["diagnostics"];
+            assert_eq!(diagnostics["landlock_status"], expected_status);
+            assert_eq!(diagnostics["landlock_abi_version"], "5");
+            assert_eq!(diagnostics["landlock_rights_mask"], "0xffff");
+            assert_eq!(diagnostics["landlock_required"], required.to_string());
+        }
+    }
+
+    #[test]
+    fn command_boundary_enforce_fails_closed_but_audit_reports_unbounded_without_evidence() {
+        let probe = report(&[(
+            BoundaryPrimitive::NetworkNamespace,
+            HostProbeStatus::Available,
+            "netns probe ok",
+        )]);
+        let attempt = fake_attempt(Vec::new());
+
+        let enforce = evaluate_command_boundary_attempt(
+            &enforce_config(vec![BoundaryDimension::Network], probe.clone()),
+            Some(&attempt),
+        );
+        let audit = evaluate_command_boundary_attempt(
+            &audit_config(vec![BoundaryDimension::Network], probe),
+            Some(&attempt),
+        );
+
+        assert_eq!(
+            enforce
+                .effective_boundary
+                .status_for(BoundaryDimension::Network)
+                .expect("enforce network")
+                .status,
+            EffectiveBoundaryStatus::FailedClosed
+        );
+        assert!(enforce.should_fail_closed());
+        assert_eq!(
+            audit
+                .effective_boundary
+                .status_for(BoundaryDimension::Network)
+                .expect("audit network")
+                .status,
+            EffectiveBoundaryStatus::Unbounded
+        );
+        assert!(!audit.should_fail_closed());
     }
 
     #[test]

@@ -86,8 +86,8 @@ The exact fields are:
 | `mode` | Command physical-boundary mode: `enforce`, `audit`, or `off`. Missing command isolation config defaults to `off`. |
 | `required_boundaries` | Boundary dimensions that must be satisfied for this command mode. Valid labels are `network`, `filesystem`, and `landlock`. |
 | `optional_boundaries` | Boundary dimensions to attempt/report without failing `enforce` when unavailable. The same labels are accepted. A boundary cannot be both required and optional. |
-| `read_only_toolchain_paths` | Declared toolchain/cache paths that later supervisor phases may expose read-only to command children. Phase 28 validates the path syntax but does not mount them. |
-| `scratch_paths` | Declared scratch paths that later supervisor phases may expose as scratch space. Phase 28 validates the path syntax but does not create tmpfs or overlay scratch behavior. |
+| `read_only_toolchain_paths` | Declared toolchain/cache paths that the Phase 29 supervisor may expose read-only to command children. Missing sources are reported as diagnostics rather than widening the mount view. |
+| `scratch_paths` | Declared scratch paths that the Phase 29 supervisor may expose as tmpfs scratch space. Phase 29 does not add overlay discard or artifact commit semantics. |
 | `landlock` | Landlock behavior: `auto` or `off`. `landlock = "off"` is rejected when `required_boundaries` contains `landlock`. Landlock is filesystem refinement only. |
 | `unsupported_host` | Unsupported-host policy: `mode_default`, `fail_closed`, `allow_unbounded`, or `not_requested`. Contradictory combinations are rejected. |
 
@@ -103,6 +103,67 @@ On non-Linux or otherwise unsupported hosts, `host_probe` reports each primitive
 as unavailable with a reason. The same `enforce` / `audit` / `off` rules then
 decide whether a requested command fails closed, runs with unbounded labels, or
 is marked `not_requested`.
+
+Phase 29 keeps the agent-visible command method stable: commands still enter the
+runtime through `exec.command_run`, and physical isolation is a native
+implementation detail under `[lancet.isolation.command]`. In isolated modes the
+production command path builds a deterministic supervisor plan, starts the child
+through the supervised pre-exec handoff, runs child-side Linux setup, reads the
+setup report through a close-on-exec pipe, and records `effective_boundary`
+metadata from that report. When a required boundary lacks applied evidence,
+`enforce` fails closed before the backend command runs. In `audit`, failed setup
+may fall back to the existing command backend, but that fallback is labelled
+`unbounded` / `not_applied`, not `physically_bounded`. `lattice-agent`, the
+catalog method count, and the LLM-facing tool schema do not gain a second command
+tool.
+
+The native supervisor setup order is: privilege strategy check, unprivileged
+user namespace bootstrap when selected, network namespace, mount namespace,
+minimal mount view, cwd mapping, allowlist environment plus fd cleanup, optional
+Landlock refinement, then exec. The unprivileged bootstrap checks readable
+kernel sysctls such as `unprivileged_userns_clone` and
+`max_user_namespaces` before attempting `CLONE_NEWUSER`, then still treats the
+real `unshare`, `setgroups`, `uid_map`, and `gid_map` operations as
+authoritative. These stages earn boundary credit only from real applied setup
+reports, not from host probes or precomputed plans.
+
+The network claim is intentionally narrow. `network: physically_bounded` is
+sound only when the command attempt reports applied `network_namespace` evidence
+with `source_primitives = ["network_namespace"]`. The supervisor does not
+create a veth device, default route, or host namespace join for this no-egress
+case. Landlock, mount namespace, OverlayFS, and later overlay rollback cannot
+earn network credit and cannot make network effects reversible.
+
+The filesystem claim is tied to a minimal mount view, not to a mount namespace
+alone. A fresh mount namespace initially inherits the host mount table, so Phase
+29 filesystem evidence requires the mount namespace plus
+`mount_view_status = "applied"` for the synthetic view. The intended view
+exposes the project at `/project`, configured read-only toolchain/cache paths
+when available, scratch tmpfs such as `/tmp`, and minimal devices only. Broad
+`$HOME`, credential paths, `/run`, Docker sockets, agent sockets, and host temp
+secret paths are not mounted by default. Phase 29 may leave the project root
+read-write; Phase 30 owns overlay discard and artifact commit behavior.
+
+Executable resolution is performed against the supervisor view. The command
+executable must resolve through `/project` or a configured read-only
+toolchain/cache path that is present in the mount plan. Read-only bind scope is
+reported honestly; current diagnostics may say `read_only_bind_scope =
+"top_level"` rather than implying recursive read-only enforcement.
+
+In isolated modes, command planning constructs the child environment from an
+explicit allowlist and generated supervisor values. It starts empty, admits only
+validated caller-provided keys, generates `PATH` from planned in-view executable
+directories, and sets scratch variables such as `TMPDIR` only when the matching
+tmpfs is planned. Non-stdio inherited file descriptors count as applied only
+when the child-side fd-cleanup stage reports success. The setup-report pipe is
+marked close-on-exec, preserved only through fd cleanup so the setup report can
+be written, then closed before the final command exec.
+
+Landlock is optional filesystem refinement after the mount view is in place. It
+reports `landlock_status = "unsupported"`, `"not_applied"`, or `"applied"`
+honestly, with `landlock_abi_version` and `landlock_rights_mask` when known.
+Landlock is not a network boundary and is not a substitute for minimal
+mount-view evidence.
 
 ## Mutation and command observation
 
@@ -127,9 +188,10 @@ not create missing parent directories. Existing-file edits must go through
 
 ### Command boundary metadata
 
-`exec.command_run` is still a partial observation boundary in v1.3. v1.4 adds
-metadata that separates host capability probes from per-command protection
-claims; it does not turn LANCET into a generalized sandbox.
+`exec.command_run` remains the stable command method. The command can still be a
+partial observation boundary, but v1.4 metadata separates host capability
+probes from per-command protection claims; it does not turn LANCET into a
+generalized sandbox.
 
 Two metadata layers must stay distinct:
 
@@ -152,7 +214,7 @@ labels are `network`, `filesystem`, and `landlock`. The stable status labels are
 
 | Status | Meaning |
 |--------|---------|
-| `physically_bounded` | The command has applied primitive evidence for that boundary. Network credit requires `network_namespace` evidence. Phase 28 does not emit this status from command preflight because the supervisor has not applied primitives yet. |
+| `physically_bounded` | The command has applied primitive evidence for that boundary. Network credit requires `network_namespace` evidence. Filesystem Phase 29 credit requires minimal mount-view evidence, not mount namespace alone or Landlock alone. |
 | `unbounded` | The boundary was requested but the command ran without applied primitive evidence. |
 | `not_requested` | The boundary was not requested or command isolation mode is `off`. |
 | `failed_closed` | `enforce` mode blocked execution before the backend because a required boundary lacked applied evidence. |
@@ -183,11 +245,91 @@ Audit/status JSON is keyed by boundary dimension:
 }
 ```
 
-For future `physically_bounded` entries, `source_primitives` must name an
-allowed source primitive. `network` accepts only `network_namespace`;
-`filesystem` accepts `overlayfs`, `mount_namespace`, or `landlock`; and
-`landlock` accepts only `landlock`. Landlock, OverlayFS, and mount namespaces
-never earn network credit.
+Applied-supervisor metadata, when produced by a real setup report, includes
+compact diagnostics that status rendering preserves:
+
+```json
+{
+  "boundary_setup_failed_closed": false,
+  "effective_boundary": {
+    "network": {
+      "boundary": "network",
+      "status": "physically_bounded",
+      "reason": "applied supervisor evidence accepted",
+      "source_primitives": ["network_namespace"],
+      "diagnostics": {
+        "namespace_status": "applied",
+        "env_policy": "allowlist",
+        "fd_cleanup_status": "applied",
+        "fd_cleanup_method": "close_range",
+        "boundary_setup_failed_closed": "false"
+      }
+    },
+    "filesystem": {
+      "boundary": "filesystem",
+      "status": "physically_bounded",
+      "reason": "applied supervisor evidence accepted",
+      "source_primitives": ["mount_namespace"],
+      "diagnostics": {
+        "namespace_status": "applied",
+        "mount_view_status": "applied",
+        "project_view_path": "/project",
+        "cwd_view_path": "/project",
+        "read_only_bind_scope": "top_level",
+        "env_policy": "allowlist",
+        "fd_cleanup_status": "applied"
+      }
+    },
+    "landlock": {
+      "boundary": "landlock",
+      "status": "unsupported",
+      "reason": "optional landlock boundary unsupported by supervisor attempt",
+      "diagnostics": {
+        "landlock_status": "unsupported",
+        "landlock_abi_version": "unknown",
+        "env_policy": "allowlist",
+        "fd_cleanup_status": "applied"
+      }
+    }
+  }
+}
+```
+
+Failed child-side setup is reported without physical credit, for example:
+
+```json
+{
+  "boundary_setup_failed_closed": true,
+  "effective_boundary": {
+    "network": {
+      "boundary": "network",
+      "status": "failed_closed",
+      "reason": "required network boundary requested but supervisor attempt lacked applied evidence",
+      "diagnostics": {
+        "supervisor_backend": "native_linux",
+        "namespace_status": "failed_closed",
+        "env_policy": "failed",
+        "fd_cleanup_status": "failed",
+        "setup_failure_stage": "privilege_check",
+        "setup_failure_reason": "check_unprivileged_user_namespace failed: kernel.unprivileged_userns_clone is disabled at /proc/sys/kernel/unprivileged_userns_clone"
+      }
+    }
+  }
+}
+```
+
+When Landlock applies, the same diagnostics use
+`landlock_status = "applied"` and include a hexadecimal
+`landlock_rights_mask`, for example `"0xffff"`. When the ABI exists but the
+ruleset is disabled or application fails without a required fail-closed policy,
+the status is `not_applied`. None of these Landlock outcomes can produce
+`network: physically_bounded`.
+
+For `physically_bounded` entries, `source_primitives` must name an allowed
+source primitive. `network` accepts only `network_namespace`; `filesystem`
+accepts `overlayfs`, `mount_namespace`, or `landlock`; and `landlock` accepts
+only `landlock`. Landlock, OverlayFS, and mount namespaces never earn network
+credit.
 
 Observed:
 
@@ -250,22 +392,37 @@ required boundary is unavailable, disabled, unknown, or unsupported.
 `effective_boundary` metadata or invalid `physically_bounded` attribution as
 `unknown` rather than silently displaying a stronger protection claim.
 
-## Phase 28 non-claims
+### Live canary classification
 
-Phase 28 documents and validates configuration, probing, preflight metadata, and
-CLI/audit vocabulary. It does not implement or claim:
+Phase 29 live Linux canaries are ignored tests gated by
+`LATTICE_LINUX_ISOLATION_LIVE=1`. Each canary reports one of three outcomes:
+`passed`, `skipped_unsupported`, or `failed`.
+
+`passed` is host-specific evidence for that canary on that host. A
+`skipped_unsupported` result is diagnostic only and is not proof of physical
+bounds; it must include an exact reason such as `network namespace unavailable`,
+`mount namespace unavailable`, `user namespace disabled`,
+`uid/gid map unavailable`, `Landlock ABI unsupported`, or
+`operation not permitted`. `failed` means the canary attempted the behavior and
+observed a violation or unexpected error.
+
+## Phase 29 non-claims
+
+Phase 29 implements command boundary reporting and the applied-evidence model
+for `exec.command_run`. Child-side raw-syscall supervisor setup is attempted in
+the command child, but Phase 29 does not claim applied physical evidence unless
+the setup report says the relevant stages were applied. Phase 29 does not
+implement or claim:
 
 - A generalized sandbox for arbitrary process behavior.
 - Side-channel protection, cgroups, seccomp, resource containment, or broad
   host compromise resistance.
 - Project read-set observation for arbitrary commands.
-- Network rollback. OverlayFS, mount namespaces, and Landlock do not make network
-  effects reversible or bounded.
+- No network rollback. OverlayFS, mount namespaces, and Landlock do not make
+  network effects reversible or bounded.
 - Cross-platform physical isolation. Non-Linux and unsupported Linux hosts are
   reported through unavailable/unsupported metadata.
-- The Phase 29 command supervisor, mount setup, fd/env hygiene, or no-egress
-  network namespace execution.
-- The Phase 30 overlay commit/discard artifact pipeline.
+- The Phase 30 overlay discard/commit artifact pipeline.
 - The Phase 31 HashLine commit boundary or effect/audit-centered projection.
 
 ## Provenance Audit

@@ -16,6 +16,14 @@ pub struct NetnsApplied {
     _private: (),
 }
 
+impl NetnsApplied {
+    /// Construct netns evidence only after the command supervisor has
+    /// successfully placed the command child in the no-egress network namespace.
+    pub fn from_supervisor_netns_success() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Evidence that a command actually used an OverlayFS-backed view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayfsApplied {
@@ -28,17 +36,53 @@ pub struct MountNamespaceApplied {
     _private: (),
 }
 
+impl MountNamespaceApplied {
+    /// Construct mount-namespace evidence only after the supervisor has entered
+    /// the child mount namespace. This is not enough to claim the Phase 29
+    /// minimal filesystem view by itself.
+    pub fn from_supervisor_mount_namespace_success() -> Self {
+        Self { _private: () }
+    }
+}
+
+/// Evidence that the supervisor installed the minimal command mount view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MinimalMountViewApplied {
+    _private: (),
+}
+
+impl MinimalMountViewApplied {
+    /// Construct minimal mount-view evidence only after the supervisor has
+    /// installed the project/toolchain/scratch/device view and can report
+    /// `mount_view_status=applied`.
+    pub fn from_supervisor_minimal_mount_view_success() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Evidence that Landlock was applied to the command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LandlockApplied {
     _private: (),
 }
 
+impl LandlockApplied {
+    /// Construct Landlock evidence only after `landlock_restrict_self`
+    /// succeeds for the command child. This is filesystem refinement evidence,
+    /// never network evidence.
+    pub fn from_supervisor_landlock_success() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// Evidence variants allowed to contribute filesystem boundary credit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FilesystemBoundaryEvidence {
     Overlayfs(OverlayfsApplied),
-    MountNamespace(MountNamespaceApplied),
+    MinimalMountView {
+        mount_namespace: MountNamespaceApplied,
+        minimal_mount_view: MinimalMountViewApplied,
+    },
     Landlock(LandlockApplied),
 }
 
@@ -46,7 +90,9 @@ impl FilesystemBoundaryEvidence {
     fn primitive(&self) -> BoundaryPrimitive {
         match self {
             FilesystemBoundaryEvidence::Overlayfs(_) => BoundaryPrimitive::Overlayfs,
-            FilesystemBoundaryEvidence::MountNamespace(_) => BoundaryPrimitive::MountNamespace,
+            FilesystemBoundaryEvidence::MinimalMountView { .. } => {
+                BoundaryPrimitive::MountNamespace
+            }
             FilesystemBoundaryEvidence::Landlock(_) => BoundaryPrimitive::Landlock,
         }
     }
@@ -79,6 +125,19 @@ impl EffectiveBoundaryCredit {
         evidence: FilesystemBoundaryEvidence,
     ) -> Result<Self, BoundaryCreditError> {
         build_physically_bounded(BoundaryDimension::Filesystem, evidence.primitive())
+    }
+
+    /// Phase 29 filesystem credit from native supervisor evidence requires both
+    /// mount-namespace setup and minimal mount-view setup. The native metadata
+    /// builder must also emit `mount_view_status=applied` with this credit.
+    pub fn filesystem_physically_bounded_from_supervisor_minimal_mount_view_success(
+        mount_namespace: MountNamespaceApplied,
+        minimal_mount_view: MinimalMountViewApplied,
+    ) -> Result<Self, BoundaryCreditError> {
+        Self::filesystem_physically_bounded(FilesystemBoundaryEvidence::MinimalMountView {
+            mount_namespace,
+            minimal_mount_view,
+        })
     }
 
     /// Landlock is also exposed as its own boundary dimension when required.
@@ -175,12 +234,7 @@ pub struct NetworkCreditRequiresNetnsEvidence;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    impl NetnsApplied {
-        fn for_test() -> Self {
-            Self { _private: () }
-        }
-    }
+    use lancet_protocol::EffectiveBoundaryEntry;
 
     impl OverlayfsApplied {
         fn for_test() -> Self {
@@ -190,13 +244,19 @@ mod tests {
 
     impl MountNamespaceApplied {
         fn for_test() -> Self {
-            Self { _private: () }
+            Self::from_supervisor_mount_namespace_success()
+        }
+    }
+
+    impl MinimalMountViewApplied {
+        fn for_test() -> Self {
+            Self::from_supervisor_minimal_mount_view_success()
         }
     }
 
     impl LandlockApplied {
         fn for_test() -> Self {
-            Self { _private: () }
+            Self::from_supervisor_landlock_success()
         }
     }
 
@@ -239,6 +299,20 @@ mod tests {
     }
 
     #[test]
+    fn serialized_landlock_source_never_earns_network_credit() {
+        let entry = EffectiveBoundaryEntry::new(
+            BoundaryDimension::Network,
+            EffectiveBoundaryStatus::PhysicallyBounded,
+        )
+        .with_source_primitive(BoundaryPrimitive::Landlock);
+
+        let err = validate_credit_attribution(entry.boundary, entry.source_primitives[0])
+            .expect_err("serialized Landlock source must not validate for network");
+        assert_eq!(err.boundary, BoundaryDimension::Network);
+        assert_eq!(err.primitive, BoundaryPrimitive::Landlock);
+    }
+
+    #[test]
     fn only_netns_earns_network_credit() {
         for primitive in BoundaryPrimitive::ALL {
             let result = validate_credit_attribution(BoundaryDimension::Network, *primitive);
@@ -253,7 +327,9 @@ mod tests {
 
     #[test]
     fn network_credit_requires_netns_evidence() {
-        let credit = EffectiveBoundaryCredit::network_physically_bounded(NetnsApplied::for_test());
+        let credit = EffectiveBoundaryCredit::network_physically_bounded(
+            NetnsApplied::from_supervisor_netns_success(),
+        );
         assert_eq!(credit.boundary(), BoundaryDimension::Network);
         assert_eq!(
             credit.source_primitive(),
@@ -263,7 +339,23 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_credit_accepts_only_attributed_primitives() {
+    fn mount_namespace_alone_is_not_filesystem_evidence() {
+        let mount_namespace = MountNamespaceApplied::for_test();
+        let mount_view = MinimalMountViewApplied::for_test();
+
+        let credit =
+            EffectiveBoundaryCredit::filesystem_physically_bounded_from_supervisor_minimal_mount_view_success(
+                mount_namespace,
+                mount_view,
+            )
+            .unwrap();
+        assert_eq!(credit.boundary(), BoundaryDimension::Filesystem);
+        assert_eq!(credit.source_primitive(), BoundaryPrimitive::MountNamespace);
+        assert_eq!(credit.status(), EffectiveBoundaryStatus::PhysicallyBounded);
+    }
+
+    #[test]
+    fn filesystem_credit_accepts_only_complete_attributed_evidence() {
         let overlay = EffectiveBoundaryCredit::filesystem_physically_bounded(
             FilesystemBoundaryEvidence::Overlayfs(OverlayfsApplied::for_test()),
         )
@@ -271,7 +363,10 @@ mod tests {
         assert_eq!(overlay.source_primitive(), BoundaryPrimitive::Overlayfs);
 
         let mount = EffectiveBoundaryCredit::filesystem_physically_bounded(
-            FilesystemBoundaryEvidence::MountNamespace(MountNamespaceApplied::for_test()),
+            FilesystemBoundaryEvidence::MinimalMountView {
+                mount_namespace: MountNamespaceApplied::for_test(),
+                minimal_mount_view: MinimalMountViewApplied::for_test(),
+            },
         )
         .unwrap();
         assert_eq!(mount.source_primitive(), BoundaryPrimitive::MountNamespace);

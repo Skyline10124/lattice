@@ -84,4 +84,43 @@ mod tests {
         assert!(Run::DESCRIPTION.contains("workspace_mutation"));
         assert!(Run::DESCRIPTION.contains("never shell strings"));
     }
+
+    #[test]
+    fn command_run_contract_has_no_supervisor_fields() {
+        let params = serde_json::to_value(RunParams {
+            argv: vec!["echo".into()],
+            cwd: Some(".".into()),
+            env: BTreeMap::new(),
+            timeout_ms: Some(1000),
+            declared_impact: Some(ImpactKind::CommandExecution),
+        })
+        .unwrap();
+        let result = serde_json::to_value(RunResult {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_truncated: None,
+            stderr_truncated: None,
+            stdout_bytes: Some(0),
+            stderr_bytes: Some(0),
+        })
+        .unwrap();
+
+        for forbidden in [
+            "supervisor",
+            "effective_boundary",
+            "host_probe_summary",
+            "boundary_setup_failed_closed",
+            "backend_invoked",
+        ] {
+            assert!(
+                params.get(forbidden).is_none(),
+                "RunParams leaked metadata field {forbidden}"
+            );
+            assert!(
+                result.get(forbidden).is_none(),
+                "RunResult leaked metadata field {forbidden}"
+            );
+        }
+    }
 }

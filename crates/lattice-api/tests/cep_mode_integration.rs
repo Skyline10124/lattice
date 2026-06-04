@@ -27,13 +27,16 @@ use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_native::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
-    CommandIsolationUnsupportedHostBehavior,
+    CommandIsolationUnsupportedHostBehavior, HostProbeEntry, HostProbeReport,
 };
 use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
-use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use lancet_protocol::envelope::{
+    BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope,
+    Impact as EnvelopeImpact, ImpactConfidence, ImpactKind, Intent, Scope,
+};
 use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepErrorCode;
 use lattice_profile::LancetSection;
@@ -214,6 +217,89 @@ async fn cep_mode_integration_off_keeps_command_isolation_config_visible_to_hand
 
     drop(client);
     server_task.abort();
+}
+
+#[tokio::test]
+async fn cep_mode_integration_off_still_runs_production_command_isolation_gate() {
+    let mut config = ServerRunConfig::in_memory_for_tests();
+    config.cep_mode = CepMode::Off;
+    config.command_isolation = CommandIsolationRuntimeConfig {
+        mode: CommandIsolationMode::Enforce,
+        required_boundaries: vec![BoundaryDimension::Network],
+        optional_boundaries: vec![],
+        read_only_toolchain_paths: vec![PathBuf::from("/usr/bin")],
+        scratch_paths: vec![],
+        landlock: CommandIsolationLandlockBehavior::Off,
+        unsupported_host: CommandIsolationUnsupportedHostBehavior::FailClosed,
+        host_probe: Some(HostProbeReport::from_entries([HostProbeEntry::new(
+            lancet_protocol::BoundaryPrimitive::NetworkNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "test host probe available",
+        )])),
+    };
+    let mut capabilities = std::collections::BTreeSet::new();
+    capabilities.insert(Capability::RunCommand {
+        argv_allowlist: vec!["echo".into()],
+    });
+    config
+        .active_envelope
+        .declare(
+            ExecutionEnvelope {
+                intent: Intent {
+                    description: "command isolation gate test".into(),
+                },
+                capabilities,
+                scope: Scope::default(),
+                impact: vec![EnvelopeImpact {
+                    kind: ImpactKind::CommandExecution,
+                    target: ".".into(),
+                    scope: None,
+                    confidence: ImpactConfidence::Conservative,
+                    unknowns: vec![],
+                }],
+                constraints: Constraints::default(),
+                verify: None,
+                on_failure: None,
+                extensions: serde_json::Map::new(),
+            },
+            0,
+            "test-turn",
+        )
+        .await
+        .expect("declare command envelope");
+    let audit = Arc::clone(&config.audit);
+
+    let (client, server) = CepTransport::pair(8);
+    let mut registry = MethodRegistry::new();
+    register_production_method_registry(&mut registry).unwrap();
+    let server_task = tokio::spawn(async move { server.run(registry, config).await.unwrap() });
+
+    let err = client
+        .call::<Run>(RunParams {
+            argv: vec!["echo".into(), "must-not-run".into()],
+            cwd: None,
+            env: Default::default(),
+            timeout_ms: None,
+            declared_impact: Some(ImpactKind::CommandExecution),
+        })
+        .await
+        .expect_err("cep_mode Off must not skip command isolation fail-closed gate");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+
+    drop(client);
+    server_task.abort();
+
+    let row = audit.row_by_audit_id(1).expect("command audit row");
+    let metadata = row.metadata_json.as_deref().expect("metadata json");
+    let metadata: serde_json::Value = serde_json::from_str(metadata).unwrap();
+    assert_eq!(metadata["command_isolation_mode"], "enforce");
+    assert_eq!(metadata["backend_invoked"], false);
+    assert_eq!(metadata["boundary_preflight_failed_closed"], true);
+    assert_eq!(
+        metadata["effective_boundary"]["network"]["status"],
+        "failed_closed"
+    );
 }
 
 #[test]

@@ -163,15 +163,37 @@ pub fn build_effective_env(
         }
     }
 
-    // Check and add allowed params
-    for (key, value) in params_env {
+    effective.extend(build_allowed_params_env(params_env, policy)?);
+
+    Ok(effective)
+}
+
+/// Validate caller-provided command environment keys without inheriting host env.
+pub fn validate_command_env_params(
+    params_env: &BTreeMap<String, String>,
+    policy: &CommandPolicy,
+) -> Result<(), CepError> {
+    for key in params_env.keys() {
         if !policy.allowed_env.contains(key) {
             return Err(env_not_allowed(key));
         }
-        effective.insert(key.clone(), value.clone());
     }
+    Ok(())
+}
 
-    Ok(effective)
+/// Build only validated caller-provided environment entries.
+///
+/// This intentionally ignores `CommandPolicy.inherited_env`; isolated native
+/// execution modes use this helper before adding supervisor-generated values.
+pub fn build_allowed_params_env(
+    params_env: &BTreeMap<String, String>,
+    policy: &CommandPolicy,
+) -> Result<BTreeMap<String, String>, CepError> {
+    validate_command_env_params(params_env, policy)?;
+    Ok(params_env
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
 }
 
 /// Validate requested timeout against policy max.
@@ -532,6 +554,29 @@ mod tests {
         params.insert("RUST_LOG".into(), "trace".into());
         let effective = build_effective_env(&params, &policy).unwrap();
         assert_eq!(effective.get("RUST_LOG").unwrap(), "trace");
+    }
+
+    #[test]
+    fn build_allowed_params_env_does_not_inherit_host_env() {
+        let policy = default_policy();
+        let params = BTreeMap::new();
+
+        let effective = build_allowed_params_env(&params, &policy).unwrap();
+
+        assert!(!effective.contains_key("PATH"));
+        assert!(!effective.contains_key("HOME"));
+    }
+
+    #[test]
+    fn validate_command_env_params_rejects_unallowed_key_without_inheritance() {
+        let policy = default_policy();
+        let mut params = BTreeMap::new();
+        params.insert("OPENAI_API_KEY".into(), "secret".into());
+
+        let err = validate_command_env_params(&params, &policy).unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(err.message.contains("OPENAI_API_KEY"));
     }
 
     // --- Timeout policy tests ---

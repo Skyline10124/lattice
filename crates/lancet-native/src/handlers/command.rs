@@ -10,18 +10,27 @@ use crate::enforcement::guard_l1::{
     has_run_command_capability,
 };
 use crate::enforcement::isolation::{
-    command_boundary_metadata, evaluate_command_boundary_preflight,
+    command_boundary_metadata, evaluate_command_boundary_attempt,
+    evaluate_command_boundary_preflight, unavailable_required_boundaries, BoundaryAttemptOutcome,
+    CommandIsolationAttempt, CommandIsolationMode, CommandIsolationUnsupportedHostBehavior,
+    MinimalMountViewStatus, SupervisorSetupStatus,
 };
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
 use crate::executor::limits::ToolLimits;
-use crate::executor::shell::{execute_argv, BoundedStreamOutput, ExecuteConfig};
+use crate::executor::shell::{
+    execute_argv, execute_argv_supervised, BoundedStreamOutput, ExecuteConfig,
+    SupervisedCommandError, SupervisorExecution,
+};
+use crate::executor::supervisor::env::build_isolated_env;
+use crate::executor::supervisor::{default_executable_view_paths, SupervisorPlan};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::envelope_store::EnvelopeRecord;
 use lancet_authority::policy::command::{
-    build_effective_env, classify_command, validate_timeout, EffectiveImpact,
+    build_allowed_params_env, build_effective_env, classify_command, validate_timeout,
+    EffectiveImpact,
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
@@ -31,7 +40,7 @@ use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Register native `exec.command_run` handler.
@@ -56,7 +65,7 @@ async fn handle_run_as(
     let policy = &ctx.cep_context.policy.command;
 
     // 3. Classify command
-    let effective_impact = classify_command(&params.argv, params.declared_impact, policy)?;
+    let effective_impact = classify_command(&params.argv, params.declared_impact.clone(), policy)?;
 
     // 4. HardDenied -> return GuardDenied error
     if effective_impact == EffectiveImpact::HardDenied {
@@ -184,35 +193,38 @@ async fn handle_run_as(
     // 7. Validate timeout
     let effective_timeout = validate_timeout(params.timeout_ms, policy)?;
 
-    // 8. Build effective env
-    let effective_env = build_effective_env(&params.env, policy)?;
-
-    // 8b. Command physical-boundary preflight. This is independent from
-    // cep_mode: CepMode::Off only skips effect-region checking, not requested
-    // command isolation boundaries.
-    let boundary_preflight = evaluate_command_boundary_preflight(&ctx.command_isolation);
-    let boundary_metadata = command_boundary_metadata(&ctx.command_isolation, &boundary_preflight);
-    ctx.record_durable_metadata(boundary_metadata.clone());
-    ctx.events
-        .emit(
-            "cep.command_metadata",
-            json!({ "method": method, "metadata": boundary_metadata }),
-        )
-        .await;
-    if boundary_preflight.should_fail_closed() {
-        return Err(command_boundary_fail_closed_error(
-            method,
-            &boundary_preflight,
-        ));
-    }
-
-    // 9. Execute via rewritten execute_argv with bounded tail reader
     let project_root = ctx
         .cep_context
         .policy
         .project_root
         .to_string_lossy()
         .to_string();
+
+    // 8. Build effective env and supervisor attempt. Isolation `off`
+    // preserves compatibility host env inheritance; isolated modes validate
+    // caller env before planning and use supervisor-generated allowlist env.
+    let execution_plan = prepare_command_execution_plan(&ctx, policy, &params, &project_root)?;
+
+    // 8b. Pre-known command physical-boundary decisions. Live supervisor
+    // attempts are recorded after the child setup report is received, because
+    // host-probe availability alone is not applied evidence.
+    if execution_plan.supervisor_plan.is_none() {
+        let boundary_preflight = match execution_plan.boundary_attempt.as_ref() {
+            Some(attempt) => {
+                evaluate_command_boundary_attempt(&ctx.command_isolation, Some(attempt))
+            }
+            None => evaluate_command_boundary_preflight(&ctx.command_isolation),
+        };
+        record_command_boundary_preflight(&ctx, method, &boundary_preflight).await;
+        if boundary_preflight.should_fail_closed() {
+            return Err(command_boundary_fail_closed_error(
+                method,
+                &boundary_preflight,
+            ));
+        }
+    }
+
+    // 9. Execute via rewritten execute_argv with bounded tail reader
     let mut cancellation = ctx.cancellation.clone();
 
     // 9a. Pre-execution baseline for WorkspaceMutation commands.
@@ -222,17 +234,65 @@ async fn handle_run_as(
         HashMap::new()
     };
 
-    let result = execute_argv(ExecuteConfig {
+    let execute_config = ExecuteConfig {
         project_root: &project_root,
         limits: &ToolLimits::default(),
-        argv: &params.argv,
+        argv: &execution_plan.argv,
         cwd: params.cwd.as_deref(),
-        env: &effective_env,
+        env: &execution_plan.effective_env,
         timeout_ms: Some(effective_timeout),
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
-    })
-    .await;
+    };
+    let result = match execution_plan.supervisor_plan {
+        Some(plan) => {
+            match execute_argv_supervised(execute_config, SupervisorExecution::Live { plan }).await
+            {
+                Ok(output) => {
+                    record_command_boundary_attempt(&ctx, method, &output.setup_attempt).await;
+                    Ok((output.output, output.stdout_meta, output.stderr_meta))
+                }
+                Err(err) if should_run_unbounded_fallback(&ctx.command_isolation, &err) => {
+                    if let Some(attempt) = err.setup_attempt.as_ref() {
+                        record_command_boundary_attempt(&ctx, method, attempt).await;
+                    }
+                    let fallback_env = build_unbounded_fallback_env(&params.env, policy)?;
+                    let mut fallback_cancellation = ctx.cancellation.clone();
+                    let fallback_config = ExecuteConfig {
+                        project_root: &project_root,
+                        limits: &ToolLimits::default(),
+                        argv: &params.argv,
+                        cwd: params.cwd.as_deref(),
+                        env: &fallback_env,
+                        timeout_ms: Some(effective_timeout),
+                        cancellation: &mut fallback_cancellation,
+                        max_output_bytes: policy.max_output_bytes,
+                    };
+                    execute_argv(fallback_config)
+                        .await
+                        .map_err(|error| CommandExecutionFailure {
+                            error,
+                            backend_invoked: true,
+                        })
+                }
+                Err(err) => {
+                    if let Some(attempt) = err.setup_attempt.as_ref() {
+                        record_command_boundary_attempt(&ctx, method, attempt).await;
+                    }
+                    Err(CommandExecutionFailure {
+                        backend_invoked: supervised_error_backend_invoked(&err),
+                        error: err.error,
+                    })
+                }
+            }
+        }
+        None => execute_argv(execute_config)
+            .await
+            .map_err(|error| CommandExecutionFailure {
+                error,
+                backend_invoked: true,
+            }),
+    };
 
     // 10. Handle result
     match result {
@@ -356,7 +416,7 @@ async fn handle_run_as(
                 stderr_bytes: Some(stderr_meta.total_bytes),
             })
         }
-        Err(err) => {
+        Err(failure) => {
             let diff = if effective_impact == EffectiveImpact::WorkspaceMutation {
                 if let Some(ref record) = active_record {
                     Some(
@@ -380,13 +440,13 @@ async fn handle_run_as(
             ctx.record_durable_metadata(json!({
                 "classification": format!("{:?}", effective_impact),
                 "envelope_id": envelope_id,
-                "error_code": err.code.as_i32(),
-                "backend_invoked": true,
+                "error_code": failure.error.code.as_i32(),
+                "backend_invoked": failure.backend_invoked,
                 "policy_enforced": true,
             }));
             ctx.record_durable_metadata(command_observation_metadata(&effective_impact));
 
-            emit_denial_metadata(&ctx, "execution_error", true, method).await;
+            emit_denial_metadata(&ctx, "execution_error", failure.backend_invoked, method).await;
 
             if let Some(diff) = diff {
                 if !diff.out_of_scope_paths.is_empty() {
@@ -397,7 +457,7 @@ async fn handle_run_as(
                 }
             }
 
-            Err(err)
+            Err(failure.error)
         }
     }
 }
@@ -416,6 +476,181 @@ fn command_boundary_fail_closed_error(
         }),
         Retriability::Permanent,
     )
+}
+
+struct PreparedCommandExecution {
+    argv: Vec<String>,
+    effective_env: BTreeMap<String, String>,
+    boundary_attempt: Option<CommandIsolationAttempt>,
+    supervisor_plan: Option<SupervisorPlan>,
+}
+
+struct CommandExecutionFailure {
+    error: CepError,
+    backend_invoked: bool,
+}
+
+fn prepare_command_execution_plan(
+    ctx: &HandlerContext,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+    params: &RunParams,
+    project_root: &str,
+) -> Result<PreparedCommandExecution, CepError> {
+    match ctx.command_isolation.mode {
+        CommandIsolationMode::Off => Ok(PreparedCommandExecution {
+            argv: params.argv.clone(),
+            effective_env: build_effective_env(&params.env, policy)?,
+            boundary_attempt: None,
+            supervisor_plan: None,
+        }),
+        CommandIsolationMode::Enforce | CommandIsolationMode::Audit => {
+            build_allowed_params_env(&params.env, policy)?;
+            if ctx.command_isolation.mode == CommandIsolationMode::Enforce
+                && required_host_boundaries_unavailable(&ctx.command_isolation)
+            {
+                return Ok(PreparedCommandExecution {
+                    argv: params.argv.clone(),
+                    effective_env: BTreeMap::new(),
+                    boundary_attempt: None,
+                    supervisor_plan: None,
+                });
+            }
+            match SupervisorPlan::build(
+                Path::new(project_root),
+                params.cwd.as_deref(),
+                &params.argv,
+                &ctx.command_isolation,
+            ) {
+                Ok(plan) => {
+                    let isolated_env =
+                        build_isolated_env(&params.env, policy, &plan, &BTreeMap::new())?;
+                    let argv = supervised_argv(&params.argv, &plan);
+                    Ok(PreparedCommandExecution {
+                        argv,
+                        effective_env: isolated_env.values,
+                        boundary_attempt: None,
+                        supervisor_plan: Some(plan),
+                    })
+                }
+                Err(err) => {
+                    let attempt = boundary_attempt_from_plan_error(&err);
+                    if ctx.command_isolation.mode == CommandIsolationMode::Enforce {
+                        Ok(PreparedCommandExecution {
+                            argv: params.argv.clone(),
+                            effective_env: BTreeMap::new(),
+                            boundary_attempt: Some(attempt),
+                            supervisor_plan: None,
+                        })
+                    } else {
+                        let fallback_plan = SupervisorPlan::env_fd_hygiene(
+                            Path::new("/project").to_path_buf(),
+                            Path::new("/project").to_path_buf(),
+                            default_executable_view_paths(),
+                            vec![Path::new("/tmp").to_path_buf()],
+                        );
+                        let isolated_env = build_isolated_env(
+                            &params.env,
+                            policy,
+                            &fallback_plan,
+                            &BTreeMap::new(),
+                        )?;
+                        Ok(PreparedCommandExecution {
+                            argv: params.argv.clone(),
+                            effective_env: isolated_env.values,
+                            boundary_attempt: Some(attempt),
+                            supervisor_plan: None,
+                        })
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn supervised_argv(params_argv: &[String], plan: &SupervisorPlan) -> Vec<String> {
+    let mut argv = params_argv.to_vec();
+    if let Some(first) = argv.first_mut() {
+        *first = plan.executable.view_path.to_string_lossy().into_owned();
+    }
+    argv
+}
+
+fn required_host_boundaries_unavailable(
+    config: &crate::enforcement::isolation::CommandIsolationRuntimeConfig,
+) -> bool {
+    let preflight = evaluate_command_boundary_preflight(config);
+    !unavailable_required_boundaries(&preflight.host_probe, &config.required_boundaries).is_empty()
+}
+
+async fn record_command_boundary_preflight(
+    ctx: &HandlerContext,
+    method: &str,
+    preflight: &crate::enforcement::isolation::CommandBoundaryPreflight,
+) {
+    let metadata = command_boundary_metadata(&ctx.command_isolation, preflight);
+    ctx.record_durable_metadata(metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": metadata }),
+        )
+        .await;
+}
+
+async fn record_command_boundary_attempt(
+    ctx: &HandlerContext,
+    method: &str,
+    attempt: &CommandIsolationAttempt,
+) {
+    let preflight = evaluate_command_boundary_attempt(&ctx.command_isolation, Some(attempt));
+    record_command_boundary_preflight(ctx, method, &preflight).await;
+}
+
+fn should_run_unbounded_fallback(
+    config: &crate::enforcement::isolation::CommandIsolationRuntimeConfig,
+    error: &SupervisedCommandError,
+) -> bool {
+    config.mode == CommandIsolationMode::Audit
+        && config.unsupported_host == CommandIsolationUnsupportedHostBehavior::AllowUnbounded
+        && error
+            .setup_attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.outcome.failed_closed)
+}
+
+fn supervised_error_backend_invoked(error: &SupervisedCommandError) -> bool {
+    !error
+        .setup_attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.outcome.failed_closed)
+}
+
+fn build_unbounded_fallback_env(
+    params_env: &BTreeMap<String, String>,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+) -> Result<BTreeMap<String, String>, CepError> {
+    let fallback_plan = SupervisorPlan::env_fd_hygiene(
+        Path::new("/project").to_path_buf(),
+        Path::new("/project").to_path_buf(),
+        default_executable_view_paths(),
+        vec![Path::new("/tmp").to_path_buf()],
+    );
+    Ok(build_isolated_env(params_env, policy, &fallback_plan, &BTreeMap::new())?.values)
+}
+
+fn boundary_attempt_from_plan_error(err: &CepError) -> CommandIsolationAttempt {
+    CommandIsolationAttempt::new(BoundaryAttemptOutcome {
+        supervisor_backend: Some("supervisor_plan".to_string()),
+        setup_failure_stage: Some("plan".to_string()),
+        setup_failure_reason: Some(err.message.clone()),
+        failed_closed: true,
+        network_namespace_status: SupervisorSetupStatus::FailedClosed,
+        mount_namespace_status: SupervisorSetupStatus::FailedClosed,
+        minimal_mount_view_status: MinimalMountViewStatus::FailedClosed,
+        fd_cleanup_status: Some("not_applied".to_string()),
+        env_policy: Some("not_applied".to_string()),
+        ..BoundaryAttemptOutcome::default()
+    })
 }
 
 #[derive(Debug, Default)]

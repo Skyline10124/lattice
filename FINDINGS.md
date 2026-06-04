@@ -79,6 +79,30 @@
   4. **分步落地**：先做纯函数抽取（结构不变、行为不变，过现有测试），再单独做 clone/ownership 收敛，避免一次大 diff 同时改结构与所有权。
 - **排期**: 与 L-22 合并到一次 agent-loop 重构窗口；非 v1.3-alpha 开场项。
 
+### L-29-01: Phase 29 tmpfs root 路径以 child PID 命名 — `isolation-supervisor` / `future-proofing`
+- **位置**: `crates/lancet-native/src/executor/supervisor/syscall.rs:471-473`、`crates/lancet-native/src/executor/supervisor/syscall.rs:93-99`、`crates/lancet-native/src/executor/supervisor/syscall.rs:230-248`
+- **问题**: `tmpfs_root_path()` 使用 `/tmp/lattice-supervisor-root-{pid}`。当前 Phase 29 在 child pre-exec 中创建并挂载 tmpfs root，PID 是正在 setup 的 child，且 root 只在 pivot 前短暂存在；并发命令不会共享同一个 child PID。风险只在未来如果把 tmpfs root 改为 parent 侧预建、跨进程缓存或提前复用路径时，PID 回收可能导致路径碰撞或清理误伤。
+- **当前状态**: 当前实现安全，非 bug。`LiveSupervisorSyscalls::Drop` 在 pivot 前失败时会清理 `tmpfs_root`，pivot 成功后 `detach_old_root` 将 `tmpfs_root = None`，避免 parent-side Drop 误清理已经成为 `/` 的 tmpfs view。
+- **计划**: 若未来把 mount root 创建移到 parent 侧或引入复用/并发预建，改用 `tempfile::TempDir`/`mkdtemp` 风格随机目录并把生命周期绑定到 setup attempt；保持 child pre-exec 现状则无需改动。
+
+### L-29-02: Phase 29 setup report pipe 8192 字节读取上限 — `isolation-supervisor` / `diagnostics`
+- **位置**: `crates/lancet-native/src/executor/shell.rs:680-699`
+- **问题**: `SetupReportPipe::read_report()` 最多读取约 8192 字节后停止。当前 setup report 只包含紧凑状态标签、stage 名称和少量诊断，远低于该限制；如果后续把 mount 列表、完整 syscall diagnostics、Landlock rule 明细或长错误链塞进 setup report，可能截断 JSON，导致 parent 侧 `decode_setup_attempt_report` 失败并回退到 fallback metadata。
+- **当前状态**: 当前 Phase 29 行为正确，非 bug。限制是隐含的诊断容量约束。
+- **计划**: 若 setup report payload 扩展，增加显式长度前缀/完整读取上限错误、压缩 diagnostics，或把 verbose diagnostics 写入独立审计记录；同时加一个超过上限的回归测试，确认不会静默降级为误导性边界证据。
+
+### L-29-03: FD cleanup 的 rlimit fallback 遇到 `close` 非 EBADF 错误会整体 fallback — `isolation-supervisor` / `robustness`
+- **位置**: `crates/lancet-native/src/executor/supervisor/fd.rs:122-136`、`crates/lancet-native/src/executor/supervisor/fd.rs:222-232`
+- **问题**: `cleanup_with_rlimit_loop()` 对每个 fd 调 `close_fd(fd)?`，`live_close_fd()` 只把 `EBADF` 视为成功；其他错误会中断 rlimit loop 并进入 `/proc/self/fd` fallback。Linux 上 `close(2)` 返回 `EINTR` 时 fd 状态语义微妙，fd 通常不能安全重试；当前把它当 error 是保守选择，但会把 cleanup method 从 rlimit loop 降级到 proc-fd loop。
+- **当前状态**: 当前实现安全，非 bug。`close_range` 优先，rlimit loop 失败后还有 `/proc/self/fd` fallback；若最终 cleanup 失败，边界 evidence fail-closed，不会误给 fd cleanup credit。
+- **计划**: 若需要减少 rare-platform 噪声，可把 `EINTR` 作为 “close attempted; continue without retry” 的特殊状态，或在 report 中记录 partial close/fallback reason；改动前需保留 non-stdio fd 不泄漏的 live canary。
+
+### L-29-04: Phase 29 live canary 和 fake matrix 覆盖充分但用途不同 — `verification` / `release-gate`
+- **位置**: `crates/lancet-native/src/executor/supervisor/linux.rs:809-874`、`crates/lancet-native/src/executor/supervisor/live_tests.rs:55-75`、`crates/lancet-native/src/executor/supervisor/env.rs:118-139`
+- **问题**: Phase 29 的 coverage 由几类测试共同支撑：fake failure matrix 覆盖每个 supervisor stage 的 fail-closed 映射；attribution tests 确认 Landlock 不给 network credit、mount namespace alone 不给 filesystem credit；live canary 在真实内核上覆盖 netns/mount/fd/Landlock；env tests 注入 HOME、SSH agent、tokens、LD/Python/Node/Rust/Cargo 等危险 host vars 并证明 allowlist 构造不继承它们。这里没有单一测试同时证明所有维度，后续 release gate 不应把某一类测试的通过误读成完整 proof。
+- **当前状态**: 当前覆盖与 Phase 29 目标匹配，非 bug。live canary 是 host-specific evidence；fake matrix 是 deterministic fail-closed proof；env tests 是 construction proof。
+- **计划**: Phase 32 rollout gate 如需发布级证明，应保持三类证据分层展示：deterministic unit/fake、current-host live canary、profile/doctor host probe；禁止把 `skipped_unsupported` 或 fake-only evidence 当作 current-host physical proof。
+
 ## P22.5 supervision verification (2026-05-28)
 
 Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).
