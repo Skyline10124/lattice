@@ -165,6 +165,93 @@ honestly, with `landlock_abi_version` and `landlock_rights_mask` when known.
 Landlock is not a network boundary and is not a substitute for minimal
 mount-view evidence.
 
+### Phase 30 overlay modes and artifact commit
+
+Phase 30 keeps `exec.command_run` as the single command method. Overlay routing
+is a native implementation detail selected from command impact and
+`[lancet.isolation.command].mode`; it is reported through command metadata and
+audit metadata, not through a new agent-visible command tool or public command
+result shape.
+
+When command isolation mode is `off`, no overlay is requested. Diagnostic
+commands run through the real-workspace compatibility path and metadata records
+`overlay_status = "not_requested"`. Workspace-mutation commands also use the
+existing snapshot-diff path, so artifact adjudication records
+`artifact_adjudication = "skipped_no_overlay"` rather than claiming overlay
+protection.
+
+In `enforce` and `audit`, diagnostic commands request a diagnostic overlay. The
+command sees an overlay view and upper-layer changes are discarded on success,
+nonzero exit, timeout, cancellation, denial, setup failure, and cleanup failure.
+Diagnostic lower drift may be reported, but no artifact is committed from this
+mode.
+
+Artifact commands request artifact staging. The command writes to overlay upper,
+then native LANCET scans that upper layer into a typed manifest before any real
+workspace mutation. Unsupported artifact kinds are rejected and discarded in
+v1.4-alpha, including device nodes, FIFOs, sockets, hardlinks, unsupported
+extended attributes, opaque-directory markers, and other special host semantics.
+Rejected kind denial records `artifact_adjudication = "denied_unsupported_kind"`
+and `rejected_kinds`.
+
+Accepted artifact manifests are checked against the active WritePath capability
+and effect-region policy, then verified against a candidate artifact view. The
+verify command runs with its own discard layer; verify writes never become part
+of the artifact manifest, committed artifact set, or final lower-baseline
+validation object. Verify metadata records `verify_layer`, with
+`"discarded"` for a successful discarded verify layer and `"cleanup_failed"` if
+verify cleanup could not complete.
+
+Before artifact bytes reach the real workspace, LANCET performs a final lower
+consistency recheck against the pre-verify lower/workspace baseline. Lower drift
+denies commit, discards staged artifact content, and records
+`lower_consistency = "drift_detected"` plus
+`artifact_adjudication = "denied_lower_drift"`. Cleanup failures for command
+children, overlay mounts, namespace references, verify layers, upper/work dirs,
+or busy mountpoints are recorded in `cleanup_outcome`; artifact cleanup failure
+blocks commit rather than applying a possibly stale artifact set.
+
+When artifact commit is accepted, the real workspace apply is serialized inside
+the native process: lower recheck and stable ordered apply run without
+interleaving from another in-process artifact commit. This is serialized
+no-interleaving alpha behavior, not crash-safe multi-file transaction
+atomicity. If an apply fails partway through, metadata records
+`commit_outcome = "partial"`, `applied_entries`, and `failed_entry`; v1.4-alpha
+does not claim rollback for already-applied filesystem entries.
+
+Audit fallback is explicit. In `audit` with unsupported-host fallback allowed,
+setup failure can run the unbounded real-workspace path, but metadata records
+`overlay_status = "not_applied"` and
+`artifact_adjudication = "skipped_no_overlay"`. A skipped overlay is diagnostic
+only; it is not physical-boundary proof.
+
+Overlay/artifact metadata keys emitted by command metadata include:
+
+| Key | Meaning |
+|-----|---------|
+| `overlay_mode` | `diagnostic`, `artifact`, `candidate_verify`, or `none` depending on the native path. |
+| `overlay_status` | `applied`, `not_applied`, `setup_failed`, or `not_requested`. |
+| `overlay_disposition` | `discarded`, `committed`, `denied`, or `not_applied`. |
+| `lower_consistency` | Lower recheck status such as `unchanged`, `drift_detected`, `not_checked`, or `check_failed`. |
+| `artifact_manifest_status` | Manifest outcome such as `accepted`, `denied`, or `not_scanned`. |
+| `artifact_adjudication` | Artifact decision such as `accepted`, `skipped_no_overlay`, `denied_unsupported_kind`, `denied_write_scope`, `denied_effect_region`, `denied_verify_failed`, `denied_lower_drift`, or `denied_cleanup_failed`. |
+| `verify_layer` | Candidate verify layer status such as `not_run`, `applied`, `discarded`, or `cleanup_failed`. |
+| `cleanup_outcome` | Overlay cleanup result, including `cleanup_succeeded` or `cleanup_failed`. |
+| `commit_outcome` | Artifact apply result such as `not_started`, `committed`, `denied`, or `partial`. |
+| `rejected_kinds` | Unsupported artifact kind records with path, kind, and reason. |
+| `applied_entries` | Artifact entries applied before success or partial failure. |
+| `failed_entry` | The entry and error that stopped a partial apply or cleanup-gated commit. |
+
+Overlay discard does not make network effects reversible. Command network
+soundness remains attributed only to applied network namespace evidence, never
+to OverlayFS, Landlock, mount namespaces, or artifact cleanup.
+
+Phase 30 live overlay canaries are part of the ignored
+`LATTICE_LINUX_ISOLATION_LIVE=1` suite. They classify each scenario as
+`passed`, `skipped_unsupported`, or `failed`. Only `passed` is evidence on that
+host; `skipped_unsupported` reports missing kernel/setup primitives and is
+diagnostic only.
+
 ## Mutation and command observation
 
 ### Hashline patches

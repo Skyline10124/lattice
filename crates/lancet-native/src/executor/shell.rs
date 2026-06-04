@@ -15,7 +15,14 @@ use crate::executor::limits::ToolLimits;
 use crate::executor::supervisor::linux::{
     boundary_attempt_from_supervisor, run_linux_supervisor_attempt,
 };
+#[cfg(test)]
+use crate::executor::supervisor::overlay::CleanupFailureKind;
+use crate::executor::supervisor::overlay::{
+    cleanup_overlay, OverlayCleanupReport, OverlayDisposition, OverlayMode, OverlayPlan,
+};
 use crate::executor::supervisor::syscall::LiveSupervisorSyscalls;
+#[cfg(test)]
+use crate::executor::supervisor::syscall::SupervisorSyscalls;
 use crate::executor::supervisor::SupervisorPlan;
 use crate::server::registry::Cancellation;
 use lancet_authority::{
@@ -257,10 +264,46 @@ pub(crate) enum SupervisorExecution {
     Fixed {
         attempt: CommandIsolationAttempt,
         behavior: SupervisorPreExecBehavior,
+        overlay: Option<FixedOverlayExecution>,
     },
     Live {
         plan: SupervisorPlan,
     },
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct FixedOverlayExecution {
+    plan: OverlayPlan,
+    cleanup_failures: Vec<CleanupFailureKind>,
+}
+
+#[cfg(test)]
+impl FixedOverlayExecution {
+    pub(crate) fn new(plan: OverlayPlan) -> Self {
+        Self {
+            plan,
+            cleanup_failures: Vec::new(),
+        }
+    }
+
+    pub(crate) fn failing(plan: OverlayPlan, failure: CleanupFailureKind) -> Self {
+        Self {
+            plan,
+            cleanup_failures: vec![failure],
+        }
+    }
+
+    pub(crate) fn plan(&self) -> &OverlayPlan {
+        &self.plan
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OverlayExecution {
+    plan: OverlayPlan,
+    #[cfg(test)]
+    cleanup_failures: Option<Vec<CleanupFailureKind>>,
 }
 
 /// Successful supervised command output plus the setup attempt reported by the
@@ -271,6 +314,8 @@ pub(crate) struct SupervisedCommandOutput {
     pub(crate) stdout_meta: BoundedStreamOutput,
     pub(crate) stderr_meta: BoundedStreamOutput,
     pub(crate) setup_attempt: CommandIsolationAttempt,
+    #[allow(dead_code)]
+    pub(crate) overlay_cleanup: Option<OverlayCleanupReport>,
 }
 
 /// Supervised command error. Setup failures carry the child-reported attempt so
@@ -279,6 +324,8 @@ pub(crate) struct SupervisedCommandOutput {
 pub(crate) struct SupervisedCommandError {
     pub(crate) error: CepError,
     pub(crate) setup_attempt: Option<CommandIsolationAttempt>,
+    #[allow(dead_code)]
+    pub(crate) overlay_cleanup: Option<OverlayCleanupReport>,
 }
 
 /// Unsafe pre-exec checklist for the supervised command handoff.
@@ -297,6 +344,16 @@ pub(crate) const SUPERVISOR_PRE_EXEC_SAFETY_CHECKLIST: &str =
      or trait-object dispatch after fork";
 
 impl SupervisorExecution {
+    pub(crate) fn overlay_plan(&self) -> Option<&OverlayPlan> {
+        match self {
+            #[cfg(test)]
+            SupervisorExecution::Fixed { overlay, .. } => {
+                overlay.as_ref().map(|overlay| overlay.plan())
+            }
+            SupervisorExecution::Live { plan } => plan.overlay_plan.as_ref(),
+        }
+    }
+
     fn fallback_attempt(&self) -> Option<CommandIsolationAttempt> {
         match self {
             #[cfg(test)]
@@ -305,11 +362,32 @@ impl SupervisorExecution {
         }
     }
 
+    fn overlay_execution(&self) -> Option<OverlayExecution> {
+        match self {
+            #[cfg(test)]
+            SupervisorExecution::Fixed { overlay, .. } => {
+                overlay.as_ref().map(|overlay| OverlayExecution {
+                    plan: overlay.plan.clone(),
+                    cleanup_failures: Some(overlay.cleanup_failures.clone()),
+                })
+            }
+            SupervisorExecution::Live { plan } => {
+                plan.overlay_plan.as_ref().map(|plan| OverlayExecution {
+                    plan: plan.clone(),
+                    #[cfg(test)]
+                    cleanup_failures: None,
+                })
+            }
+        }
+    }
+
     #[cfg(unix)]
     fn run_pre_exec_attempt(&self, setup_report_fd: RawFd) -> CommandIsolationAttempt {
         match self {
             #[cfg(test)]
-            SupervisorExecution::Fixed { attempt, behavior } => {
+            SupervisorExecution::Fixed {
+                attempt, behavior, ..
+            } => {
                 let mut attempt = attempt.clone();
                 attempt.outcome.failed_closed =
                     *behavior == SupervisorPreExecBehavior::FailBeforeExec;
@@ -367,10 +445,12 @@ pub(crate) async fn execute_argv_supervised(
             setup_attempt: outcome
                 .setup_attempt
                 .expect("supervised execution must report setup attempt"),
+            overlay_cleanup: outcome.overlay_cleanup,
         })
         .map_err(|err| SupervisedCommandError {
             error: err.error,
             setup_attempt: err.setup_attempt,
+            overlay_cleanup: err.overlay_cleanup,
         })
 }
 
@@ -380,12 +460,14 @@ struct ExecuteInnerOutput {
     stdout_meta: BoundedStreamOutput,
     stderr_meta: BoundedStreamOutput,
     setup_attempt: Option<CommandIsolationAttempt>,
+    overlay_cleanup: Option<OverlayCleanupReport>,
 }
 
 #[derive(Debug)]
 struct ExecuteInnerError {
     error: CepError,
     setup_attempt: Option<CommandIsolationAttempt>,
+    overlay_cleanup: Option<OverlayCleanupReport>,
 }
 
 async fn execute_argv_inner(
@@ -405,11 +487,13 @@ async fn execute_argv_inner(
     validate_command_inputs(argv, env).map_err(|error| ExecuteInnerError {
         error,
         setup_attempt: None,
+        overlay_cleanup: None,
     })?;
 
     let cwd = resolve_command_cwd(project_root, cwd).map_err(|error| ExecuteInnerError {
         error,
         setup_attempt: None,
+        overlay_cleanup: None,
     })?;
     let max_ms = std::cmp::max(limits.max_command_timeout, 1) as u64 * 1000;
     let timeout_ms = timeout_ms.unwrap_or(max_ms);
@@ -433,12 +517,17 @@ async fn execute_argv_inner(
         cmd.env(key, value);
     }
 
+    let overlay_execution = supervisor
+        .as_ref()
+        .and_then(SupervisorExecution::overlay_execution);
+
     #[cfg(unix)]
     let mut setup_pipe = match supervisor {
         Some(supervisor) => {
             let pipe = SetupReportPipe::new().map_err(|error| ExecuteInnerError {
                 error,
                 setup_attempt: None,
+                overlay_cleanup: cleanup_overlay_after_terminal(overlay_execution.as_ref(), true),
             })?;
             let fallback_attempt = supervisor.fallback_attempt();
             install_supervisor_pre_exec(&mut cmd, pipe.child_write, supervisor);
@@ -459,6 +548,7 @@ async fn execute_argv_inner(
                 Retriability::Permanent,
             ),
             setup_attempt: None,
+            overlay_cleanup: cleanup_overlay_after_terminal(overlay_execution.as_ref(), true),
         });
     }
 
@@ -475,17 +565,26 @@ async fn execute_argv_inner(
                         return Err(ExecuteInnerError {
                             error: supervisor_setup_failed_error(&argv[0], &attempt),
                             setup_attempt: Some(attempt),
+                            overlay_cleanup: cleanup_overlay_after_terminal(
+                                overlay_execution.as_ref(),
+                                true,
+                            ),
                         });
                     }
                     return Err(ExecuteInnerError {
                         error: spawn_failed_error(&argv[0], e),
                         setup_attempt: Some(attempt),
+                        overlay_cleanup: cleanup_overlay_after_terminal(
+                            overlay_execution.as_ref(),
+                            true,
+                        ),
                     });
                 }
             }
             return Err(ExecuteInnerError {
                 error: spawn_failed_error(&argv[0], e),
                 setup_attempt: None,
+                overlay_cleanup: cleanup_overlay_after_terminal(overlay_execution.as_ref(), true),
             });
         }
     };
@@ -497,6 +596,7 @@ async fn execute_argv_inner(
         if let Some(attempt) = setup_attempt.as_ref() {
             if attempt.outcome.failed_closed {
                 let cleanup = kill_and_reap_child(&mut child).await;
+                let child_cleanup_succeeded = cleanup.is_ok();
                 let error = match cleanup {
                     Ok(()) => supervisor_setup_failed_error(&argv[0], attempt),
                     Err(err) => child_kill_failed(&argv[0], err),
@@ -504,6 +604,10 @@ async fn execute_argv_inner(
                 return Err(ExecuteInnerError {
                     error,
                     setup_attempt,
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        child_cleanup_succeeded,
+                    ),
                 });
             }
         }
@@ -543,6 +647,10 @@ async fn execute_argv_inner(
                         stdout_meta,
                         stderr_meta,
                         setup_attempt: setup_attempt.clone(),
+                        overlay_cleanup: cleanup_overlay_after_terminal(
+                            overlay_execution.as_ref(),
+                            true,
+                        ),
                     })
                 }
                 Err(e) => {
@@ -561,6 +669,10 @@ async fn execute_argv_inner(
                             Retriability::Transient,
                         ),
                         setup_attempt: setup_attempt.clone(),
+                        overlay_cleanup: cleanup_overlay_after_terminal(
+                            overlay_execution.as_ref(),
+                            true,
+                        ),
                     })
                 }
             }
@@ -585,10 +697,18 @@ async fn execute_argv_inner(
                         Retriability::Permanent,
                     ),
                     setup_attempt: setup_attempt.clone(),
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        true,
+                    ),
                 }),
                 Err(err) => Err(ExecuteInnerError {
                     error: child_kill_failed(&argv[0], err),
                     setup_attempt: setup_attempt.clone(),
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        false,
+                    ),
                 }),
             }
         }
@@ -612,16 +732,255 @@ async fn execute_argv_inner(
                         Retriability::Transient,
                     ),
                     setup_attempt: setup_attempt.clone(),
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        true,
+                    ),
                 }),
                 Err(err) => Err(ExecuteInnerError {
                     error: child_kill_failed(&argv[0], err),
                     setup_attempt: setup_attempt.clone(),
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        false,
+                    ),
                 }),
             }
         }
     };
 
     result
+}
+
+fn cleanup_overlay_after_terminal(
+    overlay: Option<&OverlayExecution>,
+    child_cleanup_succeeded: bool,
+) -> Option<OverlayCleanupReport> {
+    let overlay = overlay?;
+    if overlay.plan.mode == OverlayMode::Artifact {
+        return None;
+    }
+    #[cfg(test)]
+    if let Some(failures) = overlay.cleanup_failures.as_ref() {
+        let mut syscalls = FixedOverlayCleanupSyscalls::new(failures.clone());
+        return Some(cleanup_overlay(
+            &overlay.plan,
+            OverlayDisposition::Discarded,
+            child_cleanup_succeeded,
+            &mut syscalls,
+        ));
+    }
+
+    let mut syscalls = LiveSupervisorSyscalls::default();
+    Some(cleanup_overlay(
+        &overlay.plan,
+        OverlayDisposition::Discarded,
+        child_cleanup_succeeded,
+        &mut syscalls,
+    ))
+}
+
+#[cfg(test)]
+struct FixedOverlayCleanupSyscalls {
+    failures: Vec<CleanupFailureKind>,
+}
+
+#[cfg(test)]
+impl FixedOverlayCleanupSyscalls {
+    fn new(failures: Vec<CleanupFailureKind>) -> Self {
+        Self { failures }
+    }
+
+    fn fails(&self, kind: CleanupFailureKind) -> bool {
+        self.failures.contains(&kind)
+    }
+}
+
+#[cfg(test)]
+impl SupervisorSyscalls for FixedOverlayCleanupSyscalls {
+    fn has_cap_sys_admin(
+        &mut self,
+    ) -> Result<bool, crate::executor::supervisor::syscall::SyscallError> {
+        Ok(true)
+    }
+    fn check_unprivileged_user_namespace(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn unshare_user_namespace(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn write_setgroups_deny(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn write_uid_map_current(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn write_gid_map_current(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn unshare_network_namespace(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn assert_no_veth_or_default_route(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn unshare_mount_namespace(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn make_mounts_private(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn mount_tmpfs_root(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn bind_mount(
+        &mut self,
+        _source: &Path,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn remount_read_only(
+        &mut self,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn record_read_only_bind_scope(
+        &mut self,
+        _scope: crate::executor::supervisor::plan::ReadOnlyBindScope,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn mount_scratch_tmpfs(
+        &mut self,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn mount_minimal_device(
+        &mut self,
+        _source: &Path,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn detach_old_root(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn assert_old_root_unreachable(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn chdir(
+        &mut self,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn cleanup_env(&mut self) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn cleanup_fds(&mut self) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn probe_landlock_abi(
+        &mut self,
+    ) -> Result<
+        crate::executor::supervisor::landlock::LandlockAbiProbe,
+        crate::executor::supervisor::syscall::SyscallError,
+    > {
+        Ok(crate::executor::supervisor::landlock::LandlockAbiProbe::unsupported("not tested"))
+    }
+    fn apply_landlock(
+        &mut self,
+        _plan: &crate::executor::supervisor::landlock::LandlockRefinementPlan,
+    ) -> Result<
+        crate::executor::supervisor::landlock::LandlockApplicationReport,
+        crate::executor::supervisor::syscall::SyscallError,
+    > {
+        Err(crate::executor::supervisor::syscall::SyscallError::new(
+            "landlock",
+            "not tested",
+        ))
+    }
+    fn setup_report_pipe_ready(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn exec_handoff_ready(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn mount_overlay(
+        &mut self,
+        _lower: &Path,
+        _upper: &Path,
+        _work: &Path,
+        _merged: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn umount_overlay(
+        &mut self,
+        _merged: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        if self.fails(CleanupFailureKind::UnmountMerged) {
+            Err(crate::executor::supervisor::syscall::SyscallError::new(
+                "umount_overlay",
+                "injected failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn remove_overlay_tree(
+        &mut self,
+        path: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        let failure = if path.ends_with("merged") {
+            CleanupFailureKind::RemoveMerged
+        } else if path.ends_with("upper") {
+            CleanupFailureKind::RemoveUpper
+        } else if path.ends_with("work") {
+            CleanupFailureKind::RemoveWork
+        } else {
+            CleanupFailureKind::RemoveSessionRoot
+        };
+        if self.fails(failure) {
+            Err(crate::executor::supervisor::syscall::SyscallError::new(
+                "remove_overlay_tree",
+                "injected failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -969,6 +1328,7 @@ fn child_kill_failed(command: &str, err: std::io::Error) -> CepError {
 mod tests {
     use super::*;
     use crate::enforcement::isolation::{BoundaryAttemptOutcome, CommandIsolationAttempt};
+    use crate::executor::supervisor::overlay::{CleanupOutcome, OverlayMode};
     use lancet_authority::policy::CommandPolicy;
 
     fn fake_setup_attempt(failed: bool) -> CommandIsolationAttempt {
@@ -981,6 +1341,23 @@ mod tests {
             setup_failure_reason: failed.then(|| "injected setup failure".to_string()),
             ..BoundaryAttemptOutcome::default()
         })
+    }
+
+    fn fixed_overlay(mode: OverlayMode) -> FixedOverlayExecution {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let plan = OverlayPlan::deterministic(&project, mode, "shell-test").expect("overlay plan");
+        FixedOverlayExecution::new(plan)
+    }
+
+    fn failing_fixed_overlay(failure: CleanupFailureKind) -> FixedOverlayExecution {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let plan = OverlayPlan::deterministic(&project, OverlayMode::Diagnostic, "shell-test")
+            .expect("overlay plan");
+        FixedOverlayExecution::failing(plan, failure)
     }
 
     #[tokio::test]
@@ -1077,6 +1454,7 @@ mod tests {
             SupervisorExecution::Fixed {
                 attempt,
                 behavior: SupervisorPreExecBehavior::Ready,
+                overlay: None,
             },
         )
         .await
@@ -1112,6 +1490,7 @@ mod tests {
             SupervisorExecution::Fixed {
                 attempt,
                 behavior: SupervisorPreExecBehavior::Ready,
+                overlay: None,
             },
         )
         .await
@@ -1148,6 +1527,7 @@ mod tests {
             SupervisorExecution::Fixed {
                 attempt,
                 behavior: SupervisorPreExecBehavior::FailBeforeExec,
+                overlay: None,
             },
         )
         .await
@@ -1163,6 +1543,309 @@ mod tests {
             !marker.exists(),
             "command argv must not run after setup failure"
         );
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_success() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let output = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["true".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleanup = output.overlay_cleanup.expect("cleanup report");
+        assert_eq!(cleanup.outcome, CleanupOutcome::Succeeded);
+        assert_eq!(cleanup.mode, OverlayMode::Diagnostic);
+        assert!(cleanup.child_cleanup_succeeded);
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_nonzero_exit() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let output = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["sh".into(), "-c".into(), "exit 7".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.output.status.code(), Some(7));
+        assert_eq!(
+            output.overlay_cleanup.expect("cleanup report").mode,
+            OverlayMode::Diagnostic
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_overlay_cleanup_is_deferred_on_nonzero_exit() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let output = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["sh".into(), "-c".into(), "exit 7".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Artifact)),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.output.status.code(), Some(7));
+        assert!(output.overlay_cleanup.is_none());
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_timeout() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let err = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["sleep".into(), "10".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(100),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.error.code, CepErrorCode::CommandTimeout);
+        assert_eq!(
+            err.overlay_cleanup.expect("cleanup report").outcome,
+            CleanupOutcome::Succeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_cancellation() {
+        let policy = CommandPolicy::defaults();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = cancel_tx.send(true);
+        });
+
+        let err = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["sleep".into(), "10".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(10000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.error.code, CepErrorCode::ExecutionFailed);
+        assert!(err.overlay_cleanup.is_some());
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_setup_failure_before_exec() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(true);
+
+        let err = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["true".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::FailBeforeExec,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.error.code, CepErrorCode::GuardDenied);
+        assert!(err.overlay_cleanup.is_some());
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_is_returned_on_spawn_failure_after_setup() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let err = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["definitely-not-a-lattice-test-command".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(fixed_overlay(OverlayMode::Diagnostic)),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.error.code, CepErrorCode::ExecutionFailed);
+        assert!(err.setup_attempt.is_some());
+        assert!(err.overlay_cleanup.is_some());
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_records_busy_unmount_failure() {
+        let policy = CommandPolicy::defaults();
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let mut cancel = Cancellation::new(cancel_rx);
+        let attempt = fake_setup_attempt(false);
+
+        let output = execute_argv_supervised(
+            ExecuteConfig {
+                project_root: ".",
+                limits: &ToolLimits::default(),
+                argv: &["true".into()],
+                cwd: None,
+                env: &BTreeMap::new(),
+                timeout_ms: Some(5000),
+                cancellation: &mut cancel,
+                max_output_bytes: policy.max_output_bytes,
+            },
+            SupervisorExecution::Fixed {
+                attempt,
+                behavior: SupervisorPreExecBehavior::Ready,
+                overlay: Some(failing_fixed_overlay(CleanupFailureKind::UnmountMerged)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleanup = output.overlay_cleanup.expect("cleanup report");
+        assert_eq!(cleanup.outcome, CleanupOutcome::Failed);
+        assert_eq!(
+            cleanup.failure_kind,
+            Some(CleanupFailureKind::UnmountMerged)
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_cleanup_report_records_upper_and_work_removal_failures() {
+        for failure in [
+            CleanupFailureKind::RemoveUpper,
+            CleanupFailureKind::RemoveWork,
+        ] {
+            let policy = CommandPolicy::defaults();
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let attempt = fake_setup_attempt(false);
+
+            let output = execute_argv_supervised(
+                ExecuteConfig {
+                    project_root: ".",
+                    limits: &ToolLimits::default(),
+                    argv: &["true".into()],
+                    cwd: None,
+                    env: &BTreeMap::new(),
+                    timeout_ms: Some(5000),
+                    cancellation: &mut cancel,
+                    max_output_bytes: policy.max_output_bytes,
+                },
+                SupervisorExecution::Fixed {
+                    attempt,
+                    behavior: SupervisorPreExecBehavior::Ready,
+                    overlay: Some(failing_fixed_overlay(failure)),
+                },
+            )
+            .await
+            .unwrap();
+
+            let cleanup = output.overlay_cleanup.expect("cleanup report");
+            assert_eq!(cleanup.outcome, CleanupOutcome::Failed);
+            assert_eq!(cleanup.failure_kind, Some(failure));
+        }
     }
 
     #[cfg(unix)]

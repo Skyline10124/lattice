@@ -10,6 +10,7 @@ use crate::enforcement::isolation::{
 };
 
 use super::landlock::{LandlockApplicationReport, LandlockRefinementPlan};
+use super::overlay::mount_overlay;
 use super::plan::{MountKind, PrivilegeStrategy, SupervisorPlan};
 use super::syscall::{SupervisorSyscalls, SyscallError};
 use super::{
@@ -188,6 +189,24 @@ fn apply_linux_stage<S: SupervisorSyscalls>(
         SupervisorStage::AssertNoVethOrDefaultRoute => syscalls.assert_no_veth_or_default_route(),
         SupervisorStage::MountNamespace => syscalls.unshare_mount_namespace(),
         SupervisorStage::MountPropagationPrivate => syscalls.make_mounts_private(),
+        SupervisorStage::OverlayUpperWork => {
+            let Some(overlay_plan) = plan.overlay_plan.as_ref() else {
+                return Err(SyscallError::new(
+                    "overlay_upper_work",
+                    "overlay stage requested without overlay plan",
+                ));
+            };
+            super::overlay::prepare_overlay_dirs(overlay_plan)
+        }
+        SupervisorStage::OverlayMount => {
+            let Some(overlay_plan) = plan.overlay_plan.as_ref() else {
+                return Err(SyscallError::new(
+                    "overlay_mount",
+                    "overlay stage requested without overlay plan",
+                ));
+            };
+            mount_overlay(overlay_plan, syscalls).map(|_| ())
+        }
         SupervisorStage::TmpfsRoot => syscalls.mount_tmpfs_root(),
         SupervisorStage::ProjectBind => {
             for mount in plan
@@ -195,9 +214,7 @@ fn apply_linux_stage<S: SupervisorSyscalls>(
                 .iter()
                 .filter(|mount| mount.kind == MountKind::ProjectRoot)
             {
-                let source = mount.source.as_deref().ok_or_else(|| {
-                    SyscallError::new("project_bind", "project bind missing source")
-                })?;
+                let source = plan.project_mount_source();
                 syscalls.bind_mount(source, &mount.target)?;
             }
             Ok(())
@@ -258,6 +275,7 @@ fn apply_linux_stage<S: SupervisorSyscalls>(
         SupervisorStage::FdCleanup => syscalls.cleanup_fds(),
         SupervisorStage::Landlock => apply_landlock_stage(syscalls, landlock_report, plan),
         SupervisorStage::SetupReportPipe => syscalls.setup_report_pipe_ready(),
+        SupervisorStage::OverlayCleanup => Ok(()),
         SupervisorStage::ExecHandoff => syscalls.exec_handoff_ready(),
     }
 }
@@ -581,6 +599,47 @@ mod tests {
 
         fn exec_handoff_ready(&mut self) -> Result<(), SyscallError> {
             self.record("exec_handoff_ready")
+        }
+
+        fn mount_overlay(
+            &mut self,
+            lower: &Path,
+            upper: &Path,
+            work: &Path,
+            merged: &Path,
+        ) -> Result<(), SyscallError> {
+            self.calls.push(format!(
+                "mount_overlay:{}->{}:{}:{}",
+                lower.display(),
+                merged.display(),
+                upper.display(),
+                work.display()
+            ));
+            if self.fail_operations.contains("mount_overlay") {
+                Err(SyscallError::new("mount_overlay", "injected failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn umount_overlay(&mut self, merged: &Path) -> Result<(), SyscallError> {
+            self.calls
+                .push(format!("umount_overlay:{}", merged.display()));
+            if self.fail_operations.contains("umount_overlay") {
+                Err(SyscallError::new("umount_overlay", "injected failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn remove_overlay_tree(&mut self, path: &Path) -> Result<(), SyscallError> {
+            self.calls
+                .push(format!("remove_overlay_tree:{}", path.display()));
+            if self.fail_operations.contains("remove_overlay_tree") {
+                Err(SyscallError::new("remove_overlay_tree", "injected failure"))
+            } else {
+                Ok(())
+            }
         }
     }
 

@@ -6,13 +6,16 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod artifact;
 pub(crate) mod env;
 pub(crate) mod fd;
 pub(crate) mod landlock;
 pub(crate) mod linux;
 #[cfg(test)]
 mod live_tests;
+pub(crate) mod overlay;
 pub(crate) mod plan;
+pub(crate) mod snapshot;
 pub(crate) mod syscall;
 
 use std::collections::BTreeSet;
@@ -33,6 +36,8 @@ pub(crate) enum SupervisorStage {
     AssertNoVethOrDefaultRoute,
     MountNamespace,
     MountPropagationPrivate,
+    OverlayUpperWork,
+    OverlayMount,
     TmpfsRoot,
     ProjectBind,
     ReadOnlyToolchainBind,
@@ -47,6 +52,7 @@ pub(crate) enum SupervisorStage {
     FdCleanup,
     Landlock,
     SetupReportPipe,
+    OverlayCleanup,
     ExecHandoff,
 }
 
@@ -62,6 +68,8 @@ impl SupervisorStage {
             SupervisorStage::AssertNoVethOrDefaultRoute => "assert_no_veth_or_default_route",
             SupervisorStage::MountNamespace => "mount_namespace",
             SupervisorStage::MountPropagationPrivate => "mount_propagation_private",
+            SupervisorStage::OverlayUpperWork => "overlay_upper_work",
+            SupervisorStage::OverlayMount => "overlay_mount",
             SupervisorStage::TmpfsRoot => "tmpfs_root",
             SupervisorStage::ProjectBind => "project_bind",
             SupervisorStage::ReadOnlyToolchainBind => "read_only_toolchain_bind",
@@ -76,6 +84,7 @@ impl SupervisorStage {
             SupervisorStage::FdCleanup => "fd_cleanup",
             SupervisorStage::Landlock => "landlock",
             SupervisorStage::SetupReportPipe => "setup_report_pipe",
+            SupervisorStage::OverlayCleanup => "overlay_cleanup",
             SupervisorStage::ExecHandoff => "exec_handoff",
         }
     }
@@ -91,6 +100,8 @@ impl SupervisorStage {
             "assert_no_veth_or_default_route" => SupervisorStage::AssertNoVethOrDefaultRoute,
             "mount_namespace" => SupervisorStage::MountNamespace,
             "mount_propagation_private" => SupervisorStage::MountPropagationPrivate,
+            "overlay_upper_work" => SupervisorStage::OverlayUpperWork,
+            "overlay_mount" => SupervisorStage::OverlayMount,
             "tmpfs_root" => SupervisorStage::TmpfsRoot,
             "project_bind" => SupervisorStage::ProjectBind,
             "read_only_toolchain_bind" => SupervisorStage::ReadOnlyToolchainBind,
@@ -105,6 +116,7 @@ impl SupervisorStage {
             "fd_cleanup" => SupervisorStage::FdCleanup,
             "landlock" => SupervisorStage::Landlock,
             "setup_report_pipe" => SupervisorStage::SetupReportPipe,
+            "overlay_cleanup" => SupervisorStage::OverlayCleanup,
             "exec_handoff" => SupervisorStage::ExecHandoff,
             _ => return None,
         })
@@ -272,6 +284,17 @@ mod tests {
 
     fn full_plan() -> SupervisorPlan {
         SupervisorPlan::wave0_full_fake(PathBuf::from("/project"), PathBuf::from("/project/src"))
+    }
+
+    #[test]
+    fn isolation_supervisor_overlay_stage_labels_round_trip() {
+        for stage in [
+            SupervisorStage::OverlayUpperWork,
+            SupervisorStage::OverlayMount,
+            SupervisorStage::OverlayCleanup,
+        ] {
+            assert_eq!(SupervisorStage::from_label(stage.label()), Some(stage));
+        }
     }
 
     #[test]

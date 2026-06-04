@@ -59,6 +59,15 @@ pub(crate) trait SupervisorSyscalls {
     ) -> Result<LandlockApplicationReport, SyscallError>;
     fn setup_report_pipe_ready(&mut self) -> Result<(), SyscallError>;
     fn exec_handoff_ready(&mut self) -> Result<(), SyscallError>;
+    fn mount_overlay(
+        &mut self,
+        lower: &Path,
+        upper: &Path,
+        work: &Path,
+        merged: &Path,
+    ) -> Result<(), SyscallError>;
+    fn umount_overlay(&mut self, merged: &Path) -> Result<(), SyscallError>;
+    fn remove_overlay_tree(&mut self, path: &Path) -> Result<(), SyscallError>;
 }
 
 #[derive(Debug, Default)]
@@ -303,6 +312,60 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
 
     fn exec_handoff_ready(&mut self) -> Result<(), SyscallError> {
         Ok(())
+    }
+
+    fn mount_overlay(
+        &mut self,
+        lower: &Path,
+        upper: &Path,
+        work: &Path,
+        merged: &Path,
+    ) -> Result<(), SyscallError> {
+        std::fs::create_dir_all(upper)
+            .map_err(|err| SyscallError::new("mkdir(overlay upper)", err.to_string()))?;
+        std::fs::create_dir_all(work)
+            .map_err(|err| SyscallError::new("mkdir(overlay work)", err.to_string()))?;
+        std::fs::create_dir_all(merged)
+            .map_err(|err| SyscallError::new("mkdir(overlay merged)", err.to_string()))?;
+        live_mount(
+            Some(Path::new("overlay")),
+            merged,
+            Some("overlay"),
+            0,
+            Some(&format!(
+                "lowerdir={},upperdir={},workdir={}",
+                lower.display(),
+                upper.display(),
+                work.display()
+            )),
+            "mount(overlay)",
+        )
+    }
+
+    fn umount_overlay(&mut self, merged: &Path) -> Result<(), SyscallError> {
+        #[cfg(target_os = "linux")]
+        {
+            live_umount2(merged, libc::MNT_DETACH, "umount2(overlay merged)")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = merged;
+            Err(SyscallError::new(
+                "umount2(overlay merged)",
+                "unsupported_platform",
+            ))
+        }
+    }
+
+    fn remove_overlay_tree(&mut self, path: &Path) -> Result<(), SyscallError> {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(SyscallError::new(
+                "remove_dir_all(overlay)",
+                err.to_string(),
+            )),
+        }
     }
 }
 

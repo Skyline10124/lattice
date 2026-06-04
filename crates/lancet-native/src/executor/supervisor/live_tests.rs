@@ -11,6 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::Arc;
 
 use super::fd::{cleanup_inherited_fds, set_cloexec, LiveFdCleanupBackend};
 use super::landlock::{LandlockRefinementPlan, LandlockRightsMask};
@@ -18,6 +19,21 @@ use super::syscall::{
     assert_proc_net_dev_has_only_loopback, assert_proc_net_route_has_no_default_route,
     LiveSupervisorSyscalls, SupervisorSyscalls,
 };
+use crate::enforcement::isolation::{
+    CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
+    CommandIsolationUnsupportedHostBehavior,
+};
+use crate::handlers::register_command_methods;
+use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
+use lancet_authority::envelope_store::ActiveEnvelopeStore;
+use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
+use lancet_catalog::methods::command::{Run, RunParams, RunResult};
+use lancet_catalog::CepMethod;
+use lancet_protocol::envelope::{
+    BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
+    ImpactKind, Intent, OnFailure, Scope, VerifyCommand,
+};
+use tokio::sync::{mpsc, watch};
 
 const LIVE_ENV: &str = "LATTICE_LINUX_ISOLATION_LIVE";
 const HELPER_ENV: &str = "LATTICE_LIVE_CANARY_HELPER";
@@ -26,6 +42,7 @@ const HELPER_MOUNT_VIEW: &str = "mount_view";
 const HELPER_FD_CLEANUP: &str = "fd_cleanup";
 const HELPER_FD_FINAL: &str = "fd_final";
 const HELPER_LANDLOCK: &str = "landlock";
+const PHASE30_VERIFY_SENTINEL: &str = "LATTICE_PHASE30_VERIFY_SENTINEL";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CanaryResult {
@@ -72,6 +89,20 @@ fn linux_isolation_live_canary_suite() {
             canary_fd_and_setup_pipe_cleanup(),
         ),
         ("landlock_status", canary_landlock_status()),
+        (
+            "diagnostic_overlay_discard",
+            canary_diagnostic_overlay_discard(),
+        ),
+        ("artifact_overlay_commit", canary_artifact_overlay_commit()),
+        (
+            "artifact_unsupported_kind_denial",
+            canary_artifact_unsupported_kind_denial(),
+        ),
+        (
+            "artifact_lower_drift_denial",
+            canary_artifact_lower_drift_denial(),
+        ),
+        ("artifact_verify_discard", canary_artifact_verify_discard()),
     ];
     print_live_summary(&results);
 
@@ -286,6 +317,172 @@ fn canary_landlock_status() -> CanaryResult {
     }
 }
 
+fn canary_diagnostic_overlay_discard() -> CanaryResult {
+    run_phase30_canary("diagnostic_overlay_discard", |rt| {
+        rt.block_on(async {
+            let fixture = LiveCommandFixture::new()?;
+            let before = workspace_listing(fixture.root());
+            let success = fixture
+                .run_diagnostic(vec!["touch".into(), "diagnostic-success.txt".into()])
+                .await?;
+            require_success(&success.result, "diagnostic success command")?;
+            if fixture.root().join("diagnostic-success.txt").exists() {
+                return Err(CanaryResult::Failed(
+                    "diagnostic overlay success left diagnostic-success.txt in real workspace"
+                        .to_string(),
+                ));
+            }
+
+            let failure = fixture
+                .run_diagnostic(vec!["false".into()], )
+                .await?;
+            if failure.result.exit_code == 0 {
+                return Err(CanaryResult::Failed(
+                    "diagnostic failure path unexpectedly exited 0".to_string(),
+                ));
+            }
+            if workspace_listing(fixture.root()) != before {
+                return Err(CanaryResult::Failed(
+                    "diagnostic overlay failure path changed the real workspace".to_string(),
+                ));
+            }
+            require_metadata(&success.metadata, "overlay_status", "applied")?;
+            require_metadata(&success.metadata, "overlay_disposition", "discarded")?;
+            Ok("diagnostic overlay discarded upper writes after success and preserved the real workspace after a nonzero terminal path".to_string())
+        })
+    })
+}
+
+fn canary_artifact_overlay_commit() -> CanaryResult {
+    run_phase30_canary("artifact_overlay_commit", |rt| {
+        rt.block_on(async {
+            let fixture = LiveCommandFixture::new()?;
+            let output = fixture
+                .run_artifact(
+                    vec!["touch".into(), "artifact-commit.txt".into()],
+                    ".",
+                    Some("true"),
+                )
+                .await?;
+            require_success(&output.result, "artifact command")?;
+            if !fixture.root().join("artifact-commit.txt").is_file() {
+                return Err(CanaryResult::Failed(
+                    "accepted artifact did not reach the real workspace".to_string(),
+                ));
+            }
+            require_metadata(&output.metadata, "artifact_manifest_status", "accepted")?;
+            require_metadata(&output.metadata, "artifact_adjudication", "accepted")?;
+            require_metadata(&output.metadata, "verify_layer", "discarded")?;
+            require_metadata(&output.metadata, "commit_outcome", "committed")?;
+            Ok("accepted artifact reached the real workspace only after adjudication, verify, cleanup, lower recheck, and commit".to_string())
+        })
+    })
+}
+
+fn canary_artifact_unsupported_kind_denial() -> CanaryResult {
+    run_phase30_canary("artifact_unsupported_kind_denial", |rt| {
+        rt.block_on(async {
+            let fixture = LiveCommandFixture::new()?;
+            let output = fixture
+                .run_artifact_expect_error(
+                    vec!["mkfifo".into(), "unsupported.pipe".into()],
+                    ".",
+                    Some("true"),
+                )
+                .await?;
+            if fixture.root().join("unsupported.pipe").exists() {
+                return Err(CanaryResult::Failed(
+                    "unsupported FIFO artifact reached the real workspace".to_string(),
+                ));
+            }
+            require_metadata(&output.metadata, "artifact_manifest_status", "denied")?;
+            require_metadata(
+                &output.metadata,
+                "artifact_adjudication",
+                "denied_unsupported_kind",
+            )?;
+            require_metadata(&output.metadata, "overlay_disposition", "denied")?;
+            if output.metadata["rejected_kinds"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+            {
+                return Err(CanaryResult::Failed(
+                    "unsupported artifact denial did not record rejected_kinds".to_string(),
+                ));
+            }
+            Ok(
+                "unsupported FIFO artifact was denied and discarded before real workspace mutation"
+                    .to_string(),
+            )
+        })
+    })
+}
+
+fn canary_artifact_lower_drift_denial() -> CanaryResult {
+    run_phase30_canary("artifact_lower_drift_denial", |rt| {
+        rt.block_on(async {
+            let fixture = LiveCommandFixture::new()?;
+            fs::write(fixture.root().join("baseline.txt"), b"before").map_err(|err| {
+                CanaryResult::SkippedUnsupported(format!(
+                    "artifact lower drift unavailable: fixture write failed: {err}"
+                ))
+            })?;
+            let output = fixture
+                .run_artifact_with_verify_drift(
+                    vec!["touch".into(), "drift-artifact.txt".into()],
+                    ".",
+                    "baseline.txt",
+                )
+                .await?;
+            if fixture.root().join("drift-artifact.txt").exists() {
+                return Err(CanaryResult::Failed(
+                    "lower drift denial still committed drift-artifact.txt".to_string(),
+                ));
+            }
+            let baseline = fs::read_to_string(fixture.root().join("baseline.txt"))
+                .unwrap_or_else(|_| String::new());
+            if baseline != "drift" {
+                return Err(CanaryResult::Failed(
+                    "drift fixture did not mutate baseline during verify".to_string(),
+                ));
+            }
+            require_metadata(&output.metadata, "artifact_adjudication", "denied_lower_drift")?;
+            require_metadata(&output.metadata, "lower_consistency", "drift_detected")?;
+            require_metadata(&output.metadata, "overlay_disposition", "denied")?;
+            Ok("lower drift after verify denied artifact commit and left the real artifact path absent".to_string())
+        })
+    })
+}
+
+fn canary_artifact_verify_discard() -> CanaryResult {
+    run_phase30_canary("artifact_verify_discard", |rt| {
+        rt.block_on(async {
+            let fixture = LiveCommandFixture::new()?;
+            let output = fixture
+                .run_artifact_with_verify_sentinel(
+                    vec!["touch".into(), "verified-artifact.txt".into()],
+                    ".",
+                    "verify-only.txt",
+                )
+                .await?;
+            require_success(&output.result, "artifact verify-discard command")?;
+            if !fixture.root().join("verified-artifact.txt").is_file() {
+                return Err(CanaryResult::Failed(
+                    "verified artifact did not commit".to_string(),
+                ));
+            }
+            if fixture.root().join("verify-only.txt").exists() {
+                return Err(CanaryResult::Failed(
+                    "verify-only write reached the committed artifact set".to_string(),
+                ));
+            }
+            require_metadata(&output.metadata, "verify_layer", "discarded")?;
+            require_metadata(&output.metadata, "commit_outcome", "committed")?;
+            Ok("verify-only write was discarded while the accepted artifact committed".to_string())
+        })
+    })
+}
+
 fn classify_landlock_helper_output(output: &Output) -> CanaryResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if output.status.success() && stdout.contains("landlock_status=applied") {
@@ -294,6 +491,550 @@ fn classify_landlock_helper_output(output: &Output) -> CanaryResult {
         CanaryResult::SkippedUnsupported(output_text(output))
     } else {
         CanaryResult::Failed(output_text(output))
+    }
+}
+
+struct LiveCommandFixture {
+    _temp: tempfile::TempDir,
+    root: PathBuf,
+}
+
+struct LiveCommandOutput {
+    result: RunResult,
+    metadata: serde_json::Value,
+}
+
+struct LiveCommandError {
+    metadata: serde_json::Value,
+}
+
+impl LiveCommandFixture {
+    fn new() -> Result<Self, CanaryResult> {
+        let temp = tempfile::TempDir::new().map_err(|err| {
+            CanaryResult::SkippedUnsupported(format!(
+                "phase30 overlay canary unavailable: tempdir failed: {err}"
+            ))
+        })?;
+        let root = temp.path().join("project");
+        fs::create_dir_all(&root).map_err(|err| {
+            CanaryResult::SkippedUnsupported(format!(
+                "phase30 overlay canary unavailable: project fixture failed: {err}"
+            ))
+        })?;
+        Ok(Self { _temp: temp, root })
+    }
+
+    fn root(&self) -> &Path {
+        &self.root
+    }
+
+    async fn run_diagnostic(&self, argv: Vec<String>) -> Result<LiveCommandOutput, CanaryResult> {
+        let (ctx, durable) =
+            live_command_ctx(&self.root, argv_allowlist(&argv), None, Vec::new(), None).await?;
+        dispatch_live_command(ctx, durable, argv, None).await
+    }
+
+    async fn run_artifact(
+        &self,
+        argv: Vec<String>,
+        write_pattern: &str,
+        verify: Option<&str>,
+    ) -> Result<LiveCommandOutput, CanaryResult> {
+        let (ctx, durable) = live_command_ctx(
+            &self.root,
+            argv_allowlist(&argv),
+            Some(write_pattern),
+            Vec::new(),
+            verify,
+        )
+        .await?;
+        dispatch_live_command(ctx, durable, argv, Some(ImpactKind::WorkspaceMutation)).await
+    }
+
+    async fn run_artifact_expect_error(
+        &self,
+        argv: Vec<String>,
+        write_pattern: &str,
+        verify: Option<&str>,
+    ) -> Result<LiveCommandError, CanaryResult> {
+        let (ctx, durable) = live_command_ctx(
+            &self.root,
+            argv_allowlist(&argv),
+            Some(write_pattern),
+            Vec::new(),
+            verify,
+        )
+        .await?;
+        dispatch_live_command_error(ctx, durable, argv, Some(ImpactKind::WorkspaceMutation)).await
+    }
+
+    async fn run_artifact_with_verify_sentinel(
+        &self,
+        argv: Vec<String>,
+        write_pattern: &str,
+        verify_write: &str,
+    ) -> Result<LiveCommandOutput, CanaryResult> {
+        let helper = install_phase30_verify_helper(&self.root)?;
+        let (ctx, durable) = live_command_ctx(
+            &self.root,
+            argv_allowlist(&argv),
+            Some(write_pattern),
+            vec![vec!["phase30-verify-helper".into()]],
+            Some("phase30-verify-helper"),
+        )
+        .await?;
+        let output = dispatch_live_command_with_env(
+            ctx,
+            durable,
+            argv,
+            Some(ImpactKind::WorkspaceMutation),
+            [(
+                PHASE30_VERIFY_SENTINEL.to_string(),
+                verify_write.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .await;
+        let _ = fs::remove_file(helper);
+        output
+    }
+
+    async fn run_artifact_with_verify_drift(
+        &self,
+        argv: Vec<String>,
+        write_pattern: &str,
+        drift_path: &str,
+    ) -> Result<LiveCommandError, CanaryResult> {
+        let helper = install_phase30_verify_helper(&self.root)?;
+        let (ctx, durable) = live_command_ctx(
+            &self.root,
+            argv_allowlist(&argv),
+            Some(write_pattern),
+            vec![vec!["phase30-verify-helper".into()]],
+            Some("phase30-verify-helper"),
+        )
+        .await?;
+        let output = dispatch_live_command_error_with_env(
+            ctx,
+            durable,
+            argv,
+            Some(ImpactKind::WorkspaceMutation),
+            [(PHASE30_VERIFY_SENTINEL.to_string(), drift_path.to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .await;
+        let _ = fs::remove_file(helper);
+        output
+    }
+}
+
+async fn live_command_ctx(
+    root: &Path,
+    argv_allowlist: Vec<String>,
+    write_path_pattern: Option<&str>,
+    extra_diagnostic_commands: Vec<Vec<String>>,
+    verify: Option<&str>,
+) -> Result<
+    (
+        HandlerContext,
+        crate::server::call_durable_metadata::CallDurableMetadata,
+    ),
+    CanaryResult,
+> {
+    let root = root.to_string_lossy().to_string();
+    let (event_tx, _event_rx) = mpsc::channel(64);
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+    let mut policy_config =
+        lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(PathBuf::from(
+            &root,
+        ));
+    for command in [
+        vec!["touch".into()],
+        vec!["false".into()],
+        vec!["true".into()],
+    ] {
+        if !policy_config
+            .command
+            .allowed_diagnostic_commands
+            .contains(&command)
+        {
+            policy_config
+                .command
+                .allowed_diagnostic_commands
+                .push(command);
+        }
+    }
+    for command in extra_diagnostic_commands {
+        if !policy_config
+            .command
+            .allowed_diagnostic_commands
+            .contains(&command)
+        {
+            policy_config
+                .command
+                .allowed_diagnostic_commands
+                .push(command);
+        }
+    }
+    if !policy_config
+        .command
+        .allowed_env
+        .contains(&PHASE30_VERIFY_SENTINEL.to_string())
+    {
+        policy_config
+            .command
+            .allowed_env
+            .push(PHASE30_VERIFY_SENTINEL.to_string());
+    }
+    let cep_policy = policy_config.to_cep_policy_config();
+    let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+        policy_config,
+    ));
+
+    let store = Arc::new(ActiveEnvelopeStore::new());
+    let mut capabilities = std::collections::BTreeSet::new();
+    capabilities.insert(Capability::RunCommand { argv_allowlist });
+    if let Some(pattern) = write_path_pattern {
+        capabilities.insert(Capability::WritePath {
+            path_pattern: pattern.to_string(),
+        });
+    }
+    let envelope = ExecutionEnvelope {
+        intent: Intent {
+            description: "phase30 live overlay canary".into(),
+        },
+        capabilities,
+        scope: Scope {
+            workspace_root: Some(root.clone()),
+            extensions: serde_json::Map::new(),
+        },
+        impact: vec![Impact {
+            kind: if write_path_pattern.is_some() {
+                ImpactKind::WorkspaceMutation
+            } else {
+                ImpactKind::CommandExecution
+            },
+            target: root.clone(),
+            scope: None,
+            confidence: ImpactConfidence::Conservative,
+            unknowns: vec![],
+        }],
+        constraints: Constraints::default(),
+        verify: verify.map(|command| VerifyCommand {
+            command: command.into(),
+            expected_exit_code: Some(0),
+        }),
+        on_failure: Some(OnFailure::RetainDiff),
+        extensions: serde_json::Map::new(),
+    };
+    store
+        .declare(envelope, 0, "phase30-live")
+        .await
+        .map_err(|err| {
+            CanaryResult::SkippedUnsupported(format!(
+                "phase30 overlay canary unavailable: envelope declaration failed: {err:?}"
+            ))
+        })?;
+
+    let durable_metadata = crate::server::call_durable_metadata::CallDurableMetadata::default();
+    let ctx = HandlerContext {
+        call_id: 30,
+        events: EventSink::new(event_tx, 30),
+        cancellation: Cancellation::new(cancel_rx),
+        base_envelope: BaseExecutionEnvelope::for_workspace_root(&root, "phase30 live canary"),
+        cep_context: Arc::new(CepTurnContext::from_policy(CepPolicyConfig {
+            command: cep_policy.command.clone(),
+            ..cep_policy
+        })),
+        active_envelope: store,
+        turn_id: "phase30-live".into(),
+        durable_metadata: durable_metadata.clone(),
+        effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+        authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+        policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+        default_policy_hook: Some(default_hook),
+        audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+            turn_id: "phase30-live".into(),
+            session_id: "phase30-live-session".into(),
+            ..Default::default()
+        })),
+        audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
+        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
+        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        command_isolation: live_overlay_isolation_config(),
+    };
+
+    Ok((ctx, durable_metadata))
+}
+
+fn live_overlay_isolation_config() -> CommandIsolationRuntimeConfig {
+    CommandIsolationRuntimeConfig {
+        mode: CommandIsolationMode::Enforce,
+        required_boundaries: vec![lancet_protocol::BoundaryDimension::Filesystem],
+        optional_boundaries: Vec::new(),
+        read_only_toolchain_paths: live_toolchain_paths(),
+        scratch_paths: Vec::new(),
+        landlock: CommandIsolationLandlockBehavior::Off,
+        unsupported_host: CommandIsolationUnsupportedHostBehavior::FailClosed,
+        host_probe: None,
+    }
+}
+
+fn live_toolchain_paths() -> Vec<PathBuf> {
+    ["/bin", "/usr"]
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| path.exists())
+        .collect()
+}
+
+async fn dispatch_live_command(
+    ctx: HandlerContext,
+    durable: crate::server::call_durable_metadata::CallDurableMetadata,
+    argv: Vec<String>,
+    declared_impact: Option<ImpactKind>,
+) -> Result<LiveCommandOutput, CanaryResult> {
+    dispatch_live_command_with_env(ctx, durable, argv, declared_impact, Default::default()).await
+}
+
+async fn dispatch_live_command_with_env(
+    ctx: HandlerContext,
+    durable: crate::server::call_durable_metadata::CallDurableMetadata,
+    argv: Vec<String>,
+    declared_impact: Option<ImpactKind>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<LiveCommandOutput, CanaryResult> {
+    let registry = live_command_registry();
+    let params = RunParams {
+        argv,
+        cwd: None,
+        env,
+        timeout_ms: Some(10_000),
+        declared_impact,
+    };
+    match registry
+        .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        .await
+    {
+        Ok(value) => Ok(LiveCommandOutput {
+            result: serde_json::from_value(value).map_err(|err| {
+                CanaryResult::Failed(format!("phase30 command result decode failed: {err}"))
+            })?,
+            metadata: durable_metadata_json(&durable),
+        }),
+        Err(error) => Err(classify_live_command_error(
+            error,
+            durable_metadata_json(&durable),
+        )),
+    }
+}
+
+async fn dispatch_live_command_error(
+    ctx: HandlerContext,
+    durable: crate::server::call_durable_metadata::CallDurableMetadata,
+    argv: Vec<String>,
+    declared_impact: Option<ImpactKind>,
+) -> Result<LiveCommandError, CanaryResult> {
+    dispatch_live_command_error_with_env(ctx, durable, argv, declared_impact, Default::default())
+        .await
+}
+
+async fn dispatch_live_command_error_with_env(
+    ctx: HandlerContext,
+    durable: crate::server::call_durable_metadata::CallDurableMetadata,
+    argv: Vec<String>,
+    declared_impact: Option<ImpactKind>,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<LiveCommandError, CanaryResult> {
+    let registry = live_command_registry();
+    let params = RunParams {
+        argv,
+        cwd: None,
+        env,
+        timeout_ms: Some(10_000),
+        declared_impact,
+    };
+    match registry
+        .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        .await
+    {
+        Ok(value) => {
+            let result: RunResult = serde_json::from_value(value).map_err(|err| {
+                CanaryResult::Failed(format!("phase30 command result decode failed: {err}"))
+            })?;
+            Err(CanaryResult::Failed(format!(
+                "phase30 command unexpectedly succeeded with exit_code={}",
+                result.exit_code
+            )))
+        }
+        Err(error) => {
+            let metadata = durable_metadata_json(&durable);
+            if let Some(skip) = classify_live_command_error_as_skip(&error, &metadata) {
+                return Err(skip);
+            }
+            Ok(LiveCommandError { metadata })
+        }
+    }
+}
+
+fn live_command_registry() -> MethodRegistry {
+    let mut registry = MethodRegistry::new();
+    register_command_methods(&mut registry).expect("register command methods");
+    registry
+}
+
+fn classify_live_command_error(
+    error: lancet_protocol::CepError,
+    metadata: serde_json::Value,
+) -> CanaryResult {
+    classify_live_command_error_as_skip(&error, &metadata).unwrap_or_else(|| {
+        CanaryResult::Failed(format!(
+            "phase30 command failed: code={:?} message={} metadata={metadata}",
+            error.code, error.message
+        ))
+    })
+}
+
+fn classify_live_command_error_as_skip(
+    error: &lancet_protocol::CepError,
+    metadata: &serde_json::Value,
+) -> Option<CanaryResult> {
+    let text = format!("{} {metadata}", error.message).to_ascii_lowercase();
+    let setup_failed = metadata
+        .get("boundary_setup_failed_closed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || text.contains("setup_failure_reason")
+        || text.contains("overlay_mount")
+        || text.contains("operation not permitted")
+        || text.contains("permission denied");
+    if setup_failed {
+        return Some(CanaryResult::SkippedUnsupported(format!(
+            "phase30 overlay unavailable: {}",
+            error.message
+        )));
+    }
+    if text.contains("no such file or directory") && text.contains("failed to spawn command") {
+        return Some(CanaryResult::SkippedUnsupported(format!(
+            "phase30 command execution unavailable inside supervisor view: {}",
+            error.message
+        )));
+    }
+    None
+}
+
+fn durable_metadata_json(
+    durable: &crate::server::call_durable_metadata::CallDurableMetadata,
+) -> serde_json::Value {
+    durable
+        .take_json()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn argv_allowlist(argv: &[String]) -> Vec<String> {
+    argv.first().cloned().into_iter().collect()
+}
+
+fn require_success(result: &RunResult, label: &str) -> Result<(), CanaryResult> {
+    if result.exit_code == 0 {
+        Ok(())
+    } else {
+        Err(CanaryResult::Failed(format!(
+            "{label} exited {} stdout={} stderr={}",
+            result.exit_code, result.stdout, result.stderr
+        )))
+    }
+}
+
+fn require_metadata(
+    metadata: &serde_json::Value,
+    key: &str,
+    expected: &str,
+) -> Result<(), CanaryResult> {
+    if metadata.get(key).and_then(serde_json::Value::as_str) == Some(expected) {
+        Ok(())
+    } else {
+        Err(CanaryResult::Failed(format!(
+            "metadata {key} expected {expected}, got {}",
+            metadata.get(key).unwrap_or(&serde_json::Value::Null)
+        )))
+    }
+}
+
+fn workspace_listing(root: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_workspace_listing(root, root, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_workspace_listing(root: &Path, current: &Path, paths: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(relative) = path.strip_prefix(root) {
+            paths.push(relative.to_string_lossy().to_string());
+        }
+        if path.is_dir() {
+            collect_workspace_listing(root, &path, paths);
+        }
+    }
+}
+
+fn install_phase30_verify_helper(root: &Path) -> Result<PathBuf, CanaryResult> {
+    let helper = root.join("phase30-verify-helper");
+    let script = format!(
+        "#!/bin/sh\nif [ -n \"${{{PHASE30_VERIFY_SENTINEL}:-}}\" ]; then touch \"${{{PHASE30_VERIFY_SENTINEL}}}\"; fi\n"
+    );
+    fs::write(&helper, script).map_err(|err| {
+        CanaryResult::SkippedUnsupported(format!(
+            "phase30 verify helper unavailable: write failed: {err}"
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&helper)
+            .map_err(|err| {
+                CanaryResult::SkippedUnsupported(format!(
+                    "phase30 verify helper unavailable: metadata failed: {err}"
+                ))
+            })?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&helper, permissions).map_err(|err| {
+            CanaryResult::SkippedUnsupported(format!(
+                "phase30 verify helper unavailable: chmod failed: {err}"
+            ))
+        })?;
+    }
+    Ok(helper)
+}
+
+fn run_phase30_canary(
+    name: &str,
+    f: impl FnOnce(&tokio::runtime::Runtime) -> Result<String, CanaryResult>,
+) -> CanaryResult {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return CanaryResult::SkippedUnsupported(format!(
+                "{name} unavailable: tokio runtime setup failed: {err}"
+            ))
+        }
+    };
+    match f(&runtime) {
+        Ok(detail) => CanaryResult::Passed(detail),
+        Err(result) => result,
     }
 }
 

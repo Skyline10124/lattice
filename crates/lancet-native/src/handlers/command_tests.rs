@@ -27,6 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
+static TEST_ARTIFACT_VERIFY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn test_ctx(
     root: &str,
 ) -> (
@@ -436,6 +438,1130 @@ async fn command_boundary_off_runs_and_records_not_requested_for_every_boundary(
             "not_requested"
         );
     }
+}
+
+fn fake_diagnostic_overlay_attempt(failed_closed: bool) -> CommandIsolationAttempt {
+    CommandIsolationAttempt::new(BoundaryAttemptOutcome {
+        supervisor_backend: Some("fixed_overlay".to_string()),
+        env_policy: Some("allowlist".to_string()),
+        fd_cleanup_status: Some("applied".to_string()),
+        failed_closed,
+        setup_failure_stage: failed_closed.then(|| "overlay_mount".to_string()),
+        setup_failure_reason: failed_closed.then(|| "injected overlay setup failure".to_string()),
+        ..BoundaryAttemptOutcome::default()
+    })
+}
+
+fn fixed_diagnostic_overlay(
+    project_root: &std::path::Path,
+) -> crate::executor::shell::FixedOverlayExecution {
+    let plan = crate::executor::supervisor::overlay::OverlayPlan::deterministic(
+        project_root,
+        crate::executor::supervisor::overlay::OverlayMode::Diagnostic,
+        "diagnostic-routing-test",
+    )
+    .expect("overlay plan");
+    crate::executor::shell::FixedOverlayExecution::new(plan)
+}
+
+fn failing_fixed_diagnostic_overlay(
+    project_root: &std::path::Path,
+    failure: crate::executor::supervisor::overlay::CleanupFailureKind,
+) -> crate::executor::shell::FixedOverlayExecution {
+    let plan = crate::executor::supervisor::overlay::OverlayPlan::deterministic(
+        project_root,
+        crate::executor::supervisor::overlay::OverlayMode::Diagnostic,
+        "diagnostic-routing-test",
+    )
+    .expect("overlay plan");
+    crate::executor::shell::FixedOverlayExecution::failing(plan, failure)
+}
+
+fn fixed_artifact_overlay(
+    project_root: &std::path::Path,
+) -> crate::executor::shell::FixedOverlayExecution {
+    let session_id = format!(
+        "artifact-routing-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let plan = crate::executor::supervisor::overlay::OverlayPlan::deterministic(
+        project_root,
+        crate::executor::supervisor::overlay::OverlayMode::Artifact,
+        &session_id,
+    )
+    .expect("artifact overlay plan");
+    let _ = std::fs::remove_dir_all(&plan.session_root);
+    std::fs::create_dir_all(&plan.paths.upper).expect("artifact upper");
+    crate::executor::shell::FixedOverlayExecution::new(plan)
+}
+
+fn successful_artifact_cleanup(
+    _overlay: &crate::executor::shell::FixedOverlayExecution,
+    disposition: crate::executor::supervisor::overlay::OverlayDisposition,
+) -> crate::executor::supervisor::overlay::OverlayCleanupReport {
+    crate::executor::supervisor::overlay::OverlayCleanupReport {
+        mode: crate::executor::supervisor::overlay::OverlayMode::Artifact,
+        disposition,
+        outcome: crate::executor::supervisor::overlay::CleanupOutcome::Succeeded,
+        failure_kind: None,
+        path_label: None,
+        reason: None,
+        child_cleanup_succeeded: true,
+    }
+}
+
+async fn run_fixed_diagnostic_overlay_case(
+    root: &str,
+    ctx: HandlerContext,
+    argv: Vec<String>,
+    timeout_ms: u64,
+    behavior: crate::executor::shell::SupervisorPreExecBehavior,
+    overlay: crate::executor::shell::FixedOverlayExecution,
+    failed_closed: bool,
+) -> Result<RunResult, CepError> {
+    let policy = ctx.cep_context.policy.command.clone();
+    let params = RunParams {
+        argv: argv.clone(),
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(timeout_ms),
+        declared_impact: Some(ImpactKind::CommandExecution),
+    };
+    let lower = crate::executor::supervisor::snapshot::capture_lower_fingerprint(
+        std::path::Path::new(root),
+    )
+    .expect("lower fingerprint");
+    run_diagnostic_overlay_supervised(
+        argv,
+        BTreeMap::new(),
+        params,
+        ctx,
+        Run::NAME,
+        timeout_ms,
+        root.to_string(),
+        &policy,
+        lower,
+        SupervisorExecution::Fixed {
+            attempt: fake_diagnostic_overlay_attempt(failed_closed),
+            behavior,
+            overlay: Some(overlay),
+        },
+    )
+    .await
+}
+
+async fn test_ctx_with_artifact_caps(
+    root: &str,
+    argv_allowlist: Vec<String>,
+    write_path_pattern: &str,
+    verify: Option<VerifyCommand>,
+) -> (
+    HandlerContext,
+    mpsc::Receiver<lancet_protocol::ToolEvent>,
+    watch::Sender<bool>,
+    lancet_authority::effect::ledger::EffectLedger,
+) {
+    let (event_tx, event_rx) = mpsc::channel(32);
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+        lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+            std::path::PathBuf::from(root),
+        ),
+    ));
+    let store = Arc::new(ActiveEnvelopeStore::new());
+    let mut caps = BTreeSet::new();
+    caps.insert(Capability::RunCommand { argv_allowlist });
+    caps.insert(Capability::WritePath {
+        path_pattern: write_path_pattern.into(),
+    });
+    let envelope = ExecutionEnvelope {
+        intent: Intent {
+            description: "artifact command test".into(),
+        },
+        capabilities: caps,
+        scope: Scope {
+            workspace_root: Some(root.into()),
+            extensions: serde_json::Map::new(),
+        },
+        impact: vec![EnvImpact {
+            kind: ImpactKind::WorkspaceMutation,
+            target: root.into(),
+            scope: None,
+            confidence: ImpactConfidence::Conservative,
+            unknowns: vec![],
+        }],
+        constraints: Constraints::default(),
+        verify,
+        on_failure: None,
+        extensions: serde_json::Map::new(),
+    };
+    store.declare(envelope, 0, "test-turn").await.unwrap();
+    let effect_ledger = lancet_authority::effect::ledger::EffectLedger::new();
+    let authorized_region = lancet_authority::effect::ledger::AuthorizedRegionSlot::new();
+    let mut region = lancet_authority::effect::region::AuthorizedEffectRegion::empty();
+    region
+        .kinds
+        .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
+    if let Some((path, is_prefix)) = lancet_authority::effect::region::normalize_write_region_path(
+        write_path_pattern,
+        &std::path::PathBuf::from(root),
+    ) {
+        if is_prefix {
+            region.write_path_prefixes.push(path);
+        } else {
+            region.write_paths.push(path);
+        }
+    }
+    authorized_region.set(region);
+    (
+        HandlerContext {
+            call_id: 1,
+            events: EventSink::new(event_tx, 1),
+            cancellation: Cancellation::new(cancel_rx),
+            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "artifact handler test"),
+            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
+            active_envelope: store,
+            turn_id: "test-turn".into(),
+            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+            effect_ledger: effect_ledger.clone(),
+            authorized_region,
+            policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+            default_policy_hook: Some(default_hook),
+            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                turn_id: "test-turn".into(),
+                session_id: "test-session".into(),
+                ..Default::default()
+            })),
+            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
+            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
+            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            command_isolation:
+                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+        },
+        event_rx,
+        cancel_tx,
+        effect_ledger,
+    )
+}
+
+async fn run_fixed_artifact_overlay_case(
+    root: &str,
+    ctx: HandlerContext,
+    argv: Vec<String>,
+    overlay: crate::executor::shell::FixedOverlayExecution,
+    cleanup: crate::executor::supervisor::overlay::OverlayCleanupReport,
+) -> Result<RunResult, CepError> {
+    let policy = ctx.cep_context.policy.command.clone();
+    let params = RunParams {
+        argv: argv.clone(),
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(5000),
+        declared_impact: Some(ImpactKind::WorkspaceMutation),
+    };
+    let active_record = ctx
+        .active_envelope
+        .active_record()
+        .await
+        .expect("active artifact envelope");
+    let lower =
+        crate::executor::supervisor::snapshot::capture_lower_baseline(std::path::Path::new(root))
+            .expect("lower baseline");
+    run_artifact_overlay_supervised(
+        params,
+        ctx,
+        Run::NAME,
+        5000,
+        argv,
+        BTreeMap::new(),
+        active_record,
+        root.to_string(),
+        &policy,
+        lower,
+        SupervisorExecution::Fixed {
+            attempt: fake_diagnostic_overlay_attempt(false),
+            behavior: crate::executor::shell::SupervisorPreExecBehavior::Ready,
+            overlay: Some(overlay),
+        },
+        Some(cleanup),
+    )
+    .await
+}
+
+fn assert_overlay_matrix_metadata(
+    metadata: &serde_json::Value,
+    overlay_status: &str,
+    cleanup_outcome: &str,
+    lower_consistency: &str,
+) {
+    assert_eq!(metadata["overlay_mode"], "diagnostic_discard");
+    assert_eq!(metadata["overlay_status"], overlay_status);
+    assert_eq!(metadata["overlay_disposition"], "discarded");
+    assert_eq!(metadata["cleanup_outcome"], cleanup_outcome);
+    assert_eq!(metadata["lower_consistency"], lower_consistency);
+    assert!(metadata["effective_boundary"]
+        .get("overlay_status")
+        .is_none());
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_routing_hard_denied_returns_before_overlay_setup() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["sh".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Enforce,
+        vec![lancet_protocol::BoundaryDimension::Filesystem],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::MountNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "mount namespace available in probe",
+        )]),
+    );
+    let durable = ctx.durable_metadata.clone();
+
+    let params = RunParams {
+        argv: vec!["sh".into(), "-c".into(), "echo denied".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: None,
+        declared_impact: None,
+    };
+    let err = registry
+        .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        .await
+        .expect_err("hard denied command must not reach overlay setup");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert!(metadata.get("overlay_status").is_none());
+    assert_eq!(metadata["backend_invoked"], false);
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_routing_mode_off_records_not_requested() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Off,
+        vec![],
+        command_boundary_probe(&[]),
+    );
+    let durable = ctx.durable_metadata.clone();
+
+    let result = run_echo_with_context(&registry, ctx)
+        .await
+        .expect("mode off keeps real-workspace diagnostic execution");
+    let parsed: RunResult = serde_json::from_value(result).unwrap();
+
+    assert_eq!(parsed.exit_code, 0);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["overlay_status"], "not_requested");
+    assert_eq!(metadata["overlay_mode"], "none");
+    assert_eq!(metadata["cleanup_outcome"], "not_requested");
+    assert!(metadata.get("effective_boundary").is_some());
+    assert!(metadata["effective_boundary"]
+        .get("overlay_status")
+        .is_none());
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_routing_audit_setup_failure_records_not_applied() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Audit,
+        vec![lancet_protocol::BoundaryDimension::Filesystem],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::MountNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "mount namespace available in probe",
+        )]),
+    );
+    let durable = ctx.durable_metadata.clone();
+    let policy = ctx.cep_context.policy.command.clone();
+    let params = RunParams {
+        argv: vec!["echo".into(), "fallback".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(5000),
+        declared_impact: Some(ImpactKind::CommandExecution),
+    };
+    let lower = crate::executor::supervisor::snapshot::capture_lower_fingerprint(dir.path())
+        .expect("lower fingerprint");
+
+    let result = run_diagnostic_overlay_supervised(
+        params.argv.clone(),
+        BTreeMap::new(),
+        params,
+        ctx,
+        Run::NAME,
+        5000,
+        root.to_string(),
+        &policy,
+        lower,
+        SupervisorExecution::Fixed {
+            attempt: fake_diagnostic_overlay_attempt(true),
+            behavior: crate::executor::shell::SupervisorPreExecBehavior::FailBeforeExec,
+            overlay: Some(fixed_diagnostic_overlay(dir.path())),
+        },
+    )
+    .await
+    .expect("audit mode may fall back after overlay setup failure");
+    assert!(result.stdout.contains("fallback"));
+
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["overlay_mode"], "diagnostic_discard");
+    assert_eq!(metadata["overlay_status"], "not_applied");
+    assert_eq!(metadata["overlay_disposition"], "not_applied");
+    assert_eq!(metadata["cleanup_outcome"], "cleanup_succeeded");
+    assert_eq!(metadata["backend_invoked"], true);
+    assert!(metadata["effective_boundary"]
+        .get("overlay_status")
+        .is_none());
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_success_discards_metadata_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["true".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let result = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["true".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect("success case");
+
+    assert_eq!(result.exit_code, 0);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "unchanged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_nonzero_exit_discards_metadata_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["sh".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let result = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["sh".into(), "-c".into(), "exit 7".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect("nonzero exit still returns RunResult");
+
+    assert_eq!(result.exit_code, 7);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "unchanged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_timeout_discards_metadata_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) =
+        test_ctx_with_run_command(root, vec!["sleep".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let err = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["sleep".into(), "10".into()],
+        50,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect_err("timeout case");
+
+    assert_eq!(err.code, CepErrorCode::CommandTimeout);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "unchanged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_cancellation_discards_metadata_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, cancel_tx) = test_ctx_with_run_command(root, vec!["sleep".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let _ = cancel_tx.send(true);
+    });
+
+    let err = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["sleep".into(), "10".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect_err("cancellation case");
+
+    assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "unchanged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_denial_discards_without_backend_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let marker = dir.path().join("should-not-exist");
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) =
+        test_ctx_with_run_command(root, vec!["touch".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let err = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["touch".into(), marker.to_string_lossy().to_string()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::FailBeforeExec,
+        fixed_diagnostic_overlay(dir.path()),
+        true,
+    )
+    .await
+    .expect_err("setup denial case");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+    assert!(!marker.exists());
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "setup_failed", "cleanup_succeeded", "unchanged");
+    assert_eq!(metadata["backend_invoked"], false);
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_setup_failure_fallback_records_not_applied() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    ctx.command_isolation = command_boundary_config(
+        crate::enforcement::isolation::CommandIsolationMode::Audit,
+        vec![lancet_protocol::BoundaryDimension::Filesystem],
+        command_boundary_probe(&[(
+            lancet_protocol::BoundaryPrimitive::MountNamespace,
+            lancet_protocol::HostProbeStatus::Available,
+            "mount namespace available in probe",
+        )]),
+    );
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let result = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["echo".into(), "fallback".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::FailBeforeExec,
+        fixed_diagnostic_overlay(dir.path()),
+        true,
+    )
+    .await
+    .expect("audit fallback case");
+
+    assert!(result.stdout.contains("fallback"));
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["overlay_status"], "not_applied");
+    assert_eq!(metadata["overlay_disposition"], "not_applied");
+    assert_eq!(metadata["cleanup_outcome"], "cleanup_succeeded");
+    assert_eq!(metadata["lower_consistency"], "unchanged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_shell_spawn_failure_discards_and_preserves_lower() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) =
+        test_ctx_with_run_command(root, vec!["missing-command".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let err = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["definitely-not-a-lattice-test-command".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect_err("spawn failure case");
+
+    assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "unchanged");
+    assert_eq!(metadata["backend_invoked"], true);
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_cleanup_failure_preserves_original_success() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["true".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+
+    let result = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["true".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        failing_fixed_diagnostic_overlay(
+            dir.path(),
+            crate::executor::supervisor::overlay::CleanupFailureKind::UnmountMerged,
+        ),
+        false,
+    )
+    .await
+    .expect("cleanup failure keeps diagnostic command result");
+
+    assert_eq!(result.exit_code, 0);
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_failed", "unchanged");
+    assert_eq!(metadata["cleanup_failure_kind"], "unmount_merged");
+}
+
+#[tokio::test]
+async fn diagnostic_overlay_failure_matrix_lower_drift_records_drift_and_discards() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "baseline").unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx) =
+        test_ctx_with_run_command(root, vec!["sleep".into()]).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let drift_path = dir.path().join("external-drift.txt");
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        std::fs::write(drift_path, "external drift").unwrap();
+    });
+
+    let result = run_fixed_diagnostic_overlay_case(
+        root,
+        ctx,
+        vec!["sleep".into(), "0.1".into()],
+        5000,
+        crate::executor::shell::SupervisorPreExecBehavior::Ready,
+        fixed_diagnostic_overlay(dir.path()),
+        false,
+    )
+    .await
+    .expect("lower drift case");
+
+    assert_eq!(result.exit_code, 0);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_overlay_matrix_metadata(&metadata, "applied", "cleanup_succeeded", "drift_detected");
+}
+
+#[tokio::test]
+async fn artifact_overlay_staging_denies_out_of_scope_without_touching_workspace() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    let (mut ctx, mut events, _cancel_tx, ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["sh".into()],
+        "src/**",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let before = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Denied,
+    );
+
+    let err = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec!["sh".into(), "-c".into(), "echo staged > outside.txt".into()],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect_err("out-of-scope artifact must be denied");
+
+    assert!(!dir.path().join("outside.txt").exists());
+    let after = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root).unwrap();
+    assert_eq!(before, after);
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(err.code, CepErrorCode::ReplanRequired);
+    assert_eq!(metadata["overlay_mode"], "artifact");
+    assert_eq!(metadata["overlay_status"], "applied");
+    assert_eq!(metadata["artifact_manifest_status"], "denied");
+    assert_eq!(metadata["artifact_adjudication"], "denied_write_scope");
+    assert_eq!(metadata["verify_layer"], "not_run");
+    assert_eq!(metadata["commit_outcome"], "not_started");
+    assert_eq!(metadata["cleanup_outcome"], "cleanup_succeeded");
+    assert!(metadata["failed_entry"].is_null());
+
+    let effects = ledger.snapshot();
+    assert!(effects.iter().any(|effect| {
+        effect.kind == ImpactKind::WorkspaceMutation
+            && matches!(&effect.scope, lancet_authority::effect::ledger::ObservedScope::Path(path) if path.ends_with("outside.txt"))
+    }));
+    let mut saw_replan_required = false;
+    let mut saw_verify_failed = false;
+    while let Ok(event) = events.try_recv() {
+        saw_replan_required |= event.method == "cep.replan_required";
+        saw_verify_failed |= event.method == "cep.verify_failed";
+    }
+    assert!(saw_replan_required);
+    assert!(!saw_verify_failed);
+}
+
+#[tokio::test]
+async fn artifact_adjudication_scope_denies_effect_region_before_verify() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    std::fs::create_dir_all(dir.path().join("allowed")).unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    let (mut ctx, mut events, _cancel_tx, _ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["sh".into()],
+        "allowed/**",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    ctx.authorized_region.set({
+        let mut region = lancet_authority::effect::region::AuthorizedEffectRegion::empty();
+        region
+            .kinds
+            .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
+        region.write_path_prefixes.push(dir.path().join("src"));
+        region
+    });
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Denied,
+    );
+
+    let err = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "mkdir -p allowed && echo staged > allowed/generated.txt".into(),
+        ],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect_err("effect-region miss must be denied");
+
+    assert_eq!(err.code, CepErrorCode::ReplanRequired);
+    assert!(!dir.path().join("allowed/generated.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_adjudication"], "denied_effect_region");
+    assert_eq!(metadata["verify_layer"], "not_run");
+    assert_eq!(metadata["commit_outcome"], "not_started");
+    let mut saw_verify_failed = false;
+    while let Ok(event) = events.try_recv() {
+        saw_verify_failed |= event.method == "cep.verify_failed";
+    }
+    assert!(!saw_verify_failed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unsupported_artifact_kind_denies_manifest_and_records_rejected_kind() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, mut events, _cancel_tx, ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["mkfifo".into()],
+        ".",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Denied,
+    );
+
+    let err = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec!["mkfifo".into(), "pipe".into()],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect_err("unsupported FIFO artifact must be denied");
+
+    assert_eq!(err.code, CepErrorCode::GuardDenied);
+    assert!(!dir.path().join("pipe").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_manifest_status"], "denied");
+    assert_eq!(metadata["artifact_adjudication"], "denied_unsupported_kind");
+    assert_eq!(metadata["overlay_disposition"], "denied");
+    assert_eq!(metadata["verify_layer"], "not_run");
+    assert_eq!(metadata["commit_outcome"], "not_started");
+    assert_eq!(metadata["rejected_kinds"][0]["path"], "pipe");
+    assert_eq!(metadata["rejected_kinds"][0]["kind"], "fifo");
+
+    assert!(!ledger
+        .snapshot()
+        .iter()
+        .any(|effect| { effect.source == lancet_authority::effect::ledger::EffectSource::Verify }));
+    let mut saw_verify_failed = false;
+    while let Ok(event) = events.try_recv() {
+        saw_verify_failed |= event.method == "cep.verify_failed";
+    }
+    assert!(!saw_verify_failed);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn artifact_overlay_commit_flow_commits_accepted_entries_after_verify() {
+    let _verify_write_guard = TEST_ARTIFACT_VERIFY_WRITE_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    std::fs::write(dir.path().join("existing.txt"), "old").unwrap();
+    std::fs::write(dir.path().join("remove.txt"), "remove").unwrap();
+    let (mut ctx, _events, _cancel_tx, ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["sh".into()],
+        ".",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Committed,
+    );
+    set_test_artifact_verify_write(Some("verify-only.txt"));
+
+    let result = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "printf new > new.txt; printf updated > existing.txt; touch .wh.remove.txt; ln -s existing.txt link.txt".into(),
+        ],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect("accepted artifact command should commit");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+        "new"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("existing.txt")).unwrap(),
+        "updated"
+    );
+    assert!(!dir.path().join("remove.txt").exists());
+    assert_eq!(
+        std::fs::read_link(dir.path().join("link.txt")).unwrap(),
+        std::path::PathBuf::from("existing.txt")
+    );
+    assert!(!dir.path().join("verify-only.txt").exists());
+
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_manifest_status"], "accepted");
+    assert_eq!(metadata["artifact_adjudication"], "accepted");
+    assert_eq!(metadata["verify_layer"], "discarded");
+    assert_eq!(metadata["commit_outcome"], "committed");
+    assert_eq!(metadata["lower_consistency"], "unchanged");
+    assert_eq!(metadata["applied_entries"].as_array().unwrap().len(), 4);
+    assert!(ledger
+        .snapshot()
+        .iter()
+        .any(|effect| { effect.source == lancet_authority::effect::ledger::EffectSource::Verify }));
+}
+
+#[tokio::test]
+async fn verify_baseline_exclusion_denies_lower_drift_after_verify_without_committing() {
+    let _verify_write_guard = TEST_ARTIFACT_VERIFY_WRITE_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    std::fs::write(dir.path().join("baseline.txt"), "before").unwrap();
+    let (mut ctx, _events, _cancel_tx, _ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["sh".into()],
+        ".",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Committed,
+    );
+    set_test_artifact_verify_write(Some("verify-only.txt"));
+
+    let policy = ctx.cep_context.policy.command.clone();
+    let params = RunParams {
+        argv: vec![
+            "sh".into(),
+            "-c".into(),
+            "printf artifact > artifact.txt".into(),
+        ],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(5000),
+        declared_impact: Some(ImpactKind::WorkspaceMutation),
+    };
+    let active_record = ctx
+        .active_envelope
+        .active_record()
+        .await
+        .expect("active artifact envelope");
+    let lower =
+        crate::executor::supervisor::snapshot::capture_lower_baseline(std::path::Path::new(root))
+            .expect("lower baseline");
+    std::fs::write(dir.path().join("baseline.txt"), "drift").unwrap();
+
+    let err = run_artifact_overlay_supervised(
+        params,
+        ctx,
+        Run::NAME,
+        5000,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "printf artifact > artifact.txt".into(),
+        ],
+        BTreeMap::new(),
+        active_record,
+        root.to_string(),
+        &policy,
+        lower,
+        SupervisorExecution::Fixed {
+            attempt: fake_diagnostic_overlay_attempt(false),
+            behavior: crate::executor::shell::SupervisorPreExecBehavior::Ready,
+            overlay: Some(overlay),
+        },
+        Some(cleanup),
+    )
+    .await
+    .expect_err("lower drift after verify must deny commit");
+
+    assert_eq!(err.code, CepErrorCode::ReplanRequired);
+    assert!(!dir.path().join("artifact.txt").exists());
+    assert!(!dir.path().join("verify-only.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_adjudication"], "denied_lower_drift");
+    assert_eq!(metadata["lower_consistency"], "drift_detected");
+    assert_eq!(metadata["overlay_disposition"], "denied");
+    assert_eq!(metadata["commit_outcome"], "denied");
+}
+
+#[tokio::test]
+async fn artifact_overlay_commit_flow_cleanup_failure_blocks_commit() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx, _ledger) =
+        test_ctx_with_artifact_caps(root, vec!["sh".into()], ".", None).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = crate::executor::supervisor::overlay::OverlayCleanupReport {
+        mode: crate::executor::supervisor::overlay::OverlayMode::Artifact,
+        disposition: crate::executor::supervisor::overlay::OverlayDisposition::Committed,
+        outcome: crate::executor::supervisor::overlay::CleanupOutcome::Failed,
+        failure_kind: Some(crate::executor::supervisor::overlay::CleanupFailureKind::RemoveUpper),
+        path_label: Some("upper"),
+        reason: Some("injected cleanup failure".into()),
+        child_cleanup_succeeded: true,
+    };
+
+    let err = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "printf artifact > artifact.txt".into(),
+        ],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect_err("cleanup failure must block artifact commit");
+
+    assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+    assert!(!dir.path().join("artifact.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_adjudication"], "denied_cleanup_failed");
+    assert_eq!(metadata["cleanup_outcome"], "cleanup_failed");
+    assert_eq!(metadata["commit_outcome"], "not_started");
+}
+
+#[tokio::test]
+async fn artifact_fallback_without_overlay_records_skipped_no_overlay() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx, _ledger) =
+        test_ctx_with_artifact_caps(root, vec!["touch".into()], ".", None).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Audit;
+    let durable = ctx.durable_metadata.clone();
+    let policy = ctx.cep_context.policy.command.clone();
+    let active_record = ctx
+        .active_envelope
+        .active_record()
+        .await
+        .expect("active artifact envelope");
+    let pre_snapshot = crate::executor::supervisor::snapshot::capture_workspace_snapshot(root)
+        .expect("pre snapshot");
+    let params = RunParams {
+        argv: vec!["touch".into(), "fallback.txt".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(5000),
+        declared_impact: Some(ImpactKind::WorkspaceMutation),
+    };
+
+    let result = artifact_fallback_without_overlay(
+        params,
+        ctx,
+        Run::NAME,
+        5000,
+        active_record,
+        root.to_string(),
+        &policy,
+        pre_snapshot,
+    )
+    .await
+    .expect("audit fallback may run without overlay");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(dir.path().join("fallback.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["overlay_status"], "not_applied");
+    assert_eq!(metadata["artifact_adjudication"], "skipped_no_overlay");
+    assert_eq!(metadata["commit_outcome"], "not_started");
+}
+
+#[tokio::test]
+async fn artifact_mode_off_records_not_requested_and_uses_snapshot_diff() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let registry = native_command_registry(root);
+    let (mut ctx, _events, _cancel_tx, _ledger) =
+        test_ctx_with_artifact_caps(root, vec!["touch".into()], ".", None).await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Off;
+    let durable = ctx.durable_metadata.clone();
+    let params = RunParams {
+        argv: vec!["touch".into(), "mode-off.txt".into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: Some(5000),
+        declared_impact: Some(ImpactKind::WorkspaceMutation),
+    };
+
+    let value = registry
+        .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        .await
+        .expect("mode off workspace mutation keeps fallback path");
+    let parsed: RunResult = serde_json::from_value(value).unwrap();
+
+    assert_eq!(parsed.exit_code, 0);
+    assert!(dir.path().join("mode-off.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["overlay_status"], "not_requested");
+    assert_eq!(metadata["artifact_adjudication"], "skipped_no_overlay");
+    assert_eq!(metadata["commit_outcome"], "not_started");
 }
 
 async fn test_ctx_with_run_command(
@@ -1651,135 +2777,6 @@ async fn diagnostic_skips_post_exec_diff_check() {
         .unwrap();
     let parsed: RunResult = serde_json::from_value(result).unwrap();
     assert_eq!(parsed.exit_code, 0);
-}
-
-// --- Workspace snapshot tests ---
-
-#[test]
-fn capture_snapshot_returns_file_hashes() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::write(dir.path().join("file.txt"), "content").unwrap();
-    let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
-    assert!(snapshot.contains_key("file.txt"));
-    assert!(snapshot["file.txt"].content_hash.is_some());
-    assert_eq!(snapshot["file.txt"].file_type, "file");
-}
-
-#[test]
-fn capture_snapshot_includes_hidden_project_files_but_skips_git_and_target() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(dir.path().join(".github/workflows")).unwrap();
-    std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
-    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
-    std::fs::write(dir.path().join(".github/workflows/ci.yml"), "name: ci").unwrap();
-    std::fs::write(dir.path().join(".git/config"), "[core]").unwrap();
-    std::fs::write(dir.path().join("target/debug/out"), "build").unwrap();
-
-    let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
-
-    assert!(snapshot.contains_key(".github/workflows/ci.yml"));
-    assert!(!snapshot.contains_key(".git/config"));
-    assert!(!snapshot.contains_key("target/debug/out"));
-}
-
-#[test]
-fn capture_snapshot_tracks_active_git_hooks_but_skips_samples_and_objects() {
-    let dir = tempfile::TempDir::new().unwrap();
-    std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
-    std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
-    std::fs::write(
-        dir.path().join(".git/hooks/pre-commit.sample"),
-        "#!/bin/sh\nexit 0\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join(".git/hooks/post-checkout"),
-        "#!/bin/sh\n# evil\n",
-    )
-    .unwrap();
-    std::fs::write(dir.path().join(".git/objects/whatever"), "x").unwrap();
-    std::fs::write(dir.path().join(".git/config"), "[core]").unwrap();
-
-    let snapshot = capture_workspace_snapshot(dir.path().to_str().unwrap()).unwrap();
-
-    assert!(snapshot.contains_key(".git/hooks/post-checkout"));
-    assert!(!snapshot.contains_key(".git/hooks/pre-commit.sample"));
-    assert!(!snapshot.contains_key(".git/objects/whatever"));
-    assert!(!snapshot.contains_key(".git/config"));
-}
-
-#[test]
-fn compute_changed_paths_detects_new_file() {
-    let pre = HashMap::new();
-    let mut post = HashMap::new();
-    post.insert(
-        "new.txt".into(),
-        FileSnapshot {
-            content_hash: Some("hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let changed = compute_changed_paths(&pre, &post);
-    assert_eq!(changed, vec!["new.txt"]);
-}
-
-#[test]
-fn compute_changed_paths_detects_modified_file() {
-    let mut pre = HashMap::new();
-    pre.insert(
-        "file.txt".into(),
-        FileSnapshot {
-            content_hash: Some("old_hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let mut post = HashMap::new();
-    post.insert(
-        "file.txt".into(),
-        FileSnapshot {
-            content_hash: Some("new_hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let changed = compute_changed_paths(&pre, &post);
-    assert_eq!(changed, vec!["file.txt"]);
-}
-
-#[test]
-fn compute_changed_paths_detects_deleted_file() {
-    let mut pre = HashMap::new();
-    pre.insert(
-        "deleted.txt".into(),
-        FileSnapshot {
-            content_hash: Some("hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let post = HashMap::new();
-    let changed = compute_changed_paths(&pre, &post);
-    assert_eq!(changed, vec!["deleted.txt"]);
-}
-
-#[test]
-fn compute_changed_paths_ignores_unchanged() {
-    let mut pre = HashMap::new();
-    pre.insert(
-        "file.txt".into(),
-        FileSnapshot {
-            content_hash: Some("same_hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let mut post = HashMap::new();
-    post.insert(
-        "file.txt".into(),
-        FileSnapshot {
-            content_hash: Some("same_hash".into()),
-            file_type: "file".into(),
-        },
-    );
-    let changed = compute_changed_paths(&pre, &post);
-    assert!(changed.is_empty());
 }
 
 #[test]

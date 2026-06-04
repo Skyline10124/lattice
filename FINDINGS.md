@@ -103,6 +103,12 @@
 - **当前状态**: 当前覆盖与 Phase 29 目标匹配，非 bug。live canary 是 host-specific evidence；fake matrix 是 deterministic fail-closed proof；env tests 是 construction proof。
 - **计划**: Phase 32 rollout gate 如需发布级证明，应保持三类证据分层展示：deterministic unit/fake、current-host live canary、profile/doctor host probe；禁止把 `skipped_unsupported` 或 fake-only evidence 当作 current-host physical proof。
 
+### L-30-01: Overlay cleanup 只保留首个失败诊断 — `diagnostics` / `observability`
+- **位置**: `crates/lancet-native/src/executor/supervisor/overlay.rs:393-425`
+- **问题**: `cleanup_overlay` 使用首个失败作为 cleanup report 的失败原因；如果 unmount 失败后 upper/work 目录删除也失败，后续失败信息不会进入 compact metadata。安全性不受影响，因为任一 cleanup failure 都会阻止 artifact commit，但排查 busy mount、残留 upper/work、child cleanup 等复合故障时诊断信息会变薄。
+- **当前状态**: 非阻断，Phase 30 安全关键路径正确；`cleanup_outcome=cleanup_failed` 足以让 artifact commit fail-closed。
+- **计划**: 后续 Phase 31/32 或诊断增强窗口可把 cleanup report 扩展为保留首个主失败 + 附加失败列表，或引入 compact repeated failure records；保持现有 fail-closed 行为和 metadata 体积约束，补充多失败矩阵回归测试。
+
 ## P22.5 supervision verification (2026-05-28)
 
 Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).

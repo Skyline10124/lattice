@@ -10,6 +10,7 @@ use crate::executor::shell::resolve_command_cwd;
 use crate::executor::supervisor::landlock::{
     landlock_fail_closed, landlock_required, landlock_stage_enabled,
 };
+use crate::executor::supervisor::overlay::OverlayPlan;
 
 pub(crate) const PROJECT_VIEW_PATH: &str = "/project";
 
@@ -105,6 +106,7 @@ pub(crate) struct SupervisorPlan {
     pub(crate) read_only_bind_scope: ReadOnlyBindScope,
     pub(crate) executable: ExecutableResolution,
     pub(crate) diagnostics: Vec<SupervisorPlanDiagnostic>,
+    pub(crate) overlay_plan: Option<OverlayPlan>,
 }
 
 impl SupervisorPlan {
@@ -227,6 +229,7 @@ impl SupervisorPlan {
             read_only_bind_scope: ReadOnlyBindScope::TopLevelOnly,
             executable,
             diagnostics,
+            overlay_plan: None,
         })
     }
 
@@ -261,6 +264,7 @@ impl SupervisorPlan {
             read_only_bind_scope: ReadOnlyBindScope::TopLevelOnly,
             executable,
             diagnostics: Vec::new(),
+            overlay_plan: None,
         }
     }
 
@@ -300,12 +304,31 @@ impl SupervisorPlan {
             read_only_bind_scope: ReadOnlyBindScope::TopLevelOnly,
             executable,
             diagnostics: Vec::new(),
+            overlay_plan: None,
         }
     }
 
     pub(crate) fn with_privilege_strategy(mut self, strategy: PrivilegeStrategy) -> Self {
         self.privilege_strategy = strategy;
         self
+    }
+
+    pub(crate) fn with_overlay_plan(mut self, overlay_plan: OverlayPlan) -> Self {
+        self.overlay_plan = Some(overlay_plan);
+        self
+    }
+
+    pub(crate) fn project_mount_source(&self) -> &Path {
+        self.overlay_plan
+            .as_ref()
+            .map(OverlayPlan::project_mount_source)
+            .or_else(|| {
+                self.mounts
+                    .iter()
+                    .find(|mount| mount.kind == MountKind::ProjectRoot)
+                    .and_then(|mount| mount.source.as_deref())
+            })
+            .unwrap_or(&self.project_host_root)
     }
 
     pub(crate) fn read_only_toolchain_mounts(&self) -> impl Iterator<Item = &MountPlan> {
@@ -332,6 +355,10 @@ impl SupervisorPlan {
         if self.mount_namespace {
             stages.push(SupervisorStage::MountNamespace);
             stages.push(SupervisorStage::MountPropagationPrivate);
+        }
+        if self.overlay_plan.is_some() {
+            stages.push(SupervisorStage::OverlayUpperWork);
+            stages.push(SupervisorStage::OverlayMount);
         }
         if self.mount_view {
             stages.push(SupervisorStage::TmpfsRoot);
@@ -514,6 +541,8 @@ fn plan_error(field: impl Into<String>, reason: impl Into<String>) -> CepError {
 mod tests {
     use super::*;
     use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
+    use crate::executor::supervisor::overlay::{OverlayMode, OverlayPlan};
+    use crate::executor::supervisor::SupervisorStage;
     use tempfile::TempDir;
 
     fn touch(path: &Path) {
@@ -739,5 +768,40 @@ mod tests {
             .iter()
             .any(|mount| mount.target == Path::new("/scratch/build")));
         assert!(scratch.iter().all(|mount| mount.source.is_none()));
+    }
+
+    #[test]
+    fn overlay_plan_adds_overlay_setup_before_project_bind() {
+        let temp = TempDir::new().unwrap();
+        touch(&temp.path().join("bin/run"));
+        let overlay =
+            OverlayPlan::deterministic(temp.path(), OverlayMode::Diagnostic, "turn-1").unwrap();
+        let plan = SupervisorPlan::build(
+            temp.path(),
+            None,
+            &argv("run"),
+            &CommandIsolationRuntimeConfig::default(),
+        )
+        .unwrap()
+        .with_overlay_plan(overlay.clone());
+        let stages = plan.stages();
+
+        assert_eq!(plan.project_mount_source(), overlay.paths.merged);
+        assert!(
+            stages
+                .iter()
+                .position(|stage| *stage == SupervisorStage::OverlayUpperWork)
+                < stages
+                    .iter()
+                    .position(|stage| *stage == SupervisorStage::ProjectBind)
+        );
+        assert!(
+            stages
+                .iter()
+                .position(|stage| *stage == SupervisorStage::OverlayMount)
+                < stages
+                    .iter()
+                    .position(|stage| *stage == SupervisorStage::ProjectBind)
+        );
     }
 }

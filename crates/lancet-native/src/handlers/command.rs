@@ -16,14 +16,31 @@ use crate::enforcement::isolation::{
     MinimalMountViewStatus, SupervisorSetupStatus,
 };
 use crate::enforcement::verify::{
-    extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
+    extract_verify_command, run_verify, run_verify_on_candidate_view, validate_verify_command,
+    verify_failed_error,
 };
 use crate::executor::limits::ToolLimits;
 use crate::executor::shell::{
     execute_argv, execute_argv_supervised, BoundedStreamOutput, ExecuteConfig,
     SupervisedCommandError, SupervisorExecution,
 };
+use crate::executor::supervisor::artifact::{
+    adjudicate_artifact_manifest, commit_artifact_manifest, prepare_artifact_commit_set,
+    scan_overlay_upper, ArtifactAdjudicationReport, ArtifactCommitReport, CommitOutcome,
+    RejectedArtifactKind,
+};
 use crate::executor::supervisor::env::build_isolated_env;
+use crate::executor::supervisor::overlay::{
+    cleanup_overlay, prepare_candidate_artifact_view, CleanupOutcome, OverlayCleanupReport,
+    OverlayDisposition, OverlayMode, OverlayPlan, OverlayStatus, VerifyDiscardReport,
+    VerifyLayerStatus,
+};
+use crate::executor::supervisor::snapshot::{
+    capture_lower_baseline, capture_lower_fingerprint, capture_workspace_snapshot,
+    compute_changed_paths, LowerBaseline, LowerConsistencyStatus, LowerFingerprint,
+    WorkspaceSnapshot,
+};
+use crate::executor::supervisor::syscall::LiveSupervisorSyscalls;
 use crate::executor::supervisor::{default_executable_view_paths, SupervisorPlan};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
@@ -40,8 +57,11 @@ use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
+
+#[cfg(test)]
+static TEST_ARTIFACT_VERIFY_WRITE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Register native `exec.command_run` handler.
 pub fn register_command_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -62,10 +82,10 @@ async fn handle_run_as(
 
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
 
-    let policy = &ctx.cep_context.policy.command;
+    let policy = ctx.cep_context.policy.command.clone();
 
     // 3. Classify command
-    let effective_impact = classify_command(&params.argv, params.declared_impact.clone(), policy)?;
+    let effective_impact = classify_command(&params.argv, params.declared_impact.clone(), &policy)?;
 
     // 4. HardDenied -> return GuardDenied error
     if effective_impact == EffectiveImpact::HardDenied {
@@ -191,7 +211,7 @@ async fn handle_run_as(
     // 6. Diagnostic: no envelope required, but still enforce policy
 
     // 7. Validate timeout
-    let effective_timeout = validate_timeout(params.timeout_ms, policy)?;
+    let effective_timeout = validate_timeout(params.timeout_ms, &policy)?;
 
     let project_root = ctx
         .cep_context
@@ -203,7 +223,8 @@ async fn handle_run_as(
     // 8. Build effective env and supervisor attempt. Isolation `off`
     // preserves compatibility host env inheritance; isolated modes validate
     // caller env before planning and use supervisor-generated allowlist env.
-    let execution_plan = prepare_command_execution_plan(&ctx, policy, &params, &project_root)?;
+    let execution_plan =
+        prepare_command_execution_plan(&ctx, &policy, &params, &project_root, &effective_impact)?;
 
     // 8b. Pre-known command physical-boundary decisions. Live supervisor
     // attempts are recorded after the child setup report is received, because
@@ -217,11 +238,86 @@ async fn handle_run_as(
         };
         record_command_boundary_preflight(&ctx, method, &boundary_preflight).await;
         if boundary_preflight.should_fail_closed() {
+            if effective_impact == EffectiveImpact::Diagnostic {
+                record_overlay_command_metadata(
+                    &ctx,
+                    method,
+                    OverlayCommandMetadata {
+                        mode: None,
+                        status: overlay_status_for_unapplied_diagnostic(&ctx),
+                        disposition: None,
+                        lower_consistency: None,
+                        cleanup: None,
+                    },
+                )
+                .await;
+            }
             return Err(command_boundary_fail_closed_error(
                 method,
                 &boundary_preflight,
             ));
         }
+    }
+
+    if effective_impact == EffectiveImpact::Diagnostic {
+        if overlay_requested_for_command(&ctx) {
+            return handle_diagnostic_overlay_run(
+                params,
+                ctx,
+                method,
+                effective_timeout,
+                execution_plan,
+                project_root,
+                &policy,
+            )
+            .await;
+        }
+        record_overlay_command_metadata(
+            &ctx,
+            method,
+            OverlayCommandMetadata {
+                mode: None,
+                status: OverlayStatus::NotRequested,
+                disposition: None,
+                lower_consistency: None,
+                cleanup: None,
+            },
+        )
+        .await;
+    }
+
+    if effective_impact == EffectiveImpact::WorkspaceMutation && overlay_requested_for_command(&ctx)
+    {
+        return handle_artifact_overlay_run(
+            params,
+            ctx,
+            method,
+            effective_timeout,
+            execution_plan,
+            active_record
+                .clone()
+                .expect("workspace mutation active envelope checked above"),
+            project_root,
+            &policy,
+        )
+        .await;
+    }
+
+    if effective_impact == EffectiveImpact::WorkspaceMutation {
+        let pre_snapshot = capture_workspace_snapshot(&project_root)?;
+        return artifact_fallback_without_overlay(
+            params,
+            ctx,
+            method,
+            effective_timeout,
+            active_record
+                .clone()
+                .expect("workspace mutation active envelope checked above"),
+            project_root,
+            &policy,
+            pre_snapshot,
+        )
+        .await;
     }
 
     // 9. Execute via rewritten execute_argv with bounded tail reader
@@ -231,7 +327,7 @@ async fn handle_run_as(
     let pre_snapshot = if effective_impact == EffectiveImpact::WorkspaceMutation {
         capture_workspace_snapshot(&project_root)?
     } else {
-        HashMap::new()
+        WorkspaceSnapshot::new()
     };
 
     let execute_config = ExecuteConfig {
@@ -256,7 +352,7 @@ async fn handle_run_as(
                     if let Some(attempt) = err.setup_attempt.as_ref() {
                         record_command_boundary_attempt(&ctx, method, attempt).await;
                     }
-                    let fallback_env = build_unbounded_fallback_env(&params.env, policy)?;
+                    let fallback_env = build_unbounded_fallback_env(&params.env, &policy)?;
                     let mut fallback_cancellation = ctx.cancellation.clone();
                     let fallback_config = ExecuteConfig {
                         project_root: &project_root,
@@ -345,9 +441,9 @@ async fn handle_run_as(
 
                     // Run verify after every successful WorkspaceMutation call.
                     if let Some(verify_cmd) = extract_verify_command(envelope) {
-                        validate_verify_command(&verify_cmd, policy, &project_root)?;
+                        validate_verify_command(&verify_cmd, &policy, &project_root)?;
                         let mut verify_cancel = ctx.cancellation.clone();
-                        match run_verify(&verify_cmd, &project_root, policy, &mut verify_cancel)
+                        match run_verify(&verify_cmd, &project_root, &policy, &mut verify_cancel)
                             .await
                         {
                             Ok(outcome) if !outcome.success => {
@@ -490,11 +586,1230 @@ struct CommandExecutionFailure {
     backend_invoked: bool,
 }
 
+struct OverlayCommandMetadata<'a> {
+    mode: Option<OverlayMode>,
+    status: OverlayStatus,
+    disposition: Option<OverlayDisposition>,
+    lower_consistency: Option<LowerConsistencyStatus>,
+    cleanup: Option<&'a OverlayCleanupReport>,
+}
+
+struct ArtifactOverlayMetadata<'a> {
+    status: OverlayStatus,
+    disposition: Option<OverlayDisposition>,
+    lower_consistency: Option<LowerConsistencyStatus>,
+    artifact_manifest_status: &'a str,
+    artifact_adjudication: &'a str,
+    verify_layer: VerifyLayerStatus,
+    cleanup: Option<&'a OverlayCleanupReport>,
+    commit_report: Option<&'a ArtifactCommitReport>,
+    rejected_kinds: &'a [RejectedArtifactKind],
+}
+
+async fn handle_diagnostic_overlay_run(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    execution_plan: PreparedCommandExecution,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+) -> Result<RunResult, CepError> {
+    let lower_fingerprint = capture_lower_fingerprint(Path::new(&project_root))?;
+
+    let Some(plan) = execution_plan.supervisor_plan else {
+        if let Some(attempt) = execution_plan.boundary_attempt.as_ref() {
+            record_command_boundary_attempt(&ctx, method, attempt).await;
+        }
+        record_overlay_command_metadata(
+            &ctx,
+            method,
+            OverlayCommandMetadata {
+                mode: Some(OverlayMode::Diagnostic),
+                status: OverlayStatus::NotApplied,
+                disposition: None,
+                lower_consistency: Some(diagnostic_lower_consistency(
+                    Path::new(&project_root),
+                    &lower_fingerprint,
+                )?),
+                cleanup: None,
+            },
+        )
+        .await;
+        return run_diagnostic_unbounded_fallback(
+            params,
+            ctx,
+            method,
+            effective_timeout,
+            project_root,
+            policy,
+        )
+        .await;
+    };
+
+    run_diagnostic_overlay_supervised(
+        execution_plan.argv,
+        execution_plan.effective_env,
+        params,
+        ctx,
+        method,
+        effective_timeout,
+        project_root,
+        policy,
+        lower_fingerprint,
+        SupervisorExecution::Live { plan },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_diagnostic_overlay_supervised(
+    argv: Vec<String>,
+    effective_env: BTreeMap<String, String>,
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+    lower_fingerprint: LowerFingerprint,
+    supervisor: SupervisorExecution,
+) -> Result<RunResult, CepError> {
+    let mut cancellation = ctx.cancellation.clone();
+    let execute_config = ExecuteConfig {
+        project_root: &project_root,
+        limits: &ToolLimits::default(),
+        argv: &argv,
+        cwd: params.cwd.as_deref(),
+        env: &effective_env,
+        timeout_ms: Some(effective_timeout),
+        cancellation: &mut cancellation,
+        max_output_bytes: policy.max_output_bytes,
+    };
+
+    match execute_argv_supervised(execute_config, supervisor).await {
+        Ok(output) => {
+            record_command_boundary_attempt(&ctx, method, &output.setup_attempt).await;
+            let lower_consistency =
+                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+            record_overlay_command_metadata(
+                &ctx,
+                method,
+                OverlayCommandMetadata {
+                    mode: Some(OverlayMode::Diagnostic),
+                    status: OverlayStatus::Applied,
+                    disposition: Some(OverlayDisposition::Discarded),
+                    lower_consistency: Some(lower_consistency),
+                    cleanup: output.overlay_cleanup.as_ref(),
+                },
+            )
+            .await;
+            finish_diagnostic_success(
+                &ctx,
+                method,
+                &project_root,
+                output.output,
+                output.stdout_meta,
+                output.stderr_meta,
+            )
+            .await
+        }
+        Err(err) if should_run_unbounded_fallback(&ctx.command_isolation, &err) => {
+            if let Some(attempt) = err.setup_attempt.as_ref() {
+                record_command_boundary_attempt(&ctx, method, attempt).await;
+            }
+            let lower_consistency =
+                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+            record_overlay_command_metadata(
+                &ctx,
+                method,
+                OverlayCommandMetadata {
+                    mode: Some(OverlayMode::Diagnostic),
+                    status: OverlayStatus::NotApplied,
+                    disposition: None,
+                    lower_consistency: Some(lower_consistency),
+                    cleanup: err.overlay_cleanup.as_ref(),
+                },
+            )
+            .await;
+            run_diagnostic_unbounded_fallback(
+                params,
+                ctx,
+                method,
+                effective_timeout,
+                project_root,
+                policy,
+            )
+            .await
+        }
+        Err(err) => {
+            if let Some(attempt) = err.setup_attempt.as_ref() {
+                record_command_boundary_attempt(&ctx, method, attempt).await;
+            }
+            let lower_consistency =
+                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+            let status = if err
+                .setup_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.outcome.failed_closed)
+            {
+                OverlayStatus::SetupFailed
+            } else {
+                OverlayStatus::Applied
+            };
+            record_overlay_command_metadata(
+                &ctx,
+                method,
+                OverlayCommandMetadata {
+                    mode: Some(OverlayMode::Diagnostic),
+                    status,
+                    disposition: Some(OverlayDisposition::Discarded),
+                    lower_consistency: Some(lower_consistency),
+                    cleanup: err.overlay_cleanup.as_ref(),
+                },
+            )
+            .await;
+            let backend_invoked = supervised_error_backend_invoked(&err);
+            finish_diagnostic_error(&ctx, method, err.error, backend_invoked).await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_artifact_overlay_run(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    execution_plan: PreparedCommandExecution,
+    active_record: EnvelopeRecord,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+) -> Result<RunResult, CepError> {
+    let lower_baseline = capture_lower_baseline(Path::new(&project_root))?;
+
+    let Some(plan) = execution_plan.supervisor_plan else {
+        if let Some(attempt) = execution_plan.boundary_attempt.as_ref() {
+            record_command_boundary_attempt(&ctx, method, attempt).await;
+        }
+        return artifact_fallback_without_overlay(
+            params,
+            ctx,
+            method,
+            effective_timeout,
+            active_record,
+            project_root,
+            policy,
+            lower_baseline.entries,
+        )
+        .await;
+    };
+
+    run_artifact_overlay_supervised(
+        params,
+        ctx,
+        method,
+        effective_timeout,
+        execution_plan.argv,
+        execution_plan.effective_env,
+        active_record,
+        project_root,
+        policy,
+        lower_baseline,
+        SupervisorExecution::Live { plan },
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_artifact_overlay_supervised(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    argv: Vec<String>,
+    effective_env: BTreeMap<String, String>,
+    active_record: EnvelopeRecord,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+    lower_baseline: LowerBaseline,
+    supervisor: SupervisorExecution,
+    cleanup_override: Option<OverlayCleanupReport>,
+) -> Result<RunResult, CepError> {
+    let artifact_plan = supervisor.overlay_plan().cloned().ok_or_else(|| {
+        CepError::internal_error("artifact overlay execution requested without overlay plan")
+    })?;
+    let execute_project_root =
+        artifact_execute_project_root_for_supervisor(&project_root, &artifact_plan, &supervisor);
+    let mut cancellation = ctx.cancellation.clone();
+    let execute_config = ExecuteConfig {
+        project_root: &execute_project_root,
+        limits: &ToolLimits::default(),
+        argv: &argv,
+        cwd: params.cwd.as_deref(),
+        env: &effective_env,
+        timeout_ms: Some(effective_timeout),
+        cancellation: &mut cancellation,
+        max_output_bytes: policy.max_output_bytes,
+    };
+
+    let output = match execute_argv_supervised(execute_config, supervisor).await {
+        Ok(output) => {
+            record_command_boundary_attempt(&ctx, method, &output.setup_attempt).await;
+            output
+        }
+        Err(err) if should_run_unbounded_fallback(&ctx.command_isolation, &err) => {
+            if let Some(attempt) = err.setup_attempt.as_ref() {
+                record_command_boundary_attempt(&ctx, method, attempt).await;
+            }
+            record_artifact_overlay_metadata(
+                &ctx,
+                method,
+                ArtifactOverlayMetadata {
+                    status: OverlayStatus::NotApplied,
+                    disposition: None,
+                    lower_consistency: Some(LowerConsistencyStatus::Unchanged),
+                    artifact_manifest_status: "not_scanned",
+                    artifact_adjudication: "skipped_no_overlay",
+                    verify_layer: VerifyLayerStatus::NotRun,
+                    cleanup: err.overlay_cleanup.as_ref(),
+                    commit_report: None,
+                    rejected_kinds: &[],
+                },
+            )
+            .await;
+            return artifact_fallback_without_overlay(
+                params,
+                ctx,
+                method,
+                effective_timeout,
+                active_record,
+                project_root,
+                policy,
+                lower_baseline.entries,
+            )
+            .await;
+        }
+        Err(err) => {
+            if let Some(attempt) = err.setup_attempt.as_ref() {
+                record_command_boundary_attempt(&ctx, method, attempt).await;
+            }
+            let cleanup = cleanup_override.unwrap_or_else(|| {
+                cleanup_artifact_overlay(&artifact_plan, OverlayDisposition::Denied, true)
+            });
+            record_artifact_overlay_metadata(
+                &ctx,
+                method,
+                ArtifactOverlayMetadata {
+                    status: artifact_status_from_error(&err),
+                    disposition: Some(OverlayDisposition::Denied),
+                    lower_consistency: Some(LowerConsistencyStatus::Unchanged),
+                    artifact_manifest_status: "not_scanned",
+                    artifact_adjudication: "denied_execution_failed",
+                    verify_layer: VerifyLayerStatus::NotRun,
+                    cleanup: Some(&cleanup),
+                    commit_report: None,
+                    rejected_kinds: &[],
+                },
+            )
+            .await;
+            emit_denial_metadata(
+                &ctx,
+                "execution_error",
+                supervised_error_backend_invoked(&err),
+                method,
+            )
+            .await;
+            return Err(err.error);
+        }
+    };
+
+    let exit_code = output.output.status.code().unwrap_or(-1);
+    record_command_execution_for_artifact(
+        &ctx,
+        method,
+        &project_root,
+        &active_record.envelope_id,
+        exit_code,
+        &output.stdout_meta,
+        &output.stderr_meta,
+    )
+    .await;
+
+    let scan = scan_overlay_upper(&artifact_plan.paths.upper, &lower_baseline)?;
+    let write_patterns = extract_write_path_patterns(&active_record.envelope.capabilities);
+    let authorized_region = ctx
+        .authorized_region
+        .get()
+        .unwrap_or_else(lancet_authority::effect::region::AuthorizedEffectRegion::empty);
+    let adjudication = match adjudicate_artifact_manifest(
+        &scan.manifest,
+        &scan.rejected_kinds,
+        &project_root,
+        &write_patterns,
+        &authorized_region,
+    ) {
+        Ok(report) => report,
+        Err(failure) => {
+            record_manifest_effects(&ctx, &failure.report);
+            if !failure.report.denied_paths.is_empty() {
+                emit_artifact_replan_required(
+                    &ctx,
+                    method,
+                    &active_record.envelope_id,
+                    &failure.report.denied_paths,
+                    &scan.manifest.paths(),
+                )
+                .await;
+            }
+            let cleanup = cleanup_override.unwrap_or_else(|| {
+                cleanup_artifact_overlay(&artifact_plan, failure.report.overlay_disposition, true)
+            });
+            record_artifact_overlay_metadata(
+                &ctx,
+                method,
+                ArtifactOverlayMetadata {
+                    status: OverlayStatus::Applied,
+                    disposition: Some(failure.report.overlay_disposition),
+                    lower_consistency: Some(LowerConsistencyStatus::Unchanged),
+                    artifact_manifest_status: failure.report.artifact_manifest_status.label(),
+                    artifact_adjudication: &failure.report.artifact_adjudication,
+                    verify_layer: VerifyLayerStatus::NotRun,
+                    cleanup: Some(&cleanup),
+                    commit_report: None,
+                    rejected_kinds: &failure.report.rejected_kinds,
+                },
+            )
+            .await;
+            return Err(failure.into_error());
+        }
+    };
+    record_manifest_effects(&ctx, &adjudication);
+
+    let verify_report = match run_artifact_verify_if_configured(
+        &ctx,
+        method,
+        &active_record,
+        &artifact_plan,
+        &scan.manifest,
+        policy,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err((err, report)) => {
+            let cleanup = cleanup_override.unwrap_or_else(|| {
+                cleanup_artifact_overlay(&artifact_plan, OverlayDisposition::Denied, true)
+            });
+            record_artifact_overlay_metadata(
+                &ctx,
+                method,
+                ArtifactOverlayMetadata {
+                    status: OverlayStatus::Applied,
+                    disposition: Some(OverlayDisposition::Denied),
+                    lower_consistency: Some(LowerConsistencyStatus::Unchanged),
+                    artifact_manifest_status: adjudication.artifact_manifest_status.label(),
+                    artifact_adjudication: "denied_verify_failed",
+                    verify_layer: report.verify_layer,
+                    cleanup: Some(&cleanup),
+                    commit_report: None,
+                    rejected_kinds: &[],
+                },
+            )
+            .await;
+            ctx.events
+                .emit(
+                    "cep.verify_failed",
+                    json!({
+                        "method": method,
+                        "envelope_id": &active_record.envelope_id,
+                        "verify_exit_code": -1,
+                        "diff_retained": false,
+                    }),
+                )
+                .await;
+            return Err(err);
+        }
+    };
+
+    let prepared = prepare_artifact_commit_set(
+        scan.manifest.clone(),
+        &artifact_plan.paths.upper,
+        &lower_baseline,
+    )?;
+    let artifact_cleanup = cleanup_override.unwrap_or_else(|| {
+        cleanup_artifact_overlay(&artifact_plan, OverlayDisposition::Committed, true)
+    });
+    let commit_report = match commit_artifact_manifest(
+        Path::new(&project_root),
+        prepared,
+        &artifact_cleanup,
+        &verify_report,
+    ) {
+        Ok(report) => report,
+        Err(failure) => {
+            record_artifact_overlay_metadata(
+                &ctx,
+                method,
+                ArtifactOverlayMetadata {
+                    status: OverlayStatus::Applied,
+                    disposition: Some(failure.report.overlay_disposition),
+                    lower_consistency: lower_consistency_from_commit_report(&failure.report),
+                    artifact_manifest_status: adjudication.artifact_manifest_status.label(),
+                    artifact_adjudication: &failure.report.artifact_adjudication,
+                    verify_layer: verify_report.verify_layer,
+                    cleanup: Some(&artifact_cleanup),
+                    commit_report: Some(&failure.report),
+                    rejected_kinds: &[],
+                },
+            )
+            .await;
+            return Err(failure.into_error());
+        }
+    };
+
+    record_artifact_overlay_metadata(
+        &ctx,
+        method,
+        ArtifactOverlayMetadata {
+            status: OverlayStatus::Applied,
+            disposition: Some(commit_report.overlay_disposition),
+            lower_consistency: lower_consistency_from_commit_report(&commit_report),
+            artifact_manifest_status: adjudication.artifact_manifest_status.label(),
+            artifact_adjudication: &commit_report.artifact_adjudication,
+            verify_layer: verify_report.verify_layer,
+            cleanup: Some(&artifact_cleanup),
+            commit_report: Some(&commit_report),
+            rejected_kinds: &[],
+        },
+    )
+    .await;
+
+    emit_success_metadata(
+        &ctx,
+        CommandSuccessAudit {
+            classification: &EffectiveImpact::WorkspaceMutation,
+            envelope_id: Some(&active_record.envelope_id),
+            exit_code,
+            stdout_meta: &output.stdout_meta,
+            stderr_meta: &output.stderr_meta,
+            method,
+            observation_metadata: &command_observation_metadata(
+                &EffectiveImpact::WorkspaceMutation,
+            ),
+        },
+    )
+    .await;
+
+    Ok(RunResult {
+        exit_code,
+        stdout: String::from_utf8_lossy(&output.output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.output.stderr).to_string(),
+        stdout_truncated: output.stdout_meta.truncated.then_some(true),
+        stderr_truncated: output.stderr_meta.truncated.then_some(true),
+        stdout_bytes: Some(output.stdout_meta.total_bytes),
+        stderr_bytes: Some(output.stderr_meta.total_bytes),
+    })
+}
+
+fn artifact_execute_project_root_for_supervisor(
+    project_root: &str,
+    artifact_plan: &OverlayPlan,
+    supervisor: &SupervisorExecution,
+) -> String {
+    #[cfg(not(test))]
+    let _ = supervisor;
+    #[cfg(test)]
+    if matches!(supervisor, SupervisorExecution::Fixed { .. }) {
+        let _ = std::fs::create_dir_all(&artifact_plan.paths.upper);
+        return artifact_plan.paths.upper.to_string_lossy().into_owned();
+    }
+    let _ = artifact_plan;
+    project_root.to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn artifact_fallback_without_overlay(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    active_record: EnvelopeRecord,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+    pre_snapshot: WorkspaceSnapshot,
+) -> Result<RunResult, CepError> {
+    record_artifact_overlay_metadata(
+        &ctx,
+        method,
+        ArtifactOverlayMetadata {
+            status: match ctx.command_isolation.mode {
+                CommandIsolationMode::Off => OverlayStatus::NotRequested,
+                CommandIsolationMode::Audit | CommandIsolationMode::Enforce => {
+                    OverlayStatus::NotApplied
+                }
+            },
+            disposition: None,
+            lower_consistency: None,
+            artifact_manifest_status: "not_scanned",
+            artifact_adjudication: "skipped_no_overlay",
+            verify_layer: VerifyLayerStatus::NotRun,
+            cleanup: None,
+            commit_report: None,
+            rejected_kinds: &[],
+        },
+    )
+    .await;
+
+    let fallback_env = if ctx.command_isolation.mode == CommandIsolationMode::Off {
+        build_effective_env(&params.env, policy)?
+    } else {
+        build_unbounded_fallback_env(&params.env, policy)?
+    };
+    let mut cancellation = ctx.cancellation.clone();
+    let execute_config = ExecuteConfig {
+        project_root: &project_root,
+        limits: &ToolLimits::default(),
+        argv: &params.argv,
+        cwd: params.cwd.as_deref(),
+        env: &fallback_env,
+        timeout_ms: Some(effective_timeout),
+        cancellation: &mut cancellation,
+        max_output_bytes: policy.max_output_bytes,
+    };
+    match execute_argv(execute_config).await {
+        Ok((output, stdout_meta, stderr_meta)) => {
+            let exit_code = output.status.code().unwrap_or(-1);
+            record_command_execution_for_artifact(
+                &ctx,
+                method,
+                &project_root,
+                &active_record.envelope_id,
+                exit_code,
+                &stdout_meta,
+                &stderr_meta,
+            )
+            .await;
+            let diff = record_workspace_mutation_diff(
+                &ctx,
+                &active_record,
+                &project_root,
+                &pre_snapshot,
+                method,
+            )
+            .await?;
+            if !diff.out_of_scope_paths.is_empty() {
+                return Err(out_of_scope_changed_paths_error(
+                    diff.out_of_scope_paths,
+                    method,
+                ));
+            }
+            if let Some(verify_cmd) = extract_verify_command(&active_record.envelope) {
+                validate_verify_command(&verify_cmd, policy, &project_root)?;
+                let mut verify_cancel = ctx.cancellation.clone();
+                match run_verify(&verify_cmd, &project_root, policy, &mut verify_cancel).await {
+                    Ok(outcome) if !outcome.success => {
+                        ctx.events
+                            .emit(
+                                "cep.verify_failed",
+                                json!({
+                                    "method": method,
+                                    "envelope_id": &active_record.envelope_id,
+                                    "verify_exit_code": outcome.exit_code,
+                                    "diff_retained": true,
+                                }),
+                            )
+                            .await;
+                        return Err(verify_failed_error(&verify_cmd, &outcome));
+                    }
+                    Ok(_) => {
+                        ctx.record_effect(ObservedEffect {
+                            kind: ImpactKind::CommandExecution,
+                            scope: ObservedScope::Root(project_root.clone()),
+                            required_capability: RequiredCapability::RunCommand,
+                            source: EffectSource::Verify,
+                        });
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let observation_metadata =
+                command_observation_metadata(&EffectiveImpact::WorkspaceMutation);
+            emit_success_metadata(
+                &ctx,
+                CommandSuccessAudit {
+                    classification: &EffectiveImpact::WorkspaceMutation,
+                    envelope_id: Some(&active_record.envelope_id),
+                    exit_code,
+                    stdout_meta: &stdout_meta,
+                    stderr_meta: &stderr_meta,
+                    method,
+                    observation_metadata: &observation_metadata,
+                },
+            )
+            .await;
+            Ok(RunResult {
+                exit_code,
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                stdout_truncated: stdout_meta.truncated.then_some(true),
+                stderr_truncated: stderr_meta.truncated.then_some(true),
+                stdout_bytes: Some(stdout_meta.total_bytes),
+                stderr_bytes: Some(stderr_meta.total_bytes),
+            })
+        }
+        Err(error) => {
+            let diff = record_workspace_mutation_diff(
+                &ctx,
+                &active_record,
+                &project_root,
+                &pre_snapshot,
+                method,
+            )
+            .await?;
+            ctx.record_durable_metadata(json!({
+                "classification": command_classification_label(&EffectiveImpact::WorkspaceMutation),
+                "envelope_id": &active_record.envelope_id,
+                "error_code": error.code.as_i32(),
+                "backend_invoked": true,
+                "policy_enforced": true,
+            }));
+            ctx.record_durable_metadata(command_observation_metadata(
+                &EffectiveImpact::WorkspaceMutation,
+            ));
+            emit_denial_metadata(&ctx, "execution_error", true, method).await;
+            if !diff.out_of_scope_paths.is_empty() {
+                return Err(out_of_scope_changed_paths_error(
+                    diff.out_of_scope_paths,
+                    method,
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn record_command_execution_for_artifact(
+    ctx: &HandlerContext,
+    method: &'static str,
+    project_root: &str,
+    envelope_id: &str,
+    exit_code: i32,
+    stdout_meta: &BoundedStreamOutput,
+    stderr_meta: &BoundedStreamOutput,
+) {
+    let observation_metadata = command_observation_metadata(&EffectiveImpact::WorkspaceMutation);
+    let execution_metadata = command_execution_metadata(CommandExecutionMetadata {
+        classification: &EffectiveImpact::WorkspaceMutation,
+        envelope_id: Some(envelope_id),
+        exit_code,
+        stdout_meta,
+        stderr_meta,
+        method,
+        observation_metadata: &observation_metadata,
+    });
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::CommandExecution,
+        scope: ObservedScope::Root(project_root.to_string()),
+        required_capability: RequiredCapability::RunCommand,
+        source: EffectSource::HandlerBackend,
+    });
+    ctx.record_durable_metadata(execution_metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": execution_metadata }),
+        )
+        .await;
+    ctx.record_durable_metadata(observation_metadata);
+}
+
+async fn run_artifact_verify_if_configured(
+    ctx: &HandlerContext,
+    method: &'static str,
+    active_record: &EnvelopeRecord,
+    artifact_plan: &OverlayPlan,
+    manifest: &crate::executor::supervisor::artifact::ArtifactManifest,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+) -> Result<VerifyDiscardReport, (CepError, VerifyDiscardReport)> {
+    let Some(verify_cmd) = extract_verify_command(&active_record.envelope) else {
+        return Ok(VerifyDiscardReport::not_run());
+    };
+    let candidate = prepare_candidate_artifact_view(artifact_plan, manifest);
+    #[cfg(test)]
+    if let Some(relative) = take_test_artifact_verify_write() {
+        validate_verify_command(&verify_cmd, policy, &candidate.root.to_string_lossy())
+            .map_err(|err| (err, VerifyDiscardReport::not_run()))?;
+        if relative.contains("..") || Path::new(&relative).is_absolute() {
+            return Err((
+                CepError::internal_error("test artifact verify write path must be relative"),
+                VerifyDiscardReport::not_run(),
+            ));
+        }
+        std::fs::write(artifact_plan.paths.upper.join(relative), "verify-only").map_err(|err| {
+            (
+                CepError::internal_error(format!("failed to write test verify artifact: {err}")),
+                VerifyDiscardReport::not_run(),
+            )
+        })?;
+        ctx.record_effect(ObservedEffect {
+            kind: ImpactKind::CommandExecution,
+            scope: ObservedScope::Root(candidate.root.to_string_lossy().to_string()),
+            required_capability: RequiredCapability::RunCommand,
+            source: EffectSource::Verify,
+        });
+        return Ok(VerifyDiscardReport {
+            verify_layer: VerifyLayerStatus::Discarded,
+            cleanup_outcome: Some(CleanupOutcome::Succeeded),
+            failure_kind: None,
+            path_label: None,
+            reason: None,
+            child_cleanup_succeeded: true,
+        });
+    }
+    let mut verify_cancel = ctx.cancellation.clone();
+    match run_verify_on_candidate_view(
+        &verify_cmd,
+        &candidate,
+        policy,
+        &mut verify_cancel,
+        &format!("{}-{}-verify", ctx.turn_id, ctx.call_id),
+    )
+    .await
+    {
+        Ok(outcome) => {
+            ctx.record_effect(ObservedEffect {
+                kind: ImpactKind::CommandExecution,
+                scope: ObservedScope::Root(candidate.root.to_string_lossy().to_string()),
+                required_capability: RequiredCapability::RunCommand,
+                source: EffectSource::Verify,
+            });
+            Ok(outcome.discard)
+        }
+        Err(err) => {
+            let report = if err.code == CepErrorCode::VerifyFailed {
+                VerifyDiscardReport {
+                    verify_layer: VerifyLayerStatus::Discarded,
+                    cleanup_outcome: Some(CleanupOutcome::Succeeded),
+                    failure_kind: None,
+                    path_label: None,
+                    reason: None,
+                    child_cleanup_succeeded: true,
+                }
+            } else {
+                VerifyDiscardReport {
+                    verify_layer: VerifyLayerStatus::CleanupFailed,
+                    cleanup_outcome: Some(CleanupOutcome::Failed),
+                    failure_kind: None,
+                    path_label: None,
+                    reason: Some(err.message.clone()),
+                    child_cleanup_succeeded: true,
+                }
+            };
+            let _ = method;
+            Err((err, report))
+        }
+    }
+}
+
+fn cleanup_artifact_overlay(
+    artifact_plan: &OverlayPlan,
+    disposition: OverlayDisposition,
+    child_cleanup_succeeded: bool,
+) -> OverlayCleanupReport {
+    let mut syscalls = LiveSupervisorSyscalls::default();
+    cleanup_overlay(
+        artifact_plan,
+        disposition,
+        child_cleanup_succeeded,
+        &mut syscalls,
+    )
+}
+
+fn artifact_status_from_error(err: &SupervisedCommandError) -> OverlayStatus {
+    if err
+        .setup_attempt
+        .as_ref()
+        .is_some_and(|attempt| attempt.outcome.failed_closed)
+    {
+        OverlayStatus::SetupFailed
+    } else {
+        OverlayStatus::Applied
+    }
+}
+
+fn record_manifest_effects(ctx: &HandlerContext, report: &ArtifactAdjudicationReport) {
+    for effect in &report.observed_effects {
+        ctx.record_effect(effect.clone());
+    }
+}
+
+async fn emit_artifact_replan_required(
+    ctx: &HandlerContext,
+    method: &'static str,
+    envelope_id: &str,
+    denied_paths: &[String],
+    manifest_paths: &[String],
+) {
+    ctx.events
+        .emit(
+            "cep.replan_required",
+            json!({
+                "method": method,
+                "active_envelope_id": envelope_id,
+                "out_of_scope_paths": denied_paths,
+                "changed_paths": manifest_paths,
+            }),
+        )
+        .await;
+}
+
+fn lower_consistency_from_commit_report(
+    report: &ArtifactCommitReport,
+) -> Option<LowerConsistencyStatus> {
+    match report.lower_consistency.as_str() {
+        "unchanged" => Some(LowerConsistencyStatus::Unchanged),
+        "drift_detected" => Some(LowerConsistencyStatus::DriftDetected),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn set_test_artifact_verify_write(path: Option<&str>) {
+    *TEST_ARTIFACT_VERIFY_WRITE.lock().unwrap() = path.map(str::to_string);
+}
+
+#[cfg(test)]
+fn take_test_artifact_verify_write() -> Option<String> {
+    TEST_ARTIFACT_VERIFY_WRITE.lock().unwrap().take()
+}
+
+async fn run_diagnostic_unbounded_fallback(
+    params: RunParams,
+    ctx: HandlerContext,
+    method: &'static str,
+    effective_timeout: u64,
+    project_root: String,
+    policy: &lancet_authority::policy::command::CommandPolicy,
+) -> Result<RunResult, CepError> {
+    let fallback_env = build_unbounded_fallback_env(&params.env, policy)?;
+    let mut fallback_cancellation = ctx.cancellation.clone();
+    let fallback_config = ExecuteConfig {
+        project_root: &project_root,
+        limits: &ToolLimits::default(),
+        argv: &params.argv,
+        cwd: params.cwd.as_deref(),
+        env: &fallback_env,
+        timeout_ms: Some(effective_timeout),
+        cancellation: &mut fallback_cancellation,
+        max_output_bytes: policy.max_output_bytes,
+    };
+    match execute_argv(fallback_config).await {
+        Ok((output, stdout_meta, stderr_meta)) => {
+            finish_diagnostic_success(
+                &ctx,
+                method,
+                &project_root,
+                output,
+                stdout_meta,
+                stderr_meta,
+            )
+            .await
+        }
+        Err(error) => finish_diagnostic_error(&ctx, method, error, true).await,
+    }
+}
+
+async fn finish_diagnostic_success(
+    ctx: &HandlerContext,
+    method: &'static str,
+    project_root: &str,
+    output: std::process::Output,
+    stdout_meta: BoundedStreamOutput,
+    stderr_meta: BoundedStreamOutput,
+) -> Result<RunResult, CepError> {
+    let exit_code = output.status.code().unwrap_or(-1);
+    let effective_impact = EffectiveImpact::Diagnostic;
+    let observation_metadata = command_observation_metadata(&effective_impact);
+    let execution_metadata = command_execution_metadata(CommandExecutionMetadata {
+        classification: &effective_impact,
+        envelope_id: None,
+        exit_code,
+        stdout_meta: &stdout_meta,
+        stderr_meta: &stderr_meta,
+        method,
+        observation_metadata: &observation_metadata,
+    });
+
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::CommandExecution,
+        scope: ObservedScope::Root(project_root.to_string()),
+        required_capability: RequiredCapability::RunCommand,
+        source: EffectSource::HandlerBackend,
+    });
+    ctx.record_durable_metadata(execution_metadata.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": execution_metadata }),
+        )
+        .await;
+    ctx.record_durable_metadata(observation_metadata.clone());
+    emit_success_metadata(
+        ctx,
+        CommandSuccessAudit {
+            classification: &effective_impact,
+            envelope_id: None,
+            exit_code,
+            stdout_meta: &stdout_meta,
+            stderr_meta: &stderr_meta,
+            method,
+            observation_metadata: &observation_metadata,
+        },
+    )
+    .await;
+
+    Ok(RunResult {
+        exit_code,
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stdout_truncated: stdout_meta.truncated.then_some(true),
+        stderr_truncated: stderr_meta.truncated.then_some(true),
+        stdout_bytes: Some(stdout_meta.total_bytes),
+        stderr_bytes: Some(stderr_meta.total_bytes),
+    })
+}
+
+async fn finish_diagnostic_error(
+    ctx: &HandlerContext,
+    method: &'static str,
+    error: CepError,
+    backend_invoked: bool,
+) -> Result<RunResult, CepError> {
+    let effective_impact = EffectiveImpact::Diagnostic;
+    ctx.record_durable_metadata(json!({
+        "classification": command_classification_label(&effective_impact),
+        "envelope_id": serde_json::Value::Null,
+        "error_code": error.code.as_i32(),
+        "backend_invoked": backend_invoked,
+        "policy_enforced": true,
+    }));
+    ctx.record_durable_metadata(command_observation_metadata(&effective_impact));
+    emit_denial_metadata(ctx, "execution_error", backend_invoked, method).await;
+    Err(error)
+}
+
+fn overlay_requested_for_command(ctx: &HandlerContext) -> bool {
+    matches!(
+        ctx.command_isolation.mode,
+        CommandIsolationMode::Enforce | CommandIsolationMode::Audit
+    )
+}
+
+fn overlay_status_for_unapplied_diagnostic(ctx: &HandlerContext) -> OverlayStatus {
+    match ctx.command_isolation.mode {
+        CommandIsolationMode::Off => OverlayStatus::NotRequested,
+        CommandIsolationMode::Audit => OverlayStatus::NotApplied,
+        CommandIsolationMode::Enforce => OverlayStatus::SetupFailed,
+    }
+}
+
+fn overlay_mode_for_effect(effective_impact: &EffectiveImpact) -> Option<OverlayMode> {
+    match effective_impact {
+        EffectiveImpact::Diagnostic => Some(OverlayMode::Diagnostic),
+        EffectiveImpact::WorkspaceMutation => Some(OverlayMode::Artifact),
+        EffectiveImpact::HardDenied => None,
+    }
+}
+
+fn diagnostic_lower_consistency(
+    project_root: &Path,
+    baseline: &LowerFingerprint,
+) -> Result<LowerConsistencyStatus, CepError> {
+    let current = capture_lower_fingerprint(project_root)?;
+    if current == *baseline {
+        Ok(LowerConsistencyStatus::Unchanged)
+    } else {
+        Ok(LowerConsistencyStatus::DriftDetected)
+    }
+}
+
+async fn record_overlay_command_metadata(
+    ctx: &HandlerContext,
+    method: &'static str,
+    metadata: OverlayCommandMetadata<'_>,
+) {
+    let json = overlay_command_metadata_json(method, metadata);
+    ctx.record_durable_metadata(json.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": json }),
+        )
+        .await;
+}
+
+async fn record_artifact_overlay_metadata(
+    ctx: &HandlerContext,
+    method: &'static str,
+    metadata: ArtifactOverlayMetadata<'_>,
+) {
+    let json = artifact_overlay_metadata_json(method, metadata);
+    ctx.record_durable_metadata(json.clone());
+    ctx.events
+        .emit(
+            "cep.command_metadata",
+            json!({ "method": method, "metadata": json }),
+        )
+        .await;
+}
+
+fn artifact_overlay_metadata_json(
+    method: &'static str,
+    metadata: ArtifactOverlayMetadata<'_>,
+) -> serde_json::Value {
+    let cleanup_outcome = metadata
+        .cleanup
+        .map(|cleanup| cleanup.outcome.label())
+        .unwrap_or_else(|| match metadata.status {
+            OverlayStatus::NotRequested => "not_requested",
+            OverlayStatus::NotApplied => "not_applied",
+            OverlayStatus::SetupFailed | OverlayStatus::Applied => "not_reported",
+        });
+    let commit_outcome = metadata
+        .commit_report
+        .map(|report| report.commit_outcome.label())
+        .unwrap_or(CommitOutcome::NotStarted.label());
+    let applied_entries = metadata
+        .commit_report
+        .map(|report| {
+            report
+                .applied_entries
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "path": entry.path,
+                        "kind": entry.kind.label(),
+                        "operation": entry.operation.label(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let failed_entry = metadata.commit_report.and_then(|report| {
+        report.failed_entry.as_ref().map(|entry| {
+            json!({
+                "path": entry.path,
+                "kind": entry.kind.label(),
+                "error": entry.error,
+            })
+        })
+    });
+    json!({
+        "method": method,
+        "overlay_mode": overlay_mode_label(OverlayMode::Artifact),
+        "overlay_status": metadata.status.label(),
+        "overlay_disposition": metadata
+            .disposition
+            .map(|disposition| disposition.label())
+            .unwrap_or_else(|| metadata.status.label()),
+        "lower_consistency": metadata
+            .lower_consistency
+            .map(lower_consistency_label)
+            .or_else(|| metadata.commit_report.map(|report| report.lower_consistency.as_str()))
+            .unwrap_or("not_checked"),
+        "artifact_manifest_status": metadata.artifact_manifest_status,
+        "artifact_adjudication": metadata.artifact_adjudication,
+        "verify_layer": metadata.verify_layer.label(),
+        "cleanup_outcome": cleanup_outcome,
+        "cleanup_failure_kind": metadata
+            .cleanup
+            .and_then(|cleanup| cleanup.failure_kind.map(|kind| kind.label())),
+        "child_cleanup_succeeded": metadata
+            .cleanup
+            .map(|cleanup| cleanup.child_cleanup_succeeded),
+        "commit_outcome": commit_outcome,
+        "rejected_kinds": rejected_kinds_json(metadata.rejected_kinds),
+        "applied_entries": applied_entries,
+        "failed_entry": failed_entry,
+        "lower_changed_paths": metadata
+            .commit_report
+            .map(|report| report.changed_paths.clone())
+            .unwrap_or_default(),
+    })
+}
+
+fn rejected_kinds_json(rejected: &[RejectedArtifactKind]) -> Vec<serde_json::Value> {
+    rejected
+        .iter()
+        .map(|kind| {
+            json!({
+                "path": kind.path,
+                "kind": kind.kind.label(),
+                "reason": kind.reason,
+            })
+        })
+        .collect()
+}
+
+fn overlay_command_metadata_json(
+    method: &'static str,
+    metadata: OverlayCommandMetadata<'_>,
+) -> serde_json::Value {
+    let cleanup_outcome = metadata
+        .cleanup
+        .map(|cleanup| cleanup.outcome.label())
+        .unwrap_or_else(|| match metadata.status {
+            OverlayStatus::NotRequested => "not_requested",
+            OverlayStatus::NotApplied => "not_applied",
+            OverlayStatus::SetupFailed | OverlayStatus::Applied => "not_reported",
+        });
+    let cleanup_failure_kind = metadata
+        .cleanup
+        .and_then(|cleanup| cleanup.failure_kind.map(|kind| kind.label()));
+    let child_cleanup_succeeded = metadata
+        .cleanup
+        .map(|cleanup| cleanup.child_cleanup_succeeded);
+    json!({
+        "method": method,
+        "overlay_mode": metadata.mode.map(overlay_mode_label).unwrap_or("none"),
+        "overlay_status": metadata.status.label(),
+        "overlay_disposition": metadata
+            .disposition
+            .map(|disposition| disposition.label())
+            .unwrap_or_else(|| metadata.status.label()),
+        "lower_consistency": metadata
+            .lower_consistency
+            .map(lower_consistency_label)
+            .unwrap_or("not_checked"),
+        "cleanup_outcome": cleanup_outcome,
+        "cleanup_failure_kind": cleanup_failure_kind,
+        "child_cleanup_succeeded": child_cleanup_succeeded,
+    })
+}
+
+fn overlay_mode_label(mode: OverlayMode) -> &'static str {
+    match mode {
+        OverlayMode::Diagnostic => "diagnostic_discard",
+        OverlayMode::Artifact => "artifact",
+        OverlayMode::CandidateVerify => "candidate_verify",
+    }
+}
+
+fn lower_consistency_label(status: LowerConsistencyStatus) -> &'static str {
+    match status {
+        LowerConsistencyStatus::Unchanged => "unchanged",
+        LowerConsistencyStatus::DriftDetected => "drift_detected",
+    }
+}
+
 fn prepare_command_execution_plan(
     ctx: &HandlerContext,
     policy: &lancet_authority::policy::command::CommandPolicy,
     params: &RunParams,
     project_root: &str,
+    effective_impact: &EffectiveImpact,
 ) -> Result<PreparedCommandExecution, CepError> {
     match ctx.command_isolation.mode {
         CommandIsolationMode::Off => Ok(PreparedCommandExecution {
@@ -521,7 +1836,23 @@ fn prepare_command_execution_plan(
                 &params.argv,
                 &ctx.command_isolation,
             ) {
-                Ok(plan) => {
+                Ok(mut plan) => {
+                    if let Some(overlay_mode) = overlay_mode_for_effect(effective_impact) {
+                        let overlay_plan = OverlayPlan::deterministic(
+                            Path::new(project_root),
+                            overlay_mode,
+                            &format!("{}-{}", ctx.turn_id, ctx.call_id),
+                        )
+                        .map_err(|err| {
+                            CepError::internal_error(format!(
+                                "failed to plan {} overlay {}: {}",
+                                overlay_mode.label(),
+                                err.field,
+                                err.reason
+                            ))
+                        })?;
+                        plan = plan.with_overlay_plan(overlay_plan);
+                    }
                     let isolated_env =
                         build_isolated_env(&params.env, policy, &plan, &BTreeMap::new())?;
                     let argv = supervised_argv(&params.argv, &plan);
@@ -662,7 +1993,7 @@ async fn record_workspace_mutation_diff(
     ctx: &HandlerContext,
     record: &EnvelopeRecord,
     project_root: &str,
-    pre_snapshot: &HashMap<String, FileSnapshot>,
+    pre_snapshot: &WorkspaceSnapshot,
     method: &'static str,
 ) -> Result<WorkspaceMutationDiff, CepError> {
     let write_patterns = extract_write_path_patterns(&record.envelope.capabilities);
@@ -736,155 +2067,6 @@ fn out_of_scope_changed_paths_error(out_of_scope_paths: Vec<String>, method: &st
         }),
         Retriability::RequiresReplan,
     )
-}
-
-/// A file snapshot for pre/post-execution diff comparison.
-#[derive(Clone, Debug)]
-struct FileSnapshot {
-    /// Content hash (blake3) for regular files.
-    content_hash: Option<String>,
-    /// File type indicator.
-    file_type: String,
-}
-
-/// Capture a workspace snapshot under project_root.
-///
-/// For each regular file: record (relative_path, FileSnapshot with blake3 hash).
-/// For symlinks/dirs: record (relative_path, FileSnapshot with type only).
-/// Uses a recursive helper built on `std::fs::read_dir` (no new dependencies).
-fn capture_workspace_snapshot(
-    project_root: &str,
-) -> Result<HashMap<String, FileSnapshot>, CepError> {
-    let root = Path::new(project_root);
-    let mut snapshot = HashMap::new();
-    capture_recursive(root, root, &mut snapshot)?;
-    Ok(snapshot)
-}
-
-fn capture_recursive(
-    base: &Path,
-    current: &Path,
-    snapshot: &mut HashMap<String, FileSnapshot>,
-) -> Result<(), CepError> {
-    let entries = std::fs::read_dir(current).map_err(|e| {
-        CepError::internal_error(format!(
-            "failed to read directory '{}': {e}",
-            current.display()
-        ))
-    })?;
-
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| CepError::internal_error(format!("failed to read entry: {e}")))?;
-
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(base)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
-
-        // Skip runtime/build internals, but keep hidden project files like .github or .cargo.
-        if is_snapshot_skipped_path(&relative) {
-            continue;
-        }
-
-        let metadata = entry.file_type().map_err(|e| {
-            CepError::internal_error(format!(
-                "failed to read file type for '{}': {e}",
-                path.display()
-            ))
-        })?;
-
-        if metadata.is_symlink() {
-            snapshot.insert(
-                relative,
-                FileSnapshot {
-                    content_hash: None,
-                    file_type: "symlink".into(),
-                },
-            );
-        } else if metadata.is_dir() {
-            snapshot.insert(
-                relative,
-                FileSnapshot {
-                    content_hash: None,
-                    file_type: "dir".into(),
-                },
-            );
-            capture_recursive(base, &path, snapshot)?;
-        } else {
-            // Regular file — compute blake3 hash
-            let content = std::fs::read(&path).map_err(|e| {
-                CepError::internal_error(format!("failed to read file '{}': {e}", path.display()))
-            })?;
-            let hash = format!("blake3:{}", blake3::hash(&content).to_hex());
-            snapshot.insert(
-                relative,
-                FileSnapshot {
-                    content_hash: Some(hash),
-                    file_type: "file".into(),
-                },
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn is_snapshot_skipped_path(relative: &str) -> bool {
-    if relative == "target" || relative.starts_with("target/") {
-        return true;
-    }
-
-    // Allow descent into the hook directory while pruning the rest of .git.
-    if relative == ".git" || relative == ".git/hooks" {
-        return false;
-    }
-
-    // Track active hooks, but skip Git's inert sample templates.
-    if let Some(hook) = relative.strip_prefix(".git/hooks/") {
-        return hook.ends_with(".sample");
-    }
-
-    relative.starts_with(".git/")
-}
-
-/// Compute changed paths between pre and post snapshots.
-///
-/// Returns relative paths of files that were added, deleted, or had content changes.
-fn compute_changed_paths(
-    pre: &HashMap<String, FileSnapshot>,
-    post: &HashMap<String, FileSnapshot>,
-) -> Vec<String> {
-    let mut changed = Vec::new();
-
-    // Check for new or modified files
-    for (path, post_snap) in post {
-        match pre.get(path) {
-            Some(pre_snap) => {
-                // File existed before — check if content changed
-                if pre_snap.file_type != post_snap.file_type
-                    || pre_snap.content_hash != post_snap.content_hash
-                {
-                    changed.push(path.clone());
-                }
-            }
-            None => {
-                // New file
-                changed.push(path.clone());
-            }
-        }
-    }
-
-    // Check for deleted files
-    for path in pre.keys() {
-        if !post.contains_key(path) {
-            changed.push(path.clone());
-        }
-    }
-
-    changed
 }
 
 fn validate_inputs(params: &RunParams) -> Result<(), CepError> {
