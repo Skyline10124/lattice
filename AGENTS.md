@@ -100,6 +100,17 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 
 ## Repository Hygiene
 
+- New Rust source files under `crates/**` must start with the workspace copyright
+  and SPDX header:
+
+  ```rust
+  // Copyright 2026 Ast Rin
+  // SPDX-License-Identifier: Apache-2.0
+  ```
+
+- Preserve existing copyright and SPDX headers when editing source files.
+- Do not add or alter headers for generated, vendored, or external files unless
+  the surrounding maintained source already uses that convention.
 - Do not modify `.gitignore` in agent-driven changes. In particular, do not add
   ignore exceptions or whitelist rules to force ignored private/planning/build
   paths into commits. If a path appears to need tracking despite ignore rules,
