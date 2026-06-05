@@ -78,11 +78,11 @@ check_docs() {
     return
   fi
 
-  xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/phases/**' \
+  xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/**' \
     "$old_any|$old_cep_methods|$old_doc_refs|sessions list|debug \"test prompt\"|config show|tui -m|--trace|run-v11|run_v11" \
     < "$targets_tmp" > "$docs_tmp" 2>/dev/null || true
 
-  xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/phases/**' \
+  xargs -r rg -n --hidden --glob '!target/**' --glob '!.planning/**' \
     'plugin|swarm|orchestrat|rich prompt|sandboxed tool execution|approval|policy stack|TUI' \
     < "$targets_tmp" 2>/dev/null \
     | awk 'BEGIN { IGNORECASE=1 } !/future|deferred|out of scope|later|not part of v1\.1|removed|unsupported|beyond v1\.1/' \
@@ -110,7 +110,7 @@ manifest_output=$(
 print_group "workspace metadata old crate identities" "$manifest_output"
 
 source_output=$(
-  rg -n --hidden --glob '!target/**' --glob '!.planning/phases/**' --glob '*/src/**/*.rs' \
+  rg -n --hidden --glob '!target/**' --glob '!.planning/**' --glob '*/src/**/*.rs' \
     "$old_any" crates 2>/dev/null || true
 )
 print_group "active crate source old crate identities" "$source_output"

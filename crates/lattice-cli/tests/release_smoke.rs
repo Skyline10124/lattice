@@ -401,13 +401,56 @@ fn smoke_session_status_nonexistent_returns_error() {
 // ─── release gate wiring ────────────────────────────────────────────────────
 
 #[test]
-fn release_smoke_release_gate_includes_lancet_boundary_check() {
+fn release_smoke_release_gate_sh_is_retired() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let gate_path = manifest_dir.join("../../scripts/release-gate.sh");
+    let output = Command::new(&gate_path)
+        .output()
+        .unwrap_or_else(|err| panic!("run {}: {err}", gate_path.display()));
+
+    assert!(
+        !output.status.success(),
+        "retired release gate should exit nonzero"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "retired release gate should not write stdout, got:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("release-gate.sh is retired. Run scripts/release-gate-v1.4.sh (current)"),
+        "retired release gate should point to the current v1.4 gate, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn release_smoke_release_gate_v1_4_includes_lancet_boundary_check() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let gate_path = manifest_dir.join("../../scripts/release-gate-v1.4.sh");
     let gate = std::fs::read_to_string(&gate_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", gate_path.display()));
     assert!(
         gate.contains("scripts/lancet-boundary-check.sh"),
-        "release gate must invoke LANCET boundary check"
+        "v1.4 release gate must invoke LANCET boundary check"
+    );
+    assert!(
+        gate.contains("lancet-authority"),
+        "v1.4 release gate must cover lancet-authority"
+    );
+    assert!(
+        gate.contains("lancet-invariants"),
+        "v1.4 release gate must cover lancet-invariants"
+    );
+    assert!(
+        gate.contains("dogfood proof: no-key command artifact metadata")
+            && gate.contains("v1_4_command_artifact_dogfood"),
+        "v1.4 release gate must include the no-key command artifact metadata dogfood lane"
+    );
+    assert!(
+        gate.contains("docs/v1.4-alpha-release-record.md")
+            && gate.contains("does not write or enforce that record requirement"),
+        "v1.4 release gate must name but neither write nor enforce the release record requirement"
     );
 }

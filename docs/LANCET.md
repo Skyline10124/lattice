@@ -42,8 +42,27 @@ The canonical method names are grouped by primary effect class:
 
 ### Release gate and self-check
 
-- **Offline release gate:** `scripts/release-gate-v1.3.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. Exits 0 on a clean tree.
+`scripts/release-gate-v1.4.sh` is offline deterministic by default. A default
+run uses existing Cargo tests and local scripts only; it does not require API
+keys, provider calls, public network access, or live Linux kernel primitives.
+The gate keeps release evidence in three separate proof categories:
+
+- **live physical proof:** available only when `--live` is supplied or
+  `LATTICE_LINUX_ISOLATION_LIVE=1` is set. This runs the single ignored Rust
+  suite, `linux_isolation_live_canary_suite`; no shell-only or parallel live
+  canary suite is part of the gate.
+- **offline correctness proof:** deterministic non-kernel checks for boundary
+  and commit correctness. HashLine retention is offline correctness proof per
+  the v1.4-alpha release contract, and cleanup stress uses the same offline
+  proof class; neither is relabeled as live physical proof.
+- **dogfood proof:** no-key, no-uncontrolled-network production-path scenarios,
+  including command/artifact metadata and audit replay. This is not live kernel
+  proof and does not require the overlay path to be applied on every developer
+  host. Real-provider dogfood is outside the gate.
+
+- **Offline release gate:** `scripts/release-gate-v1.4.sh` — runs `cargo fmt`, `cargo clippy`, targeted crate tests, dogfood suite, LANCET boundary check, and `lattice lancet doctor`. It is offline deterministic by default and runs live Linux physical canaries only with `--live` or `LATTICE_LINUX_ISOLATION_LIVE=1`.
 - **LANCET self-check:** `cargo run -p lattice-cli -- lancet doctor` — verifies the production registry fully registers the CATALOG, in-process transport smoke-tests, base envelope constructs, and mode policy parses cleanly.
+- **v1.4-alpha release record:** `docs/v1.4-alpha-release-record.md` — named evidence home for capable-host live canary output, host/kernel capability facts, failed canaries, skipped unsupported canaries, and the trust-claim decision. The local gate does not write this record and does not enforce the release-record requirement that at least one capable Linux host reports `failed=0` and `skipped_unsupported=0`; that capable-host condition is judged by the CI/release-record layer.
 - **Warn-mode report:** `docs/lancet-warn-report.md` — coverage report for the canonical effect-contract surface; the baseline is N=0 leaks and no `fix-now` triage rows.
 - **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
 
@@ -504,17 +523,30 @@ required boundary is unavailable, disabled, unknown, or unsupported.
 
 ### Live canary classification
 
-Phase 29 live Linux canaries are ignored tests gated by
+v1.4-alpha live Linux canaries share the single ignored Rust suite
+`linux_isolation_live_canary_suite`, gated by
 `LATTICE_LINUX_ISOLATION_LIVE=1`. Each canary reports one of three outcomes:
-`passed`, `skipped_unsupported`, or `failed`.
+`passed`, `skipped_unsupported`, or `failed`, followed by
+`live_canary_summary: passed=N skipped_unsupported=N failed=N`.
 
-`passed` is host-specific evidence for that canary on that host. A
-`skipped_unsupported` result is diagnostic only and is not proof of physical
+`passed` is host-specific evidence for that canary on that host. In release-gate
+shorthand, skipped_unsupported is diagnostic only and is not proof of physical
 bounds; it must include an exact reason such as `network namespace unavailable`,
 `mount namespace unavailable`, `user namespace disabled`,
 `uid/gid map unavailable`, `Landlock ABI unsupported`, or
 `operation not permitted`. `failed` means the canary attempted the behavior and
 observed a violation or unexpected error.
+
+v1.4-alpha physical-bound trust is claimed only from capable-host live
+`passed` canaries captured in `docs/v1.4-alpha-release-record.md`. Unsupported,
+warn, audit, off, or fallback execution is diagnostic output and must not be
+represented as physical-bound proof. Extra rootless, container, distro, or
+non-Linux runs may be recorded as diagnostics, but the trust claim needs at
+least one capable Linux host with `failed=0` and `skipped_unsupported=0`.
+`scripts/release-gate-v1.4.sh --live` runs the suite and prints that summary
+for the operator to record; it does not itself gate on `skipped_unsupported`,
+and it does not create or populate the release record. Judging the capable-host
+condition is the release-record layer's job.
 
 ## Phase 29 non-claims
 
