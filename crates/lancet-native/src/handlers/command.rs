@@ -23,15 +23,14 @@ use crate::enforcement::verify::{
     extract_verify_command, run_verify, run_verify_on_candidate_view, validate_verify_command,
     verify_failed_error,
 };
-use crate::executor::limits::ToolLimits;
 use crate::executor::shell::{
     execute_argv, execute_argv_supervised, BoundedStreamOutput, ExecuteConfig,
     SupervisedCommandError, SupervisorExecution,
 };
 use crate::executor::supervisor::artifact::{
     adjudicate_artifact_manifest, commit_artifact_manifest, prepare_artifact_commit_set,
-    scan_overlay_upper, ArtifactAdjudicationReport, ArtifactCommitReport, CommitOutcome,
-    RejectedArtifactKind,
+    scan_overlay_upper, ArtifactAdjudicationReport, ArtifactCommitFailure, ArtifactCommitReport,
+    CommitOutcome, PreparedArtifactSet, RejectedArtifactKind,
 };
 use crate::executor::supervisor::env::build_isolated_env;
 use crate::executor::supervisor::overlay::{
@@ -62,7 +61,7 @@ use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 static TEST_ARTIFACT_VERIFY_WRITE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -308,7 +307,7 @@ async fn handle_run_as(
     }
 
     if effective_impact == EffectiveImpact::WorkspaceMutation {
-        let pre_snapshot = capture_workspace_snapshot(&project_root)?;
+        let pre_snapshot = capture_workspace_snapshot_blocking(project_root.clone()).await?;
         return artifact_fallback_without_overlay(
             params,
             ctx,
@@ -329,18 +328,17 @@ async fn handle_run_as(
 
     // 9a. Pre-execution baseline for WorkspaceMutation commands.
     let pre_snapshot = if effective_impact == EffectiveImpact::WorkspaceMutation {
-        capture_workspace_snapshot(&project_root)?
+        capture_workspace_snapshot_blocking(project_root.clone()).await?
     } else {
         WorkspaceSnapshot::new()
     };
 
     let execute_config = ExecuteConfig {
         project_root: &project_root,
-        limits: &ToolLimits::default(),
         argv: &execution_plan.argv,
         cwd: params.cwd.as_deref(),
         env: &execution_plan.effective_env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
     };
@@ -360,11 +358,10 @@ async fn handle_run_as(
                     let mut fallback_cancellation = ctx.cancellation.clone();
                     let fallback_config = ExecuteConfig {
                         project_root: &project_root,
-                        limits: &ToolLimits::default(),
                         argv: &params.argv,
                         cwd: params.cwd.as_deref(),
                         env: &fallback_env,
-                        timeout_ms: Some(effective_timeout),
+                        timeout_ms: effective_timeout,
                         cancellation: &mut fallback_cancellation,
                         max_output_bytes: policy.max_output_bytes,
                     };
@@ -621,7 +618,7 @@ async fn handle_diagnostic_overlay_run(
     project_root: String,
     policy: &lancet_authority::policy::command::CommandPolicy,
 ) -> Result<RunResult, CepError> {
-    let lower_fingerprint = capture_lower_fingerprint(Path::new(&project_root))?;
+    let lower_fingerprint = capture_lower_fingerprint_blocking(project_root.clone()).await?;
 
     let Some(plan) = execution_plan.supervisor_plan else {
         if let Some(attempt) = execution_plan.boundary_attempt.as_ref() {
@@ -634,10 +631,10 @@ async fn handle_diagnostic_overlay_run(
                 mode: Some(OverlayMode::Diagnostic),
                 status: OverlayStatus::NotApplied,
                 disposition: None,
-                lower_consistency: Some(diagnostic_lower_consistency(
-                    Path::new(&project_root),
-                    &lower_fingerprint,
-                )?),
+                lower_consistency: Some(
+                    diagnostic_lower_consistency_blocking(&project_root, &lower_fingerprint)
+                        .await?,
+                ),
                 cleanup: None,
             },
         )
@@ -684,11 +681,10 @@ async fn run_diagnostic_overlay_supervised(
     let mut cancellation = ctx.cancellation.clone();
     let execute_config = ExecuteConfig {
         project_root: &project_root,
-        limits: &ToolLimits::default(),
         argv: &argv,
         cwd: params.cwd.as_deref(),
         env: &effective_env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
     };
@@ -697,7 +693,7 @@ async fn run_diagnostic_overlay_supervised(
         Ok(output) => {
             record_command_boundary_attempt(&ctx, method, &output.setup_attempt).await;
             let lower_consistency =
-                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+                diagnostic_lower_consistency_blocking(&project_root, &lower_fingerprint).await?;
             record_overlay_command_metadata(
                 &ctx,
                 method,
@@ -725,7 +721,7 @@ async fn run_diagnostic_overlay_supervised(
                 record_command_boundary_attempt(&ctx, method, attempt).await;
             }
             let lower_consistency =
-                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+                diagnostic_lower_consistency_blocking(&project_root, &lower_fingerprint).await?;
             record_overlay_command_metadata(
                 &ctx,
                 method,
@@ -753,7 +749,7 @@ async fn run_diagnostic_overlay_supervised(
                 record_command_boundary_attempt(&ctx, method, attempt).await;
             }
             let lower_consistency =
-                diagnostic_lower_consistency(Path::new(&project_root), &lower_fingerprint)?;
+                diagnostic_lower_consistency_blocking(&project_root, &lower_fingerprint).await?;
             let status = if err
                 .setup_attempt
                 .as_ref()
@@ -792,7 +788,7 @@ async fn handle_artifact_overlay_run(
     project_root: String,
     policy: &lancet_authority::policy::command::CommandPolicy,
 ) -> Result<RunResult, CepError> {
-    let lower_baseline = capture_lower_baseline(Path::new(&project_root))?;
+    let lower_baseline = capture_lower_baseline_blocking(project_root.clone()).await?;
 
     let Some(plan) = execution_plan.supervisor_plan else {
         if let Some(attempt) = execution_plan.boundary_attempt.as_ref() {
@@ -851,11 +847,10 @@ async fn run_artifact_overlay_supervised(
     let mut cancellation = ctx.cancellation.clone();
     let execute_config = ExecuteConfig {
         project_root: &execute_project_root,
-        limits: &ToolLimits::default(),
         argv: &argv,
         cwd: params.cwd.as_deref(),
         env: &effective_env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
     };
@@ -1057,12 +1052,14 @@ async fn run_artifact_overlay_supervised(
     let artifact_cleanup = cleanup_override.unwrap_or_else(|| {
         cleanup_artifact_overlay(&artifact_plan, OverlayDisposition::Committed, true)
     });
-    let commit_report = match commit_artifact_manifest(
-        Path::new(&project_root),
+    let commit_report = match commit_artifact_manifest_blocking(
+        PathBuf::from(&project_root),
         prepared,
-        &artifact_cleanup,
-        &verify_report,
-    ) {
+        artifact_cleanup.clone(),
+        verify_report.clone(),
+    )
+    .await?
+    {
         Ok(report) => report,
         Err(failure) => {
             record_artifact_overlay_metadata(
@@ -1192,11 +1189,10 @@ async fn artifact_fallback_without_overlay(
     let mut cancellation = ctx.cancellation.clone();
     let execute_config = ExecuteConfig {
         project_root: &project_root,
-        limits: &ToolLimits::default(),
         argv: &params.argv,
         cwd: params.cwd.as_deref(),
         env: &fallback_env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation: &mut cancellation,
         max_output_bytes: policy.max_output_bytes,
     };
@@ -1532,11 +1528,10 @@ async fn run_diagnostic_unbounded_fallback(
     let mut fallback_cancellation = ctx.cancellation.clone();
     let fallback_config = ExecuteConfig {
         project_root: &project_root,
-        limits: &ToolLimits::default(),
         argv: &params.argv,
         cwd: params.cwd.as_deref(),
         env: &fallback_env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation: &mut fallback_cancellation,
         max_output_bytes: policy.max_output_bytes,
     };
@@ -1658,16 +1653,69 @@ fn overlay_mode_for_effect(effective_impact: &EffectiveImpact) -> Option<Overlay
     }
 }
 
-fn diagnostic_lower_consistency(
-    project_root: &Path,
+async fn capture_workspace_snapshot_blocking(
+    project_root: String,
+) -> Result<WorkspaceSnapshot, CepError> {
+    run_blocking_snapshot("capture_workspace_snapshot", move || {
+        capture_workspace_snapshot(PathBuf::from(project_root))
+    })
+    .await
+}
+
+async fn capture_lower_baseline_blocking(project_root: String) -> Result<LowerBaseline, CepError> {
+    run_blocking_snapshot("capture_lower_baseline", move || {
+        capture_lower_baseline(&PathBuf::from(project_root))
+    })
+    .await
+}
+
+async fn capture_lower_fingerprint_blocking(
+    project_root: String,
+) -> Result<LowerFingerprint, CepError> {
+    run_blocking_snapshot("capture_lower_fingerprint", move || {
+        capture_lower_fingerprint(&PathBuf::from(project_root))
+    })
+    .await
+}
+
+async fn diagnostic_lower_consistency_blocking(
+    project_root: &str,
     baseline: &LowerFingerprint,
 ) -> Result<LowerConsistencyStatus, CepError> {
-    let current = capture_lower_fingerprint(project_root)?;
-    if current == *baseline {
-        Ok(LowerConsistencyStatus::Unchanged)
-    } else {
-        Ok(LowerConsistencyStatus::DriftDetected)
-    }
+    let project_root = PathBuf::from(project_root);
+    let baseline = baseline.clone();
+    run_blocking_snapshot("diagnostic_lower_consistency", move || {
+        let current = capture_lower_fingerprint(&project_root)?;
+        if current == baseline {
+            Ok(LowerConsistencyStatus::Unchanged)
+        } else {
+            Ok(LowerConsistencyStatus::DriftDetected)
+        }
+    })
+    .await
+}
+
+async fn run_blocking_snapshot<T, F>(operation: &'static str, f: F) -> Result<T, CepError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CepError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|err| {
+        CepError::internal_error(format!("{operation} blocking task failed: {err}"))
+    })?
+}
+
+async fn commit_artifact_manifest_blocking(
+    project_root: PathBuf,
+    prepared: PreparedArtifactSet,
+    artifact_cleanup: OverlayCleanupReport,
+    verify_report: VerifyDiscardReport,
+) -> Result<Result<ArtifactCommitReport, Box<ArtifactCommitFailure>>, CepError> {
+    tokio::task::spawn_blocking(move || {
+        commit_artifact_manifest(&project_root, prepared, &artifact_cleanup, &verify_report)
+    })
+    .await
+    .map_err(|err| CepError::internal_error(format!("artifact commit task failed: {err}")))
 }
 
 async fn record_overlay_command_metadata(
@@ -1761,6 +1809,7 @@ fn artifact_overlay_metadata_json(
         "cleanup_failure_kind": metadata
             .cleanup
             .and_then(|cleanup| cleanup.failure_kind.map(|kind| kind.label())),
+        "cleanup_failures": cleanup_failures_json(metadata.cleanup),
         "child_cleanup_succeeded": metadata
             .cleanup
             .map(|cleanup| cleanup.child_cleanup_succeeded),
@@ -1838,8 +1887,27 @@ fn overlay_command_metadata_json(
             .unwrap_or("not_checked"),
         "cleanup_outcome": cleanup_outcome,
         "cleanup_failure_kind": cleanup_failure_kind,
+        "cleanup_failures": cleanup_failures_json(metadata.cleanup),
         "child_cleanup_succeeded": child_cleanup_succeeded,
     })
+}
+
+fn cleanup_failures_json(cleanup: Option<&OverlayCleanupReport>) -> Vec<serde_json::Value> {
+    cleanup
+        .map(|cleanup| {
+            cleanup
+                .cleanup_failures
+                .iter()
+                .map(|failure| {
+                    json!({
+                        "kind": failure.failure_kind.label(),
+                        "path_label": failure.path_label,
+                        "reason": failure.reason.as_str(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn overlay_mode_label(mode: OverlayMode) -> &'static str {
@@ -2050,7 +2118,7 @@ async fn record_workspace_mutation_diff(
     method: &'static str,
 ) -> Result<WorkspaceMutationDiff, CepError> {
     let write_patterns = extract_write_path_patterns(&record.envelope.capabilities);
-    let post_snapshot = capture_workspace_snapshot(project_root)?;
+    let post_snapshot = capture_workspace_snapshot_blocking(project_root.to_string()).await?;
     let changed_paths = compute_changed_paths(pre_snapshot, &post_snapshot);
 
     if changed_paths.is_empty() {

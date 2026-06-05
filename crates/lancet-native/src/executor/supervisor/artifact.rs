@@ -1029,12 +1029,19 @@ fn commit_artifact_manifest_locked(
         }));
     }
 
-    apply_prepared_artifact_set(project_root, prepared)
+    let commit_baseline_details = if anchor_report.hunks.is_empty() {
+        json!({})
+    } else {
+        commit_baseline_details_for_hunks(&anchor_report.hunks)
+    };
+
+    apply_prepared_artifact_set(project_root, prepared, commit_baseline_details)
 }
 
 pub(crate) fn apply_prepared_artifact_set(
     project_root: &Path,
     prepared: &PreparedArtifactSet,
+    commit_baseline_details: Value,
 ) -> Result<ArtifactCommitReport, Box<ArtifactCommitFailure>> {
     let mut applied_entries = Vec::new();
 
@@ -1052,7 +1059,7 @@ pub(crate) fn apply_prepared_artifact_set(
                 overlay_disposition: OverlayDisposition::Committed,
                 commit_baseline_validation: "passed".to_string(),
                 commit_baseline_failure_reason: None,
-                commit_baseline_details: json!({}),
+                commit_baseline_details: commit_baseline_details.clone(),
                 applied_entries,
                 failed_entry: Some(failed_entry.clone()),
                 changed_paths: Vec::new(),
@@ -1079,7 +1086,7 @@ pub(crate) fn apply_prepared_artifact_set(
         overlay_disposition: OverlayDisposition::Committed,
         commit_baseline_validation: "passed".to_string(),
         commit_baseline_failure_reason: None,
-        commit_baseline_details: json!({}),
+        commit_baseline_details,
         applied_entries,
         failed_entry: None,
         changed_paths: Vec::new(),
@@ -1848,6 +1855,7 @@ mod tests {
             failure_kind: None,
             path_label: None,
             reason: None,
+            cleanup_failures: Vec::new(),
             child_cleanup_succeeded: true,
         }
     }
@@ -2727,6 +2735,14 @@ mod tests {
         assert_eq!(report.commit_baseline_validation, "passed");
         assert!(report.commit_baseline_failure_reason.is_none());
         assert_eq!(
+            report.commit_baseline_details["hunks"][0]["match_result"],
+            "matched"
+        );
+        assert_eq!(
+            report.commit_baseline_details["hunks"][0]["anchor_count"],
+            2
+        );
+        assert_eq!(
             std::fs::read_to_string(project.path().join("generated.txt")).unwrap(),
             "accepted"
         );
@@ -2890,6 +2906,7 @@ mod tests {
     #[test]
     fn artifact_commit_reports_partial_apply_failure_without_clearing_applied_entries() {
         let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("source.txt"), "alpha\nbeta\n").unwrap();
         std::fs::create_dir(project.path().join("z-blocked")).unwrap();
         let baseline = capture_lower_baseline(project.path()).unwrap();
         let upper = TempDir::new().unwrap();
@@ -2915,7 +2932,18 @@ mod tests {
                 }),
             ],
         };
-        let prepared = prepare_artifact_commit_set(manifest, upper.path(), &baseline).unwrap();
+        let evidence = vec![HunkAnchorEvidence {
+            file_path: "source.txt".to_string(),
+            hunk_index: 0,
+            anchors: vec![anchor(1, "alpha"), anchor(2, "beta")],
+        }];
+        let prepared = prepare_artifact_commit_set_with_baseline_evidence(
+            manifest,
+            upper.path(),
+            &baseline,
+            evidence,
+        )
+        .unwrap();
 
         let failure = commit_artifact_manifest(
             project.path(),
@@ -2927,6 +2955,10 @@ mod tests {
 
         assert_eq!(failure.error.code, CepErrorCode::ExecutionFailed);
         assert_eq!(failure.report.commit_outcome, CommitOutcome::Partial);
+        assert_eq!(
+            failure.report.commit_baseline_details["hunks"][0]["match_result"],
+            "matched"
+        );
         assert_eq!(failure.report.applied_entries.len(), 1);
         assert_eq!(failure.report.applied_entries[0].path, "a-ok.txt");
         let failed = failure.report.failed_entry.expect("failed entry");

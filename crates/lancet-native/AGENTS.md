@@ -33,12 +33,12 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
 
 ## Recent Issues
 
-- OPEN M-24-01: `host_pattern` naming implies wildcard host matching but native
-  effect-region checks use exact equality.
-- OPEN M-24-02: command workspace snapshots synchronously traverse project roots
-  and can block tokio workers on large repositories.
-- OPEN M-24-03: crate-private `ToolLimits` remains as a hidden native limit
-  shape after CEP policy split; only patch write size is meaningfully active.
+- FIXED M-24-02: command workspace snapshots and artifact lower rechecks run in
+  the blocking pool with entry/depth limits.
+- FIXED M-24-03: `ToolLimits` was removed; shell timeouts are explicit and
+  patch write size is owned by `PatchApplyLimits`.
+- FIXED L-30/L-31: cleanup metadata records all cleanup failures, and positive
+  commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
   maintained rebinding suffix denylist.
 - WATCH: tool schemas must continue to come from catalog projection only.
@@ -47,12 +47,10 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
 
 ## Next Actions
 
-- Resolve M-24-01 with either explicit exact-host naming or wildcard semantics
-  across protocol, authority, native, and tests.
-- Move workspace snapshot work behind `spawn_blocking` and add depth/file-count
-  limits or a cheaper mutation detector.
-- Replace `ToolLimits` with a focused patch apply limit or a CEP mutation policy
-  field; avoid second command/network/read policy defaults.
+- If future fetch capabilities need wildcard hosts, implement semantics across
+  protocol, authority, native, and tests instead of using pattern wording alone.
+- If mutation write budgets become profile-managed, lift `PatchApplyLimits` into
+  CEP mutation policy rather than reviving generic native tool limits.
 - Keep web fetch security centered on request-time DNS pinning; treat denylist
   additions as defense in depth.
 

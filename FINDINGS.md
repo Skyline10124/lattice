@@ -12,24 +12,6 @@
 
 ## MEDIUM
 
-### M-24-01: `host_pattern` 字段名暗示通配符但实际只做精确匹配 — `api-shape`
-- **位置**: `crates/lancet-native/src/effect/region.rs:270-272`、`crates/lancet-protocol/src/envelope.rs`（`FetchUrl { host_pattern }` 定义）
-- **问题**: `AuthorizedEffectRegion::contains` 对 `ExternalObservation` 的 host 检查是 `h == host`（精确匹配），但 `FetchUrl` capability 字段名为 `host_pattern`，暗示 glob/通配符支持。若 capability 声明 `host_pattern: "*.example.com"`，实际 `api.example.com` 不会匹配。
-- **当前状态**: 当前无通配符 host 的使用场景，行为正确但字段名误导。
-- **计划**: 重命名 `host_pattern` → `host`（破坏性改动需协调 envelope 序列化），或实现简单通配符匹配（`*.example.com` → suffix match）。排期取决于是否有多 host 的 `web.fetch` envelope 需求。
-
-### M-24-02: `capture_workspace_snapshot` 同步无界遍历阻塞 async runtime — `performance`
-- **位置**: `crates/lancet-native/src/handlers/command.rs:365-442`
-- **问题**: 对整个 project root 做同步 `std::fs::read_dir` + `std::fs::read` 递归遍历（仅排除 `.git`/`target`），无深度/文件数上限。每次 `WorkspaceMutation` 命令调用两次（pre + post snapshot）。大仓库会阻塞 tokio worker thread。
-- **当前状态**: v1.3-alpha CLI 场景工作区规模可控，非 bug。
-- **计划**: `tokio::task::spawn_blocking` 包装 + 加深度/文件数上限；或改用 mtime 比较 + 按需 hash。与 command handler async 签名无关（snapshot 函数独立）。
-
-### M-24-03: `ToolLimits` 在 CEP policy 之后成为隐藏 native 限制 — `architecture` / `policy-consistency`
-- **位置**: `crates/lancet-native/src/executor/limits.rs`、`crates/lancet-native/src/executor/shell.rs:214-256`、`crates/lancet-native/src/edit/apply.rs:14-248`
-- **问题**: `ToolLimits` 仍以 legacy “tool limit” 形状存在，但 CEP 之后 read/network/command 限制已经分别由 `ObservationPolicyConfig`、`NetworkPolicyConfig`、`CommandPolicy` 管理。当前字段中 `max_read_size`、`max_http_response_size` 无读取点；`max_command_timeout` 只作为 `execute_argv(timeout_ms=None)` fallback，生产 command/verify 路径已传入 CEP policy 计算出的 timeout；只有 `max_write_size` 仍作为 `mutate.patch` 应用后的单文件写入硬上限生效。
-- **当前状态**: 已从公共 `lattice-tooling` surface 收回到 `lancet-native` crate-private 实现细节，行为正确；但该结构会让后续读者误以为 native 层仍有一套独立 tool policy。
-- **计划**: 后续统一重构时删除 `ToolLimits`。候选方案：将 patch 写入上限改成局部 `PatchApplyLimits { max_write_size }`；或提升为 CEP mutation policy（例如 `mutation.max_single_write_bytes`）并从 profile/external policy 下发。command fallback 应改为显式使用 `CommandPolicy::default_timeout_ms/max_timeout_ms`，避免 native helper 自带第二套 timeout 默认。
-
 ### M-24-04: `tools.enabled` 同时承担 LLM 暴露白名单和 CEP base authority 派生 — `architecture` / `policy-consistency`
 - **位置**: `crates/lattice-api/src/turn/enabled_tools.rs`、`crates/lattice-api/src/turn/cep.rs:197-208`、`crates/lattice-api/src/turn/cep.rs:582-602`、`crates/lattice-api/src/turn/cep.rs:788-793`
 - **问题**: `tools.enabled` 目前不只是 agent-visible method whitelist。它先过滤 catalog-derived LLM tool schemas，再生成 `CepExecutorAdapter` 的 enabled method set；同时又被 `production_base_envelope_from_policy` 用来派生 turn base envelope 能力：`session.envelope` / `session.todo_write` 触发 `MutateSessionState`，`fetch.web` 触发 allowed-host `FetchUrl` capabilities。这样 `tools.enabled` 同时承担 exposure 和部分 authority shaping，和 CEP policy/envelope 语义重叠。
@@ -103,18 +85,6 @@
 - **当前状态**: 当前覆盖与 Phase 29 目标匹配，非 bug。live canary 是 host-specific evidence；fake matrix 是 deterministic fail-closed proof；env tests 是 construction proof。
 - **计划**: Phase 32 rollout gate 如需发布级证明，应保持三类证据分层展示：deterministic unit/fake、current-host live canary、profile/doctor host probe；禁止把 `skipped_unsupported` 或 fake-only evidence 当作 current-host physical proof。
 
-### L-30-01: Overlay cleanup 只保留首个失败诊断 — `diagnostics` / `observability`
-- **位置**: `crates/lancet-native/src/executor/supervisor/overlay.rs:393-425`
-- **问题**: `cleanup_overlay` 使用首个失败作为 cleanup report 的失败原因；如果 unmount 失败后 upper/work 目录删除也失败，后续失败信息不会进入 compact metadata。安全性不受影响，因为任一 cleanup failure 都会阻止 artifact commit，但排查 busy mount、残留 upper/work、child cleanup 等复合故障时诊断信息会变薄。
-- **当前状态**: 非阻断，Phase 30 安全关键路径正确；`cleanup_outcome=cleanup_failed` 足以让 artifact commit fail-closed。
-- **计划**: 后续 Phase 31/32 或诊断增强窗口可把 cleanup report 扩展为保留首个主失败 + 附加失败列表，或引入 compact repeated failure records；保持现有 fail-closed 行为和 metadata 体积约束，补充多失败矩阵回归测试。
-
-### L-31-01: artifact commit `passed` 路径的 `commit_baseline_details` 为空 — `commit-baseline-audit` / `observability`
-- **位置**: `crates/lancet-native/src/executor/supervisor/artifact.rs:1050`、`crates/lancet-native/src/executor/supervisor/artifact.rs:1077`
-- **问题**: `apply_prepared_artifact_set` 在 partial 和成功两条路径都写 `commit_baseline_validation = "passed"`，但 `commit_baseline_details = json!({})`，不带任何 hunk anchor summary。失败路径（`missing_anchor`/`hash_mismatch`/`ambiguous_hunk`/`lower_drift`/`verify_layer_contamination`）都会序列化 compact details，唯独成功路径没有验证证据，因此审计无法从 metadata 复现"哪些 hunk 通过了 baseline 校验"。
-- **当前状态**: 非 bug。31-CONTEXT D-09 把 `commit_baseline_failure_reason` 和 details 标为 optional，passed 路径省略 details 是最保守、最省 metadata 体积的做法；`mutate.patch` 直写路径同样不在成功时记录 hunk。
-- **计划**: 若后续需要 positive 审计证明（例如合规要求逐 hunk 可复现），在成功路径补 `commit_baseline_details.hunks` 紧凑摘要，复用 `commit_baseline_details_for_hunks`，仅记录 hash/offset/count 不带 anchor 源文本（保持 T-31-05 约束），并加成功路径 metadata 回归测试。
-
 ### L-31-02: `LowerBaseline.regular_file_contents` 全量缓存项目文件字节 — `performance` / `memory`
 - **位置**: `crates/lancet-native/src/executor/supervisor/snapshot.rs:33`、`crates/lancet-native/src/executor/supervisor/snapshot.rs:251-263`
 - **问题**: P31-WR-02 修复（commit `71e8caf`）让 `capture_lower_baseline` 在计算每个 regular file BLAKE3 hash 的同时把完整字节存入 `regular_file_contents`，使 commit-baseline anchor 校验读取 capture 时刻的快照而非活 workspace（消除 TOCTOU）。代价是整个 lower 视图的 regular file 内容常驻内存,大型 workspace 下峰值内存随项目总字节线性增长。
@@ -154,6 +124,21 @@ Self-host harness: `scripts/p22-self-host.sh` (disposable clone under `build/tmp
 ## OBSOLETE / CLOSED
 
 （完整修复记录见 [FIX.md](./FIX.md)。）
+
+### M-24-01: `FetchUrl` host 字段名与精确匹配语义收敛 — `api-shape`
+- **当前状态**: 2026-06-05 fixed/stale-record cleanup。当前协议源码已是 `Capability::FetchUrl { host }`，root finding 和 crate-local `AGENTS.md` 中的 `host_pattern` 记录已移除。
+
+### M-24-02: workspace snapshot 阻塞 async runtime — `performance`
+- **当前状态**: 2026-06-05 fixed。command handler 的 workspace snapshot、lower baseline/fingerprint、artifact commit lower recheck/real commit 进入 blocking pool；snapshot helper 增加 entry/depth 上限。
+
+### M-24-03: `ToolLimits` 隐藏 native 限制 — `architecture` / `policy-consistency`
+- **当前状态**: 2026-06-05 fixed。删除 `ToolLimits`，shell executor 改为必传已校验 timeout，patch 写入上限迁入 `PatchApplyLimits`。
+
+### L-30-01: overlay cleanup 只保留首个失败诊断 — `diagnostics`
+- **当前状态**: 2026-06-05 fixed。cleanup report/metadata 保留首个失败摘要，同时新增 compact `cleanup_failures` 列表。
+
+### L-31-01: artifact commit `passed` 缺少 hunk baseline details — `observability`
+- **当前状态**: 2026-06-05 fixed。有 hunk evidence 的 passed/partial commit report 记录 compact `commit_baseline_details.hunks`；无 evidence 时继续保持 `{}`。
 
 ### H-03: `write_file` 跟随符号链接绕过 project-root 限制 — `security`
 - **当前状态**: 2026-05-27 fixed。Unix 写入改为逐级 `openat` + `O_NOFOLLOW`，拒绝 symlink parent/leaf，关闭 `symlink_metadata`→`write` 的 TOCTOU 窗口。

@@ -21,11 +21,23 @@ use super::types::{
     PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
 use crate::executor::error::ToolError;
-use crate::executor::limits::ToolLimits;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PatchApplyLimits {
+    pub(crate) max_write_size: usize,
+}
+
+impl Default for PatchApplyLimits {
+    fn default() -> Self {
+        Self {
+            max_write_size: 1024 * 1024,
+        }
+    }
+}
 
 pub async fn apply_patch(
     project_root: &Path,
-    limits: &ToolLimits,
+    limits: &PatchApplyLimits,
     patch: &str,
 ) -> PatchResultEnvelope {
     let document = match parse_patch_document(patch) {
@@ -88,7 +100,7 @@ pub async fn apply_patch(
 
 async fn build_apply_plan(
     project_root: &Path,
-    limits: &ToolLimits,
+    limits: &PatchApplyLimits,
     document: &PatchDocument,
     attempted_operations: Vec<AttemptedOperation>,
 ) -> Result<ApplyPlan, (Vec<PatchDiagnostic>, Vec<AttemptedOperation>)> {
@@ -240,7 +252,7 @@ async fn plan_update_file(
     hunks: &[PatchHunk],
     target_path: &Path,
     operation_index: usize,
-    limits: &ToolLimits,
+    limits: &PatchApplyLimits,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
     let before = read_file_bytes(path, target_path, operation_index).await?;
     validate_old_hash(path, old_hash, &before, operation_index)?;
@@ -895,7 +907,7 @@ mod tests {
 +new
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -914,7 +926,7 @@ mod tests {
 *** Delete File: sample.txt
 *** End Patch";
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "parse_error");
@@ -944,7 +956,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hash_mismatch");
@@ -974,13 +986,45 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
         assert!(result.ok);
         assert_eq!(
             std::fs::read_to_string(file).unwrap(),
             "same\nold\nsame\nnew\n"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_engine_rejects_outputs_above_patch_write_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        let before = "old\n";
+        std::fs::write(&file, before).unwrap();
+        let old_hash = hash(before);
+        let old = remove(1, "old");
+        let patch = format!(
+            "\
+*** Begin Patch
+*** Update File: sample.txt
+*** Old Hash: {old_hash}
+@@
+{old}
++new value above limit
+*** End Patch"
+        );
+        let limits = PatchApplyLimits { max_write_size: 4 };
+
+        let result = apply_patch(dir.path(), &limits, &patch).await;
+
+        assert!(!result.ok);
+        assert_eq!(result.errors[0].code.as_str(), "io_error");
+        assert!(
+            result.errors[0].message.contains("size limit"),
+            "got: {}",
+            result.errors[0].message
+        );
+        assert_eq!(std::fs::read_to_string(file).unwrap(), before);
     }
 
     #[cfg(unix)]
@@ -1026,7 +1070,7 @@ mod tests {
             hash(second_before)
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
         std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!result.ok);
@@ -1066,7 +1110,7 @@ mod tests {
             hash(delete_before)
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
         let value = parse_envelope(&result);
 
         assert!(result.ok);
@@ -1113,7 +1157,7 @@ mod tests {
 
         let plan = build_apply_plan(
             dir.path(),
-            &ToolLimits::default(),
+            &PatchApplyLimits::default(),
             &document,
             attempted_operations,
         )
@@ -1156,7 +1200,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code.as_str(), "hunk_missing");
@@ -1187,7 +1231,7 @@ mod tests {
 *** End Patch"
         );
 
-        let result = apply_patch(dir.path(), &ToolLimits::default(), &patch).await;
+        let result = apply_patch(dir.path(), &PatchApplyLimits::default(), &patch).await;
 
         assert!(result.ok);
         assert_eq!(std::fs::read_to_string(file).unwrap(), "new one\nnew two\n");

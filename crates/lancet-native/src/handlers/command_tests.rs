@@ -513,6 +513,7 @@ fn successful_artifact_cleanup(
         failure_kind: None,
         path_label: None,
         reason: None,
+        cleanup_failures: Vec::new(),
         child_cleanup_succeeded: true,
     }
 }
@@ -1587,6 +1588,13 @@ async fn artifact_overlay_commit_flow_cleanup_failure_blocks_commit() {
         failure_kind: Some(crate::executor::supervisor::overlay::CleanupFailureKind::RemoveUpper),
         path_label: Some("upper"),
         reason: Some("injected cleanup failure".into()),
+        cleanup_failures: vec![
+            crate::executor::supervisor::overlay::OverlayCleanupFailure {
+                failure_kind: crate::executor::supervisor::overlay::CleanupFailureKind::RemoveUpper,
+                path_label: "upper",
+                reason: "injected cleanup failure".into(),
+            },
+        ],
         child_cleanup_succeeded: true,
     };
 
@@ -1609,6 +1617,9 @@ async fn artifact_overlay_commit_flow_cleanup_failure_blocks_commit() {
     let metadata = command_boundary_metadata_json(&durable);
     assert_eq!(metadata["artifact_adjudication"], "denied_cleanup_failed");
     assert_eq!(metadata["cleanup_outcome"], "cleanup_failed");
+    assert_eq!(metadata["cleanup_failure_kind"], "remove_upper");
+    assert_eq!(metadata["cleanup_failures"][0]["kind"], "remove_upper");
+    assert_eq!(metadata["cleanup_failures"][0]["path_label"], "upper");
     assert_eq!(metadata["commit_outcome"], "not_started");
 }
 

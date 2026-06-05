@@ -11,6 +11,24 @@ use std::time::SystemTime;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+const DEFAULT_SNAPSHOT_MAX_ENTRIES: usize = 100_000;
+const DEFAULT_SNAPSHOT_MAX_DEPTH: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotLimits {
+    pub(crate) max_entries: usize,
+    pub(crate) max_depth: usize,
+}
+
+impl Default for SnapshotLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: DEFAULT_SNAPSHOT_MAX_ENTRIES,
+            max_depth: DEFAULT_SNAPSHOT_MAX_DEPTH,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SnapshotFileKind {
     RegularFile,
@@ -74,9 +92,17 @@ pub(crate) struct LowerFingerprintEntry {
 pub(crate) fn capture_workspace_snapshot(
     project_root: impl AsRef<Path>,
 ) -> Result<WorkspaceSnapshot, CepError> {
+    capture_workspace_snapshot_with_limits(project_root, SnapshotLimits::default())
+}
+
+pub(crate) fn capture_workspace_snapshot_with_limits(
+    project_root: impl AsRef<Path>,
+    limits: SnapshotLimits,
+) -> Result<WorkspaceSnapshot, CepError> {
     let root = project_root.as_ref();
     let mut snapshot = BTreeMap::new();
-    capture_recursive_inner(root, root, &mut snapshot, None)?;
+    let mut entry_count = 0usize;
+    capture_recursive_inner(root, root, &mut snapshot, None, limits, 0, &mut entry_count)?;
     Ok(snapshot)
 }
 
@@ -85,7 +111,14 @@ fn capture_recursive_inner(
     current: &Path,
     snapshot: &mut WorkspaceSnapshot,
     mut regular_file_contents: Option<&mut BTreeMap<String, Vec<u8>>>,
+    limits: SnapshotLimits,
+    depth: usize,
+    entry_count: &mut usize,
 ) -> Result<(), CepError> {
+    if depth > limits.max_depth {
+        return Err(snapshot_depth_limit_error(base, current, limits.max_depth));
+    }
+
     let entries = std::fs::read_dir(current).map_err(|e| {
         CepError::internal_error(format!(
             "failed to read directory '{}': {e}",
@@ -108,6 +141,11 @@ fn capture_recursive_inner(
             continue;
         }
 
+        *entry_count += 1;
+        if *entry_count > limits.max_entries {
+            return Err(snapshot_entry_limit_error(&relative, limits.max_entries));
+        }
+
         let (entry_snapshot, content) = capture_snapshot_entry_with_content(&path)?;
         let is_dir = entry_snapshot.file_kind == SnapshotFileKind::Directory;
         if let (Some(contents), Some(content)) = (regular_file_contents.as_deref_mut(), content) {
@@ -115,7 +153,15 @@ fn capture_recursive_inner(
         }
         snapshot.insert(relative, entry_snapshot);
         if is_dir {
-            capture_recursive_inner(base, &path, snapshot, regular_file_contents.as_deref_mut())?;
+            capture_recursive_inner(
+                base,
+                &path,
+                snapshot,
+                regular_file_contents.as_deref_mut(),
+                limits,
+                depth + 1,
+                entry_count,
+            )?;
         }
     }
 
@@ -252,13 +298,24 @@ pub(crate) fn compute_changed_paths(
 }
 
 pub(crate) fn capture_lower_baseline(project_root: &Path) -> Result<LowerBaseline, CepError> {
+    capture_lower_baseline_with_limits(project_root, SnapshotLimits::default())
+}
+
+pub(crate) fn capture_lower_baseline_with_limits(
+    project_root: &Path,
+    limits: SnapshotLimits,
+) -> Result<LowerBaseline, CepError> {
     let mut entries = BTreeMap::new();
     let mut regular_file_contents = BTreeMap::new();
+    let mut entry_count = 0usize;
     capture_recursive_inner(
         project_root,
         project_root,
         &mut entries,
         Some(&mut regular_file_contents),
+        limits,
+        0,
+        &mut entry_count,
     )?;
     Ok(LowerBaseline {
         entries,
@@ -270,7 +327,7 @@ pub(crate) fn recheck_lower_baseline(
     project_root: &Path,
     baseline: &LowerBaseline,
 ) -> Result<LowerRecheckOutcome, CepError> {
-    let current = capture_workspace_snapshot(project_root)?;
+    let current = capture_workspace_snapshot_with_limits(project_root, SnapshotLimits::default())?;
     let changed_paths = compute_changed_paths(&baseline.entries, &current);
     let status = if changed_paths.is_empty() {
         LowerConsistencyStatus::Unchanged
@@ -284,8 +341,23 @@ pub(crate) fn recheck_lower_baseline(
 }
 
 pub(crate) fn capture_lower_fingerprint(project_root: &Path) -> Result<LowerFingerprint, CepError> {
+    capture_lower_fingerprint_with_limits(project_root, SnapshotLimits::default())
+}
+
+pub(crate) fn capture_lower_fingerprint_with_limits(
+    project_root: &Path,
+    limits: SnapshotLimits,
+) -> Result<LowerFingerprint, CepError> {
     let mut entries = BTreeMap::new();
-    capture_fingerprint_recursive(project_root, project_root, &mut entries)?;
+    let mut entry_count = 0usize;
+    capture_fingerprint_recursive(
+        project_root,
+        project_root,
+        &mut entries,
+        limits,
+        0,
+        &mut entry_count,
+    )?;
     Ok(LowerFingerprint { entries })
 }
 
@@ -293,7 +365,14 @@ fn capture_fingerprint_recursive(
     base: &Path,
     current: &Path,
     entries: &mut BTreeMap<String, LowerFingerprintEntry>,
+    limits: SnapshotLimits,
+    depth: usize,
+    entry_count: &mut usize,
 ) -> Result<(), CepError> {
+    if depth > limits.max_depth {
+        return Err(snapshot_depth_limit_error(base, current, limits.max_depth));
+    }
+
     let dir_entries = std::fs::read_dir(current).map_err(|e| {
         CepError::internal_error(format!(
             "failed to read directory '{}': {e}",
@@ -314,15 +393,36 @@ fn capture_fingerprint_recursive(
             continue;
         }
 
+        *entry_count += 1;
+        if *entry_count > limits.max_entries {
+            return Err(snapshot_entry_limit_error(&relative, limits.max_entries));
+        }
+
         let fingerprint = capture_fingerprint_entry(&path)?;
         let is_dir = fingerprint.file_kind == SnapshotFileKind::Directory;
         entries.insert(relative, fingerprint);
         if is_dir {
-            capture_fingerprint_recursive(base, &path, entries)?;
+            capture_fingerprint_recursive(base, &path, entries, limits, depth + 1, entry_count)?;
         }
     }
 
     Ok(())
+}
+
+fn snapshot_entry_limit_error(relative: &str, max_entries: usize) -> CepError {
+    CepError::internal_error(format!(
+        "workspace snapshot entry limit exceeded at '{relative}': max_entries={max_entries}"
+    ))
+}
+
+fn snapshot_depth_limit_error(base: &Path, current: &Path, max_depth: usize) -> CepError {
+    let relative = current
+        .strip_prefix(base)
+        .unwrap_or(current)
+        .to_string_lossy();
+    CepError::internal_error(format!(
+        "workspace snapshot depth limit exceeded at '{relative}': max_depth={max_depth}"
+    ))
 }
 
 fn capture_fingerprint_entry(path: &Path) -> Result<LowerFingerprintEntry, CepError> {
@@ -381,6 +481,44 @@ mod tests {
         let entry = snapshot.get("file.txt").expect("file snapshot");
         assert!(entry.content_hash.is_some());
         assert_eq!(entry.file_kind, SnapshotFileKind::RegularFile);
+    }
+
+    #[test]
+    fn snapshot_capture_fails_closed_when_entry_limit_is_exceeded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("one.txt"), "1").unwrap();
+        std::fs::write(dir.path().join("two.txt"), "2").unwrap();
+
+        let err = capture_workspace_snapshot_with_limits(
+            dir.path(),
+            SnapshotLimits {
+                max_entries: 1,
+                max_depth: DEFAULT_SNAPSHOT_MAX_DEPTH,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("entry limit exceeded"));
+        assert!(err.message.contains("max_entries=1"));
+    }
+
+    #[test]
+    fn snapshot_capture_fails_closed_when_depth_limit_is_exceeded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("a/b/file.txt"), "content").unwrap();
+
+        let err = capture_workspace_snapshot_with_limits(
+            dir.path(),
+            SnapshotLimits {
+                max_entries: DEFAULT_SNAPSHOT_MAX_ENTRIES,
+                max_depth: 0,
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.message.contains("depth limit exceeded"));
+        assert!(err.message.contains("max_depth=0"));
     }
 
     #[test]

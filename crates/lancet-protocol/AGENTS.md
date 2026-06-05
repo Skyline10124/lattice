@@ -31,8 +31,8 @@ types.
 
 ## Recent Issues
 
-- OPEN M-24-01: `FetchUrl { host_pattern }` implies wildcard matching, while
-  native effect-region checks currently use exact host equality.
+- FIXED M-24-01: `Capability::FetchUrl` uses the explicit `host` field; do not
+  reintroduce wildcard/pattern naming unless matching semantics are implemented.
 - FIXED P19: JSON-RPC helper, wire-code, and error-object mapping were made
   consistent after review of the old CEP core.
 - FIXED P19: catalog sealing doctest coverage was corrected so compile-fail
@@ -42,12 +42,11 @@ types.
 
 ## Next Actions
 
-- Resolve M-24-01 by either renaming `host_pattern` to `host` or defining and
-  testing wildcard semantics end to end.
-- If M-24-01 changes wire shape, update catalog schemas, authority/native
-  effect-region logic, API tests, and compatibility notes in the same series.
 - Keep error-code mapping centralized; new error families should include
   retriability and JSON-RPC wire-code tests.
+- If future fetch capabilities need wildcard hosts, update protocol naming,
+  authority matching, native effect regions, schemas, and compatibility notes
+  in the same series.
 - When adding boundary evidence fields, update authority validation and native
   host probe projection together.
 

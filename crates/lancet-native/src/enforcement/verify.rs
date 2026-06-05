@@ -7,7 +7,6 @@
 //! is executed if configured. Verify failure returns `VerifyFailed`, retains the
 //! diff, and leaves the envelope valid for same-turn repair.
 
-use crate::executor::limits::ToolLimits;
 use crate::executor::shell::{execute_argv, ExecuteConfig};
 use crate::executor::supervisor::overlay::{
     cleanup_verify_discard_layer, mount_overlay, CandidateArtifactView, VerifyDiscardPlan,
@@ -310,11 +309,10 @@ async fn run_verify_at_project_root(
 
     let (output, _stdout_meta, _stderr_meta) = execute_argv(ExecuteConfig {
         project_root,
-        limits: &ToolLimits::default(),
         argv: &spec.argv,
         cwd: spec.cwd.as_deref(),
         env: &env,
-        timeout_ms: Some(effective_timeout),
+        timeout_ms: effective_timeout,
         cancellation,
         max_output_bytes: policy.max_output_bytes,
     })

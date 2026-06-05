@@ -216,6 +216,13 @@ impl CleanupFailureKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OverlayCleanupFailure {
+    pub(crate) failure_kind: CleanupFailureKind,
+    pub(crate) path_label: &'static str,
+    pub(crate) reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct OverlayCleanupReport {
     pub(crate) mode: OverlayMode,
     pub(crate) disposition: OverlayDisposition,
@@ -223,6 +230,7 @@ pub(crate) struct OverlayCleanupReport {
     pub(crate) failure_kind: Option<CleanupFailureKind>,
     pub(crate) path_label: Option<&'static str>,
     pub(crate) reason: Option<String>,
+    pub(crate) cleanup_failures: Vec<OverlayCleanupFailure>,
     pub(crate) child_cleanup_succeeded: bool,
 }
 
@@ -421,19 +429,21 @@ pub(crate) fn cleanup_overlay<S: SupervisorSyscalls>(
     child_cleanup_succeeded: bool,
     syscalls: &mut S,
 ) -> OverlayCleanupReport {
-    let mut failure = if child_cleanup_succeeded {
-        None
-    } else {
-        Some((
-            CleanupFailureKind::ChildCleanup,
-            "child",
-            "child kill/reap cleanup failed".to_string(),
-        ))
-    };
+    let mut failures = Vec::new();
+    if !child_cleanup_succeeded {
+        failures.push(OverlayCleanupFailure {
+            failure_kind: CleanupFailureKind::ChildCleanup,
+            path_label: "child",
+            reason: "child kill/reap cleanup failed".to_string(),
+        });
+    }
 
     if let Err(err) = syscalls.umount_overlay(&plan.paths.merged) {
-        failure
-            .get_or_insert_with(|| (CleanupFailureKind::UnmountMerged, "merged", err.to_string()));
+        failures.push(OverlayCleanupFailure {
+            failure_kind: CleanupFailureKind::UnmountMerged,
+            path_label: "merged",
+            reason: err.to_string(),
+        });
     }
     for (kind, label, path) in [
         (
@@ -450,18 +460,23 @@ pub(crate) fn cleanup_overlay<S: SupervisorSyscalls>(
         ),
     ] {
         if let Err(err) = syscalls.remove_overlay_tree(path) {
-            failure.get_or_insert_with(|| (kind, label, err.to_string()));
+            failures.push(OverlayCleanupFailure {
+                failure_kind: kind,
+                path_label: label,
+                reason: err.to_string(),
+            });
         }
     }
 
-    if let Some((failure_kind, path_label, reason)) = failure {
+    if let Some(first_failure) = failures.first() {
         OverlayCleanupReport {
             mode: plan.mode,
             disposition,
             outcome: CleanupOutcome::Failed,
-            failure_kind: Some(failure_kind),
-            path_label: Some(path_label),
-            reason: Some(reason),
+            failure_kind: Some(first_failure.failure_kind),
+            path_label: Some(first_failure.path_label),
+            reason: Some(first_failure.reason.clone()),
+            cleanup_failures: failures,
             child_cleanup_succeeded,
         }
     } else {
@@ -472,6 +487,7 @@ pub(crate) fn cleanup_overlay<S: SupervisorSyscalls>(
             failure_kind: None,
             path_label: None,
             reason: None,
+            cleanup_failures: Vec::new(),
             child_cleanup_succeeded,
         }
     }
@@ -736,6 +752,38 @@ mod tests {
         assert_eq!(report.outcome.label(), "cleanup_failed");
         assert_eq!(report.failure_kind, Some(CleanupFailureKind::UnmountMerged));
         assert_eq!(report.path_label, Some("merged"));
+        assert_eq!(report.cleanup_failures.len(), 1);
+        assert_eq!(
+            report.cleanup_failures[0].failure_kind,
+            CleanupFailureKind::UnmountMerged
+        );
+    }
+
+    #[test]
+    fn overlay_cleanup_preserves_first_failure_and_records_all_failures() {
+        let (_temp, plan) = overlay_plan(OverlayMode::Artifact);
+        let mut syscalls = FakeOverlaySyscalls::default()
+            .fail("umount_overlay")
+            .fail("remove_upper");
+
+        let report = cleanup_overlay(&plan, OverlayDisposition::Denied, false, &mut syscalls);
+
+        assert_eq!(report.outcome, CleanupOutcome::Failed);
+        assert_eq!(report.failure_kind, Some(CleanupFailureKind::ChildCleanup));
+        assert_eq!(report.path_label, Some("child"));
+        assert_eq!(report.cleanup_failures.len(), 3);
+        assert_eq!(
+            report
+                .cleanup_failures
+                .iter()
+                .map(|failure| failure.failure_kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CleanupFailureKind::ChildCleanup,
+                CleanupFailureKind::UnmountMerged,
+                CleanupFailureKind::RemoveUpper,
+            ]
+        );
     }
 
     #[test]

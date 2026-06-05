@@ -14,7 +14,6 @@ use crate::enforcement::isolation::{
     AppliedBoundaryEvidence, BoundaryAttemptOutcome, CommandIsolationAttempt,
     LandlockApplicationStatus, MinimalMountViewStatus, SupervisorSetupStatus,
 };
-use crate::executor::limits::ToolLimits;
 use crate::executor::supervisor::linux::{
     boundary_attempt_from_supervisor, run_linux_supervisor_attempt,
 };
@@ -244,11 +243,10 @@ async fn bounded_read(
 /// Configuration for `execute_argv`.
 pub struct ExecuteConfig<'a> {
     pub project_root: &'a str,
-    pub limits: &'a ToolLimits,
     pub argv: &'a [String],
     pub cwd: Option<&'a str>,
     pub env: &'a BTreeMap<String, String>,
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: u64,
     pub cancellation: &'a mut Cancellation,
     pub max_output_bytes: usize,
 }
@@ -479,7 +477,6 @@ async fn execute_argv_inner(
 ) -> Result<ExecuteInnerOutput, ExecuteInnerError> {
     let ExecuteConfig {
         project_root,
-        limits,
         argv,
         cwd,
         env,
@@ -498,8 +495,6 @@ async fn execute_argv_inner(
         setup_attempt: None,
         overlay_cleanup: None,
     })?;
-    let max_ms = std::cmp::max(limits.max_command_timeout, 1) as u64 * 1000;
-    let timeout_ms = timeout_ms.unwrap_or(max_ms);
 
     let mut cmd = tokio::process::Command::new(&argv[0]);
     if argv.len() > 1 {
@@ -1370,11 +1365,10 @@ mod tests {
         let mut cancel = Cancellation::new(cancel_rx);
         let result = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &["echo".into(), "hello".into()],
             cwd: None,
             env: &BTreeMap::new(),
-            timeout_ms: Some(5000),
+            timeout_ms: 5000,
             cancellation: &mut cancel,
             max_output_bytes: policy.max_output_bytes,
         })
@@ -1394,11 +1388,10 @@ mod tests {
         let mut cancel = Cancellation::new(cancel_rx);
         let err = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &["sleep".into(), "10".into()],
             cwd: None,
             env: &BTreeMap::new(),
-            timeout_ms: Some(100),
+            timeout_ms: 100,
             cancellation: &mut cancel,
             max_output_bytes: policy.max_output_bytes,
         })
@@ -1422,11 +1415,10 @@ mod tests {
 
         let err = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &["sleep".into(), "10".into()],
             cwd: None,
             env: &BTreeMap::new(),
-            timeout_ms: Some(10000),
+            timeout_ms: 10000,
             cancellation: &mut cancel,
             max_output_bytes: policy.max_output_bytes,
         })
@@ -1446,11 +1438,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sleep".into(), "10".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(100),
+                timeout_ms: 100,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1482,11 +1473,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sleep".into(), "10".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(10000),
+                timeout_ms: 10000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1515,7 +1505,6 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: dir.path().to_str().unwrap(),
-                limits: &ToolLimits::default(),
                 argv: &[
                     "sh".into(),
                     "-c".into(),
@@ -1523,7 +1512,7 @@ mod tests {
                 ],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1558,11 +1547,10 @@ mod tests {
         let output = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["true".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1591,11 +1579,10 @@ mod tests {
         let output = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sh".into(), "-c".into(), "exit 7".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1625,11 +1612,10 @@ mod tests {
         let output = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sh".into(), "-c".into(), "exit 7".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1656,11 +1642,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sleep".into(), "10".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(100),
+                timeout_ms: 100,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1695,11 +1680,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["sleep".into(), "10".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(10000),
+                timeout_ms: 10000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1726,11 +1710,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["true".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1757,11 +1740,10 @@ mod tests {
         let err = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["definitely-not-a-lattice-test-command".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1789,11 +1771,10 @@ mod tests {
         let output = execute_argv_supervised(
             ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &["true".into()],
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: Some(5000),
+                timeout_ms: 5000,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             },
@@ -1828,11 +1809,10 @@ mod tests {
             let output = execute_argv_supervised(
                 ExecuteConfig {
                     project_root: ".",
-                    limits: &ToolLimits::default(),
                     argv: &["true".into()],
                     cwd: None,
                     env: &BTreeMap::new(),
-                    timeout_ms: Some(5000),
+                    timeout_ms: 5000,
                     cancellation: &mut cancel,
                     max_output_bytes: policy.max_output_bytes,
                 },
@@ -1887,11 +1867,10 @@ mod tests {
         // Write more than max_output_bytes
         let result = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &["python3".into(), "-c".into(), "print('x' * 300)".into()],
             cwd: None,
             env: &BTreeMap::new(),
-            timeout_ms: Some(5000),
+            timeout_ms: 5000,
             cancellation: &mut cancel,
             max_output_bytes: 100, // very small buffer
         })
@@ -1912,11 +1891,10 @@ mod tests {
         let mut cancel = Cancellation::new(cancel_rx);
         let err = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &[],
             cwd: None,
             env: &BTreeMap::new(),
-            timeout_ms: None,
+            timeout_ms: policy.default_timeout_ms,
             cancellation: &mut cancel,
             max_output_bytes: policy.max_output_bytes,
         })
@@ -1932,11 +1910,10 @@ mod tests {
         let mut cancel = Cancellation::new(cancel_rx);
         let err = execute_argv(ExecuteConfig {
             project_root: ".",
-            limits: &ToolLimits::default(),
             argv: &["echo".into(), "hi".into()],
             cwd: Some(".."),
             env: &BTreeMap::new(),
-            timeout_ms: None,
+            timeout_ms: policy.default_timeout_ms,
             cancellation: &mut cancel,
             max_output_bytes: policy.max_output_bytes,
         })
@@ -1952,7 +1929,7 @@ mod tests {
             let policy = CommandPolicy::defaults();
             let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
             let mut cancel = Cancellation::new(cancel_rx);
-            let timeout = if i % 3 == 0 { Some(50) } else { Some(5000) };
+            let timeout_ms = if i % 3 == 0 { 50 } else { 5000 };
             let argv = if i % 3 == 0 {
                 vec!["sleep".into(), "10".into()]
             } else {
@@ -1960,11 +1937,10 @@ mod tests {
             };
             let _ = execute_argv(ExecuteConfig {
                 project_root: ".",
-                limits: &ToolLimits::default(),
                 argv: &argv,
                 cwd: None,
                 env: &BTreeMap::new(),
-                timeout_ms: timeout,
+                timeout_ms,
                 cancellation: &mut cancel,
                 max_output_bytes: policy.max_output_bytes,
             })
