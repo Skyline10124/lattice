@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Resolved facts table and resolver for CEP policy evaluation.
 //!
 //! Transforms the public [`PolicyInput`] into an internal [`ResolvedPolicyInput`]

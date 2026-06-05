@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Overlay artifact manifest scanning and adjudication.
 
 use std::collections::{BTreeMap, BTreeSet};

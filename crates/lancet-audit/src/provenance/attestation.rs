@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Unsigned in-toto Statement builder from audit rows.
 
 use crate::audit::AuditRow;

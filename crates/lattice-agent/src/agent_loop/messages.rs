@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lattice_session::GraphMessage;
 
 /// Convert a `GraphMessage` to an `lattice_llm::Message` for the LLM request.

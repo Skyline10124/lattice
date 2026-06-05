@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 /// Check if argv matches the RunCommand allowlist.
 #[cfg(test)]
 fn matches_argv_allowlist(argv: &[String], allowlist: &[String]) -> bool {

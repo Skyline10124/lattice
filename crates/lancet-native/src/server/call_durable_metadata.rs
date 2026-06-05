@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-call compact metadata accumulated by native handlers for durable audit rows.
 
 use serde_json::Value;

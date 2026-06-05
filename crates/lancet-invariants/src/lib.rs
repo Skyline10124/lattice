@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! LANCET invariant card system.
 //!
 //! Loads `.lancet/invariants/*.toml` cards, indexes them by anchor, exposes opaque

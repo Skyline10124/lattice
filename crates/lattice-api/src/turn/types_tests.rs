@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lattice_session::{TurnCommitStatus, TurnUsage};
 
 use super::types::{RunTurnStatus, TurnEvent, TurnUsageSummary};

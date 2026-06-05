@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Agent profile discovery — explicit path, named lookup, and default resolution.
 //!
 //! Preserves the `.lattice/agents/<name>/agent.toml` and

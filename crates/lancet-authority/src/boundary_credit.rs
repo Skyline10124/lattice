@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effective-boundary credit attribution.
 //!
 //! This module is Phase 28's compile-time/test-time guardrail: command

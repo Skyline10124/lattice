@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP — Controlled Execution Protocol for LLM/Agent Systems.
 //!
 //! This crate defines the pure protocol data layer for CEP:

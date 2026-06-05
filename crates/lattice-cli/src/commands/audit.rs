@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! `lattice audit` — query and tail the CEP audit store.
 
 use std::path::{Path, PathBuf};

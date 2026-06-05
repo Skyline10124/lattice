@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! PROV-DM–shaped provenance fragments and unsigned in-toto attestation wire types.
 //!
 //! Graph structure is projected at query/replay time from flat audit rows — these

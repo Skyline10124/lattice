@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native exec.command_run CEP handler with policy enforcement.
 //!
 //! This is the only shell execution path from the agent.

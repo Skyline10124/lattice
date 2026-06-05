@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effect-region contract tests.
 //!
 //! Native handler runtime effects are checked against catalog-declared effect

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Concrete provider modules for LLM execution.
 //!
 //! Each provider module owns request JSON construction, SSE parsing,

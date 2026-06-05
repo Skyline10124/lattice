@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Observed-effect ledger: an Arc-backed handle that records semantic side effects
 //! observed during CEP method dispatch.
 //!

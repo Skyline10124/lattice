@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP frame aliases over JSON-RPC 2.0 types.
 //!
 //! These type aliases give CEP-specific semantics to the domain-neutral

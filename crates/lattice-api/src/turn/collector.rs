@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Collect a [`RunTurnResult`] by draining a live [`TurnEvent`] stream.
 //!
 //! Production [`super::run_turn`] uses this module so the sync facade shares

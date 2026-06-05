@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
 //! - `lancet status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows

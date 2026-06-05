@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Run/stream consistency integration tests.
 //!
 //! Proves `run_turn` is equivalent to collecting a `stream_turn` event stream

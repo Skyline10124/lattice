@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP/22 native CEP method handlers.
 
 pub mod audit;

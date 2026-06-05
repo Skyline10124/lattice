@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
 use crate::registry::{call_cancelled, Cancellation, EventSink, MethodRegistry};

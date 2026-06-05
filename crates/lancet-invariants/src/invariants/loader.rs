@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! TOML card loading from `.lancet/invariants/` directories.
 
 use crate::invariants::types::{CardAnchor, InvariantCard};

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Landlock filesystem refinement planning and application helpers.
 //!
 //! Landlock is a refinement over the already-constructed command mount view.

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native bridge for Guard L1 policy enforcement.
 //!
 //! Pure authority semantics live in `lancet-authority`; this module keeps

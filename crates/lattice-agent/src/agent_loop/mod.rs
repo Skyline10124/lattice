@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! agent loop: sequences LLM calls and tool execution for a single turn.
 //!
 //! This module implements the stable public main-path `AgentLoop`. It uses

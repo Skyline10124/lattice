@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! SQLite graph store for sessions, commits, messages, and refs.
 //!
 //! Implements `SessionGraphStore` over SQLite with a single shared

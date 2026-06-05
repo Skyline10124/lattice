@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! PROV projection and unsigned in-toto attestation builders (flat audit rows → graph).
 
 pub mod attestation;

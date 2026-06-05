@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Base URL validation and SSRF safety floor.
 //!
 //! Validates that provider base URLs are safe before HTTP clients connect:

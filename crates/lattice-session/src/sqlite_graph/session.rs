@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Session lifecycle and read-only metadata operations.
 
 use chrono::Utc;

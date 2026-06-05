@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Read-only audit provenance methods (`observe.audit`, `observe.audit_replay`).
 
 use crate::method::{CatalogMethod, CepMethod};

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native CEP `fetch.web` CEP handler.
 
 use std::sync::OnceLock;

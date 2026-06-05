@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP method trait and sealed catalog membership.
 
 use lancet_protocol::{EffectDecl, ImpactKind};

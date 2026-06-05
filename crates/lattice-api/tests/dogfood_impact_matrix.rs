@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Production-native five-impact-class matrix.
 //!
 //! Exercises one representative CEP method per `ImpactKind` through the

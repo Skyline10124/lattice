@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Command physical-boundary vocabulary.
 //!
 //! These are stable wire/config labels. They describe what is being claimed,

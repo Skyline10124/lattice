@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Gemini provider: request JSON construction, SSE parsing,
 //! and auth headers for the Gemini `generateContent` API.
 //!

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Ignored live Linux canaries for the command isolation supervisor.
 //!
 //! These tests are diagnostics unless they pass on the current host. Unsupported

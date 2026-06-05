@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! AgentLoop-only agent crate.
 
 pub mod agent_loop;

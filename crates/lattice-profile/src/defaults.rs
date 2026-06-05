@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Default agent templates — generated text only, no filesystem writes.
 
 /// Generate a strict v1 `agent.toml` template for a new agent.

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for `commit_turn`, schema shape, and basic session/commit lifecycle.
 
 use std::env;

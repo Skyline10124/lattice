@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lattice_llm::ResolvedModel;
 
 /// Render a resolved model to a JSON value suitable for CLI output.

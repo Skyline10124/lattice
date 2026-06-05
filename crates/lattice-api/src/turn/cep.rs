@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Turn-scoped Cep runtime composition and the CEP client-backed executor adapter.
 
 use std::collections::HashSet;

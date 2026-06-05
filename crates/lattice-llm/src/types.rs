@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 

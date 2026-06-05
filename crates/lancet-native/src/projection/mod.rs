@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project CEP catalog descriptors into LLM-facing tool definitions.
 //!
 //! Tool definitions are projected from `lancet_catalog::CATALOG` via

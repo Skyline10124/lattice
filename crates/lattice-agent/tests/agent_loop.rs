@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 

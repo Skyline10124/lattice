@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::impact::layer1::{derive_layer1, Layer1Result};
 use crate::impact::layer2::{derive_layer2, Layer2Result};
 use lancet_protocol::envelope::{Impact, ImpactConfidence, ImpactScope, ImpactUnknown};

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! LATTICE thin public API facade.
 //!
 //! This crate is the application entry point for session creation, session

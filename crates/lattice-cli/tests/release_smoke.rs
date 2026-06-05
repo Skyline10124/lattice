@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Isolated CLI release smoke tests.
 //!
 //! Every smoke command sets temporary HOME, XDG_CONFIG_HOME, and project cwd

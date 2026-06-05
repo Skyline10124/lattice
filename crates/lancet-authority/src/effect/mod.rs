@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effect-region capture and decision layer for the CEP executor.
 //!
 //! - [`EffectLedger`] — Arc-backed handle for recording observed effects during dispatch.

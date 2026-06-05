@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Singular `session` command over the session graph store.
 //!
 //! Supports session-first turn execution plus status, list, log, checkout,

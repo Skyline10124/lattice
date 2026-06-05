@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Concrete provider dispatch for LLM execution.
 
 use std::pin::Pin;

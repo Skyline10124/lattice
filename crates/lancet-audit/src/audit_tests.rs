@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 use lancet_catalog::methods::{
     AuditObserve, Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,

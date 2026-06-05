@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Full-turn audit rows carry PROV-relevant fields after a live CEP turn.
 
 use std::collections::BTreeSet;

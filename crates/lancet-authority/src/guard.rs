@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Guard L1 path scope enforcement for workspace mutations.
 //!
 //! Guard L1 checks whether a target path falls within the active envelope's

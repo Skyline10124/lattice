@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! JSON-RPC 2.0 envelope types.
 //!
 //! Domain-neutral request, notification, and response types conforming to

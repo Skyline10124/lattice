@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! cep_mode integration tests.
 //!
 //! Invariant: `cep_mode = Off` does **not** re-enable retired direct tool calls.

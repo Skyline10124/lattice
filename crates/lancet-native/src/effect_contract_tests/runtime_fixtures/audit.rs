@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::fixtures::*;
 use super::super::support::{build_test_context, rt};
 use lancet_audit::{AuditOutcome, CallAuditMetadata};

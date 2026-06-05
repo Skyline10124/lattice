@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Live turn streaming path (live turn).
 //!
 //! This module implements the live `stream_turn` path: startup validation via

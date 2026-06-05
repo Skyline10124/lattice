@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Low-level execution helpers for native CEP handlers.
 //!
 //! INTERNAL — superseded by CEP catalog methods.

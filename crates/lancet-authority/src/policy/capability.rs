@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Pure capability matcher for CEP policy decisions.
 //!
 //! The matcher evaluates whether a concrete invocation satisfies a

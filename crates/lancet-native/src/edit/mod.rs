@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Structured patch parsing and result types for editing tools.
 //!
 //! This module owns the typed edit IR, filesystem apply engine, and

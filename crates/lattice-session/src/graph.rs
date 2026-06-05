@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Session graph contract: types, narrow store trait, and canonical helpers.
 
 use serde::{Deserialize, Serialize};

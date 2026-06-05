@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP capability class data shared by envelopes, policy, and catalog descriptors.
 
 use crate::envelope::Capability;

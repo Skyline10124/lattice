@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP workspace observation path policy configuration and resolution.
 
 use std::path::{Component, Path, PathBuf};

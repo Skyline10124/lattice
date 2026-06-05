@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effect-region decision layer: EffectiveEffect (per-invocation materialized effect)
 //! and AuthorizedEffectRegion (post-policy authorized region).
 //!

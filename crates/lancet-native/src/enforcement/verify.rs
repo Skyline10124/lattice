@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Verify flow coordination for workspace mutations.
 //!
 //! After every successful mutation call, the active envelope's `verify` command

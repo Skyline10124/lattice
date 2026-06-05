@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Turn execution and streaming API.
 //!
 //! [`stream_turn`] is the single production execution core: it runs the agent

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Branch ref operations: checkout, branch, reset, diff.
 
 use chrono::Utc;

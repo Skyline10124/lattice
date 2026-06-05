@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::impact::layer1::Layer1Result;
 use lancet_protocol::envelope::{ImpactConfidence, ImpactScope, ImpactUnknown};
 use std::path::Path;

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Default in-process policy hook implementation.
 //!
 //! Combines capability matching, command policy, network policy, and budget

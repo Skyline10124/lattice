@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Capability coverage matrix for all catalog methods.
 //!
 //! These tests ensure that every catalog method has explicit capability

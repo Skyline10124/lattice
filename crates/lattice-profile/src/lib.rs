@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Strict single-agent profile schema, loading, discovery, and defaults.
 //!
 //! This crate defines the v1 `agent.toml` contract and performs read-only loading

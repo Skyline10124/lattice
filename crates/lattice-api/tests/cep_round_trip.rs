@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
 

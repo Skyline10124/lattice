@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Session turn execution renderer built on `lattice_api::stream_turn`.
 //!
 //! Consumes a live `TurnEventStream` and renders events incrementally:

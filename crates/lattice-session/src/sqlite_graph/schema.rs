@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Schema initialization, PRAGMAs, and idempotent ALTER TABLE migrations.
 
 use rusqlite::Connection;

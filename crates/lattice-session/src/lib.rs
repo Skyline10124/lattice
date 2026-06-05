@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Session graph and branch pointer storage for LATTICE.
 //!
 //! This crate owns the conversation graph contract: sessions,

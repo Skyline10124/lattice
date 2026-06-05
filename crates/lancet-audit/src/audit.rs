@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Flat append-only SQLite audit store for CEP execution records.
 
 use lancet_catalog::{catalog, RequiredCapability};

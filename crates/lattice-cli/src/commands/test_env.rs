@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Shared test helpers for environment variable isolation.
 //!
 //! Only compiled in test mode. Provides a serialised `with_env_var`

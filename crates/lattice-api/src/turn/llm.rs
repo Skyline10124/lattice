@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Production LLM client wired into API-owned turn execution.
 
 /// Production LlmClient that delegates to `lattice_llm::chat` / `stream`.

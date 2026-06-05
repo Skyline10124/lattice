@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for `head_transcript` and usage/terminal-reason persistence.
 
 use std::env;

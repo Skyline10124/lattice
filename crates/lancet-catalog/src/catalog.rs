@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Static CEP method catalog for CEP.
 
 use crate::method::MethodDescriptor;

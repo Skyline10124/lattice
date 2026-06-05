@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::invariants::InvariantCard;
 use lancet_catalog::methods::envelope::L2Status;
 use serde::{Deserialize, Serialize};

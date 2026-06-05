@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Tests for pointer ops: status/list/log/branch/checkout/reset/diff.
 
 use std::env;

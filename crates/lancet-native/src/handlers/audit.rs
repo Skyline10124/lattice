@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native `observe.audit` and `observe.audit_replay` handlers.
 
 use crate::audit::{AuditError, AuditQueryFilters, AUDIT_QUERY_MAX_ROWS};

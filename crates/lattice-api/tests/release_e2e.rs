@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fake-LLM end-to-end release scenario.
 //!
 //! Validates the full declare → exec.command_run → patch(fail-verify) → patch(ok)

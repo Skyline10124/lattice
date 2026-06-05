@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use super::diagnostics::parse_error;
 use super::types::{HashLine, PatchDiagnostic};
 

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native handler context and registry type binding.
 
 use crate::enforcement::isolation::CommandIsolationRuntimeConfig;

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Deterministic stub LLM implementation
 //!
 //! Provides fake `chat` and `stream` implementations that require no provider

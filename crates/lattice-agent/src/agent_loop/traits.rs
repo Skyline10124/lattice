@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lattice_llm::ToolCall;
 
 /// Structured CEP error metadata preserved by the agent loop for API/CLI observation.

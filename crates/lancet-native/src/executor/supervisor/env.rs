@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Deterministic child environment construction for supervised commands.
 
 use std::collections::BTreeMap;

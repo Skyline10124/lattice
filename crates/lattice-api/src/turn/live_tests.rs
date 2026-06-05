@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Behavioral tests for the live `stream_turn` path.
 //!
 //! These tests exercise the full live path: real SessionApi backed by SQLite,

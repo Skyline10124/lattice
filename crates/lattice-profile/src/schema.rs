@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepMode;
 use lancet_protocol::ImpactKind;

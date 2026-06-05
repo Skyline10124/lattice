@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CLI boundary smoke integration tests.
 //!
 //! These tests verify the completed CLI CLI surface cutover from the

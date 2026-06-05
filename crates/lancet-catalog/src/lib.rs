@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP typed method catalog.
 //!
 //! This crate owns the typed method contracts, params/results, method

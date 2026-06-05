@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fixed alias-table model router.
 //!
 //! Maps a small set of explicit model aliases to provider metadata:

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Property-based fuzz test for `DefaultPolicyHook::decide` and
 //! `decide_with_evidence`.
 //!

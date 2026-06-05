@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP network policy configuration for `fetch.web`.
 
 use lancet_protocol::error::{PermissionErrorData, ValidationErrorData};

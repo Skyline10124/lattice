@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bounded SSE (Server-Sent Events) framing for provider stream parsers.
 //!
 //! Provider modules share this parser to safely consume streaming HTTP

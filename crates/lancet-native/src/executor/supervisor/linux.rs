@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linux supervisor setup backend built on the fakeable syscall seam.
 
 use lancet_authority::{

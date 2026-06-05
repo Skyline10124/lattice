@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Inherited file-descriptor cleanup for supervised command exec.
 
 use std::collections::BTreeSet;

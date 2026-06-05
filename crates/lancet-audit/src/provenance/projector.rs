@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project flat [`AuditRow`] records into PROV-DM fragments.
 
 use crate::audit::{impact_kind_from_label, AuditRow};

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! LANCET native production implementation.
 //!
 //! Low-level executor helpers stay crate-private and are reachable only through

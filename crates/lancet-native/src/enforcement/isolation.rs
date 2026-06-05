@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Host capability probes and boundary gate helpers.
 
 use lancet_authority::{

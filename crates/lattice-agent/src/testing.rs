@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Feature-gated test doubles for the agent-layer LLM client seam.
 //!
 //! This module is available only with the `test-utils` feature so downstream

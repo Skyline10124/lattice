@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lancet_catalog::catalog;
 use lancet_protocol::envelope::{EffectScopeKind, ImpactKind, ImpactScope};
 

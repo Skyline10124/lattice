@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effect checker — decides whether observed effects are within the authorized region.
 //!
 //! The check is `observed ⊆ authorized_effect_region`, NOT

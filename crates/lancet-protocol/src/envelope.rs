@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! CEP execution envelope types.
 //!
 //! Defines the structured envelope that describes intent, capabilities,

@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Turn-scoped observation budget tracking for CEP CEP handlers.
 
 use lancet_protocol::error::ReservedErrorData;

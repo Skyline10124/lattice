@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Deterministic usage tests for the main turn path.
 //!
 //! These tests exercise the real `run_turn` → live `stream_turn` collector →

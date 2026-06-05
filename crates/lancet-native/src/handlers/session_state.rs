@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Native CEP `session.todo_write` CEP handler.
 
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;

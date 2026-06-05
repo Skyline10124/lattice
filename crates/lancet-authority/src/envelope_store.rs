@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Turn-scoped active envelope store for CEP.
 //!
 //! `ActiveEnvelopeStore` holds the currently active `ExecutionEnvelope` for a

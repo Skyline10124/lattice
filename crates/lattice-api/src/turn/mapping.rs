@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 use lattice_agent::{AgentTurnRequest, AgentTurnStatus, LlmRetryConfig};
 use lattice_llm::{ModelRouter, ModelTarget, ToolDefinition};
 use lattice_session::HeadTranscript;

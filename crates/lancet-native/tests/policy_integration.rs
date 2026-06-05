@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Policy integration tests.
 //!
 //! Constructs `PolicyInput` values with layered snapshots and budget snapshots,

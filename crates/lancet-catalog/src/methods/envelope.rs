@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Envelope declaration methods.
 
 use crate::method::{CatalogMethod, CepMethod};

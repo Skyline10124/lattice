@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Verify that batch IN queries are chunked correctly when the number of
 //! bind parameters exceeds `SQLITE_BIND_CHUNK_SIZE` (900). Exercises
 //! `head_transcript`, `log`, `commit_message_ids_batch`, and

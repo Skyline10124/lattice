@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Workspace snapshot helpers shared by command fallback and overlay planning.
 
 use lancet_protocol::CepError;

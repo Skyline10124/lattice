@@ -1,3 +1,6 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
 //! Commit creation, log read, and head transcript reconstruction.
 
 use chrono::Utc;
