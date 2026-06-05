@@ -7,6 +7,7 @@ use lancet_protocol::provenance::{
     ProvWasGeneratedBy, ProvWasInformedBy, TurnCallSummary, TurnExecutionTrace,
 };
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 const RUNTIME_FALLBACK: &str = "lattice";
 
@@ -21,6 +22,7 @@ pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
 
     for row in rows {
         let activity_id = activity_id_for(row.audit_id);
+        let meta = parse_metadata(row);
         fragment.activities.push(ProvActivity {
             id: activity_id.clone(),
             method: row.method.clone(),
@@ -31,6 +33,7 @@ pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
             semantic_status: row.semantic_status.clone(),
             guard_verdict: None,
             outcome_summary: row.result_or_error.clone(),
+            attributes: activity_attributes_from_metadata(meta.as_ref()),
         });
 
         if let Some(agent) = &agent_id {
@@ -40,7 +43,7 @@ pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
             });
         }
 
-        if let Some(meta) = parse_metadata(row) {
+        if let Some(meta) = meta {
             project_entities_from_metadata(row.audit_id, &row.method, &meta, &mut fragment);
         }
     }
@@ -139,6 +142,14 @@ fn parse_impact_kind(label: &str) -> ImpactKind {
         );
         ImpactKind::WorkspaceObservation
     })
+}
+
+fn activity_attributes_from_metadata(meta: Option<&Value>) -> BTreeMap<String, Value> {
+    let mut attributes = BTreeMap::new();
+    if let Some(boundary) = meta.and_then(|m| m.get("effective_boundary")) {
+        attributes.insert("effective_boundary".into(), boundary.clone());
+    }
+    attributes
 }
 
 fn project_entities_from_metadata(
@@ -313,5 +324,43 @@ mod tests {
         assert_eq!(trace.calls.len(), 2);
         assert_eq!(trace.calls[0].audit_id, 1);
         assert!(trace.statement.is_some());
+    }
+
+    #[test]
+    fn boundary_observed_projection() {
+        let rows = vec![fixture_row(
+            1,
+            "exec.command_run",
+            r#"{
+                "effective_boundary": {
+                    "network": {
+                        "boundary": "network",
+                        "status": "physically_bounded",
+                        "observed": false
+                    },
+                    "filesystem": {
+                        "boundary": "filesystem",
+                        "status": "physically_bounded",
+                        "observed": true
+                    }
+                }
+            }"#,
+        )];
+
+        let fragment = project_rows(&rows);
+        let effective_boundary = &fragment.activities[0].attributes["effective_boundary"];
+
+        assert_eq!(
+            effective_boundary["network"]["observed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            effective_boundary["filesystem"]["observed"],
+            serde_json::json!(true)
+        );
+        assert!(
+            fragment.entities.is_empty(),
+            "boundary metadata must remain on the per-call activity"
+        );
     }
 }

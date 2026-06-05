@@ -1320,7 +1320,7 @@ async fn artifact_overlay_commit_flow_commits_accepted_entries_after_verify() {
         &overlay,
         crate::executor::supervisor::overlay::OverlayDisposition::Committed,
     );
-    set_test_artifact_verify_write(Some("verify-only.txt"));
+    set_test_artifact_verify_write(Some(""));
 
     let result = run_fixed_artifact_overlay_case(
         root,
@@ -1350,14 +1350,24 @@ async fn artifact_overlay_commit_flow_commits_accepted_entries_after_verify() {
         std::fs::read_link(dir.path().join("link.txt")).unwrap(),
         std::path::PathBuf::from("existing.txt")
     );
-    assert!(!dir.path().join("verify-only.txt").exists());
-
     let metadata = command_boundary_metadata_json(&durable);
     assert_eq!(metadata["artifact_manifest_status"], "accepted");
     assert_eq!(metadata["artifact_adjudication"], "accepted");
     assert_eq!(metadata["verify_layer"], "discarded");
     assert_eq!(metadata["commit_outcome"], "committed");
     assert_eq!(metadata["lower_consistency"], "unchanged");
+    assert_eq!(metadata["commit_baseline_validation"], "passed");
+    assert!(metadata["commit_baseline_failure_reason"].is_null());
+    assert_eq!(metadata["commit_baseline_details"], serde_json::json!({}));
+    assert_eq!(
+        metadata["effective_boundary"]["filesystem"]["observed"],
+        true
+    );
+    assert_eq!(metadata["effective_boundary"]["network"]["observed"], false);
+    assert_eq!(
+        metadata["effective_boundary"]["landlock"]["observed"],
+        false
+    );
     assert_eq!(metadata["applied_entries"].as_array().unwrap().len(), 4);
     assert!(ledger
         .snapshot()
@@ -1366,7 +1376,7 @@ async fn artifact_overlay_commit_flow_commits_accepted_entries_after_verify() {
 }
 
 #[tokio::test]
-async fn verify_baseline_exclusion_denies_lower_drift_after_verify_without_committing() {
+async fn artifact_overlay_commit_flow_lower_drift_metadata_after_verify_without_committing() {
     let _verify_write_guard = TEST_ARTIFACT_VERIFY_WRITE_LOCK.lock().await;
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
@@ -1388,7 +1398,7 @@ async fn verify_baseline_exclusion_denies_lower_drift_after_verify_without_commi
         &overlay,
         crate::executor::supervisor::overlay::OverlayDisposition::Committed,
     );
-    set_test_artifact_verify_write(Some("verify-only.txt"));
+    set_test_artifact_verify_write(Some(""));
 
     let policy = ctx.cep_context.policy.command.clone();
     let params = RunParams {
@@ -1439,12 +1449,123 @@ async fn verify_baseline_exclusion_denies_lower_drift_after_verify_without_commi
 
     assert_eq!(err.code, CepErrorCode::ReplanRequired);
     assert!(!dir.path().join("artifact.txt").exists());
-    assert!(!dir.path().join("verify-only.txt").exists());
     let metadata = command_boundary_metadata_json(&durable);
     assert_eq!(metadata["artifact_adjudication"], "denied_lower_drift");
     assert_eq!(metadata["lower_consistency"], "drift_detected");
     assert_eq!(metadata["overlay_disposition"], "denied");
     assert_eq!(metadata["commit_outcome"], "denied");
+    assert_eq!(metadata["commit_baseline_validation"], "failed");
+    assert_eq!(metadata["commit_baseline_failure_reason"], "lower_drift");
+    assert_eq!(
+        metadata["commit_baseline_details"]["changed_paths"],
+        serde_json::json!(["baseline.txt"])
+    );
+}
+
+#[tokio::test]
+async fn artifact_overlay_commit_flow_verify_contamination_metadata_blocks_commit() {
+    let _verify_write_guard = TEST_ARTIFACT_VERIFY_WRITE_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_str().unwrap();
+    let (mut ctx, _events, _cancel_tx, _ledger) = test_ctx_with_artifact_caps(
+        root,
+        vec!["sh".into()],
+        ".",
+        Some(VerifyCommand {
+            command: "echo verify".into(),
+            expected_exit_code: Some(0),
+        }),
+    )
+    .await;
+    ctx.command_isolation.mode = crate::enforcement::isolation::CommandIsolationMode::Enforce;
+    let durable = ctx.durable_metadata.clone();
+    let overlay = fixed_artifact_overlay(dir.path());
+    let cleanup = successful_artifact_cleanup(
+        &overlay,
+        crate::executor::supervisor::overlay::OverlayDisposition::Committed,
+    );
+    set_test_artifact_verify_write(Some("verify-only.txt"));
+
+    let err = run_fixed_artifact_overlay_case(
+        root,
+        ctx,
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "printf artifact > artifact.txt".into(),
+        ],
+        overlay,
+        cleanup,
+    )
+    .await
+    .expect_err("verify contamination must deny artifact commit");
+
+    assert_eq!(err.code, CepErrorCode::ReplanRequired);
+    assert!(!dir.path().join("artifact.txt").exists());
+    assert!(!dir.path().join("verify-only.txt").exists());
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["artifact_adjudication"], "denied_commit_baseline");
+    assert_eq!(metadata["lower_consistency"], "not_checked");
+    assert_eq!(metadata["overlay_disposition"], "denied");
+    assert_eq!(metadata["commit_outcome"], "denied");
+    assert_eq!(metadata["commit_baseline_validation"], "failed");
+    assert_eq!(
+        metadata["commit_baseline_failure_reason"],
+        "verify_layer_contamination"
+    );
+    assert_eq!(
+        metadata["commit_baseline_details"]["contaminated_paths"],
+        serde_json::json!(["verify-only.txt"])
+    );
+}
+
+#[test]
+fn artifact_overlay_commit_flow_anchor_short_circuit_metadata_preserves_lower_not_checked() {
+    let commit_report = ArtifactCommitReport {
+        commit_outcome: CommitOutcome::Denied,
+        lower_consistency: "not_checked".to_string(),
+        artifact_adjudication: "denied_commit_baseline".to_string(),
+        overlay_disposition: crate::executor::supervisor::overlay::OverlayDisposition::Denied,
+        commit_baseline_validation: "failed".to_string(),
+        commit_baseline_failure_reason: Some("missing_anchor".to_string()),
+        commit_baseline_details: serde_json::json!({
+            "hunks": [{
+                "file_path": "src/lib.rs",
+                "hunk_index": 0,
+                "anchor_count": 1,
+                "anchor_hashes": ["blake3:abcd"],
+                "match_result": "missing_anchor",
+                "baseline_hash": "blake3:baseline"
+            }]
+        }),
+        applied_entries: Vec::new(),
+        failed_entry: None,
+        changed_paths: Vec::new(),
+    };
+    let metadata = artifact_overlay_metadata_json(
+        Run::NAME,
+        ArtifactOverlayMetadata {
+            status: OverlayStatus::Applied,
+            disposition: Some(crate::executor::supervisor::overlay::OverlayDisposition::Denied),
+            lower_consistency: lower_consistency_from_commit_report(&commit_report),
+            artifact_manifest_status: "accepted",
+            artifact_adjudication: &commit_report.artifact_adjudication,
+            verify_layer: VerifyLayerStatus::Discarded,
+            cleanup: None,
+            commit_report: Some(&commit_report),
+            rejected_kinds: &[],
+            boundary_preflight: None,
+            artifact_manifest_generated: true,
+        },
+    );
+
+    assert_eq!(metadata["lower_consistency"], "not_checked");
+    assert_eq!(metadata["commit_baseline_validation"], "failed");
+    assert_eq!(metadata["commit_baseline_failure_reason"], "missing_anchor");
+    assert_eq!(
+        metadata["commit_baseline_details"]["hunks"][0]["match_result"],
+        "missing_anchor"
+    );
 }
 
 #[tokio::test]
@@ -2813,16 +2934,14 @@ fn command_observation_metadata_is_derived_for_workspace_mutation() {
         metadata["observed_effects"],
         serde_json::json!(["command_execution", "workspace_mutation_diff"])
     );
-    assert!(metadata["unobserved_dimensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|dimension| dimension.as_str() == Some("workspace_read_set")));
-    assert!(!metadata["unobserved_dimensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|dimension| dimension.as_str() == Some("tree_in_write")));
+    let keys: Vec<_> = metadata.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "effect_observation".to_string(),
+            "observed_effects".to_string()
+        ]
+    );
 }
 
 #[test]
@@ -2835,11 +2954,14 @@ fn command_observation_metadata_is_derived_for_diagnostic() {
         metadata["observed_effects"],
         serde_json::json!(["command_execution"])
     );
-    assert!(metadata["unobserved_dimensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|dimension| dimension.as_str() == Some("tree_in_write")));
+    let keys: Vec<_> = metadata.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(
+        keys,
+        vec![
+            "effect_observation".to_string(),
+            "observed_effects".to_string()
+        ]
+    );
     assert!(!metadata["observed_effects"]
         .as_array()
         .unwrap()

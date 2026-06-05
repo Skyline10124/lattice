@@ -5,6 +5,10 @@
 //! Both methods require an active `ExecutionEnvelope`; `mutate.patch`
 //! performs all-or-nothing scope preflight before applying changes.
 
+use crate::edit::commit_baseline::{
+    commit_baseline_details_json, CommitBaselineFailureReason, CommitBaselineReport,
+    CommitBaselineValidation,
+};
 use crate::edit::content_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::types::PatchOperation;
@@ -333,7 +337,17 @@ async fn handle_patch_as(
     let result =
         crate::edit::apply_patch(std::path::Path::new(&project_root), &limits, &params.patch).await;
 
+    if let Some(report) = result.commit_baseline_report.as_ref() {
+        let metadata = commit_baseline_metadata_json(report);
+        ctx.record_durable_metadata(metadata);
+    }
+
     if !result.ok {
+        if let Some(report) = result.commit_baseline_report.as_ref() {
+            if let CommitBaselineValidation::Failed(reason) = report.validation {
+                return Err(commit_baseline_replan_error(method, report, reason));
+            }
+        }
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
             format!("patch application failed: {}", result.summary),
@@ -447,6 +461,53 @@ async fn handle_patch_as(
     Ok(PatchResult {
         changed_files: changed_paths,
     })
+}
+
+fn commit_baseline_metadata_json(report: &CommitBaselineReport) -> serde_json::Value {
+    let details = commit_baseline_details_json(report);
+    json!({
+        "commit_baseline_validation": details["commit_baseline_validation"].clone(),
+        "commit_baseline_failure_reason": details["commit_baseline_failure_reason"].clone(),
+        "commit_baseline_details": details,
+    })
+}
+
+fn commit_baseline_replan_error(
+    method: &str,
+    report: &CommitBaselineReport,
+    reason: CommitBaselineFailureReason,
+) -> CepError {
+    let file_path = report
+        .hunks
+        .iter()
+        .find(|hunk| hunk.match_result.as_str() == reason.as_str())
+        .map(|hunk| hunk.file_path.clone())
+        .or_else(|| report.lower_drift_paths.first().cloned())
+        .unwrap_or_else(|| "<unknown>".into());
+    let hunk_index = report
+        .hunks
+        .iter()
+        .find(|hunk| hunk.match_result.as_str() == reason.as_str())
+        .map(|hunk| hunk.hunk_index);
+    let coordinate = hunk_index
+        .map(|index| format!("file={file_path}, hunk_index={index}"))
+        .unwrap_or_else(|| format!("file={file_path}"));
+
+    CepError::new(
+        CepErrorCode::ReplanRequired,
+        format!(
+            "patch commit baseline validation failed: {} ({coordinate})",
+            reason.as_str()
+        ),
+        CepErrorData::Guard(GuardErrorData {
+            method: method.into(),
+            reason: format!(
+                "ReplanRequired: commit_baseline_failure_reason={} ({coordinate})",
+                reason.as_str()
+            ),
+        }),
+        Retriability::RequiresReplan,
+    )
 }
 
 fn enforce_l2_result(
@@ -1274,6 +1335,69 @@ mod patch_tests {
         )
     }
 
+    fn metadata_json(
+        durable: &crate::server::call_durable_metadata::CallDurableMetadata,
+    ) -> serde_json::Value {
+        serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap()
+    }
+
+    fn colliding_text_for_lines(first: usize, second: usize) -> String {
+        (0..200_000)
+            .map(|index| format!("patch-commit-collision-{index}"))
+            .find(|text| {
+                crate::edit::hash::line_hash(first, text)
+                    == crate::edit::hash::line_hash(second, text)
+            })
+            .expect("short hash prefix should produce a deterministic collision")
+    }
+
+    async fn stale_patch_case(
+        before: &str,
+        patch_remove_line: &str,
+        drifted: String,
+        expected_reason: &str,
+    ) -> (CepError, serde_json::Value, String) {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let file_path = dir.path().join("target.txt");
+        std::fs::write(&file_path, before).unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
+        let durable = ctx.durable_metadata.clone();
+        crate::edit::apply::set_before_patch_commit_hook(file_path.clone(), move || {
+            std::fs::write(&file_path, drifted).unwrap();
+        });
+
+        let params = PatchParams {
+            patch: update_patch("target.txt", before, patch_remove_line, "new"),
+        };
+        let err = registry
+            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+        let metadata = metadata_json(&durable);
+
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert_eq!(err.retriability, Retriability::RequiresReplan);
+        assert!(
+            err.message.contains(expected_reason),
+            "expected {expected_reason} in {err:?}"
+        );
+        assert_eq!(metadata["commit_baseline_validation"], "failed");
+        assert_eq!(metadata["commit_baseline_failure_reason"], expected_reason);
+        assert_eq!(
+            metadata["commit_baseline_details"]["commit_baseline_failure_reason"],
+            expected_reason
+        );
+        let current = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
+        (err, metadata, current)
+    }
+
     fn envelope_with_write_path(pattern: &str) -> ExecutionEnvelope {
         let mut caps = BTreeSet::new();
         caps.insert(Capability::WritePath {
@@ -1369,6 +1493,76 @@ mod patch_tests {
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "content\n"
         );
+    }
+
+    #[tokio::test]
+    async fn commit_baseline_rejects_stale_inputs() {
+        let (_err, missing_metadata, missing_current) =
+            stale_patch_case("old\n", "old", "different\n".to_string(), "missing_anchor").await;
+        assert_eq!(missing_current, "different\n");
+        assert_eq!(
+            missing_metadata["commit_baseline_details"]["hunks"][0]["file_path"],
+            "target.txt"
+        );
+        assert_eq!(
+            missing_metadata["commit_baseline_details"]["hunks"][0]["hunk_index"],
+            0
+        );
+
+        let (_err, hash_metadata, hash_current) = stale_patch_case(
+            "beta\n",
+            "beta",
+            "inserted\nbeta\n".to_string(),
+            "hash_mismatch",
+        )
+        .await;
+        assert_eq!(hash_current, "inserted\nbeta\n");
+        assert_eq!(
+            hash_metadata["commit_baseline_details"]["hunks"][0]["match_result"],
+            "hash_mismatch"
+        );
+
+        let collision = colliding_text_for_lines(1, 2);
+        let (_err, ambiguous_metadata, ambiguous_current) = stale_patch_case(
+            &format!("{collision}\n"),
+            &collision,
+            format!("{collision}\n{collision}\n"),
+            "ambiguous_hunk",
+        )
+        .await;
+        assert_eq!(ambiguous_current, format!("{collision}\n{collision}\n"));
+        assert_eq!(
+            ambiguous_metadata["commit_baseline_details"]["hunks"][0]["match_result"],
+            "ambiguous_hunk"
+        );
+
+        let (_err, drift_metadata, drift_current) = stale_patch_case(
+            "alpha\nold\n",
+            "old",
+            "alpha\nold\nextra\n".to_string(),
+            "lower_drift",
+        )
+        .await;
+        assert_eq!(drift_current, "alpha\nold\nextra\n");
+        assert_eq!(
+            drift_metadata["commit_baseline_details"]["lower_drift_paths"][0],
+            "target.txt"
+        );
+
+        for metadata in [
+            missing_metadata,
+            hash_metadata,
+            ambiguous_metadata,
+            drift_metadata,
+        ] {
+            let encoded = serde_json::to_string(&metadata["commit_baseline_details"]).unwrap();
+            assert!(!encoded.contains("different"));
+            assert!(!encoded.contains("inserted"));
+            assert!(!encoded.contains("alpha"));
+            assert!(!encoded.contains("old"));
+            assert!(!encoded.contains("anchor_text"));
+            assert!(!encoded.contains("source"));
+        }
     }
 
     #[tokio::test]

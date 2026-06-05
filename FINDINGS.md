@@ -109,6 +109,18 @@
 - **当前状态**: 非阻断，Phase 30 安全关键路径正确；`cleanup_outcome=cleanup_failed` 足以让 artifact commit fail-closed。
 - **计划**: 后续 Phase 31/32 或诊断增强窗口可把 cleanup report 扩展为保留首个主失败 + 附加失败列表，或引入 compact repeated failure records；保持现有 fail-closed 行为和 metadata 体积约束，补充多失败矩阵回归测试。
 
+### L-31-01: artifact commit `passed` 路径的 `commit_baseline_details` 为空 — `commit-baseline-audit` / `observability`
+- **位置**: `crates/lancet-native/src/executor/supervisor/artifact.rs:1050`、`crates/lancet-native/src/executor/supervisor/artifact.rs:1077`
+- **问题**: `apply_prepared_artifact_set` 在 partial 和成功两条路径都写 `commit_baseline_validation = "passed"`，但 `commit_baseline_details = json!({})`，不带任何 hunk anchor summary。失败路径（`missing_anchor`/`hash_mismatch`/`ambiguous_hunk`/`lower_drift`/`verify_layer_contamination`）都会序列化 compact details，唯独成功路径没有验证证据，因此审计无法从 metadata 复现"哪些 hunk 通过了 baseline 校验"。
+- **当前状态**: 非 bug。31-CONTEXT D-09 把 `commit_baseline_failure_reason` 和 details 标为 optional，passed 路径省略 details 是最保守、最省 metadata 体积的做法；`mutate.patch` 直写路径同样不在成功时记录 hunk。
+- **计划**: 若后续需要 positive 审计证明（例如合规要求逐 hunk 可复现），在成功路径补 `commit_baseline_details.hunks` 紧凑摘要，复用 `commit_baseline_details_for_hunks`，仅记录 hash/offset/count 不带 anchor 源文本（保持 T-31-05 约束），并加成功路径 metadata 回归测试。
+
+### L-31-02: `LowerBaseline.regular_file_contents` 全量缓存项目文件字节 — `performance` / `memory`
+- **位置**: `crates/lancet-native/src/executor/supervisor/snapshot.rs:33`、`crates/lancet-native/src/executor/supervisor/snapshot.rs:251-263`
+- **问题**: P31-WR-02 修复（commit `71e8caf`）让 `capture_lower_baseline` 在计算每个 regular file BLAKE3 hash 的同时把完整字节存入 `regular_file_contents`，使 commit-baseline anchor 校验读取 capture 时刻的快照而非活 workspace（消除 TOCTOU）。代价是整个 lower 视图的 regular file 内容常驻内存,大型 workspace 下峰值内存随项目总字节线性增长。
+- **当前状态**: 非 bug，安全性正确。开销是线性而非指数，且只在 artifact overlay commit 路径短暂存在；v1.4-alpha 目标项目规模下不构成问题。`is_snapshot_skipped_path` 已排除 `target/`、`.git` 内部等大目录。
+- **计划**: v1.5 大型 workspace 优化窗口可改为 lazy read-on-demand + 用已捕获的 content hash 做完整性校验（读时比对 hash，不匹配即判 lower drift），或只缓存带 hunk anchor evidence 的文件字节而非全树；改动需保留消除 TOCTOU 的不变量并补一个"capture 后、recheck 前修改源文件仍 fail-closed"的回归测试。
+
 ## P22.5 supervision verification (2026-05-28)
 
 Live-scenario harness: `scripts/p22-real-scenarios.sh` (disposable workspaces under `build/tmp/p22-real-scenarios/`).

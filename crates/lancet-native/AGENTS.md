@@ -42,6 +42,8 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
   maintained rebinding suffix denylist.
 - WATCH: tool schemas must continue to come from catalog projection only.
+- CLOSED 31-CR-01/WR-02: artifact commit delete paths reject symlink parents,
+  and commit-baseline anchor files are read from the captured lower baseline.
 
 ## Next Actions
 

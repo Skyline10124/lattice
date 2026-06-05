@@ -401,9 +401,9 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
     let metadata = json!({
         "command_isolation_mode": "audit",
         "effective_boundary": {
-            "network": {"boundary": "network", "status": "unbounded", "reason": "netns unavailable"},
-            "filesystem": {"boundary": "filesystem", "status": "failed_closed", "reason": "mount view missing", "diagnostics": {"mount_view_status": "failed_closed"}},
-            "landlock": {"boundary": "landlock", "status": "unsupported", "reason": "landlock disabled", "diagnostics": {"landlock_status": "unsupported", "landlock_abi_version": "unknown"}}
+            "network": {"boundary": "network", "status": "unbounded", "observed": false, "reason": "netns unavailable"},
+            "filesystem": {"boundary": "filesystem", "status": "failed_closed", "observed": true, "reason": "mount view missing", "diagnostics": {"mount_view_status": "failed_closed"}},
+            "landlock": {"boundary": "landlock", "status": "unsupported", "observed": false, "reason": "landlock disabled", "diagnostics": {"landlock_status": "unsupported", "landlock_abi_version": "unknown"}}
         },
         "host_probe_summary": {
             "network_namespace": {"status": "unavailable", "reason": "operation not permitted"}
@@ -447,8 +447,16 @@ fn cep_audit_effective_boundary_metadata_round_trips_compactly() {
         "unbounded"
     );
     assert_eq!(
+        loaded_json["effective_boundary"]["network"]["observed"],
+        false
+    );
+    assert_eq!(
         loaded_json["effective_boundary"]["filesystem"]["status"],
         "failed_closed"
+    );
+    assert_eq!(
+        loaded_json["effective_boundary"]["filesystem"]["observed"],
+        true
     );
     assert_eq!(
         loaded_json["effective_boundary"]["landlock"]["status"],

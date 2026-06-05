@@ -211,6 +211,18 @@ children, overlay mounts, namespace references, verify layers, upper/work dirs,
 or busy mountpoints are recorded in `cleanup_outcome`; artifact cleanup failure
 blocks commit rather than applying a possibly stale artifact set.
 
+Phase 31 adds a HashLine commit-baseline gate to the same final boundary. When
+preserved patch hunk anchors are available, the serialized commit section
+revalidates them against the pre-verify lower/workspace baseline before any real
+workspace apply. Durable command metadata records
+`commit_baseline_validation = "passed" | "failed"`,
+`commit_baseline_failure_reason`, and `commit_baseline_details`. Failure
+reasons distinguish `lower_drift`, `missing_anchor`, `hash_mismatch`,
+`ambiguous_hunk`, and `verify_layer_contamination`; details carry compact
+hashes, offsets, changed paths, or contaminated paths, not anchor source text.
+`lower_consistency` remains the full-tree lower recheck status and is not reused
+for hunk-level baseline failures.
+
 When artifact commit is accepted, the real workspace apply is serialized inside
 the native process: lower recheck and stable ordered apply run without
 interleaving from another in-process artifact commit. This is serialized
@@ -233,6 +245,9 @@ Overlay/artifact metadata keys emitted by command metadata include:
 | `overlay_status` | `applied`, `not_applied`, `setup_failed`, or `not_requested`. |
 | `overlay_disposition` | `discarded`, `committed`, `denied`, or `not_applied`. |
 | `lower_consistency` | Lower recheck status such as `unchanged`, `drift_detected`, `not_checked`, or `check_failed`. |
+| `commit_baseline_validation` | HashLine/commit-baseline umbrella result: `passed` or `failed`. |
+| `commit_baseline_failure_reason` | Baseline failure reason such as `lower_drift`, `missing_anchor`, `hash_mismatch`, `ambiguous_hunk`, or `verify_layer_contamination`. |
+| `commit_baseline_details` | Compact baseline detail object containing hunk summaries, changed paths, or verify contaminated paths; never anchor source text. |
 | `artifact_manifest_status` | Manifest outcome such as `accepted`, `denied`, or `not_scanned`. |
 | `artifact_adjudication` | Artifact decision such as `accepted`, `skipped_no_overlay`, `denied_unsupported_kind`, `denied_write_scope`, `denied_effect_region`, `denied_verify_failed`, `denied_lower_drift`, or `denied_cleanup_failed`. |
 | `verify_layer` | Candidate verify layer status such as `not_run`, `applied`, `discarded`, or `cleanup_failed`. |
@@ -308,6 +323,24 @@ labels are `network`, `filesystem`, and `landlock`. The stable status labels are
 | `unsupported` | The required boundary maps only to unsupported host primitives. |
 | `unknown` | Probe data was missing, inconclusive, malformed, or otherwise not reliable enough to claim a boundary. |
 
+Each boundary entry also carries `observed: bool`. `status` is physical
+boundary credit: what the command requested, applied, failed closed on, or did
+not request. `observed` is effect visibility: whether LATTICE observed command
+effects in that dimension. These are independent. For example,
+`network: { "status": "physically_bounded", "observed": false }` means the
+no-egress network namespace supplied physical command bounds, but LATTICE did
+not observe network traffic or network effects.
+
+In v1.4-alpha, `filesystem.observed` is true only after overlay artifact
+manifest generation has observed filesystem artifact effects. `network.observed`
+is false because command network traffic is not observed; network safety comes
+from no-egress physical command bounds, not rollback or traffic replay.
+`landlock.observed` is false because Landlock is a filesystem refinement, not
+an effect observation channel. No read-set observation, network rollback, or
+sandbox guarantee. No sandbox guarantee means these fields are limited
+dimension-specific evidence for `exec.command_run`, not a general containment
+claim.
+
 Audit/status JSON is keyed by boundary dimension:
 
 ```json
@@ -316,16 +349,19 @@ Audit/status JSON is keyed by boundary dimension:
     "network": {
       "boundary": "network",
       "status": "not_requested",
+      "observed": false,
       "reason": "command isolation mode is off"
     },
     "filesystem": {
       "boundary": "filesystem",
       "status": "failed_closed",
+      "observed": false,
       "reason": "required filesystem boundary requested but no applied primitive evidence exists"
     },
     "landlock": {
       "boundary": "landlock",
       "status": "unsupported",
+      "observed": false,
       "reason": "required landlock boundary unsupported on this host"
     }
   }
@@ -342,6 +378,7 @@ compact diagnostics that status rendering preserves:
     "network": {
       "boundary": "network",
       "status": "physically_bounded",
+      "observed": false,
       "reason": "applied supervisor evidence accepted",
       "source_primitives": ["network_namespace"],
       "diagnostics": {
@@ -355,6 +392,7 @@ compact diagnostics that status rendering preserves:
     "filesystem": {
       "boundary": "filesystem",
       "status": "physically_bounded",
+      "observed": true,
       "reason": "applied supervisor evidence accepted",
       "source_primitives": ["mount_namespace"],
       "diagnostics": {
@@ -370,6 +408,7 @@ compact diagnostics that status rendering preserves:
     "landlock": {
       "boundary": "landlock",
       "status": "unsupported",
+      "observed": false,
       "reason": "optional landlock boundary unsupported by supervisor attempt",
       "diagnostics": {
         "landlock_status": "unsupported",
@@ -391,6 +430,7 @@ Failed child-side setup is reported without physical credit, for example:
     "network": {
       "boundary": "network",
       "status": "failed_closed",
+      "observed": false,
       "reason": "required network boundary requested but supervisor attempt lacked applied evidence",
       "diagnostics": {
         "supervisor_backend": "native_linux",
@@ -418,29 +458,12 @@ accepts `overlayfs`, `mount_namespace`, or `landlock`; and `landlock` accepts
 only `landlock`. Landlock, OverlayFS, and mount namespaces never earn network
 credit.
 
-Observed:
-
-- `CommandExecution` for every command invocation.
-- `WorkspaceMutation` pre/post diff only when the policy classifies the command
-  as `effective_impact = workspace_mutation`.
-
-Unobserved:
-
-- Network effects.
-- Tree-out reads and writes.
-- Workspace read set.
-- Workspace writes for diagnostic commands, because diagnostic mode skips the
-  mutation diff.
-
-Audit metadata is derived from `effective_impact`:
-
-- Workspace-mutation commands record `effect_observation = "partial"`,
-  `observed_effects = ["command_execution", "workspace_mutation_diff"]`, and
-  unobserved dimensions `network`, `tree_out_read`, `tree_out_write`, and
-  `workspace_read_set`.
-- Diagnostic commands record `effect_observation = "partial"`,
-  `observed_effects = ["command_execution"]`, and additionally list
-  `tree_in_write` as unobserved.
+Effect observation metadata remains separate from boundary credit. Commands can
+record `effect_observation = "partial"` and `observed_effects` such as
+`command_execution` or `workspace_mutation_diff`, but boundary observation is
+read from `effective_boundary.*.observed`. Runtime metadata does not add
+`observed_dimensions` or `unobserved_dimensions` summary lists; consumers derive
+that view from the typed boundary entries when needed.
 
 Command allowlists are admission control only. They constrain which executable
 argv prefixes may run; they do not describe everything a permitted binary can do

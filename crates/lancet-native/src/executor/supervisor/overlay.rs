@@ -291,6 +291,7 @@ pub(crate) struct VerifyDiscardReport {
     pub(crate) path_label: Option<&'static str>,
     pub(crate) reason: Option<String>,
     pub(crate) child_cleanup_succeeded: bool,
+    pub(crate) contaminated_paths: Vec<String>,
 }
 
 impl VerifyDiscardReport {
@@ -302,6 +303,7 @@ impl VerifyDiscardReport {
             path_label: None,
             reason: None,
             child_cleanup_succeeded: true,
+            contaminated_paths: Vec::new(),
         }
     }
 
@@ -313,6 +315,7 @@ impl VerifyDiscardReport {
             path_label: None,
             reason: None,
             child_cleanup_succeeded: true,
+            contaminated_paths: Vec::new(),
         }
     }
 }
@@ -333,6 +336,7 @@ pub(crate) fn cleanup_verify_discard_layer<S: SupervisorSyscalls>(
     child_cleanup_succeeded: bool,
     syscalls: &mut S,
 ) -> VerifyDiscardReport {
+    let contaminated_paths = verify_contaminated_paths(&plan.overlay.paths.upper);
     let cleanup = cleanup_overlay(
         &plan.overlay,
         OverlayDisposition::Discarded,
@@ -350,6 +354,30 @@ pub(crate) fn cleanup_verify_discard_layer<S: SupervisorSyscalls>(
         path_label: cleanup.path_label,
         reason: cleanup.reason,
         child_cleanup_succeeded: cleanup.child_cleanup_succeeded,
+        contaminated_paths,
+    }
+}
+
+fn verify_contaminated_paths(upper: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_contaminated_paths(upper, upper, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_contaminated_paths(base: &Path, current: &Path, paths: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(relative) = path.strip_prefix(base) {
+            paths.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+        if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            collect_contaminated_paths(base, &path, paths);
+        }
     }
 }
 

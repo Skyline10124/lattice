@@ -1,6 +1,15 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 
+use tokio::sync::Mutex;
+
+use super::commit_baseline::{
+    collect_hunk_anchor_evidence, validate_commit_baseline_evidence, CommitBaselineFailureReason,
+    CommitBaselineReport, CommitBaselineValidation, HunkAnchorMatchResult,
+};
 use super::hash::{content_hash, line_hash};
 use super::parser::parse_patch_document;
 use super::types::{
@@ -45,8 +54,8 @@ pub async fn apply_patch(
         }
     };
 
-    match write_apply_plan(&plan).await {
-        Ok(()) => {
+    match commit_apply_plan(&plan).await {
+        Ok(commit_baseline_report) => {
             let changed_files = plan
                 .changes
                 .iter()
@@ -58,9 +67,15 @@ pub async fn apply_patch(
                 errors: Vec::new(),
                 changed_files,
                 attempted_operations: plan.attempted_operations,
+                commit_baseline_report: Some(commit_baseline_report),
             }
         }
-        Err(diagnostics) => failure_envelope(
+        Err(PatchCommitError::Baseline(report)) => baseline_failure_envelope(
+            "patch rejected during commit baseline validation",
+            report,
+            plan.attempted_operations,
+        ),
+        Err(PatchCommitError::Write(diagnostics)) => failure_envelope(
             "patch failed during write stage; rollback attempted",
             diagnostics,
             plan.attempted_operations,
@@ -94,6 +109,7 @@ async fn build_apply_plan(
     let mut diagnostics = Vec::new();
     let mut seen_paths = HashSet::new();
     let mut changes = Vec::new();
+    let commit_baseline_evidence = collect_hunk_anchor_evidence(document);
 
     for (operation_index, operation) in document.operations.iter().enumerate() {
         let path = operation.path().to_string();
@@ -148,6 +164,7 @@ async fn build_apply_plan(
         Ok(ApplyPlan {
             changes,
             attempted_operations,
+            commit_baseline_evidence,
         })
     } else {
         Err((diagnostics, attempted_operations))
@@ -519,6 +536,62 @@ fn find_hashline_matches(lines: &[WorkingLine], needle: &[HashLine]) -> Vec<usiz
         .collect()
 }
 
+enum PatchCommitError {
+    Baseline(CommitBaselineReport),
+    Write(Vec<PatchDiagnostic>),
+}
+
+async fn commit_apply_plan(plan: &ApplyPlan) -> Result<CommitBaselineReport, PatchCommitError> {
+    let _guard = patch_commit_lock().lock().await;
+    run_before_patch_commit_hook(plan);
+
+    let baseline_files = read_commit_baseline_files(plan).await;
+    let mut report =
+        validate_commit_baseline_evidence(&plan.commit_baseline_evidence, &baseline_files);
+    if !matches!(report.validation, CommitBaselineValidation::Passed) {
+        return Err(PatchCommitError::Baseline(report));
+    }
+
+    let drift_paths = lower_drift_paths(plan, &baseline_files);
+    if !drift_paths.is_empty() {
+        report.validation =
+            CommitBaselineValidation::Failed(CommitBaselineFailureReason::LowerDrift);
+        report.lower_drift_paths = drift_paths;
+        return Err(PatchCommitError::Baseline(report));
+    }
+
+    write_apply_plan(plan)
+        .await
+        .map_err(PatchCommitError::Write)?;
+    Ok(report)
+}
+
+fn patch_commit_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+async fn read_commit_baseline_files(plan: &ApplyPlan) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for change in &plan.changes {
+        if let Ok(bytes) = tokio::fs::read(&change.target_path).await {
+            files.insert(change.path.clone(), bytes);
+        }
+    }
+    files
+}
+
+fn lower_drift_paths(plan: &ApplyPlan, baseline_files: &BTreeMap<String, Vec<u8>>) -> Vec<String> {
+    plan.changes
+        .iter()
+        .filter_map(|change| {
+            let current = baseline_files.get(&change.path);
+            let expected = change.bytes_before.as_ref();
+            (current != expected).then(|| change.path.clone())
+        })
+        .collect()
+}
+
 async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> {
     let mut backups = Vec::new();
 
@@ -558,6 +631,98 @@ async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> 
 
     Ok(())
 }
+
+fn baseline_failure_envelope(
+    summary: impl Into<String>,
+    report: CommitBaselineReport,
+    attempted_operations: Vec<AttemptedOperation>,
+) -> PatchResultEnvelope {
+    PatchResultEnvelope {
+        ok: false,
+        summary: summary.into(),
+        errors: vec![baseline_failure_diagnostic(&report)],
+        changed_files: Vec::new(),
+        attempted_operations,
+        commit_baseline_report: Some(report),
+    }
+}
+
+fn baseline_failure_diagnostic(report: &CommitBaselineReport) -> PatchDiagnostic {
+    let reason = match report.validation {
+        CommitBaselineValidation::Passed => CommitBaselineFailureReason::MissingAnchor,
+        CommitBaselineValidation::Failed(reason) => reason,
+    };
+    let hunk = report.hunks.iter().find(|hunk| {
+        matches!(
+            (reason, hunk.match_result),
+            (
+                CommitBaselineFailureReason::MissingAnchor,
+                HunkAnchorMatchResult::MissingAnchor
+            ) | (
+                CommitBaselineFailureReason::HashMismatch,
+                HunkAnchorMatchResult::HashMismatch
+            ) | (
+                CommitBaselineFailureReason::AmbiguousHunk,
+                HunkAnchorMatchResult::AmbiguousHunk
+            )
+        )
+    });
+    let path = hunk
+        .map(|hunk| hunk.file_path.clone())
+        .or_else(|| report.lower_drift_paths.first().cloned());
+    let code = match reason {
+        CommitBaselineFailureReason::LowerDrift
+        | CommitBaselineFailureReason::HashMismatch
+        | CommitBaselineFailureReason::VerifyLayerContamination => PatchErrorCode::HashMismatch,
+        CommitBaselineFailureReason::MissingAnchor => PatchErrorCode::HunkMissing,
+        CommitBaselineFailureReason::AmbiguousHunk => PatchErrorCode::HunkAmbiguous,
+    };
+    let mut diagnostic = PatchDiagnostic::new(
+        code,
+        format!("commit_baseline_validation failed: {}", reason.as_str()),
+    );
+    if let Some(path) = path {
+        diagnostic = diagnostic.with_path(path);
+    }
+    if let Some(hunk) = hunk {
+        diagnostic = diagnostic.with_hunk_index(hunk.hunk_index);
+    }
+    diagnostic
+}
+
+#[cfg(test)]
+type BeforePatchCommitHook = (PathBuf, Box<dyn FnOnce() + Send + 'static>);
+
+#[cfg(test)]
+fn before_patch_commit_hook() -> &'static StdMutex<Option<BeforePatchCommitHook>> {
+    static HOOK: OnceLock<StdMutex<Option<BeforePatchCommitHook>>> = OnceLock::new();
+    HOOK.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+pub(crate) fn set_before_patch_commit_hook(
+    target_path: PathBuf,
+    hook: impl FnOnce() + Send + 'static,
+) {
+    *before_patch_commit_hook().lock().unwrap() = Some((target_path, Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_before_patch_commit_hook(plan: &ApplyPlan) {
+    let mut guard = before_patch_commit_hook().lock().unwrap();
+    let should_run = guard.as_ref().is_some_and(|(target_path, _)| {
+        plan.changes
+            .iter()
+            .any(|change| change.target_path == *target_path)
+    });
+    if should_run {
+        let (_, hook) = guard.take().unwrap();
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn run_before_patch_commit_hook(_plan: &ApplyPlan) {}
 
 struct CompletedWrite {
     path: String,
@@ -646,6 +811,7 @@ fn failure_envelope(
         errors,
         changed_files: Vec::new(),
         attempted_operations,
+        commit_baseline_report: None,
     }
 }
 
@@ -910,6 +1076,62 @@ mod tests {
             "alpha\nnew\nomega\n"
         );
         assert!(!delete.exists());
+    }
+
+    #[tokio::test]
+    async fn line_change_not_baseline_evidence_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.txt");
+        let before = "alpha\nold\nomega\n";
+        std::fs::write(&file, before).unwrap();
+        let alpha = context(1, "alpha");
+        let old = remove(2, "old");
+        let omega = context(3, "omega");
+        let patch = format!(
+            "\
+*** Begin Patch
+*** Update File: sample.txt
+*** Old Hash: {}
+@@
+{alpha}
+{old}
++new
+{omega}
+*** End Patch",
+            hash(before)
+        );
+        let document = parse_patch_document(&patch).unwrap();
+        let attempted_operations = document
+            .operations
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| AttemptedOperation::from_operation(index, operation))
+            .collect();
+
+        let plan = build_apply_plan(
+            dir.path(),
+            &ToolLimits::default(),
+            &document,
+            attempted_operations,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.changes.len(), 1);
+        assert!(
+            !plan.changes[0].manifest.line_changes.is_empty(),
+            "fixture must have fabricated LineChange summaries"
+        );
+        assert_eq!(plan.commit_baseline_evidence.len(), 1);
+        assert_eq!(plan.commit_baseline_evidence[0].file_path, "sample.txt");
+        assert_eq!(
+            plan.commit_baseline_evidence[0]
+                .anchors
+                .iter()
+                .map(|anchor| anchor.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "old", "omega"]
+        );
     }
 
     #[tokio::test]

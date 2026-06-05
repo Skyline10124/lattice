@@ -149,6 +149,8 @@ impl HostProbeReport {
 pub struct EffectiveBoundaryEntry {
     pub boundary: BoundaryDimension,
     pub status: EffectiveBoundaryStatus,
+    #[serde(default)]
+    pub observed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -162,6 +164,7 @@ impl EffectiveBoundaryEntry {
         Self {
             boundary,
             status,
+            observed: false,
             reason: None,
             diagnostics: BTreeMap::new(),
             source_primitives: Vec::new(),
@@ -359,5 +362,91 @@ mod tests {
         assert!(json["boundaries"]["network_namespace"].is_null());
         assert!(json["boundaries"]["overlayfs"].is_null());
         assert!(json["boundaries"]["mount_namespace"].is_null());
+    }
+
+    #[test]
+    fn observed_default_is_false_for_old_effective_boundary_entry_json() {
+        let entry: EffectiveBoundaryEntry = serde_json::from_value(serde_json::json!({
+            "boundary": "network",
+            "status": "physically_bounded",
+            "reason": "legacy audit row without observation data"
+        }))
+        .unwrap();
+
+        assert_eq!(entry.boundary, BoundaryDimension::Network);
+        assert_eq!(entry.status, EffectiveBoundaryStatus::PhysicallyBounded);
+        assert!(!entry.observed);
+
+        let json = serde_json::to_value(EffectiveBoundaryEntry::new(
+            BoundaryDimension::Filesystem,
+            EffectiveBoundaryStatus::PhysicallyBounded,
+        ))
+        .unwrap();
+
+        assert_eq!(json["observed"], serde_json::json!(false));
+        assert!(json.get("observed_dimensions").is_none());
+        assert!(json.get("unobserved_dimensions").is_none());
+    }
+
+    #[test]
+    fn boundary_observed_status_and_observation_are_independent() {
+        let network = EffectiveBoundaryEntry::new(
+            BoundaryDimension::Network,
+            EffectiveBoundaryStatus::PhysicallyBounded,
+        );
+        let mut filesystem = EffectiveBoundaryEntry::new(
+            BoundaryDimension::Filesystem,
+            EffectiveBoundaryStatus::PhysicallyBounded,
+        );
+        filesystem.observed = true;
+
+        let report = EffectiveBoundaryReport::from_entries([network, filesystem]);
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            json["boundaries"]["network"]["status"],
+            serde_json::json!("physically_bounded")
+        );
+        assert_eq!(
+            json["boundaries"]["network"]["observed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            json["boundaries"]["filesystem"]["status"],
+            serde_json::json!("physically_bounded")
+        );
+        assert_eq!(
+            json["boundaries"]["filesystem"]["observed"],
+            serde_json::json!(true)
+        );
+
+        for key in [
+            "workspace_read_set",
+            "tree_out_read",
+            "observed_dimensions",
+            "unobserved_dimensions",
+        ] {
+            assert!(json.get(key).is_none(), "{key} must not be a report field");
+            assert!(
+                json["boundaries"]["network"].get(key).is_none(),
+                "{key} must not be an entry field"
+            );
+            assert!(
+                json["boundaries"]["filesystem"].get(key).is_none(),
+                "{key} must not be an entry field"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_observed_schema_exposes_typed_entry_field() {
+        let schema = schemars::schema_for!(EffectiveBoundaryEntry);
+        let json = serde_json::to_value(&schema).unwrap();
+        let observed = json
+            .pointer("/properties/observed")
+            .or_else(|| json.pointer("/schema/properties/observed"))
+            .expect("observed is present in EffectiveBoundaryEntry schema");
+
+        assert_eq!(observed["type"], serde_json::json!("boolean"));
     }
 }

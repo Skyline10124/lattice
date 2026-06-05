@@ -30,6 +30,7 @@ pub(crate) type WorkspaceSnapshot = BTreeMap<String, SnapshotEntry>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LowerBaseline {
     pub(crate) entries: WorkspaceSnapshot,
+    pub(crate) regular_file_contents: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,14 +73,15 @@ pub(crate) fn capture_workspace_snapshot(
 ) -> Result<WorkspaceSnapshot, CepError> {
     let root = project_root.as_ref();
     let mut snapshot = BTreeMap::new();
-    capture_recursive(root, root, &mut snapshot)?;
+    capture_recursive_inner(root, root, &mut snapshot, None)?;
     Ok(snapshot)
 }
 
-fn capture_recursive(
+fn capture_recursive_inner(
     base: &Path,
     current: &Path,
     snapshot: &mut WorkspaceSnapshot,
+    mut regular_file_contents: Option<&mut BTreeMap<String, Vec<u8>>>,
 ) -> Result<(), CepError> {
     let entries = std::fs::read_dir(current).map_err(|e| {
         CepError::internal_error(format!(
@@ -103,11 +105,14 @@ fn capture_recursive(
             continue;
         }
 
-        let entry_snapshot = capture_snapshot_entry(&path)?;
+        let (entry_snapshot, content) = capture_snapshot_entry_with_content(&path)?;
         let is_dir = entry_snapshot.file_kind == SnapshotFileKind::Directory;
+        if let (Some(contents), Some(content)) = (regular_file_contents.as_deref_mut(), content) {
+            contents.insert(relative.clone(), content);
+        }
         snapshot.insert(relative, entry_snapshot);
         if is_dir {
-            capture_recursive(base, &path, snapshot)?;
+            capture_recursive_inner(base, &path, snapshot, regular_file_contents.as_deref_mut())?;
         }
     }
 
@@ -115,6 +120,12 @@ fn capture_recursive(
 }
 
 fn capture_snapshot_entry(path: &Path) -> Result<SnapshotEntry, CepError> {
+    capture_snapshot_entry_with_content(path).map(|(entry, _)| entry)
+}
+
+fn capture_snapshot_entry_with_content(
+    path: &Path,
+) -> Result<(SnapshotEntry, Option<Vec<u8>>), CepError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|e| {
         CepError::internal_error(format!(
             "failed to read metadata for '{}': {e}",
@@ -123,14 +134,16 @@ fn capture_snapshot_entry(path: &Path) -> Result<SnapshotEntry, CepError> {
     })?;
     let file_type = metadata.file_type();
     let file_kind = snapshot_file_kind(&file_type);
-    let content_hash = if file_kind == SnapshotFileKind::RegularFile {
-        let content = std::fs::read(path).map_err(|e| {
+    let content = if file_kind == SnapshotFileKind::RegularFile {
+        Some(std::fs::read(path).map_err(|e| {
             CepError::internal_error(format!("failed to read file '{}': {e}", path.display()))
-        })?;
-        Some(format!("blake3:{}", blake3::hash(&content).to_hex()))
+        })?)
     } else {
         None
     };
+    let content_hash = content
+        .as_ref()
+        .map(|content| format!("blake3:{}", blake3::hash(content).to_hex()));
     let symlink_target = if file_kind == SnapshotFileKind::Symlink {
         Some(
             std::fs::read_link(path)
@@ -147,13 +160,16 @@ fn capture_snapshot_entry(path: &Path) -> Result<SnapshotEntry, CepError> {
         None
     };
 
-    Ok(SnapshotEntry {
-        content_hash,
-        file_kind,
-        mode: normalized_mode(&metadata),
-        symlink_target,
-        size_bytes: metadata.len(),
-    })
+    Ok((
+        SnapshotEntry {
+            content_hash,
+            file_kind,
+            mode: normalized_mode(&metadata),
+            symlink_target,
+            size_bytes: metadata.len(),
+        },
+        content,
+    ))
 }
 
 fn snapshot_file_kind(file_type: &std::fs::FileType) -> SnapshotFileKind {
@@ -233,8 +249,17 @@ pub(crate) fn compute_changed_paths(
 }
 
 pub(crate) fn capture_lower_baseline(project_root: &Path) -> Result<LowerBaseline, CepError> {
+    let mut entries = BTreeMap::new();
+    let mut regular_file_contents = BTreeMap::new();
+    capture_recursive_inner(
+        project_root,
+        project_root,
+        &mut entries,
+        Some(&mut regular_file_contents),
+    )?;
     Ok(LowerBaseline {
-        entries: capture_workspace_snapshot(project_root)?,
+        entries,
+        regular_file_contents,
     })
 }
 

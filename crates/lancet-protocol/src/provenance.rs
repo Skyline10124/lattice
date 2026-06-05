@@ -7,6 +7,7 @@
 use crate::envelope::ImpactKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Stable in-toto `predicateType` URI for per-turn CEP attestations (unsigned in alpha).
 pub const CEP_TURN_ATTESTATION_PREDICATE_TYPE: &str = "https://lattice.dev/attestation/cep-turn/v1";
@@ -29,6 +30,8 @@ pub struct ProvActivity {
     pub guard_verdict: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attributes: BTreeMap<String, serde_json::Value>,
 }
 
 /// PROV Entity node — digest or URI for an artifact referenced by a call.
@@ -167,6 +170,7 @@ mod tests {
                 semantic_status: Some("ok".into()),
                 guard_verdict: Some("allowed".into()),
                 outcome_summary: Some("read 42 lines".into()),
+                attributes: BTreeMap::new(),
             }],
             entities: vec![ProvEntity {
                 id: "ent-1".into(),
@@ -193,6 +197,21 @@ mod tests {
         let serialized = serde_json::to_string(&fragment).unwrap();
         let parsed: ProvGraphFragment = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed, fragment);
+    }
+
+    #[test]
+    fn prov_activity_attributes_default_for_legacy_fragments() {
+        let fragment: ProvGraphFragment = serde_json::from_value(json!({
+            "activities": [{
+                "id": "act-legacy",
+                "method": "exec.command_run",
+                "impact_kind": "workspace_mutation",
+                "outcome_summary": "success"
+            }]
+        }))
+        .unwrap();
+
+        assert!(fragment.activities[0].attributes.is_empty());
     }
 
     #[test]

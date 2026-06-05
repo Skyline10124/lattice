@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::commit_baseline::{CommitBaselineReport, HunkAnchorEvidence};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PatchDocument {
     pub operations: Vec<PatchOperation>,
@@ -192,6 +194,7 @@ pub struct LineChange {
 pub struct ApplyPlan {
     pub changes: Vec<PlannedFileChange>,
     pub attempted_operations: Vec<AttemptedOperation>,
+    pub(crate) commit_baseline_evidence: Vec<HunkAnchorEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +215,8 @@ pub struct PatchResultEnvelope {
     pub errors: Vec<PatchDiagnostic>,
     pub changed_files: Vec<ChangedFile>,
     pub attempted_operations: Vec<AttemptedOperation>,
+    #[serde(skip)]
+    pub(crate) commit_baseline_report: Option<CommitBaselineReport>,
 }
 
 #[cfg(test)]
@@ -303,6 +308,7 @@ mod tests {
                 line_changes: vec![],
             }],
             attempted_operations: vec![AttemptedOperation::from_operation(0, &operation)],
+            commit_baseline_report: None,
         };
 
         let value = serde_json::to_value(envelope).unwrap();

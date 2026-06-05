@@ -29,6 +29,9 @@ use lancet_native::{
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::{BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryStatus};
 
+const BOUNDARY_NON_CLAIM_NOTE: &str =
+    "Physical bounds only. No read-set observation, network rollback, or sandbox guarantee.";
+
 /// `lattice lancet` subcommand group.
 #[derive(Subcommand)]
 pub enum LancetAction {
@@ -260,6 +263,12 @@ fn normalize_effective_boundary_entry(
     normalized
         .entry("boundary".to_string())
         .or_insert_with(|| serde_json::Value::String(boundary.label().to_string()));
+    if !normalized
+        .get("observed")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
+        normalized.insert("observed".to_string(), serde_json::Value::Bool(false));
+    }
     serde_json::Value::Object(normalized)
 }
 
@@ -351,6 +360,7 @@ fn unknown_effective_boundary_entry(
     serde_json::json!({
         "boundary": boundary,
         "status": EffectiveBoundaryStatus::Unknown,
+        "observed": false,
         "reason": reason,
     })
 }
@@ -447,6 +457,15 @@ fn status_text_lines(output: &CepStatusOutput) -> Vec<String> {
             ));
             if let Some(effective_boundary) = &call.effective_boundary {
                 lines.push(format!(
+                    "    {}",
+                    format_effective_boundary_boundaries_line(effective_boundary)
+                ));
+                lines.push(format!(
+                    "    {}",
+                    format_effective_boundary_observed_line(effective_boundary)
+                ));
+                lines.push(format!("    Note:       {BOUNDARY_NON_CLAIM_NOTE}"));
+                lines.push(format!(
                     "    effective_boundary: {}",
                     format_effective_boundary_compact(effective_boundary)
                 ));
@@ -461,6 +480,73 @@ fn status_text_lines(output: &CepStatusOutput) -> Vec<String> {
         verdict_str.dimmed()
     ));
     lines
+}
+
+fn format_effective_boundary_boundaries_line(
+    effective_boundary: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let parts = BoundaryDimension::ALL
+        .iter()
+        .filter_map(|boundary| {
+            let label = boundary.label();
+            let entry = effective_boundary.get(label)?;
+            Some(format!(
+                "{label}={}",
+                effective_boundary_text_status(*boundary, entry)
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        "Boundaries: unknown".to_string()
+    } else {
+        format!("Boundaries: {}", parts.join(" "))
+    }
+}
+
+fn format_effective_boundary_observed_line(
+    effective_boundary: &serde_json::Map<String, serde_json::Value>,
+) -> String {
+    let ordered = [
+        BoundaryDimension::Filesystem,
+        BoundaryDimension::Network,
+        BoundaryDimension::Landlock,
+    ];
+    let parts = ordered
+        .iter()
+        .filter_map(|boundary| {
+            let label = boundary.label();
+            let observed = effective_boundary
+                .get(label)?
+                .get("observed")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            Some(format!("{label}={}", if observed { "yes" } else { "no" }))
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        "Observed:   unknown".to_string()
+    } else {
+        format!("Observed:   {}", parts.join(" "))
+    }
+}
+
+fn effective_boundary_text_status(boundary: BoundaryDimension, entry: &serde_json::Value) -> &str {
+    if boundary == BoundaryDimension::Landlock {
+        if let Some(status) = entry
+            .get("diagnostics")
+            .and_then(|value| value.as_object())
+            .and_then(|diagnostics| diagnostics.get("landlock_status"))
+            .and_then(|value| value.as_str())
+        {
+            return status;
+        }
+    }
+    entry
+        .get("status")
+        .and_then(|status| status.as_str())
+        .unwrap_or("unknown")
 }
 
 fn format_effective_boundary_compact(
@@ -1351,6 +1437,29 @@ mod tests {
             Some("unbounded")
         );
         assert_eq!(
+            json["recent_calls"][0]["effective_boundary"]["network"]["observed"].as_bool(),
+            Some(false)
+        );
+        assert!(
+            json.get("observed_dimensions").is_none(),
+            "status JSON must not add top-level observed summary lists"
+        );
+        assert!(
+            json.get("unobserved_dimensions").is_none(),
+            "status JSON must not add top-level unobserved summary lists"
+        );
+        let recent_call = json["recent_calls"][0]
+            .as_object()
+            .expect("recent call object");
+        assert!(
+            !recent_call.contains_key("observed_dimensions"),
+            "recent call JSON must not add observed summary lists"
+        );
+        assert!(
+            !recent_call.contains_key("unobserved_dimensions"),
+            "recent call JSON must not add unobserved summary lists"
+        );
+        assert_eq!(
             output.recent_calls[0]
                 .effective_boundary
                 .as_ref()
@@ -1394,6 +1503,100 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("effective_boundary: network=unbounded")),
             "status text must label per-command effective boundary"
+        );
+    }
+
+    #[test]
+    fn observed_non_claim() {
+        let dir = TempDir::new().unwrap();
+        seed_command_boundary_audit_db(
+            dir.path(),
+            "exec.command_run",
+            Some(
+                r#"{
+                    "effective_boundary": {
+                        "network": {
+                            "boundary": "network",
+                            "status": "physically_bounded",
+                            "observed": false,
+                            "source_primitives": ["network_namespace"],
+                            "diagnostics": {
+                                "namespace_status": "applied",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied"
+                            }
+                        },
+                        "filesystem": {
+                            "boundary": "filesystem",
+                            "status": "physically_bounded",
+                            "observed": true,
+                            "source_primitives": ["mount_namespace"],
+                            "diagnostics": {
+                                "namespace_status": "applied",
+                                "mount_view_status": "applied",
+                                "env_policy": "allowlist",
+                                "fd_cleanup_status": "applied"
+                            }
+                        },
+                        "landlock": {
+                            "boundary": "landlock",
+                            "status": "physically_bounded",
+                            "observed": false,
+                            "source_primitives": ["landlock"],
+                            "diagnostics": {
+                                "landlock_status": "applied",
+                                "landlock_abi_version": "5",
+                                "landlock_rights_mask": "0xffff"
+                            }
+                        }
+                    }
+                }"#,
+            ),
+        );
+
+        let output = collect_status_with_probe(dir.path(), mixed_probe_for_tests()).unwrap();
+        let text = status_text_lines(&output).join("\n");
+
+        assert!(
+            text.contains(
+                "Boundaries: network=physically_bounded filesystem=physically_bounded landlock=applied"
+            ),
+            "status text should render concise physical boundary statuses: {text}"
+        );
+        assert!(
+            text.contains("Observed:   filesystem=yes network=no landlock=no"),
+            "status text should render observed effects per boundary: {text}"
+        );
+        assert!(
+            text.contains(
+                "Note:       Physical bounds only. No read-set observation, network rollback, or sandbox guarantee."
+            ),
+            "status text should render the exact non-claim note: {text}"
+        );
+
+        let json = status_json_value(&output);
+        assert_eq!(
+            json["recent_calls"][0]["effective_boundary"]["network"]["observed"].as_bool(),
+            Some(false)
+        );
+        assert!(
+            json.get("observed_dimensions").is_none(),
+            "status JSON must not add top-level observed summary lists"
+        );
+        assert!(
+            json.get("unobserved_dimensions").is_none(),
+            "status JSON must not add top-level unobserved summary lists"
+        );
+        let recent_call = json["recent_calls"][0]
+            .as_object()
+            .expect("recent call object");
+        assert!(
+            !recent_call.contains_key("observed_dimensions"),
+            "recent call JSON must not add observed summary lists"
+        );
+        assert!(
+            !recent_call.contains_key("unobserved_dimensions"),
+            "recent call JSON must not add unobserved summary lists"
         );
     }
 

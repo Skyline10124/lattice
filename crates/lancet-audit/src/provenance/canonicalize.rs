@@ -83,6 +83,7 @@ mod tests {
                 semantic_status: None,
                 guard_verdict: None,
                 outcome_summary: None,
+                attributes: Default::default(),
             }],
             agents: vec![ProvAgent {
                 id: "agent:sess:model".into(),

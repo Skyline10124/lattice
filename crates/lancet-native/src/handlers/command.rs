@@ -10,8 +10,9 @@ use crate::enforcement::guard_l1::{
     has_run_command_capability,
 };
 use crate::enforcement::isolation::{
-    command_boundary_metadata, evaluate_command_boundary_attempt,
-    evaluate_command_boundary_preflight, unavailable_required_boundaries, BoundaryAttemptOutcome,
+    command_boundary_metadata, effective_boundary_metadata_json_with_observation,
+    evaluate_command_boundary_attempt, evaluate_command_boundary_preflight,
+    unavailable_required_boundaries, BoundaryAttemptOutcome, CommandBoundaryPreflight,
     CommandIsolationAttempt, CommandIsolationMode, CommandIsolationUnsupportedHostBehavior,
     MinimalMountViewStatus, SupervisorSetupStatus,
 };
@@ -604,6 +605,8 @@ struct ArtifactOverlayMetadata<'a> {
     cleanup: Option<&'a OverlayCleanupReport>,
     commit_report: Option<&'a ArtifactCommitReport>,
     rejected_kinds: &'a [RejectedArtifactKind],
+    boundary_preflight: Option<&'a CommandBoundaryPreflight>,
+    artifact_manifest_generated: bool,
 }
 
 async fn handle_diagnostic_overlay_run(
@@ -876,6 +879,8 @@ async fn run_artifact_overlay_supervised(
                     cleanup: err.overlay_cleanup.as_ref(),
                     commit_report: None,
                     rejected_kinds: &[],
+                    boundary_preflight: None,
+                    artifact_manifest_generated: false,
                 },
             )
             .await;
@@ -911,6 +916,8 @@ async fn run_artifact_overlay_supervised(
                     cleanup: Some(&cleanup),
                     commit_report: None,
                     rejected_kinds: &[],
+                    boundary_preflight: None,
+                    artifact_manifest_generated: false,
                 },
             )
             .await;
@@ -924,6 +931,8 @@ async fn run_artifact_overlay_supervised(
             return Err(err.error);
         }
     };
+    let boundary_preflight =
+        evaluate_command_boundary_attempt(&ctx.command_isolation, Some(&output.setup_attempt));
 
     let exit_code = output.output.status.code().unwrap_or(-1);
     record_command_execution_for_artifact(
@@ -979,6 +988,8 @@ async fn run_artifact_overlay_supervised(
                     cleanup: Some(&cleanup),
                     commit_report: None,
                     rejected_kinds: &failure.report.rejected_kinds,
+                    boundary_preflight: Some(&boundary_preflight),
+                    artifact_manifest_generated: true,
                 },
             )
             .await;
@@ -1015,6 +1026,8 @@ async fn run_artifact_overlay_supervised(
                     cleanup: Some(&cleanup),
                     commit_report: None,
                     rejected_kinds: &[],
+                    boundary_preflight: Some(&boundary_preflight),
+                    artifact_manifest_generated: true,
                 },
             )
             .await;
@@ -1062,6 +1075,8 @@ async fn run_artifact_overlay_supervised(
                     cleanup: Some(&artifact_cleanup),
                     commit_report: Some(&failure.report),
                     rejected_kinds: &[],
+                    boundary_preflight: Some(&boundary_preflight),
+                    artifact_manifest_generated: true,
                 },
             )
             .await;
@@ -1082,6 +1097,8 @@ async fn run_artifact_overlay_supervised(
             cleanup: Some(&artifact_cleanup),
             commit_report: Some(&commit_report),
             rejected_kinds: &[],
+            boundary_preflight: Some(&boundary_preflight),
+            artifact_manifest_generated: true,
         },
     )
     .await;
@@ -1158,6 +1175,8 @@ async fn artifact_fallback_without_overlay(
             cleanup: None,
             commit_report: None,
             rejected_kinds: &[],
+            boundary_preflight: None,
+            artifact_manifest_generated: false,
         },
     )
     .await;
@@ -1341,18 +1360,24 @@ async fn run_artifact_verify_if_configured(
     if let Some(relative) = take_test_artifact_verify_write() {
         validate_verify_command(&verify_cmd, policy, &candidate.root.to_string_lossy())
             .map_err(|err| (err, VerifyDiscardReport::not_run()))?;
-        if relative.contains("..") || Path::new(&relative).is_absolute() {
+        if !relative.is_empty() && (relative.contains("..") || Path::new(&relative).is_absolute()) {
             return Err((
                 CepError::internal_error("test artifact verify write path must be relative"),
                 VerifyDiscardReport::not_run(),
             ));
         }
-        std::fs::write(artifact_plan.paths.upper.join(relative), "verify-only").map_err(|err| {
-            (
-                CepError::internal_error(format!("failed to write test verify artifact: {err}")),
-                VerifyDiscardReport::not_run(),
-            )
-        })?;
+        if !relative.is_empty() {
+            std::fs::write(artifact_plan.paths.upper.join(&relative), "verify-only").map_err(
+                |err| {
+                    (
+                        CepError::internal_error(format!(
+                            "failed to write test verify artifact: {err}"
+                        )),
+                        VerifyDiscardReport::not_run(),
+                    )
+                },
+            )?;
+        }
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::CommandExecution,
             scope: ObservedScope::Root(candidate.root.to_string_lossy().to_string()),
@@ -1366,6 +1391,11 @@ async fn run_artifact_verify_if_configured(
             path_label: None,
             reason: None,
             child_cleanup_succeeded: true,
+            contaminated_paths: if relative.is_empty() {
+                Vec::new()
+            } else {
+                vec![relative]
+            },
         });
     }
     let mut verify_cancel = ctx.cancellation.clone();
@@ -1396,6 +1426,7 @@ async fn run_artifact_verify_if_configured(
                     path_label: None,
                     reason: None,
                     child_cleanup_succeeded: true,
+                    contaminated_paths: Vec::new(),
                 }
             } else {
                 VerifyDiscardReport {
@@ -1405,6 +1436,7 @@ async fn run_artifact_verify_if_configured(
                     path_label: None,
                     reason: Some(err.message.clone()),
                     child_cleanup_succeeded: true,
+                    contaminated_paths: Vec::new(),
                 }
             };
             let _ = method;
@@ -1706,7 +1738,7 @@ fn artifact_overlay_metadata_json(
             })
         })
     });
-    json!({
+    let mut value = json!({
         "method": method,
         "overlay_mode": overlay_mode_label(OverlayMode::Artifact),
         "overlay_status": metadata.status.label(),
@@ -1737,7 +1769,25 @@ fn artifact_overlay_metadata_json(
             .commit_report
             .map(|report| report.changed_paths.clone())
             .unwrap_or_default(),
-    })
+        "commit_baseline_validation": metadata
+            .commit_report
+            .map(|report| report.commit_baseline_validation.as_str()),
+        "commit_baseline_failure_reason": metadata
+            .commit_report
+            .and_then(|report| report.commit_baseline_failure_reason.as_deref()),
+        "commit_baseline_details": metadata
+            .commit_report
+            .map(|report| report.commit_baseline_details.clone())
+            .unwrap_or_else(|| json!({})),
+    });
+    if let Some(preflight) = metadata.boundary_preflight {
+        value["effective_boundary"] = effective_boundary_metadata_json_with_observation(
+            &preflight.effective_boundary,
+            metadata.status == OverlayStatus::Applied,
+            metadata.artifact_manifest_generated,
+        );
+    }
+    value
 }
 
 fn rejected_kinds_json(rejected: &[RejectedArtifactKind]) -> Vec<serde_json::Value> {
@@ -2137,28 +2187,14 @@ fn command_observation_metadata(effective_impact: &EffectiveImpact) -> serde_jso
         EffectiveImpact::WorkspaceMutation => json!({
             "effect_observation": "partial",
             "observed_effects": ["command_execution", "workspace_mutation_diff"],
-            "unobserved_dimensions": [
-                "network",
-                "tree_out_read",
-                "tree_out_write",
-                "workspace_read_set"
-            ],
         }),
         EffectiveImpact::Diagnostic => json!({
             "effect_observation": "partial",
             "observed_effects": ["command_execution"],
-            "unobserved_dimensions": [
-                "network",
-                "tree_out_read",
-                "tree_out_write",
-                "tree_in_write",
-                "workspace_read_set"
-            ],
         }),
         EffectiveImpact::HardDenied => json!({
             "effect_observation": "none",
             "observed_effects": [],
-            "unobserved_dimensions": [],
         }),
     }
 }

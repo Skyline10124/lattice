@@ -73,6 +73,9 @@ pub fn build_in_toto_statement(
                     hash.clone(),
                 );
             }
+            if let Some(boundary) = meta.get("effective_boundary") {
+                material["effective_boundary"] = boundary.clone();
+            }
         }
         materials.push(material);
     }
@@ -142,7 +145,22 @@ mod tests {
             row(
                 1,
                 "observe.workspace",
-                r#"{"required_capability":"read_path","content_hash":"sha256:abc"}"#,
+                r#"{
+                    "required_capability": "read_path",
+                    "content_hash": "sha256:abc",
+                    "effective_boundary": {
+                        "network": {
+                            "boundary": "network",
+                            "status": "physically_bounded",
+                            "observed": false
+                        },
+                        "filesystem": {
+                            "boundary": "filesystem",
+                            "status": "physically_bounded",
+                            "observed": true
+                        }
+                    }
+                }"#,
             ),
             row(
                 2,
@@ -154,6 +172,14 @@ mod tests {
         assert_eq!(stmt.predicate_type, CEP_TURN_ATTESTATION_PREDICATE_TYPE);
         let materials = stmt.predicate["materials"].as_array().unwrap();
         assert_eq!(materials.len(), 2);
+        assert_eq!(
+            materials[0]["effective_boundary"]["network"]["observed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            materials[0]["effective_boundary"]["filesystem"]["observed"],
+            serde_json::json!(true)
+        );
         let caps = stmt.predicate["capabilities"].as_array().unwrap();
         assert!(caps.iter().any(|c| c == "read_path"));
         assert!(caps.iter().any(|c| c == "inspect"));

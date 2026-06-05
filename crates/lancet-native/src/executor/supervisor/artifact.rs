@@ -8,6 +8,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::{json, Value};
+
+use crate::edit::commit_baseline::{
+    validate_commit_baseline_evidence, CommitBaselineFailureReason, CommitBaselineValidation,
+    HunkAnchorEvidence, HunkAnchorSummary,
+};
 use crate::enforcement::guard_l1::check_write_scope;
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
@@ -502,14 +508,13 @@ impl ArtifactAdjudicationFailure {
     }
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) fn adjudicate_artifact_manifest(
     manifest: &ArtifactManifest,
     rejected_kinds: &[RejectedArtifactKind],
     project_root: &str,
     write_path_patterns: &[String],
     authorized_region: &AuthorizedEffectRegion,
-) -> Result<ArtifactAdjudicationReport, ArtifactAdjudicationFailure> {
+) -> Result<ArtifactAdjudicationReport, Box<ArtifactAdjudicationFailure>> {
     let observed_effects = manifest_observed_effects(manifest, project_root);
 
     if !rejected_kinds.is_empty() {
@@ -519,10 +524,10 @@ pub(crate) fn adjudicate_artifact_manifest(
             Vec::new(),
             observed_effects,
         );
-        return Err(ArtifactAdjudicationFailure {
+        return Err(Box::new(ArtifactAdjudicationFailure {
             report,
             error: guard_denied("artifact manifest contains unsupported artifact kinds"),
-        });
+        }));
     }
 
     let mut out_of_scope_paths = Vec::new();
@@ -537,7 +542,7 @@ pub(crate) fn adjudicate_artifact_manifest(
                     vec![entry.path().to_string()],
                     observed_effects,
                 );
-                return Err(ArtifactAdjudicationFailure { report, error: err });
+                return Err(Box::new(ArtifactAdjudicationFailure { report, error: err }));
             }
         }
     }
@@ -548,13 +553,13 @@ pub(crate) fn adjudicate_artifact_manifest(
             out_of_scope_paths.clone(),
             observed_effects,
         );
-        return Err(ArtifactAdjudicationFailure {
+        return Err(Box::new(ArtifactAdjudicationFailure {
             report,
             error: replan_required(
                 "artifact paths outside active WritePath scope",
                 out_of_scope_paths,
             ),
-        });
+        }));
     }
 
     let effect_region_misses = observed_effects
@@ -569,13 +574,13 @@ pub(crate) fn adjudicate_artifact_manifest(
             effect_region_misses.clone(),
             observed_effects,
         );
-        return Err(ArtifactAdjudicationFailure {
+        return Err(Box::new(ArtifactAdjudicationFailure {
             report,
             error: replan_required(
                 "artifact effects outside authorized effect region",
                 effect_region_misses,
             ),
-        });
+        }));
     }
 
     Ok(ArtifactAdjudicationReport {
@@ -610,6 +615,7 @@ pub(crate) struct PreparedArtifactSet {
     pub(crate) entries: Vec<PreparedArtifactEntry>,
     pub(crate) staging_root: PathBuf,
     pub(crate) pre_verify_lower_baseline: LowerBaseline,
+    pub(crate) commit_baseline_evidence: Vec<HunkAnchorEvidence>,
 }
 
 impl PreparedArtifactSet {
@@ -701,6 +707,20 @@ pub(crate) fn prepare_artifact_commit_set(
     artifact_upper: &Path,
     pre_verify_lower_baseline: &LowerBaseline,
 ) -> Result<PreparedArtifactSet, CepError> {
+    prepare_artifact_commit_set_with_baseline_evidence(
+        accepted_manifest,
+        artifact_upper,
+        pre_verify_lower_baseline,
+        Vec::new(),
+    )
+}
+
+pub(crate) fn prepare_artifact_commit_set_with_baseline_evidence(
+    accepted_manifest: ArtifactManifest,
+    artifact_upper: &Path,
+    pre_verify_lower_baseline: &LowerBaseline,
+    commit_baseline_evidence: Vec<HunkAnchorEvidence>,
+) -> Result<PreparedArtifactSet, CepError> {
     let staging_root = create_private_staging_root(artifact_upper)?;
     let mut prepared_entries = Vec::with_capacity(accepted_manifest.entries.len());
 
@@ -787,6 +807,7 @@ pub(crate) fn prepare_artifact_commit_set(
         entries: prepared_entries,
         staging_root,
         pre_verify_lower_baseline: pre_verify_lower_baseline.clone(),
+        commit_baseline_evidence,
     })
 }
 
@@ -829,6 +850,9 @@ pub(crate) struct ArtifactCommitReport {
     pub(crate) lower_consistency: String,
     pub(crate) artifact_adjudication: String,
     pub(crate) overlay_disposition: OverlayDisposition,
+    pub(crate) commit_baseline_validation: String,
+    pub(crate) commit_baseline_failure_reason: Option<String>,
+    pub(crate) commit_baseline_details: Value,
     pub(crate) applied_entries: Vec<AppliedArtifactEntry>,
     pub(crate) failed_entry: Option<FailedArtifactEntry>,
     pub(crate) changed_paths: Vec<String>,
@@ -846,19 +870,21 @@ impl ArtifactCommitFailure {
     }
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) fn commit_artifact_manifest(
     project_root: &Path,
     prepared: PreparedArtifactSet,
     artifact_cleanup: &OverlayCleanupReport,
     verify_cleanup: &VerifyDiscardReport,
-) -> Result<ArtifactCommitReport, ArtifactCommitFailure> {
+) -> Result<ArtifactCommitReport, Box<ArtifactCommitFailure>> {
     if let Err(reason) = validate_commit_cleanup_gates(artifact_cleanup, verify_cleanup) {
         let report = ArtifactCommitReport {
             commit_outcome: CommitOutcome::NotStarted,
             lower_consistency: "not_checked".to_string(),
             artifact_adjudication: "denied_cleanup_failed".to_string(),
             overlay_disposition: OverlayDisposition::Denied,
+            commit_baseline_validation: "failed".to_string(),
+            commit_baseline_failure_reason: None,
+            commit_baseline_details: json!({}),
             applied_entries: Vec::new(),
             failed_entry: Some(FailedArtifactEntry {
                 path: String::new(),
@@ -867,20 +893,23 @@ pub(crate) fn commit_artifact_manifest(
             }),
             changed_paths: Vec::new(),
         };
-        return Err(ArtifactCommitFailure {
+        return Err(Box::new(ArtifactCommitFailure {
             report,
             error: execution_failed(reason),
-        });
+        }));
     }
 
     let _guard = artifact_commit_lock().lock().map_err(|_| {
         let reason = "artifact commit lock poisoned".to_string();
-        ArtifactCommitFailure {
+        Box::new(ArtifactCommitFailure {
             report: ArtifactCommitReport {
                 commit_outcome: CommitOutcome::NotStarted,
                 lower_consistency: "not_checked".to_string(),
                 artifact_adjudication: "denied_commit_lock".to_string(),
                 overlay_disposition: OverlayDisposition::Denied,
+                commit_baseline_validation: "failed".to_string(),
+                commit_baseline_failure_reason: None,
+                commit_baseline_details: json!({}),
                 applied_entries: Vec::new(),
                 failed_entry: Some(FailedArtifactEntry {
                     path: String::new(),
@@ -890,35 +919,89 @@ pub(crate) fn commit_artifact_manifest(
                 changed_paths: Vec::new(),
             },
             error: execution_failed(reason),
-        }
+        })
     })?;
     test_commit_section_enter();
-    let result = commit_artifact_manifest_locked(project_root, &prepared);
+    let result = commit_artifact_manifest_locked(project_root, &prepared, verify_cleanup);
     test_commit_section_exit();
     result
 }
 
-#[allow(clippy::result_large_err)]
 fn commit_artifact_manifest_locked(
     project_root: &Path,
     prepared: &PreparedArtifactSet,
-) -> Result<ArtifactCommitReport, ArtifactCommitFailure> {
-    let lower_recheck = recheck_lower_baseline(project_root, &prepared.pre_verify_lower_baseline)
-        .map_err(|error| ArtifactCommitFailure {
-        report: ArtifactCommitReport {
-            commit_outcome: CommitOutcome::NotStarted,
-            lower_consistency: "check_failed".to_string(),
-            artifact_adjudication: "denied_lower_check_failed".to_string(),
+    verify_cleanup: &VerifyDiscardReport,
+) -> Result<ArtifactCommitReport, Box<ArtifactCommitFailure>> {
+    let baseline_files = commit_baseline_files_from_lower_baseline(
+        project_root,
+        &prepared.pre_verify_lower_baseline,
+        &prepared.commit_baseline_evidence,
+    )
+    .map_err(|error| baseline_check_failed_report(error.message.clone(), error))?;
+    let anchor_report =
+        validate_commit_baseline_evidence(&prepared.commit_baseline_evidence, &baseline_files);
+    if let CommitBaselineValidation::Failed(reason) = anchor_report.validation {
+        let report = ArtifactCommitReport {
+            commit_outcome: CommitOutcome::Denied,
+            lower_consistency: "not_checked".to_string(),
+            artifact_adjudication: "denied_commit_baseline".to_string(),
             overlay_disposition: OverlayDisposition::Denied,
+            commit_baseline_validation: "failed".to_string(),
+            commit_baseline_failure_reason: Some(reason.as_str().to_string()),
+            commit_baseline_details: commit_baseline_details_for_hunks(&anchor_report.hunks),
             applied_entries: Vec::new(),
-            failed_entry: Some(FailedArtifactEntry {
-                path: String::new(),
-                kind: ArtifactFileKind::Other,
-                error: error.message.clone(),
-            }),
+            failed_entry: None,
             changed_paths: Vec::new(),
-        },
-        error,
+        };
+        return Err(Box::new(ArtifactCommitFailure {
+            report,
+            error: commit_baseline_replan_error(reason),
+        }));
+    }
+
+    if !verify_cleanup.contaminated_paths.is_empty() {
+        let reason = CommitBaselineFailureReason::VerifyLayerContamination;
+        let report = ArtifactCommitReport {
+            commit_outcome: CommitOutcome::Denied,
+            lower_consistency: "not_checked".to_string(),
+            artifact_adjudication: "denied_commit_baseline".to_string(),
+            overlay_disposition: OverlayDisposition::Denied,
+            commit_baseline_validation: "failed".to_string(),
+            commit_baseline_failure_reason: Some(reason.as_str().to_string()),
+            commit_baseline_details: json!({
+                "contaminated_paths": verify_cleanup.contaminated_paths.clone(),
+            }),
+            applied_entries: Vec::new(),
+            failed_entry: None,
+            changed_paths: Vec::new(),
+        };
+        return Err(Box::new(ArtifactCommitFailure {
+            report,
+            error: commit_baseline_replan_error(reason),
+        }));
+    }
+
+    let lower_recheck = recheck_lower_baseline(project_root, &prepared.pre_verify_lower_baseline)
+        .map_err(|error| {
+        Box::new(ArtifactCommitFailure {
+            report: ArtifactCommitReport {
+                commit_outcome: CommitOutcome::NotStarted,
+                lower_consistency: "check_failed".to_string(),
+                artifact_adjudication: "denied_lower_check_failed".to_string(),
+                overlay_disposition: OverlayDisposition::Denied,
+                commit_baseline_validation: "failed".to_string(),
+                commit_baseline_failure_reason: None,
+                commit_baseline_details: json!({}),
+                applied_entries: Vec::new(),
+                failed_entry: Some(FailedArtifactEntry {
+                    path: String::new(),
+                    kind: ArtifactFileKind::Other,
+                    error: error.message.clone(),
+                }),
+                changed_paths: Vec::new(),
+            },
+            error,
+        })
     })?;
     if lower_recheck.status == LowerConsistencyStatus::DriftDetected {
         let report = ArtifactCommitReport {
@@ -926,24 +1009,30 @@ fn commit_artifact_manifest_locked(
             lower_consistency: lower_recheck.status.label().to_string(),
             artifact_adjudication: "denied_lower_drift".to_string(),
             overlay_disposition: OverlayDisposition::Denied,
+            commit_baseline_validation: "failed".to_string(),
+            commit_baseline_failure_reason: Some(
+                CommitBaselineFailureReason::LowerDrift.as_str().to_string(),
+            ),
+            commit_baseline_details: json!({
+                "changed_paths": lower_recheck.changed_paths.clone(),
+            }),
             applied_entries: Vec::new(),
             failed_entry: None,
             changed_paths: lower_recheck.changed_paths.clone(),
         };
-        return Err(ArtifactCommitFailure {
+        return Err(Box::new(ArtifactCommitFailure {
             report,
             error: lower_drift_error(lower_recheck.changed_paths),
-        });
+        }));
     }
 
     apply_prepared_artifact_set(project_root, prepared)
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) fn apply_prepared_artifact_set(
     project_root: &Path,
     prepared: &PreparedArtifactSet,
-) -> Result<ArtifactCommitReport, ArtifactCommitFailure> {
+) -> Result<ArtifactCommitReport, Box<ArtifactCommitFailure>> {
     let mut applied_entries = Vec::new();
 
     for entry in &prepared.entries {
@@ -958,17 +1047,20 @@ pub(crate) fn apply_prepared_artifact_set(
                 lower_consistency: LowerConsistencyStatus::Unchanged.label().to_string(),
                 artifact_adjudication: "accepted".to_string(),
                 overlay_disposition: OverlayDisposition::Committed,
+                commit_baseline_validation: "passed".to_string(),
+                commit_baseline_failure_reason: None,
+                commit_baseline_details: json!({}),
                 applied_entries,
                 failed_entry: Some(failed_entry.clone()),
                 changed_paths: Vec::new(),
             };
-            return Err(ArtifactCommitFailure {
+            return Err(Box::new(ArtifactCommitFailure {
                 report,
                 error: execution_failed(format!(
                     "artifact commit partially applied before failing at '{}': {}",
                     failed_entry.path, failed_entry.error
                 )),
-            });
+            }));
         }
         applied_entries.push(AppliedArtifactEntry {
             path: entry.path().to_string(),
@@ -982,6 +1074,9 @@ pub(crate) fn apply_prepared_artifact_set(
         lower_consistency: LowerConsistencyStatus::Unchanged.label().to_string(),
         artifact_adjudication: "accepted".to_string(),
         overlay_disposition: OverlayDisposition::Committed,
+        commit_baseline_validation: "passed".to_string(),
+        commit_baseline_failure_reason: None,
+        commit_baseline_details: json!({}),
         applied_entries,
         failed_entry: None,
         changed_paths: Vec::new(),
@@ -1108,6 +1203,71 @@ fn validate_commit_cleanup_gates(
         ));
     }
     Ok(())
+}
+
+fn commit_baseline_files_from_lower_baseline(
+    project_root: &Path,
+    baseline: &LowerBaseline,
+    evidence: &[HunkAnchorEvidence],
+) -> Result<BTreeMap<String, Vec<u8>>, CepError> {
+    let mut files = BTreeMap::new();
+    for hunk in evidence {
+        if files.contains_key(&hunk.file_path) {
+            continue;
+        }
+        if !baseline.entries.contains_key(&hunk.file_path) {
+            continue;
+        }
+        checked_artifact_path(project_root, &hunk.file_path)?;
+        if let Some(bytes) = baseline.regular_file_contents.get(&hunk.file_path) {
+            files.insert(hunk.file_path.clone(), bytes.clone());
+        }
+    }
+    Ok(files)
+}
+
+fn baseline_check_failed_report(reason: String, error: CepError) -> Box<ArtifactCommitFailure> {
+    Box::new(ArtifactCommitFailure {
+        report: ArtifactCommitReport {
+            commit_outcome: CommitOutcome::NotStarted,
+            lower_consistency: "check_failed".to_string(),
+            artifact_adjudication: "denied_lower_check_failed".to_string(),
+            overlay_disposition: OverlayDisposition::Denied,
+            commit_baseline_validation: "failed".to_string(),
+            commit_baseline_failure_reason: None,
+            commit_baseline_details: json!({}),
+            applied_entries: Vec::new(),
+            failed_entry: Some(FailedArtifactEntry {
+                path: String::new(),
+                kind: ArtifactFileKind::Other,
+                error: reason,
+            }),
+            changed_paths: Vec::new(),
+        },
+        error,
+    })
+}
+
+fn commit_baseline_details_for_hunks(hunks: &[HunkAnchorSummary]) -> Value {
+    json!({
+        "hunks": hunks
+            .iter()
+            .map(|hunk| {
+                let mut value = json!({
+                    "file_path": hunk.file_path,
+                    "hunk_index": hunk.hunk_index,
+                    "anchor_count": hunk.anchor_count,
+                    "anchor_hashes": hunk.anchor_hashes,
+                    "match_result": hunk.match_result.as_str(),
+                    "baseline_hash": hunk.baseline_hash,
+                });
+                if let Some(match_offset) = hunk.match_offset {
+                    value["match_offset"] = json!(match_offset);
+                }
+                value
+            })
+            .collect::<Vec<_>>()
+    })
 }
 
 fn artifact_commit_lock() -> &'static Mutex<()> {
@@ -1250,6 +1410,7 @@ fn apply_delete_entry(
     project_root: &Path,
     entry: &PreparedDeleteArtifactEntry,
 ) -> Result<(), String> {
+    ensure_existing_components_are_not_symlinks(project_root, &entry.path)?;
     let target = target_path(project_root, &entry.path)?;
     delete_target_path_if_present(&target)
 }
@@ -1319,6 +1480,24 @@ fn lower_drift_error(changed_paths: Vec<String>) -> CepError {
         CepErrorData::Guard(GuardErrorData {
             method: "artifact.commit".into(),
             reason: format!("ReplanRequired: lower drift: {changed_paths:?}"),
+        }),
+        Retriability::RequiresReplan,
+    )
+}
+
+fn commit_baseline_replan_error(reason: CommitBaselineFailureReason) -> CepError {
+    CepError::new(
+        CepErrorCode::ReplanRequired,
+        format!(
+            "artifact commit baseline validation failed: {}",
+            reason.as_str()
+        ),
+        CepErrorData::Guard(GuardErrorData {
+            method: "artifact.commit".into(),
+            reason: format!(
+                "ReplanRequired: commit baseline validation failed: {}",
+                reason.as_str()
+            ),
         }),
         Retriability::RequiresReplan,
     )
@@ -1620,6 +1799,8 @@ mod tests {
     use super::super::overlay::OverlayMode;
     use super::super::snapshot::capture_lower_baseline;
     use super::*;
+    use crate::edit::hash::line_hash;
+    use crate::edit::types::HashLine;
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -1628,6 +1809,7 @@ mod tests {
     fn empty_baseline() -> LowerBaseline {
         LowerBaseline {
             entries: BTreeMap::new(),
+            regular_file_contents: BTreeMap::new(),
         }
     }
 
@@ -1646,6 +1828,13 @@ mod tests {
 
     fn hash_content(content: &[u8]) -> String {
         format!("{HASH_PREFIX}{}", blake3::hash(content).to_hex())
+    }
+
+    fn anchor(line_number: usize, text: &str) -> HashLine {
+        HashLine {
+            hash: line_hash(line_number, text),
+            text: text.to_string(),
+        }
     }
 
     fn successful_artifact_cleanup() -> OverlayCleanupReport {
@@ -1668,6 +1857,7 @@ mod tests {
             path_label: None,
             reason: None,
             child_cleanup_succeeded: true,
+            contaminated_paths: Vec::new(),
         }
     }
 
@@ -2306,6 +2496,240 @@ mod tests {
     }
 
     #[test]
+    fn commit_baseline_artifact_report_rejects_missing_anchor_before_lower_recheck() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("source.txt"), "alpha\nbeta\n").unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let upper = TempDir::new().unwrap();
+        std::fs::write(upper.path().join("generated.txt"), "accepted").unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Regular(RegularArtifactEntry {
+                path: "generated.txt".to_string(),
+                operation: ArtifactOperation::Create,
+                content_hash: hash_content(b"accepted"),
+                size_bytes: 8,
+                mode: 0o644,
+                lower_hash: None,
+            })],
+        };
+        let evidence = vec![HunkAnchorEvidence {
+            file_path: "source.txt".to_string(),
+            hunk_index: 0,
+            anchors: vec![anchor(1, "missing")],
+        }];
+        let prepared = prepare_artifact_commit_set_with_baseline_evidence(
+            manifest,
+            upper.path(),
+            &baseline,
+            evidence,
+        )
+        .unwrap();
+
+        let failure = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &successful_verify_cleanup(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.error.code, CepErrorCode::ReplanRequired);
+        assert_eq!(failure.report.commit_outcome, CommitOutcome::Denied);
+        assert_eq!(failure.report.lower_consistency, "not_checked");
+        assert_eq!(failure.report.commit_baseline_validation, "failed");
+        assert_eq!(
+            failure.report.commit_baseline_failure_reason.as_deref(),
+            Some("missing_anchor")
+        );
+        assert_eq!(
+            failure.report.commit_baseline_details["hunks"][0]["match_result"],
+            "missing_anchor"
+        );
+        assert!(!project.path().join("generated.txt").exists());
+    }
+
+    #[test]
+    fn commit_baseline_artifact_report_records_lower_drift_changed_paths() {
+        let project = TempDir::new().unwrap();
+        let upper = TempDir::new().unwrap();
+        std::fs::write(upper.path().join("generated.txt"), "accepted").unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Regular(RegularArtifactEntry {
+                path: "generated.txt".to_string(),
+                operation: ArtifactOperation::Create,
+                content_hash: hash_content(b"accepted"),
+                size_bytes: 8,
+                mode: 0o644,
+                lower_hash: None,
+            })],
+        };
+        let prepared = prepare_artifact_commit_set(manifest, upper.path(), &baseline).unwrap();
+        std::fs::write(project.path().join("external.txt"), "drift").unwrap();
+
+        let failure = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &successful_verify_cleanup(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.report.commit_baseline_validation, "failed");
+        assert_eq!(
+            failure.report.commit_baseline_failure_reason.as_deref(),
+            Some("lower_drift")
+        );
+        assert_eq!(
+            failure.report.commit_baseline_details["changed_paths"],
+            json!(["external.txt"])
+        );
+        assert_eq!(failure.report.lower_consistency, "drift_detected");
+    }
+
+    #[test]
+    fn commit_baseline_artifact_report_uses_captured_baseline_bytes_before_lower_recheck() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("source.txt"), "alpha\nbeta\n").unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let upper = TempDir::new().unwrap();
+        std::fs::write(upper.path().join("generated.txt"), "accepted").unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Regular(RegularArtifactEntry {
+                path: "generated.txt".to_string(),
+                operation: ArtifactOperation::Create,
+                content_hash: hash_content(b"accepted"),
+                size_bytes: 8,
+                mode: 0o644,
+                lower_hash: None,
+            })],
+        };
+        let evidence = vec![HunkAnchorEvidence {
+            file_path: "source.txt".to_string(),
+            hunk_index: 0,
+            anchors: vec![anchor(1, "alpha"), anchor(2, "beta")],
+        }];
+        let prepared = prepare_artifact_commit_set_with_baseline_evidence(
+            manifest,
+            upper.path(),
+            &baseline,
+            evidence,
+        )
+        .unwrap();
+        std::fs::write(project.path().join("source.txt"), "shifted\nalpha\nbeta\n").unwrap();
+
+        let failure = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &successful_verify_cleanup(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.error.code, CepErrorCode::ReplanRequired);
+        assert_eq!(failure.report.lower_consistency, "drift_detected");
+        assert_eq!(
+            failure.report.commit_baseline_failure_reason.as_deref(),
+            Some("lower_drift")
+        );
+        assert_eq!(
+            failure.report.commit_baseline_details["changed_paths"],
+            json!(["source.txt"])
+        );
+        assert!(!project.path().join("generated.txt").exists());
+    }
+
+    #[test]
+    fn commit_baseline_artifact_report_rejects_verify_layer_contamination() {
+        let project = TempDir::new().unwrap();
+        let upper = TempDir::new().unwrap();
+        std::fs::write(upper.path().join("generated.txt"), "accepted").unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Regular(RegularArtifactEntry {
+                path: "generated.txt".to_string(),
+                operation: ArtifactOperation::Create,
+                content_hash: hash_content(b"accepted"),
+                size_bytes: 8,
+                mode: 0o644,
+                lower_hash: None,
+            })],
+        };
+        let prepared = prepare_artifact_commit_set(manifest, upper.path(), &baseline).unwrap();
+        let mut verify = successful_verify_cleanup();
+        verify.contaminated_paths = vec!["verify-only.txt".to_string()];
+
+        let failure = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &verify,
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.error.code, CepErrorCode::ReplanRequired);
+        assert_eq!(failure.report.lower_consistency, "not_checked");
+        assert_eq!(failure.report.commit_baseline_validation, "failed");
+        assert_eq!(
+            failure.report.commit_baseline_failure_reason.as_deref(),
+            Some("verify_layer_contamination")
+        );
+        assert_eq!(
+            failure.report.commit_baseline_details["contaminated_paths"],
+            json!(["verify-only.txt"])
+        );
+        assert!(!project.path().join("generated.txt").exists());
+    }
+
+    #[test]
+    fn commit_baseline_artifact_report_passes_after_anchor_and_lower_gates() {
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("source.txt"), "alpha\nbeta\n").unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let upper = TempDir::new().unwrap();
+        std::fs::write(upper.path().join("generated.txt"), "accepted").unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Regular(RegularArtifactEntry {
+                path: "generated.txt".to_string(),
+                operation: ArtifactOperation::Create,
+                content_hash: hash_content(b"accepted"),
+                size_bytes: 8,
+                mode: 0o644,
+                lower_hash: None,
+            })],
+        };
+        let evidence = vec![HunkAnchorEvidence {
+            file_path: "source.txt".to_string(),
+            hunk_index: 0,
+            anchors: vec![anchor(1, "alpha"), anchor(2, "beta")],
+        }];
+        let prepared = prepare_artifact_commit_set_with_baseline_evidence(
+            manifest,
+            upper.path(),
+            &baseline,
+            evidence,
+        )
+        .unwrap();
+
+        let report = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &successful_verify_cleanup(),
+        )
+        .unwrap();
+
+        assert_eq!(report.commit_outcome, CommitOutcome::Committed);
+        assert_eq!(report.lower_consistency, "unchanged");
+        assert_eq!(report.commit_baseline_validation, "passed");
+        assert!(report.commit_baseline_failure_reason.is_none());
+        assert_eq!(
+            std::fs::read_to_string(project.path().join("generated.txt")).unwrap(),
+            "accepted"
+        );
+    }
+
+    #[test]
     fn artifact_commit_blocks_cleanup_failures_before_lower_recheck() {
         let project = TempDir::new().unwrap();
         let upper = TempDir::new().unwrap();
@@ -2416,6 +2840,48 @@ mod tests {
             PathBuf::from("created.txt")
         );
         assert_eq!(report.applied_entries.len(), 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn artifact_commit_delete_refuses_symlink_parent_and_preserves_outside_file() {
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(project.path().join("allowed")).unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "outside").unwrap();
+        symlink(outside.path(), project.path().join("allowed/link")).unwrap();
+        let baseline = capture_lower_baseline(project.path()).unwrap();
+        let upper = TempDir::new().unwrap();
+        let manifest = ArtifactManifest {
+            entries: vec![ArtifactEntry::Delete(DeleteArtifactEntry {
+                path: "allowed/link/victim.txt".to_string(),
+                operation: ArtifactOperation::Delete,
+                lower_kind: Some(ArtifactFileKind::RegularFile),
+                lower_hash: None,
+            })],
+        };
+        let prepared = prepare_artifact_commit_set(manifest, upper.path(), &baseline).unwrap();
+
+        let failure = commit_artifact_manifest(
+            project.path(),
+            prepared,
+            &successful_artifact_cleanup(),
+            &successful_verify_cleanup(),
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.error.code, CepErrorCode::ExecutionFailed);
+        assert!(failure
+            .report
+            .failed_entry
+            .as_ref()
+            .expect("failed entry")
+            .error
+            .contains("refusing to write through symlink parent"));
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+            "outside"
+        );
     }
 
     #[test]

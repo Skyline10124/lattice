@@ -1000,7 +1000,11 @@ pub fn command_boundary_metadata(
 ) -> Value {
     json!({
         "command_isolation_mode": config.mode.label(),
-        "effective_boundary": effective_boundary_metadata_json(&preflight.effective_boundary),
+        "effective_boundary": effective_boundary_metadata_json_with_observation(
+            &preflight.effective_boundary,
+            false,
+            false,
+        ),
         "host_probe_summary": host_probe_summary_json(&preflight.host_probe),
         "boundary_setup_failed_closed": preflight.boundary_setup_failed_closed,
         "boundary_preflight_failed_closed": preflight.failed_closed,
@@ -1009,15 +1013,33 @@ pub fn command_boundary_metadata(
     })
 }
 
-fn effective_boundary_metadata_json(report: &EffectiveBoundaryReport) -> Value {
+pub fn effective_boundary_metadata_json_with_observation(
+    report: &EffectiveBoundaryReport,
+    overlay_applied: bool,
+    artifact_manifest_generated: bool,
+) -> Value {
     let mut map = Map::new();
     for entry in report.entries() {
+        let mut entry = entry.clone();
+        entry.observed =
+            boundary_observed(entry.boundary, overlay_applied, artifact_manifest_generated);
         map.insert(
             entry.boundary.label().to_string(),
-            serde_json::to_value(entry).unwrap_or_else(|_| json!({})),
+            serde_json::to_value(&entry).unwrap_or_else(|_| json!({})),
         );
     }
     Value::Object(map)
+}
+
+fn boundary_observed(
+    boundary: BoundaryDimension,
+    overlay_applied: bool,
+    artifact_manifest_generated: bool,
+) -> bool {
+    match boundary {
+        BoundaryDimension::Filesystem => overlay_applied && artifact_manifest_generated,
+        BoundaryDimension::Network | BoundaryDimension::Landlock => false,
+    }
 }
 
 fn host_probe_summary_json(report: &HostProbeReport) -> Value {
@@ -1473,6 +1495,87 @@ mod tests {
         assert!(metadata.to_string().len() < 4096);
         assert!(!metadata.to_string().contains("OPENAI_API_KEY"));
         assert!(!metadata.to_string().contains("AWS_ACCESS_KEY_ID"));
+    }
+
+    #[test]
+    fn command_boundary_metadata_observed_is_centralized_and_conservative() {
+        let config = enforce_config(
+            vec![
+                BoundaryDimension::Network,
+                BoundaryDimension::Filesystem,
+                BoundaryDimension::Landlock,
+            ],
+            report(&[
+                (
+                    BoundaryPrimitive::NetworkNamespace,
+                    HostProbeStatus::Available,
+                    "netns probe ok",
+                ),
+                (
+                    BoundaryPrimitive::MountNamespace,
+                    HostProbeStatus::Available,
+                    "mount ns probe ok",
+                ),
+                (
+                    BoundaryPrimitive::Landlock,
+                    HostProbeStatus::Available,
+                    "landlock probe ok",
+                ),
+            ]),
+        );
+        let mut attempt = fake_attempt(vec![
+            AppliedBoundaryEvidence::NetworkNamespace(NetnsApplied::from_supervisor_netns_success()),
+            AppliedBoundaryEvidence::MountNamespace(
+                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
+            ),
+            AppliedBoundaryEvidence::MinimalMountView(
+                MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
+            ),
+            AppliedBoundaryEvidence::Landlock(LandlockApplied::from_supervisor_landlock_success()),
+        ]);
+        attempt.outcome.network_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.mount_namespace_status = SupervisorSetupStatus::Applied;
+        attempt.outcome.minimal_mount_view_status = MinimalMountViewStatus::Applied;
+        attempt.outcome.landlock_status = LandlockApplicationStatus::Applied;
+        attempt.outcome.landlock_abi_version = Some(5);
+
+        let preflight = evaluate_command_boundary_attempt(&config, Some(&attempt));
+        let preflight_metadata = command_boundary_metadata(&config, &preflight);
+        for boundary in ["network", "filesystem", "landlock"] {
+            assert_eq!(
+                preflight_metadata["effective_boundary"][boundary]["observed"],
+                false
+            );
+        }
+        assert_eq!(
+            preflight_metadata["effective_boundary"]["network"]["status"],
+            "physically_bounded"
+        );
+        assert_eq!(
+            preflight_metadata["effective_boundary"]["landlock"]["status"],
+            "physically_bounded"
+        );
+
+        let no_manifest = effective_boundary_metadata_json_with_observation(
+            &preflight.effective_boundary,
+            true,
+            false,
+        );
+        assert_eq!(no_manifest["filesystem"]["observed"], false);
+
+        let artifact_metadata = effective_boundary_metadata_json_with_observation(
+            &preflight.effective_boundary,
+            true,
+            true,
+        );
+        assert_eq!(artifact_metadata["filesystem"]["observed"], true);
+        assert_eq!(artifact_metadata["network"]["observed"], false);
+        assert_eq!(artifact_metadata["landlock"]["observed"], false);
+        assert_eq!(artifact_metadata["network"]["status"], "physically_bounded");
+        assert_eq!(
+            artifact_metadata["landlock"]["status"],
+            "physically_bounded"
+        );
     }
 
     #[test]
