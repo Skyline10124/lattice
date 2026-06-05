@@ -1,17 +1,23 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Turn-scoped Cep runtime composition and the CEP client-backed executor adapter.
+//! LATTICE↔LANCET turn seam: the CEP client-backed executor adapter, the
+//! `lattice_profile` → LANCET policy translation, and turn-runtime assembly over
+//! [`lancet_api`].
+//!
+//! Runtime composition itself lives in `lancet-api`. This module owns only the
+//! pieces that depend on LATTICE types: the [`ToolCallExecutor`] bridge, the
+//! profile-to-policy translation, and CEP-event → agent-event mapping.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lancet_authority::policy::default::{DefaultPolicyHook, ExternalPolicyFile, PolicyConfig};
+use lancet_api::{AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig};
+use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig};
 use lancet_authority::{
-    ActiveEnvelopeStore, BudgetLimits, CepPolicyConfig, CepTurnContext, CommandPolicy,
-    NetworkPolicyConfig, ObservationPolicyConfig,
+    BudgetLimits, CepPolicyConfig, CommandPolicy, NetworkPolicyConfig, ObservationPolicyConfig,
 };
 use lancet_catalog::catalog;
 use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
@@ -21,18 +27,14 @@ use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
 use lancet_catalog::{CatalogMethod, CepMethod};
-use lancet_invariants as invariants;
 use lancet_native::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
     CommandIsolationUnsupportedHostBehavior,
 };
 use lancet_native::{
-    build_in_toto_statement, impact_kind_for_method, impact_kind_label,
-    register_production_method_registry, source_audit_range_hash, to_tool_definitions,
-    wire_code_for_error, AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore,
-    CepClient, CepTransport, MethodRegistry, ServerRunConfig,
+    impact_kind_for_method, impact_kind_label, wire_code_for_error, CepAuditContext, CepAuditStore,
+    CepClient,
 };
-use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::error::{
     invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
 };
@@ -50,8 +52,18 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
-use super::enabled_tools::resolve_enabled_tools;
 use crate::session::ApiError;
+
+/// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
+fn map_lancet_err(err: LancetError) -> ApiError {
+    match err {
+        LancetError::Config(msg) => ApiError::BadRequest(msg),
+        LancetError::UnknownTools { unknown, available } => ApiError::BadRequest(format!(
+            "unknown enabled tools {unknown:?}; available catalog tools: {available:?}"
+        )),
+        LancetError::Internal(msg) => ApiError::Internal(msg),
+    }
+}
 
 /// Per-build construction metrics (test-only; each production build is exactly one pair + adapter).
 #[cfg(test)]
@@ -157,58 +169,20 @@ impl ToolCallExecutor for CepExecutorAdapter {
     }
 }
 
-/// Turn-scoped Cep server lifecycle; dropped when the turn task completes.
-pub(crate) struct CepTurnRuntime {
-    server_task: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::watch::Sender<bool>,
-}
-
-impl CepTurnRuntime {
-    pub async fn shutdown(&mut self) {
-        let _ = self.shutdown.send(true);
-        let task = std::mem::replace(&mut self.server_task, tokio::spawn(async {}));
-        let _ = task.await;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn dummy() -> Self {
-        Self {
-            server_task: tokio::spawn(async {}),
-            shutdown: tokio::sync::watch::channel(false).0,
-        }
-    }
-}
-
-impl Drop for CepTurnRuntime {
-    fn drop(&mut self) {
-        let _ = self.shutdown.send(true);
-    }
-}
-
 /// Resolved production turn dependencies assembled by the API layer.
+///
+/// The LANCET runtime (server lifecycle, CEP client, audit) comes from
+/// [`lancet_api::LancetRuntime`]; this struct adds the LATTICE-side
+/// [`AgentLoop`] wired to a [`CepExecutorAdapter`].
 pub(crate) struct ProductionTurnDeps {
     pub agent_loop: Arc<AgentLoop>,
     pub tool_definitions: Vec<lattice_llm::ToolDefinition>,
-    pub runtime: CepTurnRuntime,
+    pub runtime: lancet_api::ServerLifecycle,
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
-}
-
-/// Build catalog-derived tool definitions filtered by the profile enabled list.
-pub(crate) fn resolve_catalog_tool_definitions(
-    enabled: &[String],
-) -> Result<Vec<lattice_llm::ToolDefinition>, ApiError> {
-    let inventory = to_tool_definitions(catalog());
-    let definitions = resolve_enabled_tools(enabled, &inventory).map_err(|err| {
-        ApiError::BadRequest(format!(
-            "unknown enabled tools {:?}; available catalog tools: {:?}",
-            err.unknown, err.available
-        ))
-    })?;
-    Ok(definitions)
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
@@ -449,20 +423,6 @@ fn resolve_runtime_config_path(runtime_root: &Path, path: &str) -> PathBuf {
     }
 }
 
-/// Build unified `PolicyConfig` from profile inline sections and optional external policy file.
-///
-/// Merge precedence: compiled defaults < profile inline `[lancet.*]` < external policy file.
-fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
-    CepPolicyConfig {
-        project_root: config.project_root.clone(),
-        observation: config.observation.clone(),
-        network: config.network.clone(),
-        budget: config.budget.clone(),
-        command: config.command.clone(),
-        denied_effect_kinds: config.denied_effect_kinds.clone(),
-    }
-}
-
 pub(crate) fn load_policy_config(
     lancet: &LancetSection,
     runtime_project_root: &Path,
@@ -582,112 +542,45 @@ fn canonicalize_existing(path: &Path, field: &str) -> Result<PathBuf, ApiError> 
     })
 }
 
-fn production_base_envelope_from_policy(
-    project_root: &str,
-    enabled_tools: &[String],
-    policy: &CepPolicyConfig,
-) -> Result<BaseExecutionEnvelope, ApiError> {
-    let mut base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(project_root, "cep_context turn observation");
-    if enabled_tools
-        .iter()
-        .any(|name| name == TodoWrite::NAME || name == Envelope::NAME)
-    {
-        base_envelope = base_envelope.with_session_state();
-    }
-    if enabled_tools.iter().any(|name| name == Fetch::NAME) {
-        for host in &policy.network.allowed_hosts {
-            let host = host.trim();
-            if !host.is_empty() {
-                base_envelope = base_envelope.with_fetch_host(host);
-            }
-        }
-    }
-    base_envelope = base_envelope.with_read_audit();
-    base_envelope
-        .validate_no_write_or_command()
-        .map_err(|err| ApiError::Internal(format!("invalid base envelope: {err}")))?;
-    Ok(base_envelope)
-}
-
-/// Build the production turn `BaseExecutionEnvelope` from profile policy and enabled tools.
+/// Build the production turn base envelope from profile policy and enabled tools.
 #[cfg(test)]
 pub(crate) fn production_base_envelope(
     project_root: &str,
     enabled_tools: &[String],
     lancet: Option<&LancetSection>,
-) -> Result<BaseExecutionEnvelope, ApiError> {
+) -> Result<lancet_protocol::envelope::BaseExecutionEnvelope, ApiError> {
     let policy = match lancet {
         Some(lancet_section) => cep_policy_from_profile(lancet_section, Path::new(project_root))?,
         None => CepPolicyConfig::defaults_for_project_root(project_root),
     };
-    production_base_envelope_from_policy(project_root, enabled_tools, &policy)
+    lancet_api::base_observation_envelope(project_root, enabled_tools, &policy)
+        .map_err(map_lancet_err)
 }
 
-/// Persist an unsigned in-toto attestation for the turn after audit flush.
-pub(crate) fn generate_and_store_attestation(
-    audit: &CepAuditStore,
-    ctx: &CepAuditContext,
-    turn_id: &str,
-) -> Result<(), ApiError> {
-    if turn_id.is_empty() {
-        return Ok(());
-    }
-    if audit
-        .attestation_for_turn(turn_id)
-        .map_err(|err| ApiError::Internal(format!("attestation lookup: {err}")))?
-        .is_some()
-    {
-        return Ok(());
-    }
-
-    let filters = AuditQueryFilters {
-        session_id: Some(ctx.session_id.clone()),
-        turn_id: Some(turn_id.to_string()),
-        ..Default::default()
+/// Translate the optional profile `[lancet]` section into a fully-resolved
+/// LANCET policy and command-isolation configuration.
+///
+/// This is the LATTICE-side half of the seam: it knows about `LancetSection`
+/// and produces the LANCET-native types `lancet-api` consumes.
+fn resolve_lancet_policy(
+    lancet: Option<&LancetSection>,
+    project_root: &str,
+) -> Result<(PolicyConfig, CommandIsolationRuntimeConfig), ApiError> {
+    let policy = match lancet {
+        Some(section) => load_policy_config(section, Path::new(project_root))?,
+        None => PolicyConfig::defaults_for_project_root(PathBuf::from(project_root)),
     };
-    let rows = audit
-        .query_rows(&filters)
-        .map_err(|err| ApiError::Internal(format!("attestation query rows: {err}")))?;
-    if rows.is_empty() {
-        return Ok(());
-    }
-
-    let runtime_version = if ctx.runtime_version.is_empty() {
-        "lattice"
-    } else {
-        ctx.runtime_version.as_str()
+    let command_isolation = match lancet {
+        Some(section) => command_isolation_config_from_profile(section, Path::new(project_root))?,
+        None => CommandIsolationRuntimeConfig::default(),
     };
-    let statement = build_in_toto_statement(turn_id, &rows, runtime_version);
-    let statement_json = serde_json::to_string(&statement)
-        .map_err(|err| ApiError::Internal(format!("attestation statement serialize: {err}")))?;
-    let range_hash = source_audit_range_hash(&rows);
-    let session_id = rows
-        .first()
-        .map(|r| r.session_id.clone())
-        .unwrap_or_else(|| ctx.session_id.clone());
-    let generated_at = rows
-        .iter()
-        .filter_map(|r| r.ended_at.as_deref())
-        .next_back()
-        .unwrap_or_else(|| rows[0].started_at.as_str())
-        .to_string();
-
-    audit
-        .insert_attestation(&AttestationRecord {
-            turn_id: turn_id.to_string(),
-            session_id,
-            statement_json,
-            predicate_type: statement.predicate_type.clone(),
-            generated_at,
-            source_audit_range_or_hash: range_hash,
-        })
-        .map_err(|err| ApiError::Internal(format!("attestation insert: {err}")))?;
-
-    Ok(())
+    Ok((policy, command_isolation))
 }
 
-/// Construct one turn-scoped Cep runtime and inject it into a fresh AgentLoop.
+/// Build a turn-scoped LANCET runtime and wrap its client in an [`AgentLoop`].
+///
+/// Translation of the profile into policy happens here; runtime composition is
+/// delegated to [`lancet_api::LancetRuntime::build`].
 pub(crate) fn build_production_turn_deps(
     project_root: &str,
     enabled_tools: &[String],
@@ -697,103 +590,49 @@ pub(crate) fn build_production_turn_deps(
     model_id: &str,
     runtime_version: &str,
 ) -> Result<ProductionTurnDeps, ApiError> {
-    let tool_definitions = resolve_catalog_tool_definitions(enabled_tools)?;
-
-    // Canonicalize the project root up front so the base envelope's ReadPath /
-    // WritePath capability patterns are built from the same canonical path the
-    // guard compares targets against. Otherwise a symlinked root (e.g. macOS
-    // `/var` -> `/private/var` temp dirs) yields a raw pattern that fails to
-    // prefix-match the canonicalized target, denying legitimate reads. Best
-    // effort: fall back to the raw path if canonicalization fails, matching the
-    // tolerance in `CepPolicyConfig::defaults_for_project_root`.
+    // Canonicalize the project root up front so the profile policy and the
+    // runtime share one canonical root. Falls back to the raw path on failure,
+    // matching `CepPolicyConfig::defaults_for_project_root`'s tolerance.
     let canonical_root = std::fs::canonicalize(project_root)
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned));
     let project_root = canonical_root.as_deref().unwrap_or(project_root);
 
-    let policy_config = match lancet {
-        Some(lancet_section) => load_policy_config(lancet_section, Path::new(project_root))?,
-        None => PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(project_root)),
-    };
-    let command_isolation = match lancet {
-        Some(lancet_section) => {
-            command_isolation_config_from_profile(lancet_section, Path::new(project_root))?
-        }
-        None => CommandIsolationRuntimeConfig::default(),
-    };
-    let cep_policy = cep_policy_from_policy_config(&policy_config);
-    let base_envelope =
-        production_base_envelope_from_policy(project_root, enabled_tools, &cep_policy)?;
-
-    #[cfg(test)]
-    let build_metrics = CepRuntimeBuildMetrics {
-        adapter_instances: 1,
-        transport_pairs: 1,
-    };
-
-    let (client, server) = CepTransport::pair(256);
-    let audit = if in_memory_audit {
-        Arc::new(
-            CepAuditStore::in_memory()
-                .map_err(|err| ApiError::Internal(format!("audit store setup: {err}")))?,
-        )
-    } else {
-        let audit_path = Path::new(project_root)
-            .join(".lattice")
-            .join("cep_audit.db");
-        Arc::new(
-            CepAuditStore::open(&audit_path)
-                .map_err(|err| ApiError::Internal(format!("audit store setup: {err}")))?,
-        )
-    };
-    let audit_context = Arc::new(RwLock::new(CepAuditContext {
-        model_id: model_id.to_string(),
-        runtime_version: runtime_version.to_string(),
-        ..Default::default()
-    }));
-    let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
-    let active_envelope = Arc::new(ActiveEnvelopeStore::new());
-
-    let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
-
+    let (policy, command_isolation) = resolve_lancet_policy(lancet, project_root)?;
+    let cep_mode = lancet
+        .map(|c| c.mode.clone())
+        .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
     let invariants_dir = lancet
         .and_then(|section| section.invariants.as_ref())
-        .and_then(|section| section.dir.as_deref());
-    let invariant_index = invariants::load_invariant_index_from_dir(
-        &invariants::resolve_invariants_dir(Path::new(project_root), invariants_dir),
-    );
-
-    let server_config = ServerRunConfig {
-        audit: Arc::clone(&audit),
-        audit_context: Arc::clone(&audit_context),
-        base_envelope: base_envelope.clone(),
-        cep_context: Arc::clone(&cep_context),
-        active_envelope,
-        policy_hook: default_hook.clone(),
-        default_policy_hook: Some(default_hook),
-        cep_mode: lancet
-            .map(|c| c.mode.clone())
-            .unwrap_or(lancet_protocol::envelope::CepMode::Enforce),
-        command_isolation,
-        invariant_index,
+        .and_then(|section| section.dir.as_deref())
+        .map(PathBuf::from);
+    let audit = if in_memory_audit {
+        AuditBacking::InMemory
+    } else {
+        AuditBacking::default_under(project_root)
     };
 
-    let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry).map_err(|err| {
-        ApiError::Internal(format!("production method registry registration: {err:?}"))
-    })?;
+    let runtime = LancetRuntime::build(LancetRuntimeConfig {
+        project_root: PathBuf::from(project_root),
+        enabled_tools: enabled_tools.to_vec(),
+        policy,
+        command_isolation,
+        cep_mode,
+        audit,
+        invariants_dir,
+        model_id: model_id.to_string(),
+        runtime_version: runtime_version.to_string(),
+    })
+    .map_err(map_lancet_err)?;
 
-    let server_shutdown = server.shutdown_handle();
-    let server_task = tokio::spawn(async move {
-        let _ = server.run(registry, server_config).await;
-    });
+    let parts = runtime.into_parts();
 
-    let enabled_names: HashSet<String> = tool_definitions
+    let enabled_names: HashSet<String> = parts
+        .tool_definitions
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
-    let cep_client = client.clone();
-    let adapter = Arc::new(CepExecutorAdapter::new(client, enabled_names));
+    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
         tool_executor: adapter,
@@ -801,16 +640,17 @@ pub(crate) fn build_production_turn_deps(
 
     Ok(ProductionTurnDeps {
         agent_loop,
-        tool_definitions,
-        runtime: CepTurnRuntime {
-            server_task,
-            shutdown: server_shutdown,
-        },
-        cep_client,
-        audit,
-        audit_context,
+        tool_definitions: parts.tool_definitions,
+        runtime: parts.lifecycle,
+        cep_client: parts.client,
+        audit: parts.audit,
+        audit_context: parts.audit_context,
+        // Production builds compose exactly one adapter over one transport pair.
         #[cfg(test)]
-        build_metrics,
+        build_metrics: CepRuntimeBuildMetrics {
+            adapter_instances: 1,
+            transport_pairs: 1,
+        },
     })
 }
 
@@ -950,6 +790,7 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
+    use lancet_api::cep_policy_from_policy_config;
     use lancet_catalog::methods::command::RunParams;
     use lancet_catalog::methods::envelope::{
         DeclareParams, Envelope, EnvelopeParams, EnvelopeResult,

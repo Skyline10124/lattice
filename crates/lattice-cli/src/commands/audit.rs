@@ -8,14 +8,12 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use lancet_api::LancetServer;
 use lancet_authority::CepTurnContext;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditTailResult,
 };
-use lancet_native::{
-    impact_kind_from_label, register_production_method_registry, CepAuditStore, CepClient,
-    CepTransport, MethodRegistry, ServerRunConfig,
-};
+use lancet_native::{impact_kind_from_label, CepAuditStore, CepClient, ServerRunConfig};
 use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use tokio::sync::RwLock;
 
@@ -96,10 +94,6 @@ where
         CepAuditStore::open(&audit_path).map_err(|e| anyhow::anyhow!("open audit store: {e}"))?,
     );
 
-    let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry)
-        .map_err(|e| anyhow::anyhow!("register CEP methods: {}", e.message))?;
-
     let root = project_root
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("project root path is not UTF-8"))?;
@@ -114,18 +108,12 @@ where
         ..Default::default()
     }));
 
-    let (client, server) = CepTransport::pair(64);
-    let server_task = tokio::spawn(async move {
-        server
-            .run(registry, config)
-            .await
-            .map_err(|e| format!("CEP server: {}", e.message))
-            .expect("CEP server");
-    });
+    let (client, lifecycle) =
+        LancetServer::spawn(config, 64).map_err(|e| anyhow::anyhow!("spawn CEP server: {e}"))?;
 
     f(client).await?;
 
-    drop(server_task);
+    drop(lifecycle);
     Ok(())
 }
 

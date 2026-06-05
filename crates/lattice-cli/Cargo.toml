@@ -14,6 +14,7 @@ path = "src/main.rs"
 lattice-session = { workspace = true }
 lattice-profile = { workspace = true }
 lattice-api = { workspace = true }
+lancet-api = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-authority = { workspace = true }

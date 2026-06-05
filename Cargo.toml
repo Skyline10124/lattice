@@ -12,6 +12,7 @@ members = [
     "crates/lancet-authority",
     "crates/lancet-invariants",
     "crates/lancet-native",
+    "crates/lancet-api",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -36,6 +37,7 @@ lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
 lancet-invariants = { path = "crates/lancet-invariants" }
 lancet-native   = { path = "crates/lancet-native" }
+lancet-api      = { path = "crates/lancet-api" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 

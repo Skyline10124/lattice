@@ -501,9 +501,8 @@ mod attestation_and_dispatch {
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
-    use crate::turn::cep::{
-        build_production_turn_deps, generate_and_store_attestation, CepExecutorAdapter,
-    };
+    use crate::turn::cep::{build_production_turn_deps, CepExecutorAdapter};
+    use lancet_api::store_turn_attestation;
 
     #[tokio::test]
     async fn dispatch_typed_routes_submit_intent() {
@@ -598,7 +597,7 @@ mod attestation_and_dispatch {
 
         deps.audit.await_pending().await;
         let ctx = deps.audit_context.read().await;
-        generate_and_store_attestation(&deps.audit, &ctx, &turn_id).expect("store attestation");
+        store_turn_attestation(&deps.audit, &ctx, &turn_id).expect("store attestation");
 
         let replay = deps
             .cep_client

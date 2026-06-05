@@ -62,7 +62,7 @@ async fn stream_turn_live_with_agent(
     let deps = super::cep::ProductionTurnDeps {
         agent_loop,
         tool_definitions,
-        runtime: super::cep::CepTurnRuntime::dummy(),
+        runtime: lancet_api::ServerLifecycle::noop(),
         cep_client,
         audit: Arc::new(lancet_native::CepAuditStore::in_memory().expect("in-memory audit store")),
         audit_context: Arc::new(tokio::sync::RwLock::new(

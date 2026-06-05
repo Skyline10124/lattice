@@ -1,0 +1,27 @@
+[package]
+name = "lancet-api"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LANCET unified public API: CEP runtime composition, policy/audit/attestation, and tool projection — independent of the LATTICE session/agent layers"
+
+[dependencies]
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+lancet-dispatch = { workspace = true }
+lancet-audit = { workspace = true }
+lancet-authority = { workspace = true }
+lancet-invariants = { workspace = true }
+lancet-native = { workspace = true }
+# Transitional: `to_tool_definitions` yields `lattice_llm::ToolDefinition`. This is
+# the only LATTICE coupling left in the LANCET stack and is tracked for extraction.
+lattice-llm = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+lancet-catalog = { workspace = true }
+tempfile = { workspace = true }

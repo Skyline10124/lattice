@@ -5,8 +5,10 @@ Crate-local guidance for `lattice-api`.
 ## Role
 
 This crate owns the public facade for session creation/opening and turn
-execution. It exposes `SessionApi`, `stream_turn`, `run_turn`, public turn
-events/results, and currently composes the turn-scoped LANCET runtime.
+execution. It exposes `SessionApi`, `stream_turn`, `run_turn`, and public turn
+events/results. LANCET runtime composition now lives in `lancet-api`; this crate
+translates profile `[lancet]` policy into LANCET-native config and wires the
+agent loop over `lancet-api`'s CEP runtime.
 
 ## Sub-Architecture
 
@@ -15,9 +17,10 @@ events/results, and currently composes the turn-scoped LANCET runtime.
 - `src/turn/live.rs` owns the live streaming turn core.
 - `src/turn/execute.rs` owns the `run_turn` entrypoint.
 - `src/turn/collector.rs` drains live streams into `RunTurnResult`.
-- `src/turn/cep.rs` composes native registry, dispatch client/server, profile
-  policy lowering, base envelopes, audit, invariants, and `CepExecutorAdapter`.
-- `src/turn/enabled_tools.rs` resolves enabled tool exposure.
+- `src/turn/cep.rs` is the LATTICE↔LANCET seam: profile→policy translation,
+  `CepExecutorAdapter` (LLM tool calls → typed CEP), CEP-event→agent-event
+  mapping, and `build_production_turn_deps` (delegates composition to
+  `lancet_api::LancetRuntime::build`). Runtime assembly itself is in `lancet-api`.
 - `src/turn/mapping.rs` and `src/turn/types.rs` own public event/result mapping.
 - Integration tests cover CEP round trips, audit provenance, release flows, and
   consistency.
@@ -33,8 +36,10 @@ events/results, and currently composes the turn-scoped LANCET runtime.
 
 - OPEN M-24-04: `tools.enabled` currently drives both LLM tool exposure and
   parts of base authority derivation.
-- OPEN M-24-05: this crate has grown from thin facade into turn runtime
-  composition and LANCET control-plane wiring.
+- FIXED M-24-05: turn/LANCET runtime composition extracted into the new
+  `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
+  translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
+  `lancet-api`. This crate no longer depends on `lancet-invariants` directly.
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.
@@ -44,8 +49,9 @@ events/results, and currently composes the turn-scoped LANCET runtime.
 
 - Split tool exposure from authority shaping for M-24-04; exposure should not be
   treated as an authorization boundary.
-- Plan M-24-05 by extracting internal turn/LANCET composition while keeping this
-  crate as public request/response/event facade.
+- Keep runtime composition in `lancet-api`; this crate should only translate
+  profile policy and wire the agent loop. Do not reintroduce server/transport
+  assembly here.
 - Keep `run_turn` implemented through `stream_turn` and `RunTurnCollector`.
 - Add focused tests whenever public `TurnEvent` mapping or commit semantics
   change.

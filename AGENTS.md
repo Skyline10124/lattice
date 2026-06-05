@@ -26,7 +26,9 @@ Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-invariants(->protocol,catalog)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,invariants,llm)
-Layer 4:         lattice-api(-> runtime crates)
+Layer 3.5:       lancet-api(->protocol,catalog,dispatch,audit,
+                            authority,invariants,native,llm)
+Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-cli(-> api + presentation dependencies)
 ```
 
@@ -41,11 +43,12 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, active envelopes, effect ledger, and effect-region checks. |
 | `lancet-invariants` | Invariant card loading/indexing/review helpers and Guard L2 Rust AST checks. |
 | `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and LLM-facing tool projection. |
+| `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, tool projection) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and SQLite graph store. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
-| `lattice-api` | Thin public facade for session creation/opening and turn execution; composes the per-turn LANCET runtime. |
+| `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
 | `lattice-cli` | Binary entry point and presentation layer over API/session/model/audit commands. |
 
 ## CEP And LANCET Contracts
@@ -71,9 +74,10 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 
 1. `lattice-api::stream_turn` is the single live execution core.
 2. `run_turn` drains the same stream through `RunTurnCollector`.
-3. `turn/cep.rs` builds a turn-scoped LANCET runtime: native method registry,
-   dispatch server/client, profile-derived policy hook, native server lifecycle,
-   and `CepExecutorAdapter`.
+3. `turn/cep.rs` translates profile `[lancet]` policy into LANCET-native config
+   and delegates runtime composition to `lancet_api::LancetRuntime::build`
+   (server lifecycle, dispatch client, audit), then wraps the returned
+   `CepClient` in a `CepExecutorAdapter`.
 4. `AgentLoop` reads session state, assembles messages, calls the LLM through
    `LlmClient`, and sends requested tool calls through the injected executor.
 5. Native handlers execute typed CEP methods behind policy, guard, audit,
@@ -111,6 +115,12 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
   typed events and errors.
 - Keep native filesystem, shell, web, mutation, verify, and transport lifecycle
   implementation in `lancet-native`.
-- Keep public session and turn API contracts in `lattice-api`; keep CLI output
-  and argument parsing in `lattice-cli`.
+- Keep LANCET runtime composition and its public surface in `lancet-api`; it
+  takes LANCET-native policy types and must not depend on LATTICE
+  session/agent/profile crates. Anything that drives CEP (CLI, tests, embedders)
+  should spawn through `lancet_api::LancetServer`/`LancetRuntime`, not hand-roll
+  the registry/transport/server dance.
+- Keep public session and turn API contracts in `lattice-api`; it owns the
+  profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
+  CLI output and argument parsing in `lattice-cli`.
 - Prefer crate-local `AGENTS.md` files for detailed navigation before editing.

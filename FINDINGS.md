@@ -13,16 +13,10 @@
 ## MEDIUM
 
 ### M-24-04: `tools.enabled` 同时承担 LLM 暴露白名单和 CEP base authority 派生 — `architecture` / `policy-consistency`
-- **位置**: `crates/lattice-api/src/turn/enabled_tools.rs`、`crates/lattice-api/src/turn/cep.rs:197-208`、`crates/lattice-api/src/turn/cep.rs:582-602`、`crates/lattice-api/src/turn/cep.rs:788-793`
-- **问题**: `tools.enabled` 目前不只是 agent-visible method whitelist。它先过滤 catalog-derived LLM tool schemas，再生成 `CepExecutorAdapter` 的 enabled method set；同时又被 `production_base_envelope_from_policy` 用来派生 turn base envelope 能力：`session.envelope` / `session.todo_write` 触发 `MutateSessionState`，`fetch.web` 触发 allowed-host `FetchUrl` capabilities。这样 `tools.enabled` 同时承担 exposure 和部分 authority shaping，和 CEP policy/envelope 语义重叠。
-- **当前状态**: 行为正确，且 adapter disabled-method 拒绝、base envelope session/audit/fetch capability 映射已有测试覆盖；但该路径容易让后续读者误以为 tool enablement 本身就是授权边界。实际最终 authority 仍应由 CEP policy、Guard、active envelope 和 native handler enforcement 决定。
+- **位置**: `crates/lancet-api/src/tools.rs`(原 `enabled_tools.rs`)、`crates/lancet-api/src/runtime.rs` 的 `base_observation_envelope`、`crates/lattice-api/src/turn/cep.rs` 的 `build_production_turn_deps`
+- **问题**: `tools.enabled` 目前不只是 agent-visible method whitelist。它先过滤 catalog-derived LLM tool schemas，再生成 `CepExecutorAdapter` 的 enabled method set；同时又被 `base_observation_envelope` 用来派生 turn base envelope 能力：`session.envelope` / `session.todo_write` 触发 `MutateSessionState`，`fetch.web` 触发 allowed-host `FetchUrl` capabilities。这样 `tools.enabled` 同时承担 exposure 和部分 authority shaping，和 CEP policy/envelope 语义重叠。
+- **当前状态**: 行为正确，且 adapter disabled-method 拒绝、base envelope session/audit/fetch capability 映射已有测试覆盖；但该路径容易让后续读者误以为 tool enablement 本身就是授权边界。实际最终 authority 仍应由 CEP policy、Guard、active envelope 和 native handler enforcement 决定。M-24-05 抽出 `lancet-api` 后该 dual-purpose 逻辑随 base envelope builder 一并搬到 `lancet-api`，语义未拆分。
 - **计划**: 后续统一重构时拆开两层语义。`tools.enabled` 保留为 LLM exposure / adapter whitelist；base envelope 从 explicit CEP base-policy、catalog method requirements、profile `[lancet]` policy 或独立 authority builder 生成，不直接由 exposure list 推导。可将 `enabled_tools.rs` 重命名为 `tool_exposure.rs`，并把 base envelope 派生迁到 CEP authority composition 代码中。
-
-### M-24-05: `lattice-api` 从薄 facade 膨胀为 turn runtime composition 层 — `architecture` / `crate-boundary`
-- **位置**: `crates/lattice-api/src/lib.rs:1-11`、`crates/lattice-api/src/turn/cep.rs`、`crates/lattice-api/src/turn/live.rs`、`crates/lattice-api/Cargo.toml`
-- **问题**: `lattice-api` 对外仍宣称是 thin public API facade，但内部已经承载 turn-scoped LANCET runtime composition：`CepExecutorAdapter`、catalog tool projection、profile → CEP policy lowering、command isolation lowering、external policy load/merge、base envelope 派生、attestation persistence、native registry/transport/audit/invariant 装配，以及 CEP event → public `TurnEvent` 映射。`turn/cep.rs` 已成为上千行的 dependency magnet，`Cargo.toml` 也直接依赖多枚 LANCET 内部 crate。
-- **当前状态**: 对外 `run_turn` / `stream_turn` / `SessionApi` surface 仍然可用，行为正确；问题是 crate boundary 已经漂移，public facade 和内部 turn control plane 混在同一个 crate，后续 CLI/TUI/daemon 复用时容易把 API crate 变成事实上的 runtime 聚合层。
-- **计划**: 后续统一重构时切出内部 turn/LANCET composition crate（命名需随边界再定，优先避免泛化成无边界的 `runtime` 桶）。`lattice-api` 保留 public request/response/event types、`SessionApi`、`run_turn` / `stream_turn` facade 和 session commit 入口；把 `CepExecutorAdapter`、`build_production_turn_deps`、profile/policy lowering、base envelope builder、native LANCET 装配、attestation/event mapping 迁到内部 crate。CLI/TUI/daemon 继续依赖 `lattice-api`，不直接穿透到 native internals。
 
 ## LOW
 
@@ -90,6 +84,12 @@
 - **问题**: P31-WR-02 修复（commit `71e8caf`）让 `capture_lower_baseline` 在计算每个 regular file BLAKE3 hash 的同时把完整字节存入 `regular_file_contents`，使 commit-baseline anchor 校验读取 capture 时刻的快照而非活 workspace（消除 TOCTOU）。代价是整个 lower 视图的 regular file 内容常驻内存,大型 workspace 下峰值内存随项目总字节线性增长。
 - **当前状态**: 非 bug，安全性正确。开销是线性而非指数，且只在 artifact overlay commit 路径短暂存在；v1.4-alpha 目标项目规模下不构成问题。`is_snapshot_skipped_path` 已排除 `target/`、`.git` 内部等大目录。
 - **计划**: v1.5 大型 workspace 优化窗口可改为 lazy read-on-demand + 用已捕获的 content hash 做完整性校验（读时比对 hash，不匹配即判 lower drift），或只缓存带 hunk anchor evidence 的文件字节而非全树；改动需保留消除 TOCTOU 的不变量并补一个"capture 后、recheck 前修改源文件仍 fail-closed"的回归测试。
+
+### L-llm-coupling: LANCET 栈仍依赖 `lattice-llm` 叶子 crate — `architecture` / `crate-boundary`
+- **位置**: `crates/lancet-native/src/projection/mod.rs`(`lattice_llm::ToolDefinition`)、`crates/lancet-native/src/executor/web.rs` 与 `crates/lancet-authority/src/policy/network.rs`(`lattice_llm::security`)、`crates/lancet-api`(经 native 传递)
+- **问题**: M-24-05 把 LANCET runtime 组装抽到独立的 `lancet-api`,但 LANCET 栈仍未 100% 脱离 LATTICE:catalog→tool 投影产出 `lattice_llm::ToolDefinition`,URL/DNS 守卫复用 `lattice_llm::security`。因此 `lancet-api` 仍传递依赖 `lattice-llm`。
+- **当前状态**: 非 bug。`lattice-llm` 是 Layer 0 叶子,不构成依赖环;但"LANCET 完全独立于 LATTICE"这一目标尚未达成,只是从"被 app facade 包裹"降级为"依赖一枚共享叶子工具 crate"。
+- **计划**: 选定 tool/security 共享类型的归属后再做:把 `ToolDefinition`(以及 `security` 的 URL/DNS 守卫)抽到 LANCET 自有或中立的共享 crate(如 `lancet-toolspec` / `net-guard`),让 `lattice-llm` 与 LANCET 同时依赖它,从而让 `lancet-api` 彻底无 `lattice-*` 依赖。
 
 ## P22.5 supervision verification (2026-05-28)
 

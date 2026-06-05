@@ -996,6 +996,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lancet-api"
+version = "0.1.0"
+dependencies = [
+ "lancet-audit",
+ "lancet-authority",
+ "lancet-catalog",
+ "lancet-dispatch",
+ "lancet-invariants",
+ "lancet-native",
+ "lancet-protocol",
+ "lattice-llm",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lancet-audit"
 version = "0.1.0"
 dependencies = [
@@ -1124,9 +1143,9 @@ dependencies = [
  "async-trait",
  "blake3",
  "futures",
+ "lancet-api",
  "lancet-authority",
  "lancet-catalog",
- "lancet-invariants",
  "lancet-native",
  "lancet-protocol",
  "lattice-agent",
@@ -1157,6 +1176,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "futures",
+ "lancet-api",
  "lancet-authority",
  "lancet-catalog",
  "lancet-invariants",

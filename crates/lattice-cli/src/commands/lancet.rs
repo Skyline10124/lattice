@@ -14,6 +14,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
+use lancet_api::LancetServer;
 use lancet_authority::{allowed_primitives_for, CepTurnContext};
 use lancet_catalog::catalog::catalog;
 use lancet_catalog::methods::envelope::{
@@ -26,8 +27,8 @@ use lancet_native::{
     MissingRequiredBoundary,
 };
 use lancet_native::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
-    MethodRegistry, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditStore, MethodRegistry,
+    ServerRunConfig,
 };
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::{BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryStatus};
@@ -977,10 +978,6 @@ async fn submit_intent_smoke_async(project_root: PathBuf) -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("project root path is not UTF-8"))?;
 
-    let mut registry = MethodRegistry::new();
-    register_production_method_registry(&mut registry)
-        .map_err(|e| anyhow::anyhow!("register CEP methods: {}", e.message))?;
-
     // session.envelope derive_intent requires MutateSessionState capability to store the derived envelope.
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.base_envelope =
@@ -988,14 +985,8 @@ async fn submit_intent_smoke_async(project_root: PathBuf) -> Result<()> {
             .with_session_state();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root_str));
 
-    let (client, server) = CepTransport::pair(64);
-    let server_task = tokio::spawn(async move {
-        server
-            .run(registry, config)
-            .await
-            .map_err(|e| format!("CEP server: {}", e.message))
-            .expect("CEP server");
-    });
+    let (client, mut lifecycle) =
+        LancetServer::spawn(config, 64).map_err(|e| anyhow::anyhow!("spawn CEP server: {e}"))?;
 
     let result = client
         .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
@@ -1013,7 +1004,7 @@ async fn submit_intent_smoke_async(project_root: PathBuf) -> Result<()> {
         anyhow::bail!("session.envelope derive_intent smoke returned declare result");
     };
 
-    server_task.abort();
+    lifecycle.shutdown().await;
 
     if !result.impact.unknowns.is_empty() {
         anyhow::bail!(
