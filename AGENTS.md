@@ -24,10 +24,11 @@ Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,llm)
                  lancet-invariants(->protocol,catalog)
+Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
                                authority,invariants,llm)
-Layer 3.5:       lancet-api(->protocol,catalog,dispatch,audit,
-                            authority,invariants,native,llm)
+Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
+                            authority,invariants,native)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-cli(-> api + presentation dependencies)
 ```
@@ -37,13 +38,14 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 | Crate | Role |
 |---|---|
 | `lancet-protocol` | Pure CEP wire/data contracts: JSON-RPC frames, execution envelopes, errors, policy hook types, provenance wire types. No I/O and no tokio. |
-| `lancet-catalog` | Typed CEP method contracts, params/results, descriptors, static production catalog, and schema data for projections. |
+| `lancet-catalog` | Typed CEP method contracts, params/results, descriptors, static production catalog, schema data, and catalog-declared base authority requirements for projections. |
 | `lancet-dispatch` | Generic method registry, typed CEP dispatch, in-process transport, cancellation, and event sinks. |
+| `lancet-cep` | Public CEP facade over protocol/catalog/dispatch, plus catalog-derived `ToolDefinition`, `ToolExposure`, catalog-declared base-authority aggregation, and explicit `BaseAuthorityPlan` construction. No native execution, policy side effects, audit persistence, or LATTICE dependencies. |
 | `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, and attestation persistence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, active envelopes, effect ledger, and effect-region checks. |
 | `lancet-invariants` | Invariant card loading/indexing/review helpers and Guard L2 Rust AST checks. |
-| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and LLM-facing tool projection. |
-| `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, tool projection) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
+| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and impact analysis. |
+| `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and SQLite graph store. |
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
@@ -54,13 +56,19 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 ## CEP And LANCET Contracts
 
 - `lancet-protocol` is the bottom contract. Keep it data-only and runtime-free.
+- `lancet-cep` is the public CEP facade. It may frame/re-export protocol,
+  catalog, dispatch, tool exposure, and base-authority planning, but must not
+  depend on native runtime, authority policy implementation, audit persistence,
+  or any `lattice-*` crate.
 - `lancet-catalog::CATALOG` is the authoritative production method catalog.
   It contains exactly these 9 CEP methods: `observe.workspace`, `mutate.create`,
   `mutate.patch`, `exec.command_run`, `fetch.web`, `session.todo_write`,
   `session.envelope`, `observe.audit`, and `observe.audit_replay`.
-- LLM-facing tool schemas are generated only from the catalog through
-  `lancet-native::to_tool_definitions`; do not reintroduce parallel hard-coded
-  tool definitions.
+  Descriptors also declare method-local base-authority requirements; hosts and
+  policy decisions are supplied later by LANCET runtime policy, not by catalog.
+- LLM-facing CEP tool schemas are generated only from the catalog through
+  `lancet-cep::project_tool_definitions`; do not reintroduce native/API shim
+  projection functions or parallel hard-coded tool definitions.
 - Mutating methods require an active `session.envelope` capability scope and
   must pass authority policy, Guard L1, effect checks, audit recording, and
   optional verification.

@@ -355,7 +355,7 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::audit::AuditObserve;
+    use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
     use lancet_catalog::methods::envelope::Envelope;
     use lancet_catalog::methods::external::Fetch;
     use lancet_catalog::methods::session::TodoWrite;
@@ -386,17 +386,19 @@ mod cep_native_registry {
     #[test]
     fn production_base_envelope_grants_read_audit() {
         let dir = TempDir::new().unwrap();
-        let enabled = vec![AuditObserve::NAME.to_string()];
-        let envelope =
-            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
-        assert!(
-            envelope
-                .inner
-                .capabilities
-                .iter()
-                .any(|c| matches!(c, Capability::ReadAudit)),
-            "base envelope must grant ReadAudit for observe.audit/observe.audit_replay"
-        );
+        for method in [AuditObserve::NAME, AuditReplay::NAME] {
+            let enabled = vec![method.to_string()];
+            let envelope =
+                production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
+            assert!(
+                envelope
+                    .inner
+                    .capabilities
+                    .iter()
+                    .any(|c| matches!(c, Capability::ReadAudit)),
+                "base envelope must grant ReadAudit for {method}"
+            );
+        }
     }
 
     #[test]
@@ -456,7 +458,10 @@ mod cep_native_registry {
 
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ObserveWorkspace::NAME.to_string()],
+            &[
+                ObserveWorkspace::NAME.to_string(),
+                AuditReplay::NAME.to_string(),
+            ],
             llm,
             true,
             None,
@@ -567,7 +572,10 @@ mod attestation_and_dispatch {
         );
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ObserveWorkspace::NAME.to_string()],
+            &[
+                ObserveWorkspace::NAME.to_string(),
+                AuditReplay::NAME.to_string(),
+            ],
             llm,
             true,
             None,
@@ -636,7 +644,10 @@ mod attestation_and_dispatch {
         );
         let deps = build_production_turn_deps(
             dir.path().to_str().unwrap(),
-            &[ObserveWorkspace::NAME.to_string()],
+            &[
+                ObserveWorkspace::NAME.to_string(),
+                AuditReplay::NAME.to_string(),
+            ],
             llm,
             true,
             None,

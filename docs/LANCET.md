@@ -4,12 +4,15 @@ LATTICE agents execute tools through **LANCET**, the controlled execution and fa
 
 ## Public surface (v1.4-alpha boundary contract)
 
-The documented public LANCET contract is split across **`lancet-protocol`** and
-**`lancet-catalog`**:
+The documented public LANCET contract is framed by **`lancet-cep`**, which
+re-exports the CEP protocol/catalog/dispatch interface and owns tool exposure
+plus base-authority planning. The underlying contract remains split across
+**`lancet-protocol`** and **`lancet-catalog`**:
 
 | Component | Description |
 |-----------|-------------|
-| `lancet-catalog::CATALOG` | The 9-method canonical CEP catalog: `observe.workspace`, `mutate.create`, `mutate.patch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, `observe.audit_replay` |
+| `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
+| `lancet-catalog::CATALOG` | The 9-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.patch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, `observe.audit_replay` |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
@@ -22,7 +25,14 @@ Internal implementation is split across `lancet-authority` (default policy, Guar
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
 native registry, and LLM-facing tool definitions are projected only from the 9
-canonical catalog methods.
+canonical catalog methods. Tool exposure is separate from base authority:
+enabled methods filter the model-visible catalog projection, while
+catalog descriptors declare method-local base authority requirements.
+`ToolExposure::base_authority()` aggregates those requirements, and
+`BaseAuthorityPlan` materializes them with runtime policy inputs such as allowed
+fetch hosts. The base envelope never grants workspace write or command scopes.
+Projection APIs live in `lancet-cep`; `lancet-native` and `lancet-api` do not
+carry compatibility projection shims.
 
 ### Effect-contract tool surface
 

@@ -34,15 +34,13 @@ pub fn build_report() -> DoctorReport {
     let config_loaded = config_path.exists();
     let config_path = config_path.display().to_string();
 
-    // Credentials: check router-relevant env vars via ModelRouter aliases
-    let router = lattice_llm::ModelRouter::new();
-    let aliases = router.aliases();
+    // Credentials: check router-relevant env vars via API model metadata.
+    let aliases = lattice_api::list_models(false);
     let mut credential_entries: Vec<CredentialEntry> = Vec::new();
     for alias in &aliases {
-        let status = format!("{:?}", alias.credential_status);
         credential_entries.push(CredentialEntry {
             env_var: alias.api_key_env.clone(),
-            status,
+            status: alias.credential_status.clone(),
         });
     }
     // Deduplicate by env var name

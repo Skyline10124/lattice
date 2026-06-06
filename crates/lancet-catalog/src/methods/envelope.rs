@@ -3,7 +3,7 @@
 
 //! Envelope declaration methods.
 
-use crate::method::{CatalogMethod, CepMethod};
+use crate::method::{BaseAuthorityRequirement, CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
 use lancet_protocol::{
     EffectDecl, EffectKindSet, EffectScopeKind, ExecutionEnvelope, FailureSemantics, Impact,
@@ -100,6 +100,7 @@ impl CepMethod for Envelope {
     type Result = EnvelopeResult;
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::SESSION_STATE;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
         scope: EffectScopeKind::SessionState,

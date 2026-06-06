@@ -69,9 +69,9 @@ async fn main() -> std::process::ExitCode {
 
     // Initialize logging.
     if cli.verbose {
-        let _ = lattice_llm::init_logging(true);
+        let _ = lattice_api::init_logging(true);
     } else {
-        let _ = lattice_llm::init_logging(false);
+        let _ = lattice_api::init_logging(false);
     }
 
     match run_commands(cli).await {

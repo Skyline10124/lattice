@@ -125,6 +125,36 @@ mod tests {
     }
 
     #[test]
+    fn catalog_descriptors_declare_base_authority_requirements() {
+        for descriptor in catalog() {
+            match descriptor.name {
+                "session.todo_write" | "session.envelope" => {
+                    assert!(descriptor.base_authority.session_state);
+                    assert!(!descriptor.base_authority.fetch_hosts);
+                    assert!(!descriptor.base_authority.read_audit);
+                }
+                "fetch.web" => {
+                    assert!(!descriptor.base_authority.session_state);
+                    assert!(descriptor.base_authority.fetch_hosts);
+                    assert!(!descriptor.base_authority.read_audit);
+                }
+                "observe.audit" | "observe.audit_replay" => {
+                    assert!(!descriptor.base_authority.session_state);
+                    assert!(!descriptor.base_authority.fetch_hosts);
+                    assert!(descriptor.base_authority.read_audit);
+                }
+                "observe.workspace" | "mutate.create" | "mutate.patch" | "exec.command_run" => {
+                    assert_eq!(
+                        descriptor.base_authority,
+                        crate::method::BaseAuthorityRequirement::NONE
+                    );
+                }
+                other => panic!("unexpected catalog method: {other}"),
+            }
+        }
+    }
+
+    #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
         let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 9] = [

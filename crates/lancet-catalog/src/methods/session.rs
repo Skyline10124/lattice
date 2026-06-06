@@ -3,7 +3,7 @@
 
 //! Session state mutation methods.
 
-use crate::method::{CatalogMethod, CepMethod};
+use crate::method::{BaseAuthorityRequirement, CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
 use lancet_protocol::{
     EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
@@ -46,6 +46,7 @@ impl CepMethod for TodoWrite {
     type Result = TodoWriteResult;
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::MutateSessionState;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::SESSION_STATE;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::SessionStateMutation]),
         scope: EffectScopeKind::SessionState,

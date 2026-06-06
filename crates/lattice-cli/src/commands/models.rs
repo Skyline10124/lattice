@@ -8,28 +8,18 @@ use anyhow::Result;
 /// Plain `models` lists all known aliases one per line.
 /// `models --auth` lists only aliases whose credentials are present.
 pub fn run(auth_only: bool, json: bool) -> Result<()> {
-    let router = lattice_llm::ModelRouter::new();
-    let aliases = router.aliases();
-
-    let entries: Vec<&lattice_llm::ResolvedModel> = if auth_only {
-        aliases
-            .iter()
-            .filter(|a| a.credential_status == lattice_llm::CredentialStatus::Present)
-            .collect()
-    } else {
-        aliases.iter().collect()
-    };
+    let entries = lattice_api::list_models(auth_only);
 
     if json {
         let items: Vec<serde_json::Value> = entries
             .iter()
-            .map(|a| super::model_render::resolved_model_json(a))
+            .map(super::model_render::resolved_model_json)
             .collect();
         println!("{}", serde_json::to_string_pretty(&items)?);
         return Ok(());
     }
 
-    for entry in entries {
+    for entry in &entries {
         println!("{}", entry.alias);
     }
 

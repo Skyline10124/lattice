@@ -3,19 +3,11 @@
 
 //! `lattice audit` — query and tail the CEP audit store.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::Args;
-use lancet_api::LancetServer;
-use lancet_authority::CepTurnContext;
-use lancet_catalog::methods::audit::{
-    AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditTailResult,
-};
-use lancet_native::{impact_kind_from_label, CepAuditStore, CepClient, ServerRunConfig};
-use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
-use tokio::sync::RwLock;
+use lancet_api::{query_audit, tail_audit, AuditRequest};
 
 #[derive(Args, Debug, Clone)]
 pub struct AuditCmd {
@@ -65,220 +57,91 @@ pub fn run_at(project_root: &Path, cmd: AuditCmd, global_json: bool) -> Result<(
 
 async fn run_async(cmd: AuditCmd, json: bool, project_root: &Path) -> Result<()> {
     let session_id = cmd.session.clone().unwrap_or_else(|| "default".to_string());
-
+    let mut request = AuditRequest::new(project_root);
+    request.session_id = session_id;
+    request.turn_id = cmd.turn.clone();
+    request.method = cmd.method.clone();
+    request.impact = cmd.impact.clone();
+    request.capability = cmd.capability.clone();
+    request.verdict = cmd.verdict.clone();
+    request.since_audit_id = cmd.since;
     if cmd.tail {
-        run_tail(project_root, &session_id, &cmd, json).await
+        let output = tail_audit(request)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        render_tail_output(&output, json)
     } else {
-        run_query(project_root, &session_id, &cmd, json).await
+        let output = query_audit(request)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        render_query_output(&output, json)
     }
 }
 
-fn audit_db_path(project_root: &Path) -> PathBuf {
+#[cfg(test)]
+fn audit_db_path(project_root: &Path) -> std::path::PathBuf {
     project_root.join(".lattice").join("cep_audit.db")
 }
 
-async fn with_audit_client<F, Fut>(project_root: &Path, session_id: &str, f: F) -> Result<()>
-where
-    F: FnOnce(CepClient) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
-    let audit_path = audit_db_path(project_root);
-    if !audit_path.exists() {
-        bail!(
-            "audit database not found at {}; run an agent turn in this project first",
-            audit_path.display()
+fn render_query_output(output: &lancet_api::AuditQueryOutput, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "row_count": output.row_count,
+                "fragment": &output.fragment,
+            }))?
         );
+    } else {
+        println!(
+            "session={} rows={} activities={} entities={} agents={}",
+            output.session_id,
+            output.row_count,
+            output.fragment.activities.len(),
+            output.fragment.entities.len(),
+            output.fragment.agents.len()
+        );
+        for activity in &output.fragment.activities {
+            println!(
+                "  {} {} {:?}",
+                activity.id, activity.method, activity.impact_kind
+            );
+        }
     }
-
-    let audit = Arc::new(
-        CepAuditStore::open(&audit_path).map_err(|e| anyhow::anyhow!("open audit store: {e}"))?,
-    );
-
-    let root = project_root
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("project root path is not UTF-8"))?;
-
-    let mut config = ServerRunConfig::in_memory_for_tests();
-    config.audit = audit;
-    config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
-    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
-    config.audit_context = Arc::new(RwLock::new(lancet_native::CepAuditContext {
-        session_id: session_id.to_string(),
-        ..Default::default()
-    }));
-
-    let (client, lifecycle) =
-        LancetServer::spawn(config, 64).map_err(|e| anyhow::anyhow!("spawn CEP server: {e}"))?;
-
-    f(client).await?;
-
-    drop(lifecycle);
     Ok(())
 }
 
-async fn run_query(
-    project_root: &Path,
-    session_id: &str,
-    cmd: &AuditCmd,
-    json: bool,
-) -> Result<()> {
-    let impact_kind = parse_impact_kind(cmd.impact.as_deref())?;
-
-    with_audit_client(project_root, session_id, |client| async move {
-        let result = client
-            .call::<AuditObserve>(AuditObserveParams {
-                stream: false,
-                query: AuditQueryParams {
-                    method: cmd.method.clone(),
-                    impact_kind,
-                    capability: cmd.capability.clone(),
-                    verdict: cmd.verdict.clone(),
-                    since_audit_id: cmd.since,
-                    until_audit_id: None,
-                    envelope_id: None,
-                    turn_id: cmd.turn.clone(),
-                    session_id: None,
-                },
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("observe.audit: {}", e.message))?;
-        let AuditObserveResult::Query(result) = result else {
-            bail!("observe.audit returned a tail result for stream=false");
-        };
-
-        if json {
+fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "rows": &output.rows,
+                "last_audit_id": output.last_audit_id,
+                "done": output.done,
+                "batches": output.batches,
+            }))?
+        );
+    } else {
+        println!(
+            "session={} tail_rows={} last_audit_id={} done={} batches={}",
+            output.session_id,
+            output.rows.len(),
+            output.last_audit_id,
+            output.done,
+            output.batches,
+        );
+        for p in &output.rows {
             println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "row_count": result.row_count,
-                    "fragment": result.fragment,
-                }))?
+                "  {} {} {} {}",
+                p["audit_id"],
+                p["method"].as_str().unwrap_or("?"),
+                p["impact_kind"].as_str().unwrap_or("?"),
+                p["summary"].as_str().unwrap_or("")
             );
-        } else {
-            println!(
-                "session={session_id} rows={} activities={} entities={} agents={}",
-                result.row_count,
-                result.fragment.activities.len(),
-                result.fragment.entities.len(),
-                result.fragment.agents.len()
-            );
-            for activity in &result.fragment.activities {
-                println!(
-                    "  {} {} {:?}",
-                    activity.id, activity.method, activity.impact_kind
-                );
-            }
         }
-        Ok(())
-    })
-    .await
-}
-
-/// Safety cap: 1000 rows per handler batch × this many CLI continuations.
-const AUDIT_TAIL_MAX_BATCHES: usize = 1000;
-
-async fn run_tail(project_root: &Path, session_id: &str, cmd: &AuditCmd, json: bool) -> Result<()> {
-    with_audit_client(project_root, session_id, |client| async move {
-        let mut since = cmd.since.unwrap_or(0);
-        let mut all_tail_lines = Vec::new();
-        let mut tail_result = AuditTailResult {
-            last_audit_id: since,
-            done: true,
-        };
-        let mut batches = 0usize;
-
-        loop {
-            batches += 1;
-            if batches > AUDIT_TAIL_MAX_BATCHES {
-                bail!(
-                    "audit tail exceeded {AUDIT_TAIL_MAX_BATCHES} batches ({} rows emitted); \
-                     narrow with filters or resume with --since {}",
-                    all_tail_lines.len(),
-                    tail_result.last_audit_id
-                );
-            }
-
-            let events = client.events();
-            let call = client.call::<AuditObserve>(AuditObserveParams {
-                stream: true,
-                query: AuditQueryParams {
-                    since_audit_id: Some(since),
-                    ..Default::default()
-                },
-            });
-
-            let mut batch_lines = Vec::new();
-            let collect = async {
-                loop {
-                    let Some(event) = events.lock().await.recv().await else {
-                        break;
-                    };
-                    let finished = event.method == "cep.call_finished";
-                    if event.method == "audit.tail_row" {
-                        batch_lines.push(event);
-                    }
-                    if finished {
-                        break;
-                    }
-                }
-            };
-
-            let (result, _) = tokio::join!(call, collect);
-            let result = result.map_err(|e| anyhow::anyhow!("observe.audit: {}", e.message))?;
-            let AuditObserveResult::Tail(result) = result else {
-                bail!("observe.audit returned a query result for stream=true");
-            };
-            tail_result = result;
-            all_tail_lines.extend(batch_lines);
-
-            if tail_result.done {
-                break;
-            }
-            since = tail_result.last_audit_id;
-        }
-
-        if json {
-            let rows: Vec<_> = all_tail_lines.iter().map(|ev| ev.params.clone()).collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "rows": rows,
-                    "last_audit_id": tail_result.last_audit_id,
-                    "done": tail_result.done,
-                    "batches": batches,
-                }))?
-            );
-        } else {
-            println!(
-                "session={session_id} tail_rows={} last_audit_id={} done={} batches={batches}",
-                all_tail_lines.len(),
-                tail_result.last_audit_id,
-                tail_result.done,
-            );
-            for ev in &all_tail_lines {
-                let p = &ev.params;
-                println!(
-                    "  {} {} {} {}",
-                    p["audit_id"],
-                    p["method"].as_str().unwrap_or("?"),
-                    p["impact_kind"].as_str().unwrap_or("?"),
-                    p["summary"].as_str().unwrap_or("")
-                );
-            }
-        }
-        Ok(())
-    })
-    .await
-}
-
-fn parse_impact_kind(label: Option<&str>) -> Result<Option<ImpactKind>> {
-    let Some(label) = label else {
-        return Ok(None);
-    };
-    impact_kind_from_label(label)
-        .ok_or_else(|| anyhow::anyhow!("unknown impact kind: {label}"))
-        .map(Some)
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -286,7 +149,7 @@ mod tests {
     use super::*;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_catalog::CepMethod;
-    use lancet_native::audit::{CallAuditMetadata, CepAuditContext};
+    use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
 
     fn seed_audit_db(dir: &Path, session_id: &str) {

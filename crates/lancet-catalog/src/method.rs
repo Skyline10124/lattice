@@ -23,6 +23,7 @@ pub trait CepMethod: 'static {
     const IMPACT: ImpactKind;
     const CAPABILITY: RequiredCapability;
     const EFFECT: EffectDecl;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::NONE;
 }
 
 /// Sealed catalog membership — only types in `crate::methods` may implement this.
@@ -36,7 +37,39 @@ pub struct MethodDescriptor {
     pub impact: ImpactKind,
     pub capability: RequiredCapability,
     pub effect: EffectDecl,
+    pub base_authority: BaseAuthorityRequirement,
     pub params_schema: fn() -> serde_json::Value,
+}
+
+/// Base-envelope authority a method needs when it is exposed for a turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BaseAuthorityRequirement {
+    pub session_state: bool,
+    pub fetch_hosts: bool,
+    pub read_audit: bool,
+}
+
+impl BaseAuthorityRequirement {
+    pub const NONE: Self = Self::new(false, false, false);
+    pub const SESSION_STATE: Self = Self::new(true, false, false);
+    pub const FETCH_HOSTS: Self = Self::new(false, true, false);
+    pub const READ_AUDIT: Self = Self::new(false, false, true);
+
+    pub const fn new(session_state: bool, fetch_hosts: bool, read_audit: bool) -> Self {
+        Self {
+            session_state,
+            fetch_hosts,
+            read_audit,
+        }
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self {
+            session_state: self.session_state || other.session_state,
+            fetch_hosts: self.fetch_hosts || other.fetch_hosts,
+            read_audit: self.read_audit || other.read_audit,
+        }
+    }
 }
 
 impl MethodDescriptor {
@@ -48,6 +81,7 @@ impl MethodDescriptor {
             impact: M::IMPACT,
             capability: M::CAPABILITY,
             effect: M::EFFECT,
+            base_authority: M::BASE_AUTHORITY,
             params_schema: params_schema::<M>,
         }
     }

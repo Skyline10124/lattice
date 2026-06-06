@@ -12,8 +12,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
-use lattice_api::{CreateSessionRequest, OpenSessionRequest, SessionApi};
-use lattice_session::GraphHead;
+use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
 pub(crate) fn lattice_config_dir() -> PathBuf {
@@ -173,7 +172,7 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
     Ok(())
 }
 
-fn load_agent_checked(agent: &str) -> Result<lattice_profile::LoadedAgentProfile> {
+fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
     let project_root = std::env::current_dir()?;
     let loaded = crate::commands::run::load_named_profile(agent, &project_root)?;
     if loaded.profile.agent.name != agent {

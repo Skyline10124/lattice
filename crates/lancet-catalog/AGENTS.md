@@ -5,13 +5,14 @@ Crate-local guidance for `lancet-catalog`.
 ## Role
 
 This crate owns the typed CEP method catalog: method identifiers, params and
-results, descriptors, required capabilities, schema metadata, and the static
-production catalog used by native handlers and tool projection.
+results, descriptors, required capabilities, schema metadata, catalog-declared
+base authority requirements, and the static production catalog used by native
+handlers and tool projection.
 
 ## Sub-Architecture
 
-- `src/method.rs` defines `CepMethod`, `CatalogMethod`, and
-  `MethodDescriptor`.
+- `src/method.rs` defines `CepMethod`, `CatalogMethod`, `MethodDescriptor`, and
+  `BaseAuthorityRequirement`.
 - `src/catalog.rs` builds the production `CATALOG` and optional scaffold
   catalog behind `inspect-scaffold`.
 - `src/methods/workspace.rs` owns observe and mutate workspace contracts.
@@ -27,16 +28,19 @@ production catalog used by native handlers and tool projection.
 - Depend only on protocol plus serialization/schema support.
 - `CATALOG` is the authoritative production method set.
 - Keep the production catalog aligned with the root 9-method CEP contract.
-- Do not define LLM-facing tool schemas here; `lancet-native` projects them.
+- Do not define LLM-facing tool schemas here; `lancet-cep` projects them from
+  descriptors and `lancet-native` exposes the native path.
 - Keep method params/results, descriptors, and capabilities in sync.
+- Keep base authority requirements method-local and policy-neutral; catalog may
+  say that `fetch.web` needs fetch authority, but not which hosts are allowed.
 
 ## Recent Issues
 
 - FIXED P19: catalog sealing compile-fail coverage was corrected during CEP
   core review.
-- WATCH M-24-04: `tools.enabled` in `lattice-api` currently affects both LLM
-  tool exposure and base authority derivation; catalog metadata should not
-  become an implicit policy layer.
+- FIXED M-24-04: `MethodDescriptor::base_authority` now declares method-local
+  base authority requirements consumed by `lancet-cep::ToolExposure`; policy
+  inputs such as allowed hosts stay outside catalog.
 - WATCH: dotted method names stay canonical in CEP catalog; provider-specific
   name encoding belongs in `lattice-llm` wire adapters.
 - WATCH: optional scaffold methods must remain feature-gated and outside the
@@ -46,10 +50,8 @@ production catalog used by native handlers and tool projection.
 
 - For any new or changed method, update params/results, descriptor metadata,
   required capabilities, native handlers, tool projection tests, and API mapping.
-- If tool exposure/authority splitting happens for M-24-04, keep catalog
-  descriptors policy-neutral and move authority derivation out of exposure code.
 - Add regression tests when descriptor schemas, capability requirements, or
-  method names change.
+  method names/base-authority requirements change.
 - Keep scaffold additions behind `inspect-scaffold` and verify production
   catalog length remains unchanged unless the root contract is intentionally
   updated.
@@ -70,5 +72,5 @@ production catalog used by native handlers and tool projection.
 - Local: `cargo test -p lancet-catalog`.
 - Method contract changes: also run affected `lancet-native` and `lattice-api`
   tests.
-- Production catalog changes: assert catalog membership, descriptor schema, and
-  tool projection behavior.
+- Production catalog changes: assert catalog membership, descriptor schema,
+  base-authority requirements, and tool projection behavior.

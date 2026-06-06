@@ -31,8 +31,8 @@ category checks.
 
 ## Recent Issues
 
-- WATCH M-24-05: `lattice-api` currently composes invariant loading/checking as
-  part of the large turn-scoped LANCET runtime wiring.
+- FIXED M-24-05: invariant loading/checking is composed by `lancet-api` runtime
+  wiring; this crate keeps only card and Guard L2 semantics.
 - WATCH: native mutation handlers depend on this crate for Guard L2 category
   status but own the actual mutation lifecycle.
 - WATCH: opaque review helpers are security-sensitive because wording can reveal
@@ -41,8 +41,8 @@ category checks.
 
 ## Next Actions
 
-- If turn composition is split out of `lattice-api`, keep invariant card model
-  here and move only orchestration/wiring.
+- Keep invariant card model and Guard L2 mapping here; orchestration/wiring
+  belongs in `lancet-api`/native integration.
 - Add fixture cards and Rust snippets when changing Guard L2 category mapping.
 - Keep card loader errors precise enough for operators but not leaky for opaque
   review flows.

@@ -33,8 +33,9 @@ boundary-credit validation.
 
 ## Recent Issues
 
-- WATCH M-24-04: `lattice-api` currently derives parts of the base envelope from
-  `tools.enabled`, overlapping LLM exposure with authority shaping.
+- FIXED M-24-04: base-envelope inputs are declared by catalog descriptors and
+  applied through `lancet-cep::BaseAuthorityPlan`; this crate remains the
+  policy/guard/effect authority implementation.
 - WATCH M-24-01: host capability semantics must align with protocol field names
   and native effect-region matching.
 - WATCH: `mode = off` skips effect-region checks only; policy, capability,
@@ -43,8 +44,9 @@ boundary-credit validation.
 
 ## Next Actions
 
-- If M-24-04 is addressed, prefer an explicit authority/base-envelope builder
-  over deriving authority from exposure lists.
+- Keep base-envelope grant expansion outside this crate unless it becomes a
+  policy decision; this crate should validate capabilities, policy, guard, and
+  effect semantics.
 - Keep host allow semantics synchronized across protocol capabilities, network
   policy, native web fetch, and effect-region checks.
 - Add policy coverage whenever new decision reasons or capability sources are

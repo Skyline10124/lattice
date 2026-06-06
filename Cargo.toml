@@ -8,6 +8,7 @@ members = [
     "crates/lancet-protocol",
     "crates/lancet-catalog",
     "crates/lancet-dispatch",
+    "crates/lancet-cep",
     "crates/lancet-audit",
     "crates/lancet-authority",
     "crates/lancet-invariants",
@@ -33,6 +34,7 @@ lattice-agent    = { path = "crates/lattice-agent" }
 lancet-protocol = { path = "crates/lancet-protocol" }
 lancet-catalog  = { path = "crates/lancet-catalog" }
 lancet-dispatch = { path = "crates/lancet-dispatch" }
+lancet-cep      = { path = "crates/lancet-cep" }
 lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
 lancet-invariants = { path = "crates/lancet-invariants" }

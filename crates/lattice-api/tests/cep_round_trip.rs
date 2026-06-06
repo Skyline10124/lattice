@@ -15,8 +15,8 @@ use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_catalog::CepMethod;
 use lancet_native::{
-    register_production_method_registry, to_tool_definitions, CepAuditStore, CepTransport,
-    MethodRegistry, ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
+    ServerRunConfig, SEMANTIC_STAGE_NATIVE,
 };
 use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
@@ -65,15 +65,15 @@ async fn fetch_only_adapter() -> CepExecutorAdapter {
     adapter_with_registry(registry).await
 }
 
-fn tool_definition_for(method: &str) -> lattice_llm::ToolDefinition {
-    to_tool_definitions(catalog())
-        .into_iter()
-        .find(|tool| tool.name == method)
-        .unwrap_or_else(|| panic!("catalog projection missing method: {method}"))
+fn assert_catalog_method(method: &str) {
+    assert!(
+        catalog().iter().any(|descriptor| descriptor.name == method),
+        "catalog missing method: {method}"
+    );
 }
 
 fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
-    let _tool = tool_definition_for(method);
+    assert_catalog_method(method);
     ToolCall {
         id: format!("call_{method}"),
         function: FunctionCall {
@@ -347,15 +347,6 @@ async fn cep_round_trip_cep_family_error_preserves_payload() {
     assert_eq!(payload.message, expected_message);
     assert_eq!(payload.retriability, "permanent");
     assert_eq!(payload.data, serde_json::to_value(&expected_data).unwrap());
-}
-
-#[test]
-fn cep_round_trip_catalog_names_match_tool_definitions() {
-    for descriptor in catalog() {
-        let tool = tool_definition_for(descriptor.name);
-        assert_eq!(tool.name, descriptor.name);
-        assert!(tool.name.contains('.'));
-    }
 }
 
 async fn spawn_echo_server(status_line: &str, body: &str) -> String {

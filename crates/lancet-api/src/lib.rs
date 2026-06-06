@@ -6,7 +6,7 @@
 //! This crate is the single front door for driving LANCET's Controlled Execution
 //! Protocol (CEP) runtime, independent of any host application. It owns runtime
 //! composition — spawning a native CEP server over an in-process transport and
-//! handing back a typed [`CepClient`] — plus tool projection and turn
+//! handing back a typed [`CepClient`] — plus CEP tool exposure and turn
 //! attestation.
 //!
 //! # Why this crate exists
@@ -24,9 +24,9 @@
 //! of any application's configuration schema; translating an application profile
 //! into policy is the host's responsibility.
 //!
-//! The one remaining LATTICE coupling is [`ToolDefinition`], re-exported from
-//! `lattice-llm` because catalog tool projection yields that type. Extracting it
-//! to a LANCET-owned (or shared) crate is tracked as future work.
+//! The remaining LATTICE coupling in the LANCET stack is URL/DNS security
+//! helpers reused from `lattice-llm`; CEP tool definitions are owned by
+//! `lancet-cep`.
 //!
 //! # Entry points
 //!
@@ -35,23 +35,33 @@
 //! - [`LancetServer::spawn`] — low-level launcher for callers that build a
 //!   bespoke [`ServerRunConfig`].
 //! - [`store_turn_attestation`] — persist an unsigned in-toto attestation.
-//! - [`resolve_catalog_tool_definitions`] — project enabled catalog methods to
-//!   LLM-facing tool schemas.
 
 mod attestation;
+mod audit;
 mod config;
+mod doctor;
 mod error;
 mod runtime;
-mod tools;
+mod status;
 
 pub use attestation::store_turn_attestation;
+pub use audit::{
+    query_audit, tail_audit, AuditQueryOutput, AuditRequest, AuditTailOutput,
+    AUDIT_TAIL_MAX_BATCHES,
+};
 pub use config::{AuditBacking, LancetRuntimeConfig};
+pub use doctor::{
+    run_doctor_checks, run_submit_intent_smoke_for_project_root, LancetDoctorGate,
+    LancetDoctorOutput, LancetDoctorRequest,
+};
 pub use error::{LancetError, LancetResult};
 pub use runtime::{
     base_observation_envelope, cep_policy_from_policy_config, LancetRuntime, LancetRuntimeParts,
     LancetServer, ServerLifecycle, DEFAULT_CHANNEL_CAPACITY,
 };
-pub use tools::{resolve_catalog_tool_definitions, resolve_enabled_tools};
+pub use status::{
+    collect_status, collect_status_with_probe, LancetRecentCallEntry, LancetStatusOutput,
+};
 
 // --- Curated re-exports: types that appear in this crate's public signatures,
 // so consumers can name them without taking direct dependencies on the
@@ -59,12 +69,15 @@ pub use tools::{resolve_catalog_tool_definitions, resolve_enabled_tools};
 
 pub use lancet_authority::policy::default::PolicyConfig;
 pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
+pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
 pub use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 pub use lancet_native::{
-    register_production_method_registry, to_tool_definitions, AuditQueryFilters, CepAuditContext,
-    CepAuditStore, MethodRegistry, ServerRunConfig,
+    register_production_method_registry, AuditQueryFilters, CepAuditContext, CepAuditStore,
+    MethodRegistry, MissingRequiredBoundary, ServerRunConfig,
 };
 pub use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
-pub use lancet_protocol::CepError;
-pub use lattice_llm::ToolDefinition;
+pub use lancet_protocol::{
+    BoundaryDimension, BoundaryPrimitive, CepError, EffectiveBoundaryStatus, HostProbeEntry,
+    HostProbeReport, HostProbeStatus,
+};

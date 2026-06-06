@@ -3,7 +3,7 @@
 
 //! External observation methods.
 
-use crate::method::{CatalogMethod, CepMethod};
+use crate::method::{BaseAuthorityRequirement, CatalogMethod, CepMethod};
 use lancet_protocol::RequiredCapability;
 use lancet_protocol::{
     EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
@@ -39,6 +39,7 @@ impl CepMethod for Fetch {
     type Result = FetchResult;
     const IMPACT: ImpactKind = ImpactKind::ExternalObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::FetchUrl;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::FETCH_HOSTS;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::ExternalObservation]),
         scope: EffectScopeKind::ExternalHost,

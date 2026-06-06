@@ -5,8 +5,6 @@
 //!
 //! Low-level executor helpers stay crate-private and are reachable only through
 //! native catalog handlers. `lattice-agent` cannot reach them at compile time.
-//! [`to_tool_definitions`] is the only public projection from the catalog to
-//! LLM-facing tool schemas.
 
 pub mod audit {
     pub use lancet_audit::*;
@@ -16,7 +14,6 @@ pub mod enforcement;
 pub(crate) mod executor;
 mod handlers;
 pub mod impact;
-pub mod projection;
 pub mod provenance {
     pub use lancet_audit::provenance::*;
 }
@@ -33,9 +30,6 @@ pub use lancet_audit::{
     AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_NATIVE,
 };
 pub use lancet_dispatch::{wire_code_for_error, CepClient, CepServer, CepTransport};
-#[cfg(feature = "inspect-scaffold")]
-pub use projection::scaffold_tool_definitions;
-pub use projection::to_tool_definitions;
 pub use provenance::{
     build_in_toto_statement, canonicalize_in_toto_statement, source_audit_range_hash,
 };

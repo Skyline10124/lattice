@@ -301,6 +301,10 @@ fn apply_network_profile(section: &LancetNetworkSection, network: &mut NetworkPo
     }
 }
 
+fn to_llm_tool_definition(tool: lancet_api::ToolDefinition) -> lattice_llm::ToolDefinition {
+    lattice_llm::ToolDefinition::new(tool.name, tool.description, tool.parameters)
+}
+
 /// Build `CommandPolicy` from the profile `[lancet.command]` section.
 ///
 /// Missing `[lancet.command]` falls back to `CommandPolicy::defaults()`.
@@ -632,6 +636,11 @@ pub(crate) fn build_production_turn_deps(
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
+    let tool_definitions = parts
+        .tool_definitions
+        .into_iter()
+        .map(to_llm_tool_definition)
+        .collect();
     let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
     let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
         llm,
@@ -640,7 +649,7 @@ pub(crate) fn build_production_turn_deps(
 
     Ok(ProductionTurnDeps {
         agent_loop,
-        tool_definitions: parts.tool_definitions,
+        tool_definitions,
         runtime: parts.lifecycle,
         cep_client: parts.client,
         audit: parts.audit,

@@ -1002,11 +1002,11 @@ dependencies = [
  "lancet-audit",
  "lancet-authority",
  "lancet-catalog",
+ "lancet-cep",
  "lancet-dispatch",
  "lancet-invariants",
  "lancet-native",
  "lancet-protocol",
- "lattice-llm",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -1052,6 +1052,17 @@ version = "0.1.0"
 dependencies = [
  "lancet-protocol",
  "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "lancet-cep"
+version = "0.1.0"
+dependencies = [
+ "lancet-catalog",
+ "lancet-dispatch",
+ "lancet-protocol",
  "serde",
  "serde_json",
 ]
@@ -1170,18 +1181,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "clap",
  "colored",
  "dirs",
  "dotenvy",
  "futures",
  "lancet-api",
- "lancet-authority",
  "lancet-catalog",
  "lancet-invariants",
  "lancet-native",
- "lancet-protocol",
  "lattice-agent",
  "lattice-api",
  "lattice-llm",

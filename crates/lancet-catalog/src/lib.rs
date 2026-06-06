@@ -15,4 +15,4 @@ pub use catalog::{catalog, CATALOG};
 #[cfg(feature = "inspect-scaffold")]
 pub use catalog::{scaffold_catalog, SCAFFOLD_CATALOG};
 pub use lancet_protocol::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
-pub use method::{CatalogMethod, CepMethod, MethodDescriptor};
+pub use method::{BaseAuthorityRequirement, CatalogMethod, CepMethod, MethodDescriptor};

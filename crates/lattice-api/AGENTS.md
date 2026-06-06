@@ -34,8 +34,10 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Recent Issues
 
-- OPEN M-24-04: `tools.enabled` currently drives both LLM tool exposure and
-  parts of base authority derivation.
+- FIXED M-24-04: `lancet-cep` now separates `ToolExposure` from
+  `BaseAuthorityPlan`, and catalog descriptors declare method-local base
+  authority requirements. This crate converts CEP tool definitions to provider
+  tool definitions only at the LATTICE↔LANCET seam.
 - FIXED M-24-05: turn/LANCET runtime composition extracted into the new
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
@@ -47,8 +49,6 @@ agent loop over `lancet-api`'s CEP runtime.
 
 ## Next Actions
 
-- Split tool exposure from authority shaping for M-24-04; exposure should not be
-  treated as an authorization boundary.
 - Keep runtime composition in `lancet-api`; this crate should only translate
   profile policy and wire the agent loop. Do not reintroduce server/transport
   assembly here.

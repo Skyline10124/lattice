@@ -23,14 +23,13 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use lattice_profile::ProfileSource;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use std::time::Duration;
 use tokio::time;
 
-use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
+use lattice_api::{LoadedAgentProfile, RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
 
 /// Stream idle timeout in seconds (L-18-03).
 pub(crate) const STREAM_TIMEOUT_SECS: u64 = 300;
@@ -440,7 +439,7 @@ fn render_verbose_epilogue<WErr: Write>(
 pub async fn run_session_prompt(
     prompt: String,
     session_id: String,
-    loaded_profile: lattice_profile::LoadedAgentProfile,
+    loaded_profile: LoadedAgentProfile,
     verbose: bool,
     json: bool,
 ) -> std::process::ExitCode {
@@ -456,7 +455,7 @@ pub async fn run_session_prompt(
 async fn run_inner(
     prompt: String,
     session_id: String,
-    loaded_profile: lattice_profile::LoadedAgentProfile,
+    loaded_profile: LoadedAgentProfile,
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
@@ -555,13 +554,9 @@ async fn run_inner(
 pub(crate) fn load_named_profile(
     agent_name: &str,
     project_root: &Path,
-) -> std::result::Result<lattice_profile::LoadedAgentProfile, anyhow::Error> {
+) -> std::result::Result<LoadedAgentProfile, anyhow::Error> {
     let global_agents_dir = safe_agents_dir(None).map_err(|e| anyhow::anyhow!("{}", e))?;
-    let paths = lattice_profile::DiscoveryPaths {
-        project_root: project_root.to_path_buf(),
-        global_agents_dir,
-    };
-    lattice_profile::resolve_agent_profile(ProfileSource::Name(agent_name.to_string()), &paths)
+    lattice_api::resolve_named_agent_profile(agent_name, project_root, &global_agents_dir)
         .map_err(Into::into)
 }
 

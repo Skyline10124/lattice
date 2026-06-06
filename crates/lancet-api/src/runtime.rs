@@ -9,20 +9,15 @@ use std::sync::Arc;
 use lancet_audit::{CepAuditContext, CepAuditStore};
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
-use lancet_catalog::methods::envelope::Envelope;
-use lancet_catalog::methods::external::Fetch;
-use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::CepMethod;
+use lancet_cep::{BaseAuthorityPlan, ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_invariants::{load_invariant_index_from_dir, resolve_invariants_dir};
 use lancet_native::{register_production_method_registry, MethodRegistry, ServerRunConfig};
 use lancet_protocol::envelope::BaseExecutionEnvelope;
-use lattice_llm::ToolDefinition;
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};
 use crate::error::LancetError;
-use crate::tools::resolve_catalog_tool_definitions;
 
 /// Default CEP transport channel capacity for the production runtime.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -152,11 +147,12 @@ impl LancetRuntime {
             .and_then(|p| p.to_str().map(str::to_owned))
             .unwrap_or(project_root_str);
 
-        let tool_definitions = resolve_catalog_tool_definitions(&enabled_tools)?;
+        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
+        let tool_definitions = tool_exposure.definitions().to_vec();
 
         let cep_policy = cep_policy_from_policy_config(&policy);
         let base_envelope =
-            base_observation_envelope(&workspace_root, &enabled_tools, &cep_policy)?;
+            base_observation_envelope_from_exposure(&workspace_root, &tool_exposure, &cep_policy)?;
 
         let audit = match audit {
             AuditBacking::InMemory => Arc::new(
@@ -257,34 +253,91 @@ pub fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
     }
 }
 
-/// Build the turn base observation envelope from policy and the enabled tools.
+/// Build the turn base envelope from policy and the enabled catalog methods.
 ///
-/// Grants session-state for envelope/todo methods, per-host fetch capabilities
-/// for allowed network hosts, and read-audit; never write or command scopes.
+/// Grants catalog-declared session/fetch/audit authority, using policy network
+/// hosts for fetch-capable methods; never grants workspace write or command
+/// scopes.
 pub fn base_observation_envelope(
     project_root: &str,
     enabled_tools: &[String],
     policy: &CepPolicyConfig,
 ) -> Result<BaseExecutionEnvelope, LancetError> {
-    let mut base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(project_root, "cep_context turn observation");
-    if enabled_tools
-        .iter()
-        .any(|name| name == TodoWrite::NAME || name == Envelope::NAME)
-    {
-        base_envelope = base_envelope.with_session_state();
+    let exposure = resolve_catalog_tool_exposure(enabled_tools)?;
+    base_observation_envelope_from_exposure(project_root, &exposure, policy)
+}
+
+fn base_observation_envelope_from_exposure(
+    project_root: &str,
+    exposure: &ToolExposure,
+    policy: &CepPolicyConfig,
+) -> Result<BaseExecutionEnvelope, LancetError> {
+    let plan = BaseAuthorityPlan::for_workspace_root(project_root).with_requirements(
+        exposure.base_authority(),
+        policy.network.allowed_hosts.iter(),
+    );
+    plan.build()
+        .map_err(|err| LancetError::Internal(format!("invalid base envelope: {err}")))
+}
+
+fn resolve_catalog_tool_exposure(enabled: &[String]) -> Result<ToolExposure, LancetError> {
+    ToolExposure::from_catalog_enabled(enabled).map_err(map_tool_exposure_err)
+}
+
+fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
+    LancetError::UnknownTools {
+        unknown: err.unknown,
+        available: err.available,
     }
-    if enabled_tools.iter().any(|name| name == Fetch::NAME) {
-        for host in &policy.network.allowed_hosts {
-            let host = host.trim();
-            if !host.is_empty() {
-                base_envelope = base_envelope.with_fetch_host(host);
-            }
-        }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lancet_catalog::methods::{AuditObserve, Fetch, ObserveWorkspace, TodoWrite};
+    use lancet_catalog::CepMethod;
+    use lancet_protocol::Capability;
+
+    #[test]
+    fn base_envelope_uses_catalog_descriptor_requirements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
+        policy.network.allowed_hosts = vec!["example.com".to_string()];
+        let enabled = vec![
+            Fetch::NAME.to_string(),
+            TodoWrite::NAME.to_string(),
+            AuditObserve::NAME.to_string(),
+        ];
+
+        let envelope =
+            base_observation_envelope(dir.path().to_str().unwrap(), &enabled, &policy).unwrap();
+
+        assert!(envelope.inner.capabilities.contains(&Capability::FetchUrl {
+            host: "example.com".to_string()
+        }));
+        assert!(envelope
+            .inner
+            .capabilities
+            .contains(&Capability::MutateSessionState));
+        assert!(envelope.inner.capabilities.contains(&Capability::ReadAudit));
+        assert!(envelope.validate_no_write_or_command().is_ok());
     }
-    base_envelope = base_envelope.with_read_audit();
-    base_envelope
-        .validate_no_write_or_command()
-        .map_err(|err| LancetError::Internal(format!("invalid base envelope: {err}")))?;
-    Ok(base_envelope)
+
+    #[test]
+    fn allowed_hosts_do_not_grant_fetch_without_fetch_method() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
+        policy.network.allowed_hosts = vec!["example.com".to_string()];
+        let enabled = vec![ObserveWorkspace::NAME.to_string()];
+
+        let envelope =
+            base_observation_envelope(dir.path().to_str().unwrap(), &enabled, &policy).unwrap();
+
+        assert!(!envelope
+            .inner
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::FetchUrl { .. })));
+        assert!(envelope.validate_no_write_or_command().is_ok());
+    }
 }

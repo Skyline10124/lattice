@@ -6,7 +6,7 @@ Crate-local guidance for `lancet-native`.
 
 This crate owns the production native CEP implementation: method handlers,
 native server lifecycle, policy/guard/audit integration, verification, edit
-application, shell/web helpers, impact analysis, and catalog-to-tool projection.
+application, shell/web helpers, and impact analysis.
 
 ## Sub-Architecture
 
@@ -19,14 +19,13 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
   patch write limits.
 - `src/executor/` owns crate-private shell/web/render helpers and output limits.
 - `src/impact/` owns impact analysis layers.
-- `src/projection/` owns catalog-to-LLM tool definition projection.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
 ## Boundaries
 
 - Keep low-level executor helpers crate-private behind native handlers.
-- `to_tool_definitions` is the public tool projection path; no parallel
-  hard-coded tool schema surface.
+- Tool projection belongs in `lancet-cep`; do not add native compatibility
+  projection shims.
 - Mutations must pass active envelope, Guard L1, effect checks, audit recording,
   optional invariant checks, and optional verify.
 - Do not expose direct native executors to `lattice-agent`.
@@ -41,7 +40,8 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
   commit-baseline hunk summaries are recorded when evidence exists.
 - PARTIAL M-05: web fetch rebinding defense uses request-time pinned IP plus a
   maintained rebinding suffix denylist.
-- WATCH: tool schemas must continue to come from catalog projection only.
+- WATCH: tool schemas must continue to come from `lancet-cep` catalog
+  projection only.
 - CLOSED 31-CR-01/WR-02: artifact commit delete paths reject symlink parents,
   and commit-baseline anchor files are read from the captured lower baseline.
 
@@ -57,7 +57,7 @@ application, shell/web helpers, impact analysis, and catalog-to-tool projection.
 ## Record Maintenance
 
 - Update `Recent Issues` and `Next Actions` whenever native handlers,
-  enforcement, executor helpers, edit logic, or projection behavior changes.
+  enforcement, executor helpers, edit logic, or impact behavior changes.
 - Keep open/deferred/residual native issues in root `FINDINGS.md`.
 - Add landed native fixes to root `FIX.md` with verification and changed files.
 - For partial fixes, update this file and leave explicit residual risk in

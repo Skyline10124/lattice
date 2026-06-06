@@ -15,7 +15,7 @@ pub(crate) mod fd;
 pub(crate) mod landlock;
 pub(crate) mod linux;
 #[cfg(test)]
-mod live_tests;
+mod linux_canary_tests;
 pub(crate) mod overlay;
 pub(crate) mod plan;
 pub(crate) mod snapshot;

@@ -1,0 +1,17 @@
+[package]
+name = "lancet-cep"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "CEP public facade: protocol/catalog/dispatch re-exports, tool exposure, and base authority planning"
+
+[dependencies]
+lancet-protocol = { workspace = true }
+lancet-catalog = { workspace = true }
+lancet-dispatch = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+inspect-scaffold = ["lancet-catalog/inspect-scaffold"]

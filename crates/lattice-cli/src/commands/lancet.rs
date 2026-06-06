@@ -9,29 +9,16 @@
 //!   isolated `session.envelope` derive-intent smoke that asserts `unknowns == 0`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use colored::Colorize;
-use lancet_api::LancetServer;
-use lancet_authority::{allowed_primitives_for, CepTurnContext};
-use lancet_catalog::catalog::catalog;
-use lancet_catalog::methods::envelope::{
-    Envelope, EnvelopeParams, EnvelopeResult, SubmitIntentParams,
+#[cfg(test)]
+use lancet_api::collect_status_with_probe;
+use lancet_api::{
+    collect_status, run_doctor_checks, BoundaryDimension, HostProbeEntry, HostProbeReport,
+    HostProbeStatus, LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, LancetStatusOutput,
 };
-use lancet_invariants::invariants::loader::load_cards_from_dir;
-use lancet_invariants::resolve_invariants_dir;
-use lancet_native::{
-    probe_host_capabilities, unavailable_required_boundaries, HostProbeReport,
-    MissingRequiredBoundary,
-};
-use lancet_native::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, MethodRegistry,
-    ServerRunConfig,
-};
-use lancet_protocol::envelope::BaseExecutionEnvelope;
-use lancet_protocol::{BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryStatus};
 
 const BOUNDARY_NON_CLAIM_NOTE: &str =
     "Physical bounds only. No read-set observation, network rollback, or sandbox guarantee.";
@@ -62,312 +49,8 @@ pub fn run(action: Option<LancetAction>, global_json: bool) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-fn audit_db_path(project_root: &Path) -> PathBuf {
-    project_root.join(".lattice").join("cep_audit.db")
-}
-
-fn compute_duration_ms(started_at: &str, ended_at: Option<&str>) -> Option<i64> {
-    let ended = ended_at?;
-    let start = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
-    let end = chrono::DateTime::parse_from_rfc3339(ended).ok()?;
-    Some(end.signed_duration_since(start).num_milliseconds())
-}
-
-// ---------------------------------------------------------------------------
 // lancet status
 // ---------------------------------------------------------------------------
-
-pub(crate) struct CepStatusOutput {
-    pub host_probe: HostProbeReport,
-    pub active_envelope: Option<serde_json::Value>,
-    pub no_active_envelope_observed: bool,
-    pub recent_calls: Vec<RecentCallEntry>,
-    pub last_guard_verdict: Option<String>,
-}
-
-pub(crate) struct RecentCallEntry {
-    pub audit_id: i64,
-    pub method: String,
-    pub impact: String,
-    pub verdict: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub effective_boundary: Option<serde_json::Map<String, serde_json::Value>>,
-    pub boundary_setup_failed_closed: Option<bool>,
-}
-
-/// Build status data from the audit store without spawning a CEP server.
-pub(crate) fn collect_status(project_root: &Path) -> Result<CepStatusOutput> {
-    collect_status_with_probe(project_root, probe_host_capabilities())
-}
-
-fn collect_status_with_probe(
-    project_root: &Path,
-    host_probe: HostProbeReport,
-) -> Result<CepStatusOutput> {
-    let db_path = audit_db_path(project_root);
-
-    if !db_path.exists() {
-        return Ok(CepStatusOutput {
-            host_probe,
-            active_envelope: None,
-            no_active_envelope_observed: true,
-            recent_calls: vec![],
-            last_guard_verdict: None,
-        });
-    }
-
-    let store =
-        CepAuditStore::open(&db_path).map_err(|e| anyhow::anyhow!("open audit store: {e}"))?;
-
-    // Latest session.envelope row — raw metadata_json only.
-    let declare_rows = store
-        .query_rows(&AuditQueryFilters {
-            method: Some("session.envelope".to_string()),
-            ..Default::default()
-        })
-        .map_err(|e| anyhow::anyhow!("query session.envelope rows: {e}"))?;
-
-    let active_envelope = declare_rows.last().and_then(|row| {
-        row.metadata_json
-            .as_deref()
-            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-    });
-    let no_active_envelope_observed = active_envelope.is_none();
-
-    // All rows for recent-calls window and last guard verdict.
-    let all_rows = store
-        .query_rows(&AuditQueryFilters::default())
-        .map_err(|e| anyhow::anyhow!("query all rows: {e}"))?;
-
-    let last_guard_verdict = all_rows.last().map(|r| {
-        r.semantic_status
-            .clone()
-            .unwrap_or_else(|| r.guard_stage.clone())
-    });
-
-    let recent_start = all_rows.len().saturating_sub(20);
-    let recent_calls = all_rows[recent_start..]
-        .iter()
-        .rev()
-        .map(|row| RecentCallEntry {
-            audit_id: row.audit_id,
-            method: row.method.clone(),
-            impact: row.impact_kind.clone(),
-            verdict: row.semantic_status.clone(),
-            duration_ms: compute_duration_ms(row.started_at.as_str(), row.ended_at.as_deref()),
-            effective_boundary: parse_effective_boundary_metadata(
-                &row.method,
-                row.metadata_json.as_deref(),
-            ),
-            boundary_setup_failed_closed: parse_boundary_setup_failed_closed_metadata(
-                &row.method,
-                row.metadata_json.as_deref(),
-            ),
-        })
-        .collect();
-
-    Ok(CepStatusOutput {
-        host_probe,
-        active_envelope,
-        no_active_envelope_observed,
-        recent_calls,
-        last_guard_verdict,
-    })
-}
-
-fn parse_effective_boundary_metadata(
-    method: &str,
-    metadata_json: Option<&str>,
-) -> Option<serde_json::Map<String, serde_json::Value>> {
-    if method != "exec.command_run" {
-        return None;
-    }
-    let metadata_json = metadata_json?;
-    let metadata = match serde_json::from_str::<serde_json::Value>(metadata_json) {
-        Ok(value) => value,
-        Err(err) => {
-            return Some(unknown_effective_boundary(format!(
-                "malformed metadata_json: {err}"
-            )));
-        }
-    };
-    let boundary_value = metadata.get("effective_boundary")?;
-    let Some(boundary_map) = boundary_value.as_object() else {
-        return Some(unknown_effective_boundary(
-            "effective_boundary metadata is not an object".to_string(),
-        ));
-    };
-    if boundary_map.is_empty() {
-        return None;
-    }
-
-    let mut parsed = serde_json::Map::new();
-    for boundary in BoundaryDimension::ALL {
-        let label = boundary.label();
-        if let Some(entry) = boundary_map.get(label) {
-            parsed.insert(
-                label.to_string(),
-                normalize_effective_boundary_entry(*boundary, entry),
-            );
-        }
-    }
-    if parsed.is_empty() {
-        Some(unknown_effective_boundary(
-            "effective_boundary metadata has no known boundary keys".to_string(),
-        ))
-    } else {
-        Some(parsed)
-    }
-}
-
-fn parse_boundary_setup_failed_closed_metadata(
-    method: &str,
-    metadata_json: Option<&str>,
-) -> Option<bool> {
-    if method != "exec.command_run" {
-        return None;
-    }
-    let metadata = serde_json::from_str::<serde_json::Value>(metadata_json?).ok()?;
-    metadata
-        .get("boundary_setup_failed_closed")
-        .and_then(|value| value.as_bool())
-}
-
-fn normalize_effective_boundary_entry(
-    boundary: BoundaryDimension,
-    entry: &serde_json::Value,
-) -> serde_json::Value {
-    let Some(object) = entry.as_object() else {
-        return unknown_effective_boundary_entry(
-            boundary,
-            "effective_boundary entry is not an object".to_string(),
-        );
-    };
-    let Some(status) = object.get("status").and_then(|value| value.as_str()) else {
-        return unknown_effective_boundary_entry(
-            boundary,
-            "effective_boundary entry missing status".to_string(),
-        );
-    };
-    if !is_known_effective_boundary_status(status) {
-        return unknown_effective_boundary_entry(
-            boundary,
-            format!("unknown effective_boundary status `{status}`"),
-        );
-    }
-    if status == "physically_bounded" {
-        if let Err(reason) = validate_physically_bounded_attribution(boundary, object) {
-            return unknown_effective_boundary_entry(boundary, reason);
-        }
-    }
-    let mut normalized = object.clone();
-    normalized
-        .entry("boundary".to_string())
-        .or_insert_with(|| serde_json::Value::String(boundary.label().to_string()));
-    if !normalized
-        .get("observed")
-        .is_some_and(serde_json::Value::is_boolean)
-    {
-        normalized.insert("observed".to_string(), serde_json::Value::Bool(false));
-    }
-    serde_json::Value::Object(normalized)
-}
-
-fn validate_physically_bounded_attribution(
-    boundary: BoundaryDimension,
-    object: &serde_json::Map<String, serde_json::Value>,
-) -> std::result::Result<(), String> {
-    let allowed = allowed_primitives_for(boundary);
-    let allowed_labels = allowed
-        .iter()
-        .map(|primitive| primitive.label())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let source_primitives = object
-        .get("source_primitives")
-        .and_then(|value| value.as_array())
-        .ok_or_else(|| {
-            format!(
-                "physically_bounded {} boundary requires source_primitives containing one of: {allowed_labels}",
-                boundary.label()
-            )
-        })?;
-
-    let mut parsed_sources = Vec::new();
-    for value in source_primitives {
-        let Some(label) = value.as_str() else {
-            return Err(format!(
-                "physically_bounded {} boundary source_primitives must contain only primitive labels",
-                boundary.label()
-            ));
-        };
-        let Some(primitive) = boundary_primitive_from_label(label) else {
-            return Err(format!(
-                "physically_bounded {} boundary source_primitives contains unknown primitive `{label}`",
-                boundary.label()
-            ));
-        };
-        parsed_sources.push(primitive);
-    }
-
-    if parsed_sources
-        .iter()
-        .any(|primitive| allowed.contains(primitive))
-    {
-        Ok(())
-    } else {
-        Err(format!(
-            "physically_bounded {} boundary requires source_primitives containing one of: {allowed_labels}",
-            boundary.label()
-        ))
-    }
-}
-
-fn boundary_primitive_from_label(label: &str) -> Option<BoundaryPrimitive> {
-    BoundaryPrimitive::ALL
-        .iter()
-        .copied()
-        .find(|primitive| primitive.label() == label)
-}
-
-fn is_known_effective_boundary_status(status: &str) -> bool {
-    matches!(
-        status,
-        "physically_bounded"
-            | "unbounded"
-            | "not_requested"
-            | "failed_closed"
-            | "unsupported"
-            | "unknown"
-    )
-}
-
-fn unknown_effective_boundary(reason: String) -> serde_json::Map<String, serde_json::Value> {
-    BoundaryDimension::ALL
-        .iter()
-        .map(|boundary| {
-            (
-                boundary.label().to_string(),
-                unknown_effective_boundary_entry(*boundary, reason.clone()),
-            )
-        })
-        .collect()
-}
-
-fn unknown_effective_boundary_entry(
-    boundary: BoundaryDimension,
-    reason: String,
-) -> serde_json::Value {
-    serde_json::json!({
-        "boundary": boundary,
-        "status": EffectiveBoundaryStatus::Unknown,
-        "observed": false,
-        "reason": reason,
-    })
-}
 
 fn run_status(json: bool) -> Result<()> {
     let project_root = std::env::current_dir().context("current working directory")?;
@@ -382,7 +65,7 @@ fn run_status(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn status_json_value(output: &CepStatusOutput) -> serde_json::Value {
+fn status_json_value(output: &LancetStatusOutput) -> serde_json::Value {
     serde_json::json!({
         "host_probe": host_probe_json_value(&output.host_probe),
         "active_envelope": output.active_envelope,
@@ -404,17 +87,17 @@ fn host_probe_json_value(host_probe: &HostProbeReport) -> serde_json::Value {
     serde_json::to_value(host_probe).unwrap_or_else(|_| serde_json::json!({}))
 }
 
-fn host_probe_reason(entry: &lancet_protocol::HostProbeEntry) -> &str {
+fn host_probe_reason(entry: &HostProbeEntry) -> &str {
     entry.reason.as_deref().unwrap_or("no_reason")
 }
 
-fn render_status_text(output: &CepStatusOutput) {
+fn render_status_text(output: &LancetStatusOutput) {
     for line in status_text_lines(output) {
         println!("{line}");
     }
 }
 
-fn status_text_lines(output: &CepStatusOutput) -> Vec<String> {
+fn status_text_lines(output: &LancetStatusOutput) -> Vec<String> {
     let mut lines = vec!["lancet status".dimmed().to_string()];
     lines.push("Host Probe (current primitives):".bold().to_string());
     for entry in output.host_probe.entries() {
@@ -625,18 +308,14 @@ fn format_effective_boundary_details(entry: &serde_json::Value) -> String {
 /// Public entry point — derives invariants dir from `$PWD/.lancet/invariants/`.
 pub fn run_doctor(json: bool, enforce_profile: Option<String>) -> Result<()> {
     let project_root = std::env::current_dir().context("current working directory")?;
-    let invariants_dir = resolve_invariants_dir(&project_root, None);
     let gate = enforce_profile
         .as_deref()
         .map(|profile| load_doctor_gate(profile, &project_root))
         .transpose()?;
-    run_doctor_inner_with_probe(
-        &project_root,
-        &invariants_dir,
-        json,
-        probe_host_capabilities(),
-        gate,
-    )
+    let mut request = LancetDoctorRequest::new(project_root);
+    request.gate = gate;
+    let output = run_doctor_checks(request);
+    emit_doctor_result(&output, json)
 }
 
 /// Testable core — accepts an explicit invariants directory.
@@ -646,13 +325,10 @@ pub(crate) fn run_doctor_inner(invariants_dir: &Path, json: bool) -> Result<()> 
         .parent()
         .and_then(Path::parent)
         .unwrap_or(invariants_dir);
-    run_doctor_inner_with_probe(
-        project_root,
-        invariants_dir,
-        json,
-        probe_host_capabilities(),
-        None,
-    )
+    let mut request = LancetDoctorRequest::new(project_root);
+    request.invariants_dir = Some(invariants_dir.to_path_buf());
+    let output = run_doctor_checks(request);
+    emit_doctor_result(&output, json)
 }
 
 #[cfg(test)]
@@ -661,179 +337,33 @@ pub(crate) fn run_doctor_inner_for_project_root(
     invariants_dir: &Path,
     json: bool,
 ) -> Result<()> {
-    run_doctor_inner_with_probe(
-        project_root,
-        invariants_dir,
-        json,
-        probe_host_capabilities(),
-        None,
-    )
+    let mut request = LancetDoctorRequest::new(project_root);
+    request.invariants_dir = Some(invariants_dir.to_path_buf());
+    let output = run_doctor_checks(request);
+    emit_doctor_result(&output, json)
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct DoctorGateInput {
-    profile_label: String,
-    required_boundaries: Vec<BoundaryDimension>,
-}
-
-#[derive(Clone, Debug)]
-struct DoctorOutput {
-    ok_items: Vec<String>,
-    warnings: Vec<String>,
-    issues: Vec<String>,
-    card_ids: Vec<String>,
-    host_probe: HostProbeReport,
-    gate_profile: Option<String>,
-    gate_missing: Vec<MissingRequiredBoundary>,
-}
-
+#[cfg(test)]
 pub(crate) fn run_doctor_inner_with_probe(
     project_root: &Path,
     invariants_dir: &Path,
     json: bool,
     host_probe: HostProbeReport,
-    gate: Option<DoctorGateInput>,
+    gate: Option<LancetDoctorGate>,
 ) -> Result<()> {
-    let output = collect_doctor_output(project_root, invariants_dir, host_probe, gate);
+    let mut request = LancetDoctorRequest::new(project_root);
+    request.invariants_dir = Some(invariants_dir.to_path_buf());
+    request.host_probe = Some(host_probe);
+    request.gate = gate;
+    let output = run_doctor_checks(request);
     emit_doctor_result(&output, json)
 }
 
-fn collect_doctor_output(
-    project_root: &Path,
-    invariants_dir: &Path,
-    host_probe: HostProbeReport,
-    gate: Option<DoctorGateInput>,
-) -> DoctorOutput {
-    let mut ok_items: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut issues: Vec<String> = Vec::new();
-    let mut gate_profile = None;
-    let mut gate_missing = Vec::new();
-
-    if gate.is_none() {
-        ok_items.push(
-            "doctor mode: informational (default exit 0; use --enforce-profile <profile> for a profile gate)"
-                .to_string(),
-        );
-    }
-
-    // 1. CATALOG method count (must be exactly 9).
-    let catalog_len = catalog().len();
-    if catalog_len == 9 {
-        ok_items.push(format!("catalog: {catalog_len} methods (expected 9)"));
-    } else {
-        issues.push(format!("catalog: expected 9 methods, got {catalog_len}"));
-    }
-
-    // 2. Production method registry registers without error.
-    {
-        let mut registry = MethodRegistry::new();
-        match register_production_method_registry(&mut registry) {
-            Ok(()) => ok_items.push("registry: production methods registered".to_string()),
-            Err(e) => issues.push(format!("registry: {}", e.message)),
-        }
-    }
-
-    // 3. Invariant cards — parse errors fail doctor.
-    let card_ids: Vec<String> = match load_cards_from_dir(invariants_dir) {
-        Ok(cards) if cards.is_empty() => {
-            ok_items.push("invariants: ok_empty (no cards)".to_string());
-            vec![]
-        }
-        Ok(cards) => {
-            let ids: Vec<String> = cards.iter().map(|c| c.id.clone()).collect();
-            ok_items.push(format!(
-                "invariants: ok_loaded ({} card(s): {})",
-                ids.len(),
-                ids.join(", ")
-            ));
-            ids
-        }
-        Err(e) => {
-            issues.push(format!("invariants: parse error: {e}"));
-            return DoctorOutput {
-                ok_items,
-                warnings,
-                issues,
-                card_ids: vec![],
-                host_probe,
-                gate_profile,
-                gate_missing,
-            };
-        }
-    };
-
-    // 4. host capability probe summary. Unavailable primitives are warnings in
-    // default informational mode, not failures.
-    for entry in host_probe.entries() {
-        match entry.status {
-            lancet_protocol::HostProbeStatus::Available => {
-                ok_items.push(format!("host_probe: {} available", entry.primitive.label()));
-            }
-            _ => warnings.push(format!(
-                "host_probe: {} {} ({})",
-                entry.primitive.label(),
-                host_probe_status_label(entry.status),
-                host_probe_reason(entry)
-            )),
-        }
-    }
-
-    // 5. Optional profile-bound gate for release/dogfood checks.
-    if let Some(gate) = gate {
-        gate_profile = Some(gate.profile_label.clone());
-        ok_items.push(format!(
-            "doctor mode: profile gate for {}",
-            gate.profile_label
-        ));
-        if gate.required_boundaries.is_empty() {
-            warnings.push(format!(
-                "isolation gate: profile {} declares no required command boundaries",
-                gate.profile_label
-            ));
-        } else {
-            let missing = unavailable_required_boundaries(&host_probe, &gate.required_boundaries);
-            if missing.is_empty() {
-                ok_items.push(format!(
-                    "isolation gate: profile {} required boundaries available",
-                    gate.profile_label
-                ));
-            } else {
-                for item in &missing {
-                    let details = format_missing_boundary_details(item);
-                    issues.push(format!(
-                        "isolation gate: required boundary {} unavailable for profile {} ({details})",
-                        item.boundary.label(),
-                        gate.profile_label
-                    ));
-                }
-                gate_missing = missing;
-            }
-        }
-    }
-
-    // 6. submit_intent smoke in isolated temp workspace.
-    match run_submit_intent_smoke_for_project_root(project_root) {
-        Ok(()) => ok_items.push("submit_intent smoke: ok (unknowns == 0)".to_string()),
-        Err(e) => issues.push(format!("submit_intent smoke: {e}")),
-    }
-
-    DoctorOutput {
-        ok_items,
-        warnings,
-        issues,
-        card_ids,
-        host_probe,
-        gate_profile,
-        gate_missing,
-    }
-}
-
-fn load_doctor_gate(profile_spec: &str, project_root: &Path) -> Result<DoctorGateInput> {
+fn load_doctor_gate(profile_spec: &str, project_root: &Path) -> Result<LancetDoctorGate> {
     let profile_path = PathBuf::from(profile_spec);
     let loaded =
         if profile_path.exists() || profile_spec.ends_with(".toml") || profile_spec.contains('/') {
-            lattice_profile::load_agent_profile(&profile_path)
+            lattice_api::load_agent_profile_path(&profile_path)
                 .with_context(|| format!("load profile {}", profile_path.display()))?
         } else {
             crate::commands::run::load_named_profile(profile_spec, project_root)
@@ -849,40 +379,22 @@ fn load_doctor_gate(profile_spec: &str, project_root: &Path) -> Result<DoctorGat
         .map(|command| command.required_boundaries.clone())
         .unwrap_or_default();
 
-    Ok(DoctorGateInput {
+    Ok(LancetDoctorGate {
         profile_label: profile_spec.to_string(),
         required_boundaries,
     })
 }
 
-fn format_missing_boundary_details(item: &MissingRequiredBoundary) -> String {
-    if item.primitive_reasons.is_empty() {
-        return "no matching primitive probe result".to_string();
-    }
-    item.primitive_reasons
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}={}:{}",
-                entry.primitive.label(),
-                host_probe_status_label(entry.status),
-                host_probe_reason(entry)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn host_probe_status_label(status: lancet_protocol::HostProbeStatus) -> &'static str {
+fn host_probe_status_label(status: HostProbeStatus) -> &'static str {
     match status {
-        lancet_protocol::HostProbeStatus::Available => "available",
-        lancet_protocol::HostProbeStatus::Unavailable => "unavailable",
-        lancet_protocol::HostProbeStatus::Disabled => "disabled",
-        lancet_protocol::HostProbeStatus::Unknown => "unknown",
+        HostProbeStatus::Available => "available",
+        HostProbeStatus::Unavailable => "unavailable",
+        HostProbeStatus::Disabled => "disabled",
+        HostProbeStatus::Unknown => "unknown",
     }
 }
 
-fn emit_doctor_result(output: &DoctorOutput, json: bool) -> Result<()> {
+fn emit_doctor_result(output: &LancetDoctorOutput, json: bool) -> Result<()> {
     let all_ok = output.issues.is_empty();
 
     if json {
@@ -909,7 +421,7 @@ fn emit_doctor_result(output: &DoctorOutput, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn doctor_json_value(output: &DoctorOutput) -> serde_json::Value {
+fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
     let all_ok = output.issues.is_empty();
     let checks: Vec<_> = output
         .ok_items
@@ -942,78 +454,6 @@ fn doctor_json_value(output: &DoctorOutput) -> serde_json::Value {
             }).collect::<Vec<_>>()
         })).collect::<Vec<_>>(),
     })
-}
-
-/// Run an isolated submit_intent smoke using an in-memory LANCET runtime.
-///
-/// Uses an explicit project root so test callers do not depend on mutable process cwd.
-/// The submit is for a "read" action on `Cargo.toml` — a file that exists in every
-/// workspace/crate directory. Asserts `impact.unknowns` is empty.
-///
-/// Handles two call contexts:
-/// - From a synchronous caller without a tokio runtime (tests, benchmarks): creates a
-///   fresh `current_thread` runtime.
-/// - From within `#[tokio::main]` (the production CLI path): uses `block_in_place` +
-///   `Handle::current().block_on()` to avoid panicking with "nested runtime" errors.
-pub(crate) fn run_submit_intent_smoke_for_project_root(project_root: &Path) -> Result<()> {
-    let project_root = project_root.to_path_buf();
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // Inside an existing tokio runtime — block_in_place prevents nesting panic.
-            tokio::task::block_in_place(|| handle.block_on(submit_intent_smoke_async(project_root)))
-        }
-        Err(_) => {
-            // No runtime active — create a lightweight current-thread runtime.
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .context("tokio runtime for submit_intent smoke")?
-                .block_on(submit_intent_smoke_async(project_root))
-        }
-    }
-}
-
-async fn submit_intent_smoke_async(project_root: PathBuf) -> Result<()> {
-    let root_str = project_root
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("project root path is not UTF-8"))?;
-
-    // session.envelope derive_intent requires MutateSessionState capability to store the derived envelope.
-    let mut config = ServerRunConfig::in_memory_for_tests();
-    config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root_str, "lancet doctor smoke")
-            .with_session_state();
-    config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root_str));
-
-    let (client, mut lifecycle) =
-        LancetServer::spawn(config, 64).map_err(|e| anyhow::anyhow!("spawn CEP server: {e}"))?;
-
-    let result = client
-        .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
-            action: "read".to_string(),
-            target: "Cargo.toml".to_string(),
-            params: None,
-            supersede: false,
-            reason: None,
-        }))
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("session.envelope derive_intent smoke failed: {}", e.message)
-        })?;
-    let EnvelopeResult::DeriveIntent(result) = result else {
-        anyhow::bail!("session.envelope derive_intent smoke returned declare result");
-    };
-
-    lifecycle.shutdown().await;
-
-    if !result.impact.unknowns.is_empty() {
-        anyhow::bail!(
-            "submit_intent smoke: {} unknown(s) in impact analysis",
-            result.impact.unknowns.len()
-        );
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,8 +678,8 @@ mod tests {
             .expect("workspace root");
         let invariants_dir = workspace_root.join(".lancet").join("invariants");
 
-        let cards =
-            load_cards_from_dir(&invariants_dir).expect("cards should load without parse errors");
+        let cards = lancet_invariants::invariants::loader::load_cards_from_dir(&invariants_dir)
+            .expect("cards should load without parse errors");
 
         assert!(
             cards.len() >= 2,
@@ -1282,7 +722,7 @@ mod tests {
             .expect("crates/")
             .parent()
             .expect("workspace root");
-        let result = run_submit_intent_smoke_for_project_root(workspace_root);
+        let result = lancet_api::run_submit_intent_smoke_for_project_root(workspace_root);
         assert!(
             result.is_ok(),
             "submit_intent smoke should succeed: {:?}",
@@ -1303,40 +743,34 @@ mod tests {
     }
 
     fn unavailable_probe_for_tests() -> HostProbeReport {
-        HostProbeReport::from_entries(lancet_protocol::BoundaryPrimitive::ALL.iter().map(
-            |primitive| {
-                lancet_native::HostProbeEntry::new(
-                    *primitive,
-                    lancet_protocol::HostProbeStatus::Unavailable,
-                    "test_unavailable",
-                )
-            },
-        ))
+        HostProbeReport::from_entries(lancet_api::BoundaryPrimitive::ALL.iter().map(|primitive| {
+            HostProbeEntry::new(*primitive, HostProbeStatus::Unavailable, "test_unavailable")
+        }))
     }
 
     fn mixed_probe_for_tests() -> HostProbeReport {
         HostProbeReport::from_entries([
-            lancet_native::HostProbeEntry::new(
-                lancet_protocol::BoundaryPrimitive::NetworkNamespace,
-                lancet_protocol::HostProbeStatus::Unavailable,
+            HostProbeEntry::new(
+                lancet_api::BoundaryPrimitive::NetworkNamespace,
+                HostProbeStatus::Unavailable,
                 "netns requires privileges",
             )
             .with_diagnostic("helper.unshare", "/usr/bin/unshare"),
-            lancet_native::HostProbeEntry::new(
-                lancet_protocol::BoundaryPrimitive::MountNamespace,
-                lancet_protocol::HostProbeStatus::Available,
+            HostProbeEntry::new(
+                lancet_api::BoundaryPrimitive::MountNamespace,
+                HostProbeStatus::Available,
                 "mount namespace smoke passed",
             )
             .with_diagnostic("helper.unshare", "/usr/bin/unshare"),
-            lancet_native::HostProbeEntry::new(
-                lancet_protocol::BoundaryPrimitive::Overlayfs,
-                lancet_protocol::HostProbeStatus::Disabled,
+            HostProbeEntry::new(
+                lancet_api::BoundaryPrimitive::Overlayfs,
+                HostProbeStatus::Disabled,
                 "overlayfs disabled",
             )
             .with_diagnostic("helper.sh", "/usr/bin/sh"),
-            lancet_native::HostProbeEntry::new(
-                lancet_protocol::BoundaryPrimitive::Landlock,
-                lancet_protocol::HostProbeStatus::Unknown,
+            HostProbeEntry::new(
+                lancet_api::BoundaryPrimitive::Landlock,
+                HostProbeStatus::Unknown,
                 "landlock ABI probe inconclusive",
             ),
         ])
@@ -1375,16 +809,16 @@ mod tests {
     #[test]
     fn lancet_doctor_json_includes_all_host_probe_primitives() {
         let dir = TempDir::new().unwrap();
-        let output = collect_doctor_output(dir.path(), dir.path(), mixed_probe_for_tests(), None);
+        let mut request = LancetDoctorRequest::new(dir.path());
+        request.invariants_dir = Some(dir.path().to_path_buf());
+        request.host_probe = Some(mixed_probe_for_tests());
+        let output = run_doctor_checks(request);
         let json = doctor_json_value(&output);
         let host_probe = json["host_probe"]["primitives"]
             .as_object()
             .expect("primitive-keyed host_probe");
-        assert_eq!(
-            host_probe.len(),
-            lancet_protocol::BoundaryPrimitive::ALL.len()
-        );
-        for primitive in lancet_protocol::BoundaryPrimitive::ALL {
+        assert_eq!(host_probe.len(), lancet_api::BoundaryPrimitive::ALL.len());
+        for primitive in lancet_api::BoundaryPrimitive::ALL {
             let entry = host_probe
                 .get(primitive.label())
                 .unwrap_or_else(|| panic!("missing primitive {}", primitive.label()));
@@ -2022,9 +1456,9 @@ mod tests {
             dir.path(),
             false,
             unavailable_probe_for_tests(),
-            Some(DoctorGateInput {
+            Some(LancetDoctorGate {
                 profile_label: "test-profile".into(),
-                required_boundaries: vec![lancet_protocol::BoundaryDimension::Network],
+                required_boundaries: vec![BoundaryDimension::Network],
             }),
         );
         assert!(
@@ -2036,22 +1470,31 @@ mod tests {
     #[test]
     fn cep_doctor_profile_gate_lists_exact_missing_boundary_reason() {
         let dir = TempDir::new().unwrap();
-        let output = collect_doctor_output(
-            dir.path(),
-            dir.path(),
-            unavailable_probe_for_tests(),
-            Some(DoctorGateInput {
-                profile_label: "test-profile".into(),
-                required_boundaries: vec![lancet_protocol::BoundaryDimension::Network],
-            }),
-        );
+        let mut request = LancetDoctorRequest::new(dir.path());
+        request.invariants_dir = Some(dir.path().to_path_buf());
+        request.host_probe = Some(unavailable_probe_for_tests());
+        request.gate = Some(LancetDoctorGate {
+            profile_label: "test-profile".into(),
+            required_boundaries: vec![BoundaryDimension::Network],
+        });
+        let output = run_doctor_checks(request);
         assert_eq!(output.gate_missing.len(), 1);
-        assert_eq!(
-            output.gate_missing[0].boundary,
-            lancet_protocol::BoundaryDimension::Network
+        assert_eq!(output.gate_missing[0].boundary, BoundaryDimension::Network);
+        let rendered = doctor_json_value(&output);
+        let reasons = rendered["gate_missing"][0]["primitive_reasons"]
+            .as_array()
+            .expect("primitive reasons");
+        assert!(
+            reasons
+                .iter()
+                .any(|entry| entry["primitive"].as_str() == Some("network_namespace")),
+            "got: {rendered}"
         );
-        let details = format_missing_boundary_details(&output.gate_missing[0]);
-        assert!(details.contains("network_namespace"), "got: {details}");
-        assert!(details.contains("test_unavailable"), "got: {details}");
+        assert!(
+            reasons
+                .iter()
+                .any(|entry| entry["reason"].as_str() == Some("test_unavailable")),
+            "got: {rendered}"
+        );
     }
 }

@@ -33,15 +33,16 @@ LANCET profile sections, and pure lowering data consumed by API/authority.
   of silently accepting them.
 - FIXED M-13: profile canonicalization failures now return
   `ProfileError::SystemPathNotFound` instead of falling back to unsafe paths.
-- WATCH M-24-04: profile `tools.enabled` currently feeds both exposure and base
-  authority derivation in `lattice-api`.
+- FIXED M-24-04: profile `tools.enabled` is the method exposure list. Base
+  authority requirements come from catalog descriptors for those methods, not
+  profile-specific branch logic in `lattice-api`.
 - WATCH: command isolation and external policy file schema are consumed by
   per-turn LANCET composition.
 
 ## Next Actions
 
-- If M-24-04 is split, keep profile schema names clear about exposure versus
-  authority/policy intent.
+- Keep profile schema names clear about exposure versus authority/policy intent;
+  add explicit fields only when the profile really owns a policy choice.
 - Add strict-deserialize tests for every new profile section and future table.
 - Keep path resolution behavior explicit for missing files, symlinked parents,
   and project-root-relative paths.

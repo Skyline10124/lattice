@@ -3,7 +3,7 @@
 
 //! Read-only audit provenance methods (`observe.audit`, `observe.audit_replay`).
 
-use crate::method::{CatalogMethod, CepMethod};
+use crate::method::{BaseAuthorityRequirement, CatalogMethod, CepMethod};
 use lancet_protocol::provenance::{InTotoStatement, ProvGraphFragment, TurnExecutionTrace};
 use lancet_protocol::RequiredCapability;
 use lancet_protocol::{
@@ -78,6 +78,7 @@ impl CepMethod for AuditObserve {
     type Result = AuditObserveResult;
     const IMPACT: ImpactKind = ImpactKind::AuditObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::ReadAudit;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::READ_AUDIT;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::AuditObservation]),
         scope: EffectScopeKind::SessionState,
@@ -112,6 +113,7 @@ impl CepMethod for AuditReplay {
     type Result = AuditReplayResult;
     const IMPACT: ImpactKind = ImpactKind::AuditObservation;
     const CAPABILITY: RequiredCapability = RequiredCapability::ReadAudit;
+    const BASE_AUTHORITY: BaseAuthorityRequirement = BaseAuthorityRequirement::READ_AUDIT;
     const EFFECT: EffectDecl = EffectDecl {
         kinds: EffectKindSet::from_static(&[ImpactKind::AuditObservation]),
         scope: EffectScopeKind::SessionState,

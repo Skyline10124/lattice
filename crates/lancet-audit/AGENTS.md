@@ -28,8 +28,8 @@ in-toto attestation construction, and attestation persistence.
 
 ## Recent Issues
 
-- WATCH M-24-05: `lattice-api` currently owns attestation persistence wiring as
-  part of an oversized turn composition layer.
+- FIXED M-24-05: attestation persistence wiring moved into `lancet-api`;
+  `lattice-api` consumes it through the public LANCET runtime surface.
 - WATCH: provenance isomorphism tests in `lancet-native` and audit turn tests in
   `lattice-api` are the practical consumers of this crate's contract.
 - WATCH: call stage and impact labels are shared language between native
@@ -39,8 +39,8 @@ in-toto attestation construction, and attestation persistence.
 
 ## Next Actions
 
-- If M-24-05 extracts an internal turn composition crate, keep audit storage
-  here and move only wiring/orchestration out of `lattice-api`.
+- Keep audit storage, provenance projection, and attestation serialization here;
+  runtime orchestration belongs in `lancet-api`.
 - Add migration or compatibility tests before changing audit row shape or
   attestation serialization.
 - Keep provenance projection and canonicalization changes paired with
