@@ -9,7 +9,7 @@
 //! in-toto statements after a live turn.
 
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
+use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
 use lancet_catalog::CepMethod;
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{canonicalize_prov_fragment, project_rows};
@@ -127,7 +127,7 @@ fn mutation_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         3,
-        Patch::NAME,
+        Edit::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-1","changed_files":["src/a.rs"]}"#,
     );
     let rows = audit
@@ -162,7 +162,7 @@ fn mixed_turn_projection_is_isomorphic() {
         &audit,
         &ctx,
         3,
-        Patch::NAME,
+        Edit::NAME,
         r#"{"required_capability":"write_path","envelope_id":"env-m","changed_files":["b.txt"]}"#,
     );
     let rows = audit

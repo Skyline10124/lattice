@@ -100,7 +100,7 @@ max_delay_ms = 3000
 
 /// Generate a strict v1 `agent.toml` template for an editing agent.
 ///
-/// Read-write tools: workspace observation, create/patch mutation,
+/// Read-write tools: workspace observation, create/edit/batch mutation,
 /// listing, todo tracking, workspace context.  No shell or web access.
 pub fn default_editor_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
@@ -108,7 +108,7 @@ pub fn default_editor_template(name: &str, model: &str) -> String {
 
     format!(
         r#"# LATTICE Agent Profile (v1) — Editor
-# Read-write agent for editing, refactoring, and applying patches.
+# Read-write agent for editing and refactoring.
 # No shell or web access — editing only.
 
 schema_version = 1
@@ -116,13 +116,13 @@ schema_version = 1
 [agent]
 name = {name}
 model = {model}
-description = "Editing agent for refactoring, fixing, and applying patches"
+description = "Editing agent for refactoring and fixing code"
 
 [prompt]
-system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, and patch tools for changes. Be precise and explain your edits."
+system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, edit, and batch tools for changes. Be precise and explain your edits."
 
 [tools]
-enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write"]
+enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", "session.envelope", "session.todo_write"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -165,7 +165,7 @@ description = "Full development agent for coding, planning, and troubleshooting"
 system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Fetch web docs when needed. Be methodical and explain your reasoning."
 
 [tools]
-enabled = ["observe.workspace", "mutate.create", "mutate.patch", "session.envelope", "session.todo_write", "exec.command_run", "fetch.web"]
+enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", "session.envelope", "session.todo_write", "exec.command_run", "fetch.web"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -344,7 +344,8 @@ mod tests {
         assert!(!enabled.contains(&"exec.command_run".to_string()));
         assert!(!enabled.contains(&"fetch.web".to_string()));
         assert!(!enabled.contains(&"mutate.create".to_string()));
-        assert!(!enabled.contains(&"mutate.patch".to_string()));
+        assert!(!enabled.contains(&"mutate.edit".to_string()));
+        assert!(!enabled.contains(&"mutate.batch".to_string()));
         assert!(!enabled.contains(&"session.envelope".to_string()));
     }
 
@@ -381,7 +382,8 @@ mod tests {
         assert!(!profile.tools.enabled.is_empty());
         let enabled = &profile.tools.enabled;
         assert!(enabled.contains(&"mutate.create".to_string()));
-        assert!(enabled.contains(&"mutate.patch".to_string()));
+        assert!(enabled.contains(&"mutate.edit".to_string()));
+        assert!(enabled.contains(&"mutate.batch".to_string()));
         assert!(enabled.contains(&"session.envelope".to_string()));
         assert!(enabled.contains(&"session.todo_write".to_string()));
         // No shell or web
@@ -403,7 +405,8 @@ mod tests {
         let expected: Vec<&str> = vec![
             "observe.workspace",
             "mutate.create",
-            "mutate.patch",
+            "mutate.edit",
+            "mutate.batch",
             "session.envelope",
             "session.todo_write",
         ];
@@ -428,7 +431,8 @@ mod tests {
         assert!(enabled.contains(&"exec.command_run".to_string()));
         assert!(enabled.contains(&"fetch.web".to_string()));
         assert!(enabled.contains(&"mutate.create".to_string()));
-        assert!(enabled.contains(&"mutate.patch".to_string()));
+        assert!(enabled.contains(&"mutate.edit".to_string()));
+        assert!(enabled.contains(&"mutate.batch".to_string()));
         assert!(enabled.contains(&"session.envelope".to_string()));
         assert!(enabled.contains(&"session.todo_write".to_string()));
     }
@@ -441,7 +445,8 @@ mod tests {
         let expected: Vec<&str> = vec![
             "observe.workspace",
             "mutate.create",
-            "mutate.patch",
+            "mutate.edit",
+            "mutate.batch",
             "session.envelope",
             "session.todo_write",
             "exec.command_run",

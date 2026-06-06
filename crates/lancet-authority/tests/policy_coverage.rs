@@ -36,7 +36,7 @@ fn declared_source() -> CapabilitySource {
     }
 }
 
-/// Build the capability fixture matrix covering all 9 canonical catalog methods.
+/// Build the capability fixture matrix covering all canonical catalog methods.
 ///
 /// Each row maps a method to its RequiredCapability, representative invocation
 /// facts, and expected verdicts for Base-only and Declared-only sources.
@@ -64,12 +64,23 @@ fn capability_fixtures() -> Vec<CapabilityFixture> {
             base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
             declared_verdict: CapabilityMatchVerdict::Satisfied,
         },
-        // mutate.patch → WritePath
+        // mutate.edit → WritePath
         CapabilityFixture {
-            method: "mutate.patch",
+            method: "mutate.edit",
             required_capability: RequiredCapability::WritePath,
             invocation: InvocationFacts {
                 path: Some("src/main.rs".into()),
+                ..Default::default()
+            },
+            base_verdict: CapabilityMatchVerdict::SourceNotAllowed,
+            declared_verdict: CapabilityMatchVerdict::Satisfied,
+        },
+        // mutate.batch → WritePath
+        CapabilityFixture {
+            method: "mutate.batch",
+            required_capability: RequiredCapability::WritePath,
+            invocation: InvocationFacts {
+                all_patch_targets: vec!["src/main.rs".into(), "src/lib.rs".into()],
                 ..Default::default()
             },
             base_verdict: CapabilityMatchVerdict::SourceNotAllowed,

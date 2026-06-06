@@ -5,16 +5,18 @@
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
-    AuditObserve, AuditReplay, Create, Envelope, Fetch, ObserveWorkspace, Patch, Run, TodoWrite,
+    AuditObserve, AuditReplay, Batch, Create, Edit, Envelope, Fetch, ObserveWorkspace, Run,
+    TodoWrite,
 };
 use std::sync::LazyLock;
 
 /// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 9]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 10]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
-        MethodDescriptor::for_method::<Patch>(),
+        MethodDescriptor::for_method::<Edit>(),
+        MethodDescriptor::for_method::<Batch>(),
         MethodDescriptor::for_method::<Run>(),
         MethodDescriptor::for_method::<Fetch>(),
         MethodDescriptor::for_method::<TodoWrite>(),
@@ -54,14 +56,16 @@ mod tests {
     use super::*;
     use crate::method::CepMethod;
     use crate::methods::{
-        AuditObserve, AuditReplay, Create, Envelope, Fetch, ObserveWorkspace, Patch, Run, TodoWrite,
+        AuditObserve, AuditReplay, Batch, Create, Edit, Envelope, Fetch, ObserveWorkspace, Run,
+        TodoWrite,
     };
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 9] = [
+    const EXPECTED_ORDER: [&str; 10] = [
         "observe.workspace",
         "mutate.create",
-        "mutate.patch",
+        "mutate.edit",
+        "mutate.batch",
         "exec.command_run",
         "fetch.web",
         "session.todo_write",
@@ -143,12 +147,11 @@ mod tests {
                     assert!(!descriptor.base_authority.fetch_hosts);
                     assert!(descriptor.base_authority.read_audit);
                 }
-                "observe.workspace" | "mutate.create" | "mutate.patch" | "exec.command_run" => {
-                    assert_eq!(
-                        descriptor.base_authority,
-                        crate::method::BaseAuthorityRequirement::NONE
-                    );
-                }
+                "observe.workspace" | "mutate.create" | "mutate.edit" | "mutate.batch"
+                | "exec.command_run" => assert_eq!(
+                    descriptor.base_authority,
+                    crate::method::BaseAuthorityRequirement::NONE
+                ),
                 other => panic!("unexpected catalog method: {other}"),
             }
         }
@@ -157,20 +160,21 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 9] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 10] = [
             (
                 &catalog[0],
                 ObserveWorkspace::IMPACT,
                 ObserveWorkspace::CAPABILITY,
             ),
             (&catalog[1], Create::IMPACT, Create::CAPABILITY),
-            (&catalog[2], Patch::IMPACT, Patch::CAPABILITY),
-            (&catalog[3], Run::IMPACT, Run::CAPABILITY),
-            (&catalog[4], Fetch::IMPACT, Fetch::CAPABILITY),
-            (&catalog[5], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
-            (&catalog[6], Envelope::IMPACT, Envelope::CAPABILITY),
-            (&catalog[7], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
-            (&catalog[8], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
+            (&catalog[2], Edit::IMPACT, Edit::CAPABILITY),
+            (&catalog[3], Batch::IMPACT, Batch::CAPABILITY),
+            (&catalog[4], Run::IMPACT, Run::CAPABILITY),
+            (&catalog[5], Fetch::IMPACT, Fetch::CAPABILITY),
+            (&catalog[6], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
+            (&catalog[7], Envelope::IMPACT, Envelope::CAPABILITY),
+            (&catalog[8], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
+            (&catalog[9], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -188,8 +192,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_9() {
-        assert_eq!(catalog().len(), 9);
+    fn catalog_len_is_10() {
+        assert_eq!(catalog().len(), 10);
     }
 
     #[test]
@@ -254,14 +258,15 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 9);
+        assert_eq!(catalog().len(), 10);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
             [
                 "observe.workspace",
                 "mutate.create",
-                "mutate.patch",
+                "mutate.edit",
+                "mutate.batch",
                 "exec.command_run",
                 "fetch.web",
                 "session.todo_write",

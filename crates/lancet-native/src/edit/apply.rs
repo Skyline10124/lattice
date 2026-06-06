@@ -3,8 +3,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-#[cfg(test)]
-use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
@@ -705,38 +703,6 @@ fn baseline_failure_diagnostic(report: &CommitBaselineReport) -> PatchDiagnostic
     diagnostic
 }
 
-#[cfg(test)]
-type BeforePatchCommitHook = (PathBuf, Box<dyn FnOnce() + Send + 'static>);
-
-#[cfg(test)]
-fn before_patch_commit_hook() -> &'static StdMutex<Option<BeforePatchCommitHook>> {
-    static HOOK: OnceLock<StdMutex<Option<BeforePatchCommitHook>>> = OnceLock::new();
-    HOOK.get_or_init(|| StdMutex::new(None))
-}
-
-#[cfg(test)]
-pub(crate) fn set_before_patch_commit_hook(
-    target_path: PathBuf,
-    hook: impl FnOnce() + Send + 'static,
-) {
-    *before_patch_commit_hook().lock().unwrap() = Some((target_path, Box::new(hook)));
-}
-
-#[cfg(test)]
-fn run_before_patch_commit_hook(plan: &ApplyPlan) {
-    let mut guard = before_patch_commit_hook().lock().unwrap();
-    let should_run = guard.as_ref().is_some_and(|(target_path, _)| {
-        plan.changes
-            .iter()
-            .any(|change| change.target_path == *target_path)
-    });
-    if should_run {
-        let (_, hook) = guard.take().unwrap();
-        hook();
-    }
-}
-
-#[cfg(not(test))]
 fn run_before_patch_commit_hook(_plan: &ApplyPlan) {}
 
 struct CompletedWrite {

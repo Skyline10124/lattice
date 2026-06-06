@@ -164,7 +164,8 @@ fn validate_target(target: &str, ctx: &HandlerContext) -> Result<(), CepError> {
 fn resolve_method_name(action: &str, target: &str) -> String {
     match action {
         "write" => "mutate.create".to_string(),
-        "patch" => "mutate.patch".to_string(),
+        "patch" | "edit" => "mutate.edit".to_string(),
+        "batch" => "mutate.batch".to_string(),
         "run" | "execute" | "command" => "exec.command_run".to_string(),
         "read" | "grep" | "search" | "list" | "ls" | "find" => "observe.workspace".to_string(),
         "fetch" => "fetch.web".to_string(),

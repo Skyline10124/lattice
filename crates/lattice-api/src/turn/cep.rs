@@ -25,7 +25,7 @@ use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::envelope::Envelope;
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
-use lancet_catalog::methods::workspace::{Create, ObserveWorkspace, Patch};
+use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
@@ -114,10 +114,11 @@ impl CepExecutorAdapter {
         match method {
             ObserveWorkspace::NAME => self.call_typed::<ObserveWorkspace>(params).await,
             Create::NAME => self.call_typed::<Create>(params).await,
+            Edit::NAME => self.call_typed::<Edit>(params).await,
+            Batch::NAME => self.call_typed::<Batch>(params).await,
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
             Run::NAME => self.call_typed::<Run>(params).await,
-            Patch::NAME => self.call_typed::<Patch>(params).await,
             Envelope::NAME => self.call_typed::<Envelope>(params).await,
             AuditObserve::NAME => self.call_typed::<AuditObserve>(params).await,
             AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,

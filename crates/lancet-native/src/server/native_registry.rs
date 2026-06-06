@@ -46,7 +46,7 @@ pub fn register_native_command(registry: &mut MethodRegistry) -> Result<(), CepE
     register_command_methods(registry)
 }
 
-/// Register native CEP `mutate.create` and `mutate.patch` handlers.
+/// Register native CEP workspace mutation handlers.
 pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_mutation_methods(registry)
 }

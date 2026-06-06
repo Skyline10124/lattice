@@ -217,8 +217,12 @@ fn deny_path_inputs() -> Vec<PolicyInput> {
         },
         // WritePath with base source — source policy requires Declared for mutations
         PolicyInput {
-            method: "mutate.patch".into(),
-            params: json!({ "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n*** End Patch\n" }),
+            method: "mutate.edit".into(),
+            params: json!({
+                "path": "src/lib.rs",
+                "expected_hash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "edits": []
+            }),
             envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::WritePath {
                     path_pattern: "src/**".into(),

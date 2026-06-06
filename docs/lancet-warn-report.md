@@ -8,7 +8,8 @@ Current v1.3.1-alpha coverage summary.
 |--------|-------------|--------------|----------------|
 | observe.workspace | overreach | success + overreach | yes |
 | mutate.create | overreach | success + overreach | yes |
-| mutate.patch | overreach | success + overreach | yes |
+| mutate.edit | overreach | success + overreach | yes |
+| mutate.batch | overreach | success + overreach | yes |
 | fetch.web | overreach | success + overreach | yes |
 | exec.command_run | overreach / partial observation | success + overreach | yes |
 | session.envelope | overreach | success + overreach | yes |
@@ -27,7 +28,8 @@ in Warn mode audit metadata. No `fix-now` items identified.
 |--------|-------------|----------------|--------|
 | observe.workspace | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
 | mutate.create | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
-| mutate.patch | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
+| mutate.edit | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
+| mutate.batch | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
 | fetch.web | overreach | yes — `effect_warning` in audit metadata | accept-alpha |
 | exec.command_run | overreach / partial observation | yes — `effect_warning` in audit metadata | accept-alpha |
 | session.envelope | overreach | yes — `effect_warning` in audit metadata | accept-alpha |

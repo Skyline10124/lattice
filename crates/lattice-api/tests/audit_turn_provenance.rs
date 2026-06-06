@@ -54,17 +54,6 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
     ]
 }
 
-fn line_hash(line_number: usize, line: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"lattice.hashline.v2\0");
-    hasher.update(&(line_number as u64).to_be_bytes());
-    hasher.update(b"\0");
-    hasher.update(line.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest.to_hex();
-    format!("blake3:{}", &hex[..4])
-}
-
 struct Workspace {
     _dir: TempDir,
     root: std::path::PathBuf,
@@ -83,7 +72,7 @@ fn setup_workspace() -> Workspace {
         "observe.workspace",
         "exec.command_run",
         "session.envelope",
-        "mutate.patch",
+        "mutate.edit",
     ];
     let toml_content = format!(
         r#"schema_version = 1
@@ -130,18 +119,15 @@ async fn full_turn_audit_rows_and_replay_fragment() {
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
-    let line_hash = line_hash(1, original);
-    let patch_doc = format!(
-        "\
-*** Begin Patch
-*** Update File: src/lib.rs
-*** Old Hash: {hash}
-@@
--{line_hash}\tpub fn answer() -> i32 {{ 1 }}
-+pub fn answer() -> i32 {{ 42 }}
-*** End Patch
-"
-    );
+    let edit_args = serde_json::json!({
+        "path": "src/lib.rs",
+        "expected_hash": hash,
+        "edits": [{
+            "op": "replace_text",
+            "old": original,
+            "new": "pub fn answer() -> i32 { 42 }"
+        }]
+    });
     let mut capabilities = BTreeSet::new();
     capabilities.insert(Capability::WritePath {
         path_pattern: "src/**".into(),
@@ -189,11 +175,8 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             ))
             .push_events(tool_call_events(
                 "c4",
-                "mutate.patch",
-                &format!(
-                    r#"{{"patch":{}}}"#,
-                    serde_json::to_string(&patch_doc).unwrap()
-                ),
+                "mutate.edit",
+                &edit_args.to_string(),
             ))
             .push_events(final_response_events("done"))
             .build(),
@@ -264,7 +247,10 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             "row {} missing capability metadata",
             row.method
         );
-        if matches!(row.method.as_str(), "mutate.patch" | "mutate.create") {
+        if matches!(
+            row.method.as_str(),
+            "mutate.create" | "mutate.edit" | "mutate.batch"
+        ) {
             let parsed: Value = serde_json::from_str(meta.unwrap_or("{}")).unwrap_or(Value::Null);
             assert!(
                 parsed.get("envelope_id").is_some(),

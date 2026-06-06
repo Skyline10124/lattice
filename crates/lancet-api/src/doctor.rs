@@ -96,10 +96,10 @@ fn collect_doctor_output(
     }
 
     let catalog_len = catalog().len();
-    if catalog_len == 9 {
-        ok_items.push(format!("catalog: {catalog_len} methods (expected 9)"));
+    if catalog_len == 10 {
+        ok_items.push(format!("catalog: {catalog_len} methods (expected 10)"));
     } else {
-        issues.push(format!("catalog: expected 9 methods, got {catalog_len}"));
+        issues.push(format!("catalog: expected 10 methods, got {catalog_len}"));
     }
 
     {

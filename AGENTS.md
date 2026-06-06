@@ -61,9 +61,10 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
   depend on native runtime, authority policy implementation, audit persistence,
   or any `lattice-*` crate.
 - `lancet-catalog::CATALOG` is the authoritative production method catalog.
-  It contains exactly these 9 CEP methods: `observe.workspace`, `mutate.create`,
-  `mutate.patch`, `exec.command_run`, `fetch.web`, `session.todo_write`,
-  `session.envelope`, `observe.audit`, and `observe.audit_replay`.
+  It contains exactly these 10 CEP methods: `observe.workspace`,
+  `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`,
+  `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, and
+  `observe.audit_replay`.
   Descriptors also declare method-local base-authority requirements; hosts and
   policy decisions are supplied later by LANCET runtime policy, not by catalog.
 - LLM-facing CEP tool schemas are generated only from the catalog through

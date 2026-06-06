@@ -3,7 +3,7 @@
 
 //! Fake-LLM end-to-end release scenario.
 //!
-//! Validates the full declare → exec.command_run → patch(fail-verify) → patch(ok)
+//! Validates the full declare → exec.command_run → edit(fail-verify) → edit(ok)
 //! cycle in a **single `run_turn`** with a multi-round `FakeStreamingLlmClient`.
 //! Uses a persisted on-disk audit DB so the attestation can be inspected after
 //! the turn completes.
@@ -65,17 +65,6 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
     ]
 }
 
-fn line_hash(line_number: usize, line: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"lattice.hashline.v2\0");
-    hasher.update(&(line_number as u64).to_be_bytes());
-    hasher.update(b"\0");
-    hasher.update(line.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest.to_hex();
-    format!("blake3:{}", &hex[..4])
-}
-
 // ── Workspace setup ──────────────────────────────────────────────────────────
 
 struct ReleaseE2eWorkspace {
@@ -109,7 +98,7 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = ["session.envelope", "exec.command_run", "mutate.patch"]
+enabled = ["session.envelope", "exec.command_run", "mutate.edit"]
 [lancet.command]
 allowed_diagnostic_commands = [["echo"], ["grep"]]
 "#;
@@ -156,15 +145,15 @@ fn make_release_e2e_request(
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
 /// Single `run_turn` driving declare → exec.command_run →
-/// patch(verify-fail, RetainDiff) → patch(verify-pass) → Done(stop).
+/// edit(verify-fail, RetainDiff) → edit(verify-pass) → Done(stop).
 ///
 /// Asserts:
 /// 1. Turn completes with status=Completed.
-/// 2. Workspace file contains the RELEASE_E2E_OK sentinel after the second patch.
+/// 2. Workspace file contains the RELEASE_E2E_OK sentinel after the second edit.
 /// 3. Session has exactly one commit in the graph.
 /// 4. On-disk attestation has correct in-toto subject / predicate / materials.
-/// 5. Audit rows are in declare → exec.command_run → patch → patch order.
-/// 6. First patch tool result is ok=false (VerifyFailed); second is ok=true.
+/// 5. Audit rows are in declare → exec.command_run → edit → edit order.
+/// 6. First edit tool result is ok=false (VerifyFailed); second is ok=true.
 #[tokio::test]
 async fn release_e2e_criterion_8() {
     let initial_content = "pub fn answer() -> i32 { 1 }";
@@ -173,27 +162,37 @@ async fn release_e2e_criterion_8() {
 
     let ws = setup_release_e2e_workspace(initial_content);
 
-    // ── Compute blake3 hashes for the two patch steps ──────────────────
+    // ── Compute blake3 hashes for the two edit steps ───────────────────
     let hash1 = format!(
         "blake3:{}",
         blake3::hash(initial_content.as_bytes()).to_hex()
     );
     let hash2 = format!("blake3:{}", blake3::hash(bad_content.as_bytes()).to_hex());
-    let line_hash1 = line_hash(1, initial_content);
-    let line_hash2 = line_hash(1, bad_content);
 
-    // Patch 1 (bad): changes content but does NOT add RELEASE_E2E_OK sentinel.
+    // Edit 1 (bad): changes content but does NOT add RELEASE_E2E_OK sentinel.
     // verify.sh ("grep -q RELEASE_E2E_OK src/lib.rs") will exit 1 → VerifyFailed.
     // OnFailure::RetainDiff means the diff IS applied; file IS changed.
-    let bad_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash1}\n@@\n-{line_hash1}\t{initial_content}\n+{bad_content}\n*** End Patch\n"
-    );
+    let bad_edit_args = serde_json::json!({
+        "path": "src/lib.rs",
+        "expected_hash": hash1,
+        "edits": [{
+            "op": "replace_text",
+            "old": initial_content,
+            "new": bad_content
+        }]
+    });
 
-    // Patch 2 (good): changes content to include RELEASE_E2E_OK.
-    // Hash uses the post-bad-patch content since RetainDiff left it changed.
-    let good_patch = format!(
-        "*** Begin Patch\n*** Update File: src/lib.rs\n*** Old Hash: {hash2}\n@@\n-{line_hash2}\t{bad_content}\n+{good_content}\n*** End Patch\n"
-    );
+    // Edit 2 (good): changes content to include RELEASE_E2E_OK.
+    // Hash uses the post-bad-edit content since RetainDiff left it changed.
+    let good_edit_args = serde_json::json!({
+        "path": "src/lib.rs",
+        "expected_hash": hash2,
+        "edits": [{
+            "op": "replace_text",
+            "old": bad_content,
+            "new": good_content
+        }]
+    });
 
     // ── Envelope for Round 1: RunCommand + WritePath + verify ──────────
     let envelope = ExecutionEnvelope {
@@ -255,21 +254,21 @@ async fn release_e2e_criterion_8() {
                 "exec.command_run",
                 &run_args.to_string(),
             ))
-            // Round 3: mutate.patch (bad) — no sentinel → verify fails, diff retained
+            // Round 3: mutate.edit (bad) — no sentinel → verify fails, diff retained
             .push_events(tool_call_events(
                 "call_2",
-                "mutate.patch",
-                &serde_json::json!({ "patch": bad_patch }).to_string(),
+                "mutate.edit",
+                &bad_edit_args.to_string(),
             ))
-            // Round 4: mutate.patch (good) — adds sentinel → verify passes
+            // Round 4: mutate.edit (good) — adds sentinel → verify passes
             .push_events(tool_call_events(
                 "call_3",
-                "mutate.patch",
-                &serde_json::json!({ "patch": good_patch }).to_string(),
+                "mutate.edit",
+                &good_edit_args.to_string(),
             ))
-            // Round 5: final assistant response after both patches
+            // Round 5: final assistant response after both edits
             .push_events(final_response_events(
-                "Criterion-8 verified: declare → run → patch(fail) → patch(ok).",
+                "Criterion-8 verified: declare → run → edit(fail) → edit(ok).",
             ))
             .build(),
     );
@@ -314,7 +313,7 @@ async fn release_e2e_criterion_8() {
     let final_content = std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
     assert!(
         final_content.contains("RELEASE_E2E_OK"),
-        "src/lib.rs must contain RELEASE_E2E_OK after good patch, got: {final_content}"
+        "src/lib.rs must contain RELEASE_E2E_OK after good edit, got: {final_content}"
     );
 
     // ── 3. Session has exactly one commit ────────────────────────────────
@@ -385,8 +384,8 @@ async fn release_e2e_criterion_8() {
         "materials must include exec.command_run; got: {method_names:?}"
     );
     assert!(
-        method_names.contains(&"mutate.patch"),
-        "materials must include mutate.patch; got: {method_names:?}"
+        method_names.contains(&"mutate.edit"),
+        "materials must include mutate.edit; got: {method_names:?}"
     );
 
     // predicate.capabilities: must be non-empty (write_path, run_command at minimum)
@@ -398,7 +397,7 @@ async fn release_e2e_criterion_8() {
         "predicate.capabilities must be non-empty"
     );
 
-    // ── 5. Audit PROV ordering: declare → exec.command_run → patch → patch ────
+    // ── 5. Audit PROV ordering: declare → exec.command_run → edit → edit ─────
     let rows = audit
         .query_rows(&AuditQueryFilters {
             turn_id: Some(turn_id.clone()),
@@ -408,7 +407,7 @@ async fn release_e2e_criterion_8() {
 
     assert!(
         rows.len() >= 4,
-        "must have at least 4 audit rows (declare, exec.command_run, 2x patch); got: {}",
+        "must have at least 4 audit rows (declare, exec.command_run, 2x edit); got: {}",
         rows.len()
     );
 
@@ -422,33 +421,33 @@ async fn release_e2e_criterion_8() {
         .iter()
         .position(|&m| m == "exec.command_run")
         .expect("exec.command_run must appear in audit rows");
-    let patch_positions: Vec<usize> = methods
+    let edit_positions: Vec<usize> = methods
         .iter()
         .enumerate()
-        .filter(|(_, &m)| m == "mutate.patch")
+        .filter(|(_, &m)| m == "mutate.edit")
         .map(|(i, _)| i)
         .collect();
 
     assert_eq!(
-        patch_positions.len(),
+        edit_positions.len(),
         2,
-        "must have exactly 2 mutate.patch audit rows; got {}: {methods:?}",
-        patch_positions.len()
+        "must have exactly 2 mutate.edit audit rows; got {}: {methods:?}",
+        edit_positions.len()
     );
     assert!(
         declare_pos < run_pos,
         "declare must precede exec.command_run in audit; order: {methods:?}"
     );
     assert!(
-        run_pos < patch_positions[0],
-        "exec.command_run must precede first patch in audit; order: {methods:?}"
+        run_pos < edit_positions[0],
+        "exec.command_run must precede first edit in audit; order: {methods:?}"
     );
     assert!(
-        patch_positions[0] < patch_positions[1],
-        "first patch must precede second patch in audit; order: {methods:?}"
+        edit_positions[0] < edit_positions[1],
+        "first edit must precede second edit in audit; order: {methods:?}"
     );
 
-    // ── 6. Tool results: declare ok=true, first patch ok=false, second ok=true ─────────
+    // ── 6. Tool results: declare ok=true, first edit ok=false, second ok=true ──────────
     let declare_result = result
         .tool_results
         .iter()
@@ -460,15 +459,15 @@ async fn release_e2e_criterion_8() {
         declare_result.error_summary
     );
 
-    let patch_results: Vec<_> = result
+    let edit_results: Vec<_> = result
         .tool_results
         .iter()
-        .filter(|t| t.name == "mutate.patch")
+        .filter(|t| t.name == "mutate.edit")
         .collect();
     assert_eq!(
-        patch_results.len(),
+        edit_results.len(),
         2,
-        "must have 2 mutate.patch tool results; all results: {:?}",
+        "must have 2 mutate.edit tool results; all results: {:?}",
         result
             .tool_results
             .iter()
@@ -476,12 +475,12 @@ async fn release_e2e_criterion_8() {
             .collect::<Vec<_>>()
     );
     assert!(
-        !patch_results[0].ok,
-        "first mutate.patch must fail (verify returned non-zero exit code)"
+        !edit_results[0].ok,
+        "first mutate.edit must fail (verify returned non-zero exit code)"
     );
     assert!(
-        patch_results[1].ok,
-        "second mutate.patch must succeed (verify found RELEASE_E2E_OK sentinel)"
+        edit_results[1].ok,
+        "second mutate.edit must succeed (verify found RELEASE_E2E_OK sentinel)"
     );
 
     println!(

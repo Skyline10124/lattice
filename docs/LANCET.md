@@ -12,7 +12,7 @@ plus base-authority planning. The underlying contract remains split across
 | Component | Description |
 |-----------|-------------|
 | `lancet-cep` | Public CEP facade: protocol/catalog/dispatch re-exports, catalog-derived `ToolDefinition`, `ToolExposure`, descriptor-declared base authority aggregation, and explicit `BaseAuthorityPlan` construction |
-| `lancet-catalog::CATALOG` | The 9-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.patch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, `observe.audit_replay` |
+| `lancet-catalog::CATALOG` | The 10-method canonical CEP catalog plus descriptor metadata, including method-local base authority requirements: `observe.workspace`, `mutate.create`, `mutate.edit`, `mutate.batch`, `exec.command_run`, `fetch.web`, `session.todo_write`, `session.envelope`, `observe.audit`, `observe.audit_replay` |
 | Method params/results | Typed `*Params` / `*Result` structs per catalog method in `lancet-catalog` |
 | `CepError` / `CepErrorCode` | Typed error families with `Retriability` in `lancet-protocol` |
 | `ExecutionEnvelope` / `Capability` / `Scope` | CEP capability, scope, and impact envelope types in `lancet-protocol` |
@@ -24,7 +24,7 @@ Internal implementation is split across `lancet-authority` (default policy, Guar
 **Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority/invariant implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
-native registry, and LLM-facing tool definitions are projected only from the 9
+native registry, and LLM-facing tool definitions are projected only from the 10
 canonical catalog methods. Tool exposure is separate from base authority:
 enabled methods filter the model-visible catalog projection, while
 catalog descriptors declare method-local base authority requirements.
@@ -42,7 +42,8 @@ The canonical method names are grouped by primary effect class:
 |--------|-------------------------|
 | `observe.workspace` | Workspace observation. `mode=read_file` has single-path scope; `mode=grep`, `mode=list_directory`, and `mode=find_files` use root/directory observation scope. |
 | `mutate.create` | Workspace mutation by pure file creation. Existing targets are rejected; missing parent directories are rejected. |
-| `mutate.patch` | Workspace mutation of existing files through hashline-anchored patch hunks. |
+| `mutate.edit` | Workspace mutation of existing files through semantic replace/insert operations. The caller provides `expected_hash`; LANCET computes hashline anchors internally. |
+| `mutate.batch` | Workspace mutation batch for create/edit operations. It intentionally has no delete operation. |
 | `exec.command_run` | Command execution, plus optional observed workspace mutation diff when `effective_impact = workspace_mutation`. |
 | `fetch.web` | External observation through URL fetch policy. |
 | `session.todo_write` | Session-state mutation for todo state. |
@@ -298,24 +299,24 @@ diagnostic only.
 
 ## Mutation and command observation
 
-### Hashline patches
+### Semantic edits
 
-`mutate.patch` requires hashline anchors for context and removed lines:
-`<prefix>blake3:<4 hex><TAB><line text>`, where `<prefix>` is either a space
-for context or `-` for removal. The short anchor is the first 4 hex digits of
-BLAKE3 over the before-state 1-based line number and line text. Added lines
-remain plain `+text`.
+`mutate.edit` edits one existing file with semantic operations such as
+`replace_text`, `insert_before`, and `insert_after`. The caller supplies the
+file `expected_hash` from `observe.workspace`; LANCET verifies that hash and
+computes hashline anchors inside the native edit backend. The LLM-facing tool
+surface does not accept hashline patch documents.
 
-This forces edits to be based on the current file state: a patch cannot remove
-or anchor a line unless it supplies that line's current line anchor. Full-file
-replacement is allowed when every removed line is hashline-anchored. Patch audit
-metadata records changed files and line-level add/remove effects.
+The internal hashline backend still forces edits to be based on the current file
+state before commit. Audit metadata records changed files and line-level
+add/remove effects. `mutate.batch` composes create/edit operations across
+multiple files but intentionally does not expose delete.
 
 ### Create-only writes
 
 `mutate.create` is create-only. It fails if the target already exists and does
 not create missing parent directories. Existing-file edits must go through
-`mutate.patch`.
+`mutate.edit` or `mutate.batch`.
 
 ### Command boundary metadata
 

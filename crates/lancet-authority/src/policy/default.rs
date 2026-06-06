@@ -526,7 +526,9 @@ impl DefaultPolicyHook {
                 let mut policy = self.config.capability_sources.clone();
                 match resolved.method.as_str() {
                     "observe.workspace" => policy.observation = overrides.clone(),
-                    "mutate.create" | "mutate.patch" => policy.mutation = overrides.clone(),
+                    "mutate.create" | "mutate.edit" | "mutate.batch" => {
+                        policy.mutation = overrides.clone()
+                    }
                     "exec.command_run" => policy.command = overrides.clone(),
                     "fetch.web" => policy.external = overrides.clone(),
                     "session.todo_write"

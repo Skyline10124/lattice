@@ -261,38 +261,6 @@ pub(super) fn setup_tempdir_with_files() -> TempDir {
     dir
 }
 
-pub(super) fn hashline(line_number: usize, line: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"lattice.hashline.v2\0");
-    hasher.update(&(line_number as u64).to_be_bytes());
-    hasher.update(b"\0");
-    hasher.update(line.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest.to_hex();
-    format!("blake3:{}", &hex[..4])
-}
-
-pub(super) fn update_patch_text(
-    path: &str,
-    before: &str,
-    remove_line: &str,
-    add_line: &str,
-) -> String {
-    let hash = blake3::hash(before.as_bytes());
-    let hash_hex = hash.to_hex();
-    let keep_line = before.lines().next().unwrap_or_default();
-    let keep_hash = hashline(1, keep_line);
-    let remove_line_number = before
-        .lines()
-        .position(|line| line == remove_line)
-        .map(|index| index + 1)
-        .expect("remove line must exist in before text");
-    let remove_hash = hashline(remove_line_number, remove_line);
-    format!(
-        "*** Begin Patch\n*** Update File: {path}\n*** Old Hash: blake3:{hash_hex}\n@@\n {keep_hash}\t{keep_line}\n-{remove_hash}\t{remove_line}\n+{add_line}\n*** End Patch\n"
-    )
-}
-
 #[derive(Debug)]
 pub(super) struct RuntimeEffectScenario {
     pub(super) name: &'static str,

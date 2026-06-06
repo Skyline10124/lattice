@@ -27,8 +27,8 @@ use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams,
 use lancet_catalog::methods::external::{Fetch, FetchParams};
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, Patch, PatchParams,
-    ReadFileParams,
+    Edit, EditOperation, EditParams, ObserveWorkspace, ObserveWorkspaceParams,
+    ObserveWorkspaceResult, ReadFileParams,
 };
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
@@ -70,17 +70,6 @@ async fn spawn_echo_server(status_line: &str, body: &str) -> String {
     format!("http://127.0.0.1:{}/", addr.port())
 }
 
-fn line_hash(line_number: usize, line: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"lattice.hashline.v2\0");
-    hasher.update(&(line_number as u64).to_be_bytes());
-    hasher.update(b"\0");
-    hasher.update(line.as_bytes());
-    let digest = hasher.finalize();
-    let hex = digest.to_hex();
-    format!("blake3:{}", &hex[..4])
-}
-
 /// Build a production server config with a fixed turn_id and the given base envelope.
 async fn build_production_config(
     canonical_root: &str,
@@ -119,7 +108,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let dir = TempDir::new().expect("temp workspace");
     let root = dir.path();
 
-    // Create initial file for read and patch operations.
+    // Create initial file for read and edit operations.
     std::fs::create_dir_all(root.join("src")).expect("src dir");
     let seed_content = "hello dog04\n";
     std::fs::write(root.join("src/dog04.txt"), seed_content).expect("seed file");
@@ -127,18 +116,8 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let canonical = std::fs::canonicalize(root).expect("canonicalize root");
     let canonical_str = canonical.to_str().unwrap();
 
-    // Compute blake3 hash for mutate.patch
+    // Content hash used by mutate.edit; line anchors are computed by LANCET.
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
-    let seed_line_hash = line_hash(1, "hello dog04");
-    let patch_doc = format!(
-        "*** Begin Patch\n\
-         *** Update File: src/dog04.txt\n\
-         *** Old Hash: {file_hash}\n\
-         @@\n\
-         -{seed_line_hash}\thello dog04\n\
-         +hello dog04 patched\n\
-         *** End Patch\n"
-    );
 
     // Build base envelope: ReadPath(root) + FetchUrl(*) + MutateSessionState + ReadAudit
     let base_envelope =
@@ -231,7 +210,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     // Declare envelope for WorkspaceMutation (WritePath requires Declared source).
     let write_envelope = ExecutionEnvelope {
         intent: Intent {
-            description: "dog04 mutate.patch".into(),
+            description: "dog04 mutate.edit".into(),
         },
         capabilities: BTreeSet::from([Capability::WritePath {
             path_pattern: "src/**".into(),
@@ -250,7 +229,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
             reason: Some("dog04 WritePath".into()),
         }))
         .await
-        .expect("session.envelope for mutate.patch");
+        .expect("session.envelope for mutate.edit");
     let EnvelopeResult::Declare(declare_write) = declare_write else {
         panic!("session.envelope returned non-declare result");
     };
@@ -259,17 +238,23 @@ async fn dogfood_impact_matrix_five_production_classes() {
         "WritePath envelope must be accepted"
     );
 
-    // Row 3 — WorkspaceMutation: mutate.patch
-    let patch_result = client1
-        .call::<Patch>(PatchParams {
-            patch: patch_doc.clone(),
+    // Row 3 — WorkspaceMutation: mutate.edit
+    let edit_result = client1
+        .call::<Edit>(EditParams {
+            path: "src/dog04.txt".into(),
+            expected_hash: file_hash,
+            edits: vec![EditOperation::ReplaceText {
+                old: "hello dog04".into(),
+                new: "hello dog04 patched".into(),
+                occurrence: None,
+            }],
         })
         .await
-        .expect("mutate.patch");
+        .expect("mutate.edit");
     assert_eq!(
-        patch_result.changed_files.len(),
+        edit_result.changed_files.len(),
         1,
-        "patch must change 1 file"
+        "edit must change 1 file"
     );
 
     // Row 4 — ExternalObservation: fetch.web (localhost echo server)
@@ -358,7 +343,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     for (expected_impact, expected_method) in [
         ("workspace_observation", "observe.workspace"),
         ("command_execution", "exec.command_run"),
-        ("workspace_mutation", "mutate.patch"),
+        ("workspace_mutation", "mutate.edit"),
         ("external_observation", "fetch.web"),
         ("session_state_mutation", "session.todo_write"),
     ] {

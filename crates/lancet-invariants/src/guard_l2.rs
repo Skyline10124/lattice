@@ -185,7 +185,7 @@ pub fn check_l2(
 
 pub fn l2_status_for_method(method: &str) -> L2Status {
     match method {
-        "mutate.create" | "mutate.patch" => {
+        "mutate.create" | "mutate.edit" | "mutate.batch" => {
             // Caller invokes check_l2; this just gates applicability
             L2Status::Covered { categories: vec![] }
         }

@@ -18,8 +18,9 @@ pub use envelope::Envelope;
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{
-    Create, FindFilesParams, FindFilesResult, GrepParams, GrepResult, ListDirectoryParams,
-    ListDirectoryResult, ObserveWorkspace, Patch, ReadFileParams, ReadFileResult,
+    Batch, BatchOperation, BatchParams, BatchResult, Create, Edit, EditOperation, EditParams,
+    EditResult, FindFilesParams, FindFilesResult, GrepParams, GrepResult, ListDirectoryParams,
+    ListDirectoryResult, ObserveWorkspace, ReadFileParams, ReadFileResult,
 };
 
 #[cfg(feature = "inspect-scaffold")]
@@ -32,13 +33,14 @@ mod sealed {
         envelope::Envelope,
         external::Fetch,
         session::TodoWrite,
-        workspace::{Create, ObserveWorkspace, Patch},
+        workspace::{Batch, Create, Edit, ObserveWorkspace},
     };
     use crate::method::sealed::Sealed;
 
     impl Sealed for ObserveWorkspace {}
     impl Sealed for Create {}
-    impl Sealed for Patch {}
+    impl Sealed for Edit {}
+    impl Sealed for Batch {}
     impl Sealed for Fetch {}
     impl Sealed for TodoWrite {}
     impl Sealed for Run {}
@@ -57,10 +59,11 @@ mod tests {
         let names = [
             ObserveWorkspace::NAME,
             Create::NAME,
+            Edit::NAME,
+            Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            Patch::NAME,
             Envelope::NAME,
             AuditObserve::NAME,
             AuditReplay::NAME,
@@ -76,10 +79,11 @@ mod tests {
         let names = [
             ObserveWorkspace::NAME,
             Create::NAME,
+            Edit::NAME,
+            Batch::NAME,
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            Patch::NAME,
             Envelope::NAME,
             AuditObserve::NAME,
             AuditReplay::NAME,

@@ -155,7 +155,7 @@ impl PolicyResolver {
                     });
                 }
             }
-            "mutate.create" => {
+            "mutate.create" | "mutate.edit" => {
                 if let Some(path) = extract_path_from_params(&input.params) {
                     let normalized = normalize_lexical_pure(&path)?;
                     let canonical = self.project_root.join(&normalized);
@@ -169,8 +169,8 @@ impl PolicyResolver {
                     });
                 }
             }
-            "mutate.patch" => {
-                let all_targets = extract_all_patch_targets(&input.params);
+            "mutate.batch" => {
+                let all_targets = extract_all_batch_targets(&input.params);
                 invocation_facts.all_patch_targets = all_targets.clone();
                 if let Some(path) = all_targets.into_iter().next() {
                     let normalized = normalize_lexical_pure(&path)?;
@@ -311,21 +311,17 @@ fn extract_optional_path_from_params(params: &serde_json::Value) -> Option<Strin
     params.get("path")?.as_str().map(String::from)
 }
 
-fn extract_all_patch_targets(params: &serde_json::Value) -> Vec<String> {
-    let Some(patch) = params.get("patch").and_then(|v| v.as_str()) else {
-        return Vec::new();
-    };
-    let mut targets = Vec::new();
-    for line in patch.lines() {
-        if let Some(target) = line.strip_prefix("*** Add File: ") {
-            targets.push(target.trim().to_string());
-        } else if let Some(target) = line.strip_prefix("*** Update File: ") {
-            targets.push(target.trim().to_string());
-        } else if let Some(target) = line.strip_prefix("*** Delete File: ") {
-            targets.push(target.trim().to_string());
-        }
-    }
-    targets
+fn extract_all_batch_targets(params: &serde_json::Value) -> Vec<String> {
+    params
+        .get("operations")
+        .and_then(|v| v.as_array())
+        .map(|operations| {
+            operations
+                .iter()
+                .filter_map(extract_path_from_params)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn extract_argv_from_params(params: &serde_json::Value) -> Vec<String> {
@@ -517,11 +513,15 @@ mod tests {
     }
 
     #[test]
-    fn resolve_workspace_patch_extracts_path() {
+    fn resolve_workspace_edit_extracts_path() {
         let resolver = test_resolver();
         let input = PolicyInput {
-            method: "mutate.patch".into(),
-            params: json!({"patch": "*** Begin Patch\n*** Update File: src/main.rs\n*** Old Hash: blake3:0000000000000000000000000000000000000000000000000000000000000000\n@@\n-old\n+new\n*** End Patch"}),
+            method: "mutate.edit".into(),
+            params: json!({
+                "path": "src/main.rs",
+                "expected_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+                "edits": []
+            }),
             envelope_snapshot: empty_envelope(),
             audit_context: audit_ctx(),
         };

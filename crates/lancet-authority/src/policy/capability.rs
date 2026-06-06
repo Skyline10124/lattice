@@ -112,7 +112,7 @@ pub struct InvocationFacts {
     pub env_keys: Vec<String>,
     /// URL host (for FetchUrl).
     pub host: Option<String>,
-    /// All target file paths extracted from a patch document (for mutate.patch).
+    /// All target file paths extracted from multi-target mutation params.
     pub all_patch_targets: Vec<String>,
     /// Session-state operation kind (for MutateSessionState).
     pub session_state_operation: Option<SessionStateOperation>,
@@ -206,7 +206,7 @@ pub fn match_capability(
 /// - `observe.workspace` accepts Base, Declared, or Both for its mode-specific capability.
 /// - `fetch.web` accepts Base, Declared, or Both.
 /// - Session-state and audit observation methods accept Base, Declared, or Both.
-/// - `mutate.create` / `mutate.patch` require Declared or Both.
+/// - Mutation methods require Declared or Both.
 /// - `exec.command_run` requires Declared or Both.
 fn is_source_allowed_for_method(
     source: &CapabilitySource,
@@ -221,7 +221,7 @@ fn is_source_allowed_for_method(
         "session.todo_write" | "session.envelope" | "observe.audit" | "observe.audit_replay" => {
             &source_policy.session_state
         }
-        "mutate.create" | "mutate.patch" => &source_policy.mutation,
+        "mutate.create" | "mutate.edit" | "mutate.batch" => &source_policy.mutation,
         "exec.command_run" => &source_policy.command,
         _ => return false,
     };
@@ -702,7 +702,7 @@ mod tests {
             ..Default::default()
         };
 
-        for method in &["mutate.create", "mutate.patch"] {
+        for method in &["mutate.create", "mutate.edit", "mutate.batch"] {
             let result = match_capability(
                 RequiredCapability::WritePath,
                 &invocation,
@@ -734,7 +734,7 @@ mod tests {
             ..Default::default()
         };
 
-        for method in &["mutate.create", "mutate.patch"] {
+        for method in &["mutate.create", "mutate.edit", "mutate.batch"] {
             let result = match_capability(
                 RequiredCapability::WritePath,
                 &invocation,

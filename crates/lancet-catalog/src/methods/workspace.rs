@@ -169,24 +169,52 @@ impl CepMethod for Create {
 
 impl CatalogMethod for Create {}
 
-/// `mutate.patch`
-pub struct Patch;
+/// `mutate.edit`
+pub struct Edit;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct PatchParams {
-    pub patch: String,
+pub struct EditParams {
+    pub path: String,
+    /// Content hash returned by `observe.workspace` for the file state the edit
+    /// was planned against. The runtime verifies this value and computes all
+    /// hashline anchors internally.
+    pub expected_hash: String,
+    pub edits: Vec<EditOperation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct PatchResult {
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum EditOperation {
+    ReplaceText {
+        old: String,
+        new: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        occurrence: Option<u64>,
+    },
+    InsertBefore {
+        anchor: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        occurrence: Option<u64>,
+    },
+    InsertAfter {
+        anchor: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        occurrence: Option<u64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct EditResult {
     pub changed_files: Vec<String>,
 }
 
-impl CepMethod for Patch {
-    const NAME: &'static str = "mutate.patch";
-    const DESCRIPTION: &'static str = "Apply LATTICE hashline patch text with multi-file update and delete operations. Patch text must use the exact envelope format: *** Begin Patch, then one or more *** Update File: path / *** Delete File: path operations, then *** End Patch. Every operation requires *** Old Hash: blake3:<64 hex> from observe.workspace read_file content_hash. Hunk context/removal lines after @@ must carry the current line anchor as '<prefix>blake3:<4 hex><tab>text' using a leading space for context or - for removals; the short anchor is the first 4 hex digits of BLAKE3 over the before-state 1-based line number and line text. Additions use +text. New files must use mutate.create. Do not send git unified diff syntax such as --- a/file or +++ b/file.";
-    type Params = PatchParams;
-    type Result = PatchResult;
+impl CepMethod for Edit {
+    const NAME: &'static str = "mutate.edit";
+    const DESCRIPTION: &'static str = "Edit an existing file with semantic text operations. Provide the path, the observe.workspace content_hash as expected_hash, and replace/insert operations; LANCET computes hashline anchors internally. This method never deletes files.";
+    type Params = EditParams;
+    type Result = EditResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
     const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
     const EFFECT: EffectDecl = EffectDecl {
@@ -198,7 +226,54 @@ impl CepMethod for Patch {
     };
 }
 
-impl CatalogMethod for Patch {}
+impl CatalogMethod for Edit {}
+
+/// `mutate.batch`
+pub struct Batch;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BatchParams {
+    pub operations: Vec<BatchOperation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum BatchOperation {
+    CreateFile {
+        path: String,
+        content: String,
+    },
+    EditFile {
+        path: String,
+        expected_hash: String,
+        edits: Vec<EditOperation>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct BatchResult {
+    pub changed_files: Vec<String>,
+    pub created_files: Vec<String>,
+    pub edited_files: Vec<String>,
+}
+
+impl CepMethod for Batch {
+    const NAME: &'static str = "mutate.batch";
+    const DESCRIPTION: &'static str = "Apply a multi-file workspace mutation as one LANCET operation. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Edit operations use expected_hash and runtime-computed hashline anchors.";
+    type Params = BatchParams;
+    type Result = BatchResult;
+    const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
+    const CAPABILITY: RequiredCapability = RequiredCapability::WritePath;
+    const EFFECT: EffectDecl = EffectDecl {
+        kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceMutation]),
+        scope: EffectScopeKind::WorkspaceWrite,
+        capabilities: &[RequiredCapability::WritePath],
+        overlay: OverlayBehavior::WriteWorkspace,
+        failure: FailureSemantics::RetainDiffOnVerifyFailure,
+    };
+}
+
+impl CatalogMethod for Batch {}
 
 #[cfg(test)]
 mod tests {
@@ -207,7 +282,12 @@ mod tests {
 
     #[test]
     fn workspace_method_names_are_full_dotted_names() {
-        for name in [ObserveWorkspace::NAME, Create::NAME, Patch::NAME] {
+        for name in [
+            ObserveWorkspace::NAME,
+            Create::NAME,
+            Edit::NAME,
+            Batch::NAME,
+        ] {
             assert!(name.contains('.'), "expected dotted name: {name}");
             assert!(!name.contains('/'), "slash names forbidden: {name}");
         }

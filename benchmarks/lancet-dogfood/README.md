@@ -12,7 +12,7 @@ provider availability, and token cost.
 | Scenario | Purpose | Expected current tools |
 |---|---|---|
 | `smoke` | Minimal envelope, observation, create, and command path. | `session.envelope`, `observe.workspace`, `mutate.create`, `exec.command_run` |
-| `mutation` | Hashline patch with post-mutation verify. | `session.envelope`, `observe.workspace`, `mutate.patch` |
+| `mutation` | Semantic edit with post-mutation verify. | `session.envelope`, `observe.workspace`, `mutate.edit` |
 | `command` | Declared command execution without workspace mutation. | `session.envelope`, `exec.command_run` |
 
 The runner writes one JSONL stream and one `summary.json` per scenario, then

@@ -3,10 +3,10 @@
 
 //! Native CEP workspace mutation handlers.
 //!
-//! Implements `mutate.create` and `mutate.patch` with Guard L1 scope
+//! Implements workspace mutation methods with Guard L1 scope
 //! enforcement and verify flow.
-//! Both methods require an active `ExecutionEnvelope`; `mutate.patch`
-//! performs all-or-nothing scope preflight before applying changes.
+//! All methods require an active `ExecutionEnvelope`; multi-file mutations
+//! perform all-or-nothing scope preflight before applying changes.
 
 use crate::edit::apply::PatchApplyLimits;
 use crate::edit::commit_baseline::{
@@ -14,6 +14,7 @@ use crate::edit::commit_baseline::{
     CommitBaselineValidation,
 };
 use crate::edit::content_hash;
+use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::types::PatchOperation;
 use crate::enforcement::guard_l1::{
@@ -28,21 +29,30 @@ use lancet_authority::effect::ledger::{
 };
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
-    Create, CreateParams, CreateResult, Patch, PatchParams, PatchResult,
+    Batch, BatchOperation, BatchParams, BatchResult, Create, CreateParams, CreateResult, Edit,
+    EditOperation, EditParams, EditResult,
 };
 use lancet_catalog::CepMethod;
-use lancet_invariants::guard_l2;
-use lancet_protocol::envelope::{CepMode, ImpactKind};
+use lancet_invariants::{guard_l2, InvariantCardIndex};
+use lancet_protocol::envelope::{CepMode, ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
     registry.register_method::<Create, _, _>(handle_create)?;
-    registry.register_method::<Patch, _, _>(handle_patch)?;
+    registry.register_method::<Edit, _, _>(handle_edit)?;
+    registry.register_method::<Batch, _, _>(handle_batch)?;
     Ok(())
+}
+
+struct MutationAuthorization {
+    envelope_id: String,
+    envelope: ExecutionEnvelope,
+    project_root: String,
 }
 
 async fn handle_create(
@@ -68,25 +78,195 @@ async fn handle_create_as(
     ctx: HandlerContext,
     method: &'static str,
 ) -> Result<CreateResult, CepError> {
-    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
+    let auth =
+        authorize_workspace_mutation(&ctx, method, &params, std::slice::from_ref(&params.path))
+            .await?;
 
-    // 1. Check active envelope
+    let create = preflight_create_file(
+        &auth.project_root,
+        &params,
+        &ctx.invariant_index,
+        ctx.cep_mode.clone(),
+        method,
+        &ctx,
+    )?;
+
+    write_preflighted_create(&auth.project_root, &create).await?;
+
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceMutation,
+        scope: ObservedScope::Path(create.full_path.clone()),
+        required_capability: RequiredCapability::WritePath,
+        source: EffectSource::HandlerBackend,
+    });
+
+    // 7. Run verify if configured
+    run_mutation_verify_if_configured(&ctx, method, &auth).await?;
+
+    // 8. Record metadata
+    let written_hash = content_hash(params.content.as_bytes());
+    ctx.record_durable_metadata(json!({
+        "method": method,
+        "envelope_id": auth.envelope_id,
+        "bytes_written": create.bytes_written,
+        "content_hash": written_hash,
+        "backend_invoked": true,
+        "policy_enforced": true,
+    }));
+
+    Ok(CreateResult {
+        path: params.path,
+        bytes_written: create.bytes_written,
+    })
+}
+
+async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResult, CepError> {
+    let auth = authorize_workspace_mutation(
+        &ctx,
+        Edit::NAME,
+        &params,
+        std::slice::from_ref(&params.path),
+    )
+    .await?;
+    let patch = compile_edit_patch(&auth.project_root, &params)?;
+    let result = apply_compiled_patch(&ctx, Edit::NAME, &auth, &patch).await?;
+    run_mutation_verify_if_configured(&ctx, Edit::NAME, &auth).await?;
+
+    ctx.record_durable_metadata(json!({
+        "method": Edit::NAME,
+        "envelope_id": auth.envelope_id,
+        "compiled_patch_backend": "hashline_patch",
+        "changed_files": result.changed_files.clone(),
+        "backend_invoked": true,
+        "policy_enforced": true,
+    }));
+
+    Ok(EditResult {
+        changed_files: result.changed_files,
+    })
+}
+
+async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchResult, CepError> {
+    let changed_paths = batch_target_paths(&params)?;
+    let auth = authorize_workspace_mutation(&ctx, Batch::NAME, &params, &changed_paths).await?;
+
+    let mut create_inputs = Vec::new();
+    let mut edit_inputs = Vec::new();
+    let mut seen_paths = HashSet::new();
+
+    for operation in &params.operations {
+        match operation {
+            BatchOperation::CreateFile { path, content } => {
+                reject_duplicate_batch_path(&mut seen_paths, path)?;
+                let params = CreateParams {
+                    path: path.clone(),
+                    content: content.clone(),
+                };
+                create_inputs.push(preflight_create_file(
+                    &auth.project_root,
+                    &params,
+                    &ctx.invariant_index,
+                    ctx.cep_mode.clone(),
+                    Batch::NAME,
+                    &ctx,
+                )?);
+            }
+            BatchOperation::EditFile {
+                path,
+                expected_hash,
+                edits,
+            } => {
+                reject_duplicate_batch_path(&mut seen_paths, path)?;
+                let params = EditParams {
+                    path: path.clone(),
+                    expected_hash: expected_hash.clone(),
+                    edits: edits.clone(),
+                };
+                edit_inputs.push(params);
+            }
+        }
+    }
+
+    let patch = if edit_inputs.is_empty() {
+        None
+    } else {
+        Some(compile_batch_edit_patch(&auth.project_root, &edit_inputs)?)
+    };
+
+    let mut edited_files = Vec::new();
+    if let Some(patch) = patch.as_deref() {
+        edited_files = apply_compiled_patch(&ctx, Batch::NAME, &auth, patch)
+            .await?
+            .changed_files;
+    }
+
+    let mut created_files = Vec::new();
+    for create in &create_inputs {
+        write_preflighted_create(&auth.project_root, create).await?;
+        ctx.record_effect(ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(create.full_path.clone()),
+            required_capability: RequiredCapability::WritePath,
+            source: EffectSource::HandlerBackend,
+        });
+        created_files.push(create.path.clone());
+    }
+
+    run_mutation_verify_if_configured(&ctx, Batch::NAME, &auth).await?;
+
+    let mut changed_files = edited_files.clone();
+    changed_files.extend(created_files.iter().cloned());
+
+    ctx.record_durable_metadata(json!({
+        "method": Batch::NAME,
+        "envelope_id": auth.envelope_id,
+        "compiled_patch_backend": "hashline_patch",
+        "created_files": created_files.clone(),
+        "edited_files": edited_files.clone(),
+        "backend_invoked": true,
+        "policy_enforced": true,
+    }));
+
+    Ok(BatchResult {
+        changed_files,
+        created_files,
+        edited_files,
+    })
+}
+
+struct CompiledPatchApply {
+    changed_files: Vec<String>,
+}
+
+struct PreflightCreate {
+    path: String,
+    content: String,
+    full_path: PathBuf,
+    bytes_written: u64,
+}
+
+async fn authorize_workspace_mutation(
+    ctx: &HandlerContext,
+    method: &str,
+    params: &impl serde::Serialize,
+    changed_paths: &[String],
+) -> Result<MutationAuthorization, CepError> {
+    let _evaluation = evaluate_and_enforce_policy(ctx, method, params).await?;
+
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
         None => {
-            emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+            emit_envelope_missing(ctx, method, "workspace_mutation").await;
             return Err(envelope_missing_error(method));
         }
     };
 
-    // 2. Extract WritePath patterns
     let patterns = extract_write_path_patterns(&envelope.capabilities);
     if patterns.is_empty() {
-        emit_envelope_missing(&ctx, method, "workspace_mutation").await;
+        emit_envelope_missing(ctx, method, "workspace_mutation").await;
         return Err(envelope_missing_error(method));
     }
 
-    // 3. Get project root
     let project_root = ctx
         .cep_context
         .policy
@@ -94,22 +274,83 @@ async fn handle_create_as(
         .to_string_lossy()
         .to_string();
 
-    // 4. Check scope
-    if let Err(err) = check_write_scope(&params.path, &project_root, &patterns) {
-        if err.code == CepErrorCode::ReplanRequired {
-            emit_replan_required(
-                &ctx,
-                method,
-                &envelope_id,
-                std::slice::from_ref(&params.path),
-            )
-            .await;
+    let mut out_of_scope = Vec::new();
+    for path in changed_paths {
+        if let Err(err) = check_write_scope(path, &project_root, &patterns) {
+            if err.code == CepErrorCode::ReplanRequired {
+                out_of_scope.push(path.clone());
+            } else {
+                return Err(err);
+            }
         }
-        return Err(err);
     }
 
-    // 5. Check parent directory exists; create does not create directories.
-    let full_path = std::path::Path::new(&project_root).join(&params.path);
+    if !out_of_scope.is_empty() {
+        emit_replan_required(ctx, method, &envelope_id, &out_of_scope).await;
+        return Err(CepError::new(
+            CepErrorCode::ReplanRequired,
+            format!(
+                "{method} contains out-of-scope paths: {:?}; mutation not applied",
+                out_of_scope
+            ),
+            CepErrorData::Guard(GuardErrorData {
+                method: method.into(),
+                reason: format!("ReplanRequired: out-of-scope paths {:?}", out_of_scope),
+            }),
+            Retriability::RequiresReplan,
+        ));
+    }
+
+    Ok(MutationAuthorization {
+        envelope_id,
+        envelope,
+        project_root,
+    })
+}
+
+async fn run_mutation_verify_if_configured(
+    ctx: &HandlerContext,
+    method: &str,
+    auth: &MutationAuthorization,
+) -> Result<(), CepError> {
+    let Some(verify_cmd) = extract_verify_command(&auth.envelope) else {
+        return Ok(());
+    };
+
+    let policy = &ctx.cep_context.policy.command;
+    validate_verify_command(&verify_cmd, policy, &auth.project_root)?;
+
+    let mut cancellation = ctx.cancellation.clone();
+    match run_verify(&verify_cmd, &auth.project_root, policy, &mut cancellation).await {
+        Ok(outcome) if !outcome.success => {
+            emit_verify_failed(ctx, method, &auth.envelope_id, outcome.exit_code).await;
+            Err(verify_failed_error(&verify_cmd, &outcome))
+        }
+        Ok(_) => {
+            ctx.record_effect(ObservedEffect {
+                kind: ImpactKind::CommandExecution,
+                scope: ObservedScope::Root(auth.project_root.clone()),
+                required_capability: RequiredCapability::RunCommand,
+                source: EffectSource::Verify,
+            });
+            Ok(())
+        }
+        Err(err) => {
+            emit_verify_failed(ctx, method, &auth.envelope_id, -1).await;
+            Err(err)
+        }
+    }
+}
+
+fn preflight_create_file(
+    project_root: &str,
+    params: &CreateParams,
+    invariant_index: &InvariantCardIndex,
+    cep_mode: CepMode,
+    method: &str,
+    ctx: &HandlerContext,
+) -> Result<PreflightCreate, CepError> {
+    let full_path = Path::new(project_root).join(&params.path);
     if let Some(parent) = full_path.parent() {
         if !parent.exists() {
             return Err(CepError::new(
@@ -142,16 +383,14 @@ async fn handle_create_as(
         ));
     }
 
-    // 6. Opaque invariant cards require human review before mutation.
-    let cards = ctx.invariant_index.match_target(&params.path);
+    let cards = invariant_index.match_target(&params.path);
     if let Some(message) = lancet_invariants::opaque_human_review_message(&cards) {
         return Err(lancet_invariants::opaque_human_review_error(
             method, &message,
         ));
     }
 
-    // 7. Guard L2: AST category check for .rs files with invariant cards
-    if params.path.ends_with(".rs") && !matches!(ctx.cep_mode, CepMode::Off) {
+    if params.path.ends_with(".rs") && !matches!(cep_mode, CepMode::Off) {
         let _status = guard_l2::l2_status_for_method(method);
         let has_forbidden = cards.iter().any(|c| !c.forbidden.is_empty());
         if has_forbidden {
@@ -161,90 +400,318 @@ async fn handle_create_as(
                 &[(0, params.content.len())],
                 &cards,
             );
-            enforce_l2_result(&ctx, method, &params.path, &result)?;
+            enforce_l2_result(ctx, method, &params.path, &result)?;
         }
     }
 
-    // 7. Write file using native secure containment.
-    let bytes_written = params.content.len() as u64;
-    create_file_secure(&project_root, &params.path, &params.content).await?;
-
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceMutation,
-        scope: ObservedScope::Path(full_path.clone()),
-        required_capability: RequiredCapability::WritePath,
-        source: EffectSource::HandlerBackend,
-    });
-
-    // 7. Run verify if configured
-    if let Some(verify_cmd) = extract_verify_command(&envelope) {
-        let policy = &ctx.cep_context.policy.command;
-        validate_verify_command(&verify_cmd, policy, &project_root)?;
-
-        let mut cancellation = ctx.cancellation.clone();
-        match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
-            Ok(outcome) if !outcome.success => {
-                emit_verify_failed(&ctx, method, &envelope_id, outcome.exit_code).await;
-                return Err(verify_failed_error(&verify_cmd, &outcome));
-            }
-            Ok(_) => {
-                ctx.record_effect(ObservedEffect {
-                    kind: ImpactKind::CommandExecution,
-                    scope: ObservedScope::Root(project_root.clone()),
-                    required_capability: RequiredCapability::RunCommand,
-                    source: EffectSource::Verify,
-                });
-            }
-            Err(err) => {
-                // Verify execution error (timeout, cancel, etc.)
-                emit_verify_failed(&ctx, method, &envelope_id, -1).await;
-                return Err(err);
-            }
-        }
-    }
-
-    // 8. Record metadata
-    let written_hash = content_hash(params.content.as_bytes());
-    ctx.record_durable_metadata(json!({
-        "method": method,
-        "envelope_id": envelope_id,
-        "bytes_written": bytes_written,
-        "content_hash": written_hash,
-        "backend_invoked": true,
-        "policy_enforced": true,
-    }));
-
-    Ok(CreateResult {
-        path: params.path,
-        bytes_written,
+    Ok(PreflightCreate {
+        path: params.path.clone(),
+        content: params.content.clone(),
+        full_path,
+        bytes_written: params.content.len() as u64,
     })
 }
 
-/// Handle `mutate.patch` with Guard L1 preflight scope enforcement and verify flow.
-///
-/// Flow:
-/// 1. Parse patch, extract all changed paths; malformed patch text is schema
-///    error, not a capability/scope failure.
-/// 2. Check active envelope exists -> else EnvelopeMissing
-/// 3. Check ALL paths against WritePath scope (preflight, before apply)
-/// 4. If any out-of-scope -> ReplanRequired, patch NOT applied
-/// 5. Apply patch using existing edit/ machinery
-/// 6. If verify configured -> run verify
-/// 7. If verify fails -> VerifyFailed, retain diff
-/// 8. Return PatchResult with changed_files
-async fn handle_patch(params: PatchParams, ctx: HandlerContext) -> Result<PatchResult, CepError> {
-    handle_patch_as(params, ctx, Patch::NAME).await
+async fn write_preflighted_create(
+    project_root: &str,
+    create: &PreflightCreate,
+) -> Result<(), CepError> {
+    create_file_secure(project_root, &create.path, &create.content).await
 }
 
-async fn handle_patch_as(
-    params: PatchParams,
-    ctx: HandlerContext,
-    method: &'static str,
-) -> Result<PatchResult, CepError> {
-    let document = parse_patch_document(&params.patch).map_err(|parse_err| {
+fn batch_target_paths(params: &BatchParams) -> Result<Vec<String>, CepError> {
+    if params.operations.is_empty() {
+        return Err(validation_error(
+            "operations",
+            "mutate.batch requires at least one operation",
+        ));
+    }
+
+    Ok(params
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            BatchOperation::CreateFile { path, .. } | BatchOperation::EditFile { path, .. } => {
+                path.clone()
+            }
+        })
+        .collect())
+}
+
+fn reject_duplicate_batch_path(seen: &mut HashSet<String>, path: &str) -> Result<(), CepError> {
+    if seen.insert(path.to_string()) {
+        Ok(())
+    } else {
+        Err(validation_error(
+            "operations",
+            format!("mutate.batch contains duplicate target path '{path}'"),
+        ))
+    }
+}
+
+fn compile_edit_patch(project_root: &str, params: &EditParams) -> Result<String, CepError> {
+    let fragment = compile_edit_operation_fragment(project_root, params)?;
+    Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
+}
+
+fn compile_batch_edit_patch(project_root: &str, edits: &[EditParams]) -> Result<String, CepError> {
+    let mut patch = String::from("*** Begin Patch\n");
+    for edit in edits {
+        patch.push_str(&compile_edit_operation_fragment(project_root, edit)?);
+    }
+    patch.push_str("*** End Patch\n");
+    Ok(patch)
+}
+
+fn compile_edit_operation_fragment(
+    project_root: &str,
+    params: &EditParams,
+) -> Result<String, CepError> {
+    if params.edits.is_empty() {
+        return Err(validation_error(
+            "edits",
+            "mutate.edit requires at least one edit operation",
+        ));
+    }
+    if params.path.contains('\n') || params.path.contains('\r') {
+        return Err(validation_error(
+            "path",
+            "path must not contain newline characters",
+        ));
+    }
+
+    let before =
+        std::fs::read_to_string(Path::new(project_root).join(&params.path)).map_err(|err| {
+            CepError::new(
+                CepErrorCode::ExecutionFailed,
+                format!("cannot read edit target '{}': {err}", params.path),
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    command: "mutate.edit.compile".into(),
+                    exit_code: Some(1),
+                    stderr: Some(err.to_string()),
+                }),
+                Retriability::Permanent,
+            )
+        })?;
+
+    let current_hash = content_hash(before.as_bytes());
+    if current_hash != params.expected_hash {
+        return Err(CepError::new(
+            CepErrorCode::ReplanRequired,
+            format!(
+                "expected_hash for '{}' is stale: expected {}, current {}; observe.workspace read_file again",
+                params.path, params.expected_hash, current_hash
+            ),
+            CepErrorData::Guard(GuardErrorData {
+                method: Edit::NAME.into(),
+                reason: "ReplanRequired: stale expected_hash".into(),
+            }),
+            Retriability::RequiresReplan,
+        ));
+    }
+
+    let after = apply_semantic_edit_operations(&before, &params.edits)?;
+    compile_update_fragment(&params.path, &params.expected_hash, &before, &after)
+}
+
+fn apply_semantic_edit_operations(
+    before: &str,
+    edits: &[EditOperation],
+) -> Result<String, CepError> {
+    let mut content = before.to_string();
+    for edit in edits {
+        match edit {
+            EditOperation::ReplaceText {
+                old,
+                new,
+                occurrence,
+            } => {
+                let (start, end) = find_semantic_occurrence(&content, old, *occurrence, "old")?;
+                content.replace_range(start..end, new);
+            }
+            EditOperation::InsertBefore {
+                anchor,
+                content: inserted,
+                occurrence,
+            } => {
+                let (start, _) = find_semantic_occurrence(&content, anchor, *occurrence, "anchor")?;
+                content.insert_str(start, inserted);
+            }
+            EditOperation::InsertAfter {
+                anchor,
+                content: inserted,
+                occurrence,
+            } => {
+                let (_, end) = find_semantic_occurrence(&content, anchor, *occurrence, "anchor")?;
+                content.insert_str(end, inserted);
+            }
+        }
+    }
+    Ok(content)
+}
+
+fn find_semantic_occurrence(
+    haystack: &str,
+    needle: &str,
+    occurrence: Option<u64>,
+    field: &str,
+) -> Result<(usize, usize), CepError> {
+    if needle.is_empty() {
+        return Err(validation_error(field, "match text must not be empty"));
+    }
+    let matches = haystack
+        .match_indices(needle)
+        .map(|(start, value)| (start, start + value.len()))
+        .collect::<Vec<_>>();
+
+    let index = match occurrence {
+        Some(0) => return Err(validation_error("occurrence", "occurrence is 1-based")),
+        Some(value) => value as usize - 1,
+        None if matches.len() == 1 => 0,
+        None if matches.is_empty() => {
+            return Err(semantic_replan_error(format!("{field} text was not found")));
+        }
+        None => {
+            return Err(semantic_replan_error(format!(
+                "{field} text matched {} occurrences; provide occurrence",
+                matches.len()
+            )));
+        }
+    };
+
+    matches.get(index).copied().ok_or_else(|| {
+        semantic_replan_error(format!("{field} occurrence {} was not found", index + 1))
+    })
+}
+
+fn compile_update_fragment(
+    path: &str,
+    expected_hash: &str,
+    before: &str,
+    after: &str,
+) -> Result<String, CepError> {
+    if before == after {
+        return Err(validation_error(
+            "edits",
+            "semantic edit produced no changes",
+        ));
+    }
+    let (before_lines, before_final_newline) = patch_lines(before);
+    let (after_lines, after_final_newline) = patch_lines(after);
+    if before_final_newline != after_final_newline {
+        return Err(validation_error(
+            "edits",
+            "semantic edits must preserve the file's trailing newline state",
+        ));
+    }
+
+    let mut prefix = 0usize;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < before_lines.len().saturating_sub(prefix)
+        && suffix < after_lines.len().saturating_sub(prefix)
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let old_end = before_lines.len() - suffix;
+    let new_end = after_lines.len() - suffix;
+    let mut fragment = format!("*** Update File: {path}\n*** Old Hash: {expected_hash}\n@@\n");
+
+    if prefix == old_end {
+        render_insertion_hunk(
+            &mut fragment,
+            &before_lines,
+            &after_lines[prefix..new_end],
+            prefix,
+        )?;
+    } else {
+        for (idx, line) in before_lines[prefix..old_end].iter().enumerate() {
+            let line_number = prefix + idx + 1;
+            fragment.push_str(&format!("-{}\t{}\n", line_hash(line_number, line), line));
+        }
+        for line in &after_lines[prefix..new_end] {
+            fragment.push_str(&format!("+{line}\n"));
+        }
+    }
+
+    Ok(fragment)
+}
+
+fn render_insertion_hunk(
+    fragment: &mut String,
+    before_lines: &[String],
+    inserted: &[String],
+    insert_at: usize,
+) -> Result<(), CepError> {
+    if inserted.is_empty() {
+        return Err(validation_error(
+            "edits",
+            "semantic edit produced no changed lines",
+        ));
+    }
+
+    if insert_at > 0 {
+        let context_index = insert_at - 1;
+        let context = &before_lines[context_index];
+        fragment.push_str(&format!(
+            " {}\t{}\n",
+            line_hash(context_index + 1, context),
+            context
+        ));
+        for line in inserted {
+            fragment.push_str(&format!("+{line}\n"));
+        }
+        return Ok(());
+    }
+
+    if let Some(context) = before_lines.first() {
+        for line in inserted {
+            fragment.push_str(&format!("+{line}\n"));
+        }
+        fragment.push_str(&format!(" {}\t{}\n", line_hash(1, context), context));
+        return Ok(());
+    }
+
+    Err(validation_error(
+        "edits",
+        "semantic insertion into an empty existing file is not supported by hashline patch yet",
+    ))
+}
+
+fn patch_lines(content: &str) -> (Vec<String>, bool) {
+    if content.is_empty() {
+        return (Vec::new(), false);
+    }
+    let final_newline = content.ends_with('\n');
+    let mut lines = content
+        .split('\n')
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if final_newline {
+        lines.pop();
+    }
+    (lines, final_newline)
+}
+
+async fn apply_compiled_patch(
+    ctx: &HandlerContext,
+    method: &str,
+    auth: &MutationAuthorization,
+    patch: &str,
+) -> Result<CompiledPatchApply, CepError> {
+    let document = parse_patch_document(patch).map_err(|parse_err| {
         CepError::new(
             CepErrorCode::SchemaMismatch,
-            format!("patch parse error: {}", parse_err),
+            format!("compiled patch parse error: {}", parse_err),
             CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
                 field: "patch".into(),
                 reason: parse_err.to_string(),
@@ -253,68 +720,6 @@ async fn handle_patch_as(
         )
     })?;
 
-    let _evaluation = evaluate_and_enforce_policy(&ctx, method, &params).await?;
-
-    // 1. Check active envelope
-    let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
-        Some((id, env)) => (id, env),
-        None => {
-            emit_envelope_missing(&ctx, method, "workspace_mutation").await;
-            return Err(envelope_missing_error(method));
-        }
-    };
-
-    // 2. Extract WritePath patterns
-    let patterns = extract_write_path_patterns(&envelope.capabilities);
-    if patterns.is_empty() {
-        emit_envelope_missing(&ctx, method, "workspace_mutation").await;
-        return Err(envelope_missing_error(method));
-    }
-
-    // 3. Get project root
-    let project_root = ctx
-        .cep_context
-        .policy
-        .project_root
-        .to_string_lossy()
-        .to_string();
-
-    let changed_paths: Vec<String> = document
-        .operations
-        .iter()
-        .map(|op| op.path().to_string())
-        .collect();
-
-    // 5. Check ALL paths against scope (preflight, all-or-nothing)
-    let mut out_of_scope = Vec::new();
-    for path in &changed_paths {
-        if let Err(err) = check_write_scope(path, &project_root, &patterns) {
-            if err.code == CepErrorCode::ReplanRequired {
-                out_of_scope.push(path.clone());
-            } else {
-                return Err(err);
-            }
-        }
-    }
-
-    if !out_of_scope.is_empty() {
-        emit_replan_required(&ctx, method, &envelope_id, &out_of_scope).await;
-        return Err(CepError::new(
-            CepErrorCode::ReplanRequired,
-            format!(
-                "patch contains out-of-scope paths: {:?}; patch not applied",
-                out_of_scope
-            ),
-            CepErrorData::Guard(GuardErrorData {
-                method: method.into(),
-                reason: format!("ReplanRequired: out-of-scope paths {:?}", out_of_scope),
-            }),
-            Retriability::RequiresReplan,
-        ));
-    }
-
-    // 6. Opaque cards require review before mutation. Structural L2 runs below
-    // against post-patch content so new files and introduced AST nodes are visible.
     for operation in &document.operations {
         let path = operation.path();
         let cards = ctx.invariant_index.match_target(path);
@@ -327,18 +732,16 @@ async fn handle_patch_as(
             && !matches!(ctx.cep_mode, CepMode::Off)
             && cards.iter().any(|c| !c.forbidden.is_empty())
         {
-            if let Some((before, after)) = projected_patch_content(&project_root, operation)? {
+            if let Some((before, after)) = projected_patch_content(&auth.project_root, operation)? {
                 let ranges = changed_line_byte_ranges(before.as_deref(), &after);
                 let result = guard_l2::check_l2(path, after.as_bytes(), &ranges, &cards);
-                enforce_l2_result(&ctx, method, path, &result)?;
+                enforce_l2_result(ctx, method, path, &result)?;
             }
         }
     }
 
-    // 7. Apply patch using existing edit/ machinery
     let limits = PatchApplyLimits::default();
-    let result =
-        crate::edit::apply_patch(std::path::Path::new(&project_root), &limits, &params.patch).await;
+    let result = crate::edit::apply_patch(Path::new(&auth.project_root), &limits, patch).await;
 
     if let Some(report) = result.commit_baseline_report.as_ref() {
         let metadata = commit_baseline_metadata_json(report);
@@ -353,9 +756,9 @@ async fn handle_patch_as(
         }
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
-            format!("patch application failed: {}", result.summary),
+            format!("compiled patch application failed: {}", result.summary),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                command: "patch".into(),
+                command: "compiled_patch".into(),
                 exit_code: Some(1),
                 stderr: Some(
                     result
@@ -370,26 +773,15 @@ async fn handle_patch_as(
         ));
     }
 
-    let changed_paths: Vec<String> = result
+    let changed_files = result
         .changed_files
         .iter()
         .map(|f| f.path.clone())
-        .collect();
-    let changed_files_meta: Vec<serde_json::Value> = result
-        .changed_files
-        .iter()
-        .map(|f| {
-            json!({
-                "path": f.path,
-                "content_hash": f.hash_after,
-                "line_changes": f.line_changes,
-            })
-        })
-        .collect();
+        .collect::<Vec<_>>();
 
-    for changed_path in &changed_paths {
-        let abs_path = if std::path::Path::new(changed_path).is_relative() {
-            PathBuf::from(&project_root).join(changed_path)
+    for changed_path in &changed_files {
+        let abs_path = if Path::new(changed_path).is_relative() {
+            PathBuf::from(&auth.project_root).join(changed_path)
         } else {
             PathBuf::from(changed_path)
         };
@@ -426,44 +818,33 @@ async fn handle_patch_as(
         });
     }
 
-    // 7. Run verify if configured
-    if let Some(verify_cmd) = extract_verify_command(&envelope) {
-        let policy = &ctx.cep_context.policy.command;
-        validate_verify_command(&verify_cmd, policy, &project_root)?;
+    Ok(CompiledPatchApply { changed_files })
+}
 
-        let mut cancellation = ctx.cancellation.clone();
-        match run_verify(&verify_cmd, &project_root, policy, &mut cancellation).await {
-            Ok(outcome) if !outcome.success => {
-                emit_verify_failed(&ctx, method, &envelope_id, outcome.exit_code).await;
-                return Err(verify_failed_error(&verify_cmd, &outcome));
-            }
-            Ok(_) => {
-                ctx.record_effect(ObservedEffect {
-                    kind: ImpactKind::CommandExecution,
-                    scope: ObservedScope::Root(project_root.clone()),
-                    required_capability: RequiredCapability::RunCommand,
-                    source: EffectSource::Verify,
-                });
-            }
-            Err(err) => {
-                emit_verify_failed(&ctx, method, &envelope_id, -1).await;
-                return Err(err);
-            }
-        }
-    }
+fn validation_error(field: impl Into<String>, reason: impl Into<String>) -> CepError {
+    let reason = reason.into();
+    CepError::new(
+        CepErrorCode::SchemaMismatch,
+        reason.clone(),
+        CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+            field: field.into(),
+            reason,
+        }),
+        Retriability::Permanent,
+    )
+}
 
-    // 8. Record metadata
-    ctx.record_durable_metadata(json!({
-        "method": method,
-        "envelope_id": envelope_id,
-        "changed_files": changed_files_meta,
-        "backend_invoked": true,
-        "policy_enforced": true,
-    }));
-
-    Ok(PatchResult {
-        changed_files: changed_paths,
-    })
+fn semantic_replan_error(reason: impl Into<String>) -> CepError {
+    let reason = reason.into();
+    CepError::new(
+        CepErrorCode::ReplanRequired,
+        reason.clone(),
+        CepErrorData::Guard(GuardErrorData {
+            method: Edit::NAME.into(),
+            reason,
+        }),
+        Retriability::RequiresReplan,
+    )
 }
 
 fn commit_baseline_metadata_json(report: &CommitBaselineReport) -> serde_json::Value {
@@ -1237,11 +1618,10 @@ mod create_tests {
 }
 
 #[cfg(test)]
-mod patch_tests {
+mod edit_tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::envelope_store::ActiveEnvelopeStore;
-    use lancet_invariants::{CardAnchor, ForbiddenEntry, InvariantCard, InvariantCardIndex};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
@@ -1255,20 +1635,6 @@ mod patch_tests {
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
-        test_ctx_with_store_and_index(
-            root,
-            store,
-            Arc::new(InvariantCardIndex::new(vec![])),
-            CepMode::Off,
-        )
-    }
-
-    fn test_ctx_with_store_and_index(
-        root: &str,
-        store: Arc<ActiveEnvelopeStore>,
-        invariant_index: Arc<InvariantCardIndex>,
-        cep_mode: CepMode,
-    ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
@@ -1281,7 +1647,7 @@ mod patch_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "patch test"),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "edit test"),
                 cep_context: Arc::new(
                     lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
                 ),
@@ -1299,8 +1665,8 @@ mod patch_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index,
-                cep_mode,
+                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
+                cep_mode: CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },
@@ -1314,93 +1680,6 @@ mod patch_tests {
         registry
     }
 
-    fn hashline(before: &str, line: &str) -> String {
-        let line_number = before
-            .lines()
-            .position(|candidate| candidate == line)
-            .map(|index| index + 1)
-            .expect("line must exist in before content");
-        crate::edit::hash::line_hash(line_number, line)
-    }
-
-    fn update_patch(path: &str, before: &str, remove_line: &str, add_line: &str) -> String {
-        format!(
-            "\
-*** Begin Patch
-*** Update File: {path}
-*** Old Hash: {}
-@@
--{}\t{remove_line}
-+{add_line}
-*** End Patch",
-            content_hash(before.as_bytes()),
-            hashline(before, remove_line)
-        )
-    }
-
-    fn metadata_json(
-        durable: &crate::server::call_durable_metadata::CallDurableMetadata,
-    ) -> serde_json::Value {
-        serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap()
-    }
-
-    fn colliding_text_for_lines(first: usize, second: usize) -> String {
-        (0..200_000)
-            .map(|index| format!("patch-commit-collision-{index}"))
-            .find(|text| {
-                crate::edit::hash::line_hash(first, text)
-                    == crate::edit::hash::line_hash(second, text)
-            })
-            .expect("short hash prefix should produce a deterministic collision")
-    }
-
-    async fn stale_patch_case(
-        before: &str,
-        patch_remove_line: &str,
-        drifted: String,
-        expected_reason: &str,
-    ) -> (CepError, serde_json::Value, String) {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let file_path = dir.path().join("target.txt");
-        std::fs::write(&file_path, before).unwrap();
-        let registry = mutation_registry();
-        let store = Arc::new(ActiveEnvelopeStore::new());
-        store
-            .declare(envelope_with_write_path("."), 0, "test-turn")
-            .await
-            .unwrap();
-        let (ctx, _events) = test_ctx_with_store(root, store);
-        let durable = ctx.durable_metadata.clone();
-        crate::edit::apply::set_before_patch_commit_hook(file_path.clone(), move || {
-            std::fs::write(&file_path, drifted).unwrap();
-        });
-
-        let params = PatchParams {
-            patch: update_patch("target.txt", before, patch_remove_line, "new"),
-        };
-        let err = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
-        let metadata = metadata_json(&durable);
-
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
-        assert_eq!(err.retriability, Retriability::RequiresReplan);
-        assert!(
-            err.message.contains(expected_reason),
-            "expected {expected_reason} in {err:?}"
-        );
-        assert_eq!(metadata["commit_baseline_validation"], "failed");
-        assert_eq!(metadata["commit_baseline_failure_reason"], expected_reason);
-        assert_eq!(
-            metadata["commit_baseline_details"]["commit_baseline_failure_reason"],
-            expected_reason
-        );
-        let current = std::fs::read_to_string(dir.path().join("target.txt")).unwrap();
-        (err, metadata, current)
-    }
-
     fn envelope_with_write_path(pattern: &str) -> ExecutionEnvelope {
         let mut caps = BTreeSet::new();
         caps.insert(Capability::WritePath {
@@ -1408,7 +1687,7 @@ mod patch_tests {
         });
         ExecutionEnvelope {
             intent: Intent {
-                description: "test patch".into(),
+                description: "test edit".into(),
             },
             capabilities: caps,
             scope: Scope::default(),
@@ -1427,239 +1706,122 @@ mod patch_tests {
     }
 
     #[tokio::test]
-    async fn patch_no_envelope_returns_capability_not_granted() {
+    async fn edit_semantic_replace_computes_hashline_in_runtime() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let before = "old\n";
-        std::fs::write(dir.path().join("test.txt"), before).unwrap();
-        let registry = mutation_registry();
-        let store = Arc::new(ActiveEnvelopeStore::new());
-        let (ctx, _events) = test_ctx_with_store(root, store);
-
-        let params = PatchParams {
-            patch: update_patch("test.txt", before, "old", "hello"),
-        };
-        let err = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
-    }
-
-    #[tokio::test]
-    async fn malformed_patch_returns_schema_mismatch_before_capability_check() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = mutation_registry();
-        let store = Arc::new(ActiveEnvelopeStore::new());
-        let (ctx, _events) = test_ctx_with_store(root, store);
-
-        let params = PatchParams {
-            patch: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new".into(),
-        };
-        let err = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::SchemaMismatch);
-        assert!(
-            err.message.contains("*** Begin Patch") || err.message.contains("patch parse error"),
-            "malformed patch should report patch syntax, got: {}",
-            err.message
-        );
-    }
-
-    #[tokio::test]
-    async fn patch_in_scope_succeeds() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let before = "old\n";
-        std::fs::write(dir.path().join("new.txt"), before).unwrap();
-        let registry = mutation_registry();
-        let store = Arc::new(ActiveEnvelopeStore::new());
-
-        let envelope = envelope_with_write_path(".");
-        store.declare(envelope, 0, "test-turn").await.unwrap();
-
-        let (ctx, _events) = test_ctx_with_store(root, store);
-
-        let params = PatchParams {
-            patch: update_patch("new.txt", before, "old", "content"),
-        };
-        let result = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap();
-        let parsed: PatchResult = serde_json::from_value(result).unwrap();
-        assert!(parsed.changed_files.iter().any(|p| p == "new.txt"));
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
-            "content\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn commit_baseline_rejects_stale_inputs() {
-        let (_err, missing_metadata, missing_current) =
-            stale_patch_case("old\n", "old", "different\n".to_string(), "missing_anchor").await;
-        assert_eq!(missing_current, "different\n");
-        assert_eq!(
-            missing_metadata["commit_baseline_details"]["hunks"][0]["file_path"],
-            "target.txt"
-        );
-        assert_eq!(
-            missing_metadata["commit_baseline_details"]["hunks"][0]["hunk_index"],
-            0
-        );
-
-        let (_err, hash_metadata, hash_current) = stale_patch_case(
-            "beta\n",
-            "beta",
-            "inserted\nbeta\n".to_string(),
-            "hash_mismatch",
-        )
-        .await;
-        assert_eq!(hash_current, "inserted\nbeta\n");
-        assert_eq!(
-            hash_metadata["commit_baseline_details"]["hunks"][0]["match_result"],
-            "hash_mismatch"
-        );
-
-        let collision = colliding_text_for_lines(1, 2);
-        let (_err, ambiguous_metadata, ambiguous_current) = stale_patch_case(
-            &format!("{collision}\n"),
-            &collision,
-            format!("{collision}\n{collision}\n"),
-            "ambiguous_hunk",
-        )
-        .await;
-        assert_eq!(ambiguous_current, format!("{collision}\n{collision}\n"));
-        assert_eq!(
-            ambiguous_metadata["commit_baseline_details"]["hunks"][0]["match_result"],
-            "ambiguous_hunk"
-        );
-
-        let (_err, drift_metadata, drift_current) = stale_patch_case(
-            "alpha\nold\n",
-            "old",
-            "alpha\nold\nextra\n".to_string(),
-            "lower_drift",
-        )
-        .await;
-        assert_eq!(drift_current, "alpha\nold\nextra\n");
-        assert_eq!(
-            drift_metadata["commit_baseline_details"]["lower_drift_paths"][0],
-            "target.txt"
-        );
-
-        for metadata in [
-            missing_metadata,
-            hash_metadata,
-            ambiguous_metadata,
-            drift_metadata,
-        ] {
-            let encoded = serde_json::to_string(&metadata["commit_baseline_details"]).unwrap();
-            assert!(!encoded.contains("different"));
-            assert!(!encoded.contains("inserted"));
-            assert!(!encoded.contains("alpha"));
-            assert!(!encoded.contains("old"));
-            assert!(!encoded.contains("anchor_text"));
-            assert!(!encoded.contains("source"));
-        }
-    }
-
-    #[tokio::test]
-    async fn patch_out_of_scope_returns_replan_required_not_applied() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        let before = "old\n";
-        std::fs::write(dir.path().join("README.md"), before).unwrap();
-        let registry = mutation_registry();
-        let store = Arc::new(ActiveEnvelopeStore::new());
-
-        // Only allow src/** but patch targets README.md
-        let envelope = envelope_with_write_path("src/**");
-        store.declare(envelope, 0, "test-turn").await.unwrap();
-
-        let (ctx, _events) = test_ctx_with_store(root, store);
-
-        let params = PatchParams {
-            patch: update_patch("README.md", before, "old", "# Title"),
-        };
-        let err = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ReplanRequired);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("README.md")).unwrap(),
-            before
-        );
-    }
-
-    #[tokio::test]
-    async fn patch_l2_checks_post_patch_updated_file_content() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().to_str().unwrap();
-        std::fs::create_dir_all(dir.path().join("src")).unwrap();
-        let before = "fn marker() {}\n";
-        std::fs::write(dir.path().join("src/new.rs"), before).unwrap();
+        let before = "alpha\nbeta\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
         store
-            .declare(envelope_with_write_path("src/**"), 0, "test-turn")
+            .declare(envelope_with_write_path("."), 0, "test-turn")
             .await
             .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
 
-        let card = InvariantCard {
-            id: "INV-STRUCT".into(),
-            title: "No structs".into(),
-            anchor: CardAnchor::Glob("src/**/*.rs".into()),
-            forbidden: vec![ForbiddenEntry {
-                category: "struct_def".into(),
-                reason: "structs are frozen".into(),
+        let params = EditParams {
+            path: "target.txt".into(),
+            expected_hash: content_hash(before.as_bytes()),
+            edits: vec![EditOperation::ReplaceText {
+                old: "beta".into(),
+                new: "gamma".into(),
+                occurrence: None,
             }],
-            opaque: vec![],
         };
-        let index = Arc::new(InvariantCardIndex::new(vec![card]));
-        let (ctx, _events) = test_ctx_with_store_and_index(root, store, index, CepMode::Enforce);
+        let result = registry
+            .dispatch(Edit::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: EditResult = serde_json::from_value(result).unwrap();
 
-        let params = PatchParams {
-            patch: update_patch("src/new.rs", before, "fn marker() {}", "struct Added {}"),
+        assert_eq!(parsed.changed_files, vec!["target.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            "alpha\ngamma\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_ambiguous_text_requires_occurrence() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let before = "same\nsame\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
+
+        let params = EditParams {
+            path: "target.txt".into(),
+            expected_hash: content_hash(before.as_bytes()),
+            edits: vec![EditOperation::ReplaceText {
+                old: "same".into(),
+                new: "other".into(),
+                occurrence: None,
+            }],
         };
         let err = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .dispatch(Edit::NAME, serde_json::to_value(&params).unwrap(), ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::GuardDenied);
+
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
         assert_eq!(
-            std::fs::read_to_string(dir.path().join("src/new.rs")).unwrap(),
+            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
             before
         );
     }
 
     #[tokio::test]
-    async fn patch_emits_guard_verdict_event() {
+    async fn batch_create_and_edit_without_delete_succeeds() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
-        let before = "old\n";
-        std::fs::write(dir.path().join("README.md"), before).unwrap();
+        let before = "workspace\nold\n";
+        std::fs::write(dir.path().join("Cargo.toml"), before).unwrap();
         let registry = mutation_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
 
-        let envelope = envelope_with_write_path("src/**");
-        store.declare(envelope, 0, "test-turn").await.unwrap();
-
-        let (ctx, mut events) = test_ctx_with_store(root, store);
-
-        let params = PatchParams {
-            patch: update_patch("README.md", before, "old", "# Title"),
+        let params = BatchParams {
+            operations: vec![
+                BatchOperation::EditFile {
+                    path: "Cargo.toml".into(),
+                    expected_hash: content_hash(before.as_bytes()),
+                    edits: vec![EditOperation::ReplaceText {
+                        old: "old".into(),
+                        new: "new".into(),
+                        occurrence: None,
+                    }],
+                },
+                BatchOperation::CreateFile {
+                    path: "new.txt".into(),
+                    content: "created\n".into(),
+                },
+            ],
         };
-        let _ = registry
-            .dispatch(Patch::NAME, serde_json::to_value(&params).unwrap(), ctx)
-            .await;
+        let result = registry
+            .dispatch(Batch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: BatchResult = serde_json::from_value(result).unwrap();
 
-        let event = events.recv().await.unwrap();
-        assert_eq!(event.method, "cep.guard_verdict");
+        assert_eq!(parsed.created_files, vec!["new.txt"]);
+        assert_eq!(parsed.edited_files, vec!["Cargo.toml"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap(),
+            "workspace\nnew\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "created\n"
+        );
     }
 }

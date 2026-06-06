@@ -16,7 +16,7 @@ use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
-    CreateParams, GrepParams, ObserveWorkspaceParams, PatchParams, ReadFileParams,
+    CreateParams, EditOperation, EditParams, GrepParams, ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
 use lancet_protocol::envelope::{Capability, ImpactKind};
@@ -88,29 +88,31 @@ proptest! {
 
 proptest! {
     #[test]
-    fn patch_effect_contract_positive(_n in 0u8..1) {
+    fn edit_effect_contract_positive(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
 
-        // Compute content hash for V2 patch format
         let content = std::fs::read(dir.path().join("hello.txt")).unwrap();
         let hash = blake3::hash(&content);
         let hash_hex = hash.to_hex();
-        let hello_hash = hashline(1, "hello");
-        let world_hash = hashline(2, "world");
 
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = mutation_region(&root);
-        let patch_text = format!(
-            "*** Begin Patch\n*** Update File: hello.txt\n*** Old Hash: blake3:{hash_hex}\n@@\n {hello_hash}\thello\n-{world_hash}\tworld\n+patched\n*** End Patch\n"
-        );
-        let params = PatchParams { patch: patch_text };
-        let outcome = rt().block_on(effect_contract_harness::<Patch>(
+        let params = EditParams {
+            path: "hello.txt".into(),
+            expected_hash: format!("blake3:{hash_hex}"),
+            edits: vec![EditOperation::ReplaceText {
+                old: "world".into(),
+                new: "patched".into(),
+                occurrence: None,
+            }],
+        };
+        let outcome = rt().block_on(effect_contract_harness::<Edit>(
             &registry, params, ctx, authority.clone(),
         ));
-        outcome.dispatch_result.as_ref().expect("legal patch must dispatch");
+        outcome.dispatch_result.as_ref().expect("legal edit must dispatch");
         assert_positive(&outcome, &authority);
     }
 }
@@ -290,15 +292,22 @@ proptest! {
 
 proptest! {
     #[test]
-    fn patch_effect_contract_negative(_n in 0u8..1) {
+    fn edit_effect_contract_negative(_n in 0u8..1) {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
         let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
-        let patch_text = "--- a/../outside/evil.txt\n+++ b/../outside/evil.txt\n@@ -0,0 +1 @@\n+evil\n";
-        let params = PatchParams { patch: patch_text.into() };
+        let params = EditParams {
+            path: "../outside/evil.txt".into(),
+            expected_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            edits: vec![EditOperation::ReplaceText {
+                old: "x".into(),
+                new: "evil".into(),
+                occurrence: None,
+            }],
+        };
         let authority = mutation_region(&root);
-        let outcome = rt().block_on(effect_contract_harness::<Patch>(
+        let outcome = rt().block_on(effect_contract_harness::<Edit>(
             &registry, params, ctx, authority,
         ));
         assert_negative_no_backend_effects(&outcome);

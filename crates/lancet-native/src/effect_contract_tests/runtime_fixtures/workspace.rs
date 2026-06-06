@@ -5,8 +5,8 @@ use super::super::fixtures::*;
 use super::super::support::build_test_context;
 use lancet_authority::NetworkPolicyConfig;
 use lancet_catalog::methods::workspace::{
-    CreateParams, FindFilesParams, GrepParams, ListDirectoryParams, ObserveWorkspaceParams,
-    PatchParams, ReadFileParams,
+    BatchOperation, BatchParams, CreateParams, EditOperation, EditParams, FindFilesParams,
+    GrepParams, ListDirectoryParams, ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
 use lancet_protocol::envelope::VerifyCommand;
@@ -240,7 +240,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
     scenarios
 }
 
-pub(in crate::effect_contract_tests) fn patch_runtime_effects() -> Vec<RuntimeEffectScenario> {
+pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -249,6 +249,7 @@ pub(in crate::effect_contract_tests) fn patch_runtime_effects() -> Vec<RuntimeEf
         .to_string();
     let mut scenarios = Vec::new();
 
+    let before = "hello\nworld\n";
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![write_cap(&root)],
@@ -256,10 +257,16 @@ pub(in crate::effect_contract_tests) fn patch_runtime_effects() -> Vec<RuntimeEf
     );
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
-        "happy_patch",
-        dispatch_success_effects::<Patch>(
-            PatchParams {
-                patch: update_patch_text("hello.txt", "hello\nworld\n", "world", "patched"),
+        "happy_edit",
+        dispatch_success_effects::<Edit>(
+            EditParams {
+                path: "hello.txt".into(),
+                expected_hash: format!("blake3:{}", blake3::hash(before.as_bytes()).to_hex()),
+                edits: vec![EditOperation::ReplaceText {
+                    old: "world".into(),
+                    new: "edited".into(),
+                    occurrence: None,
+                }],
             },
             ctx,
             mutation_region(&root),
@@ -273,93 +280,64 @@ pub(in crate::effect_contract_tests) fn patch_runtime_effects() -> Vec<RuntimeEf
     );
     declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
-        "failure_hash_mismatch_no_backend_effect",
-        dispatch_failure_effects::<Patch>(
-            PatchParams {
-                patch: "*** Begin Patch\n*** Update File: data.txt\n*** Old Hash: blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n@@\n blake3:aaaa\tsome data content\n-blake3:aaaa\tsome data content\n+patched\n*** End Patch\n".into(),
+        "failure_stale_hash_no_backend_effect",
+        dispatch_failure_effects::<Edit>(
+            EditParams {
+                path: "data.txt".into(),
+                expected_hash:
+                    "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                edits: vec![EditOperation::ReplaceText {
+                    old: "some data content".into(),
+                    new: "edited".into(),
+                    occurrence: None,
+                }],
             },
             ctx,
             mutation_region(&root),
         ),
     ));
 
+    scenarios
+}
+
+pub(in crate::effect_contract_tests) fn batch_runtime_effects() -> Vec<RuntimeEffectScenario> {
+    let dir = setup_tempdir_with_files();
+    let root = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let mut scenarios = Vec::new();
+
+    let before = "some data content\n";
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![write_cap(&root)],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
-    );
+    declare_active_envelope(&ctx, &root);
     scenarios.push(scenario(
-        "scope_boundary_out_of_scope_no_backend_effect",
-        dispatch_failure_effects::<Patch>(
-            PatchParams {
-                patch: update_patch_text(
-                    "data.txt",
-                    "some data content\n",
-                    "some data content",
-                    "patched",
-                ),
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
-
-    std::fs::write(dir.path().join("verify_success.txt"), "alpha\nbeta\n").unwrap();
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![write_cap(&root), run_cap()],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(
-            &root,
-            ".",
-            vec!["echo".into(), "touch".into()],
-            Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: None,
-            }),
-        ),
-    );
-    scenarios.push(scenario(
-        "verify_success_filters_verify_source",
-        dispatch_success_effects::<Patch>(
-            PatchParams {
-                patch: update_patch_text("verify_success.txt", "alpha\nbeta\n", "beta", "patched"),
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
-
-    std::fs::write(dir.path().join("verify_failure.txt"), "alpha\nbeta\n").unwrap();
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![write_cap(&root), run_cap()],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(
-            &root,
-            ".",
-            vec!["echo".into(), "touch".into()],
-            Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: Some(1),
-            }),
-        ),
-    );
-    scenarios.push(scenario(
-        "failure_verify_failed_retains_backend_mutation",
-        dispatch_failure_effects::<Patch>(
-            PatchParams {
-                patch: update_patch_text("verify_failure.txt", "alpha\nbeta\n", "beta", "patched"),
+        "happy_batch_create_and_edit",
+        dispatch_success_effects::<Batch>(
+            BatchParams {
+                operations: vec![
+                    BatchOperation::EditFile {
+                        path: "data.txt".into(),
+                        expected_hash: format!(
+                            "blake3:{}",
+                            blake3::hash(before.as_bytes()).to_hex()
+                        ),
+                        edits: vec![EditOperation::ReplaceText {
+                            old: "some data content".into(),
+                            new: "edited".into(),
+                            occurrence: None,
+                        }],
+                    },
+                    BatchOperation::CreateFile {
+                        path: "created.txt".into(),
+                        content: "created\n".into(),
+                    },
+                ],
             },
             ctx,
             mutation_region(&root),
