@@ -371,4 +371,12 @@ async fn stream_turn_emits_cep_lifecycle_events() {
             .any(|e| matches!(e, TurnEvent::ToolCallFinished { .. })),
         "ToolCallFinished must remain distinct from CepCallFinished"
     );
+    let tool_finished = events
+        .iter()
+        .position(|e| matches!(e, TurnEvent::ToolCallFinished { .. }))
+        .expect("ToolCallFinished must be present");
+    assert!(
+        cep_finished < tool_finished,
+        "CepCallFinished must precede ToolCallFinished"
+    );
 }

@@ -77,6 +77,7 @@ proptest! {
         let params = CreateParams {
             path: "output.txt".into(),
             content,
+            create_parents: false,
         };
         let outcome = rt().block_on(effect_contract_harness::<Create>(
             &registry, params, ctx, authority.clone(),
@@ -281,6 +282,7 @@ proptest! {
         let params = CreateParams {
             path: "/outside-scope/evil.txt".into(),
             content,
+            create_parents: false,
         };
         let authority = mutation_region(&root);
         let outcome = rt().block_on(effect_contract_harness::<Create>(

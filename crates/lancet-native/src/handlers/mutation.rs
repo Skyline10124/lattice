@@ -39,7 +39,7 @@ use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Register native workspace mutation methods.
 pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), CepError> {
@@ -93,6 +93,7 @@ async fn handle_create_as(
 
     write_preflighted_create(&auth.project_root, &create).await?;
 
+    record_created_dir_effects(&ctx, &auth.project_root, &create);
     ctx.record_effect(ObservedEffect {
         kind: ImpactKind::WorkspaceMutation,
         scope: ObservedScope::Path(create.full_path.clone()),
@@ -110,6 +111,7 @@ async fn handle_create_as(
         "envelope_id": auth.envelope_id,
         "bytes_written": create.bytes_written,
         "content_hash": written_hash,
+        "created_dirs": create.created_dirs.clone(),
         "backend_invoked": true,
         "policy_enforced": true,
     }));
@@ -117,6 +119,7 @@ async fn handle_create_as(
     Ok(CreateResult {
         path: params.path,
         bytes_written: create.bytes_written,
+        created_dirs: create.created_dirs,
     })
 }
 
@@ -156,11 +159,16 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
 
     for operation in &params.operations {
         match operation {
-            BatchOperation::CreateFile { path, content } => {
+            BatchOperation::CreateFile {
+                path,
+                content,
+                create_parents,
+            } => {
                 reject_duplicate_batch_path(&mut seen_paths, path)?;
                 let params = CreateParams {
                     path: path.clone(),
                     content: content.clone(),
+                    create_parents: *create_parents,
                 };
                 create_inputs.push(preflight_create_file(
                     &auth.project_root,
@@ -201,8 +209,16 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     }
 
     let mut created_files = Vec::new();
+    let mut created_dirs = Vec::new();
+    let mut seen_created_dirs = HashSet::new();
     for create in &create_inputs {
         write_preflighted_create(&auth.project_root, create).await?;
+        for dir in &create.created_dirs {
+            if seen_created_dirs.insert(dir.clone()) {
+                record_created_dir_effect(&ctx, &auth.project_root, dir);
+                created_dirs.push(dir.clone());
+            }
+        }
         ctx.record_effect(ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
             scope: ObservedScope::Path(create.full_path.clone()),
@@ -223,6 +239,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
         "compiled_patch_backend": "hashline_patch",
         "created_files": created_files.clone(),
         "edited_files": edited_files.clone(),
+        "created_dirs": created_dirs.clone(),
         "backend_invoked": true,
         "policy_enforced": true,
     }));
@@ -231,6 +248,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
         changed_files,
         created_files,
         edited_files,
+        created_dirs,
     })
 }
 
@@ -243,6 +261,7 @@ struct PreflightCreate {
     content: String,
     full_path: PathBuf,
     bytes_written: u64,
+    created_dirs: Vec<String>,
 }
 
 async fn authorize_workspace_mutation(
@@ -350,23 +369,21 @@ fn preflight_create_file(
     method: &str,
     ctx: &HandlerContext,
 ) -> Result<PreflightCreate, CepError> {
-    let full_path = Path::new(project_root).join(&params.path);
-    if let Some(parent) = full_path.parent() {
-        if !parent.exists() {
-            return Err(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                format!(
-                    "parent directory '{}' does not exist for '{}'; mutate.create does not create directories",
-                    parent.display(),
-                    params.path
-                ),
-                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                    field: "path".into(),
-                    reason: "parent directory does not exist".into(),
-                }),
-                Retriability::Permanent,
-            ));
-        }
+    let (full_path, _parent) = resolve_create_target(project_root, &params.path)?;
+    let created_dirs = missing_parent_dirs(project_root, &params.path)?;
+    if !created_dirs.is_empty() && !params.create_parents {
+        return Err(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!(
+                "parent directory for '{}' does not exist; set create_parents=true on {method} to create missing parent directories",
+                params.path
+            ),
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "create_parents".into(),
+                reason: "missing parent directories require create_parents=true".into(),
+            }),
+            Retriability::Permanent,
+        ));
     }
     if full_path.exists() {
         return Err(CepError::new(
@@ -409,6 +426,7 @@ fn preflight_create_file(
         content: params.content.clone(),
         full_path,
         bytes_written: params.content.len() as u64,
+        created_dirs,
     })
 }
 
@@ -416,7 +434,25 @@ async fn write_preflighted_create(
     project_root: &str,
     create: &PreflightCreate,
 ) -> Result<(), CepError> {
+    if !create.created_dirs.is_empty() {
+        create_parent_dirs_secure(project_root, &create.path).await?;
+    }
     create_file_secure(project_root, &create.path, &create.content).await
+}
+
+fn record_created_dir_effects(ctx: &HandlerContext, project_root: &str, create: &PreflightCreate) {
+    for dir in &create.created_dirs {
+        record_created_dir_effect(ctx, project_root, dir);
+    }
+}
+
+fn record_created_dir_effect(ctx: &HandlerContext, project_root: &str, dir: &str) {
+    ctx.record_effect(ObservedEffect {
+        kind: ImpactKind::WorkspaceMutation,
+        scope: ObservedScope::Path(Path::new(project_root).join(dir)),
+        required_capability: RequiredCapability::WritePath,
+        source: EffectSource::HandlerBackend,
+    });
 }
 
 fn batch_target_paths(params: &BatchParams) -> Result<Vec<String>, CepError> {
@@ -1050,44 +1086,14 @@ fn line_byte_bounds(source: &str) -> Vec<(usize, usize)> {
     bounds
 }
 
-/// Create a file securely using native containment checks.
-async fn create_file_secure(
+fn resolve_create_target(
     project_root: &str,
     relative_path: &str,
-    content: &str,
-) -> Result<(), CepError> {
-    use std::path::Path;
-
-    // Reject parent traversal
-    if relative_path.contains("..") {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            format!("path traversal denied: '{relative_path}' contains '..'"),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "path".into(),
-                reason: "contains '..'".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
-
-    // Reject NUL
-    if relative_path.contains('\0') {
-        return Err(CepError::new(
-            CepErrorCode::PathContainment,
-            format!("path contains NUL byte: '{relative_path}'"),
-            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                field: "path".into(),
-                reason: "contains NUL byte".into(),
-            }),
-            Retriability::Permanent,
-        ));
-    }
+) -> Result<(PathBuf, PathBuf), CepError> {
+    validate_relative_workspace_path(relative_path)?;
 
     let full_path = Path::new(project_root).join(relative_path);
-
-    // Check parent exists
-    let parent = full_path.parent().ok_or_else(|| {
+    let parent = full_path.parent().map(Path::to_path_buf).ok_or_else(|| {
         CepError::new(
             CepErrorCode::ExecutionFailed,
             format!("cannot resolve parent for '{relative_path}'"),
@@ -1100,18 +1106,209 @@ async fn create_file_secure(
         )
     })?;
 
-    if !parent.exists() {
+    Ok((full_path, parent))
+}
+
+fn validate_relative_workspace_path(relative_path: &str) -> Result<(), CepError> {
+    if relative_path.is_empty() {
+        return Err(validation_error("path", "path must not be empty"));
+    }
+
+    if relative_path.contains('\0') {
         return Err(CepError::new(
+            CepErrorCode::PathContainment,
+            format!("path contains NUL byte: '{relative_path}'"),
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "path".into(),
+                reason: "contains NUL byte".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return Err(CepError::new(
+            CepErrorCode::PathContainment,
+            format!("absolute path denied: '{relative_path}'"),
+            CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                field: "path".into(),
+                reason: "absolute path is outside workspace scope".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(CepError::new(
+                    CepErrorCode::PathContainment,
+                    format!("path traversal denied: '{relative_path}' contains '..'"),
+                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                        field: "path".into(),
+                        reason: "contains '..'".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(CepError::new(
+                    CepErrorCode::PathContainment,
+                    format!("path escapes workspace scope: '{relative_path}'"),
+                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                        field: "path".into(),
+                        reason: "path escapes workspace scope".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn missing_parent_dirs(project_root: &str, relative_path: &str) -> Result<Vec<String>, CepError> {
+    validate_relative_workspace_path(relative_path)?;
+
+    let root = Path::new(project_root);
+    let relative = Path::new(relative_path);
+    let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let mut current = root.to_path_buf();
+    let mut missing = Vec::new();
+
+    for component in parent.components() {
+        match component {
+            Component::Normal(name) => current.push(name),
+            Component::CurDir => continue,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(CepError::new(
+                    CepErrorCode::PathContainment,
+                    format!("path escapes workspace scope: '{relative_path}'"),
+                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                        field: "path".into(),
+                        reason: "path escapes workspace scope".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+        }
+
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CepError::new(
+                    CepErrorCode::PathContainment,
+                    format!("parent directory '{}' is a symlink", current.display()),
+                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                        field: "path".into(),
+                        reason: "parent directory is a symlink".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(CepError::new(
+                    CepErrorCode::ExecutionFailed,
+                    format!("parent path '{}' is not a directory", current.display()),
+                    CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                        field: "path".into(),
+                        reason: "parent path is not a directory".into(),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(workspace_relative_path(root, &current));
+            }
+            Err(err) => {
+                return Err(CepError::new(
+                    CepErrorCode::ExecutionFailed,
+                    format!(
+                        "cannot inspect parent directory '{}': {err}",
+                        current.display()
+                    ),
+                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                        command: "create".into(),
+                        exit_code: None,
+                        stderr: Some(err.to_string()),
+                    }),
+                    Retriability::Permanent,
+                ));
+            }
+        }
+    }
+
+    Ok(missing)
+}
+
+fn workspace_relative_path(project_root: &Path, path: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn ensure_existing_parent_chain_safe(
+    project_root: &str,
+    relative_path: &str,
+) -> Result<(), CepError> {
+    let missing = missing_parent_dirs(project_root, relative_path)?;
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(CepError::new(
             CepErrorCode::ExecutionFailed,
-            format!("parent directory '{}' does not exist", parent.display()),
+            format!(
+                "parent directory for '{}' does not exist: {}",
+                relative_path,
+                missing.join(", ")
+            ),
             CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
                 command: "create".into(),
                 exit_code: None,
                 stderr: Some("parent directory does not exist".into()),
             }),
             Retriability::Permanent,
-        ));
+        ))
     }
+}
+
+async fn create_parent_dirs_secure(
+    project_root: &str,
+    relative_path: &str,
+) -> Result<(), CepError> {
+    let (_full_path, parent) = resolve_create_target(project_root, relative_path)?;
+
+    tokio::fs::create_dir_all(&parent).await.map_err(|err| {
+        CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!(
+                "failed to create parent directories for '{}': {err}",
+                relative_path
+            ),
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                command: "create_parents".into(),
+                exit_code: None,
+                stderr: Some(err.to_string()),
+            }),
+            Retriability::Transient,
+        )
+    })?;
+
+    ensure_existing_parent_chain_safe(project_root, relative_path)
+}
+
+/// Create a file securely using native containment checks.
+async fn create_file_secure(
+    project_root: &str,
+    relative_path: &str,
+    content: &str,
+) -> Result<(), CepError> {
+    let (full_path, _parent) = resolve_create_target(project_root, relative_path)?;
+    ensure_existing_parent_chain_safe(project_root, relative_path)?;
 
     use tokio::io::AsyncWriteExt;
 
@@ -1386,6 +1583,7 @@ mod create_tests {
         let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
+            create_parents: false,
         };
         let err = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1410,6 +1608,7 @@ mod create_tests {
         let params = CreateParams {
             path: "test.txt".into(),
             content: "hello world".into(),
+            create_parents: false,
         };
         let result = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1442,6 +1641,7 @@ mod create_tests {
         let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
+            create_parents: false,
         };
         let err = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1467,6 +1667,7 @@ mod create_tests {
         let params = CreateParams {
             path: "README.md".into(),
             content: "out of scope".into(),
+            create_parents: false,
         };
         let err = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1489,6 +1690,7 @@ mod create_tests {
         let out_of_scope = CreateParams {
             path: "src/other/file.rs".into(),
             content: "fn main() {}\n".into(),
+            create_parents: false,
         };
         let replan = registry
             .dispatch(
@@ -1504,6 +1706,7 @@ mod create_tests {
         let traversal = CreateParams {
             path: "../../etc/passwd".into(),
             content: "bad".into(),
+            create_parents: false,
         };
         let guard = registry
             .dispatch(
@@ -1530,6 +1733,7 @@ mod create_tests {
         let create_params = CreateParams {
             path: "src/other/file.rs".into(),
             content: "fn main() {}\n".into(),
+            create_parents: false,
         };
 
         let (ctx1, _events1) = test_ctx_with_store(root, Arc::clone(&store));
@@ -1588,6 +1792,7 @@ mod create_tests {
         let params = CreateParams {
             path: "nonexistent/dir/file.txt".into(),
             content: "hello".into(),
+            create_parents: false,
         };
         let err = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1595,6 +1800,71 @@ mod create_tests {
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ExecutionFailed);
         assert!(err.message.contains("parent"));
+        assert!(err.message.contains("create_parents=true"));
+    }
+
+    #[tokio::test]
+    async fn create_with_create_parents_creates_missing_dirs() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+
+        let envelope = envelope_with_write_path(".");
+        store.declare(envelope, 0, "test-turn").await.unwrap();
+
+        let (ctx, _events) = test_ctx_with_store(root, store);
+
+        let params = CreateParams {
+            path: "nonexistent/dir/file.txt".into(),
+            content: "hello".into(),
+            create_parents: true,
+        };
+        let result = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: CreateResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(parsed.path, "nonexistent/dir/file.txt");
+        assert_eq!(
+            parsed.created_dirs,
+            vec!["nonexistent".to_string(), "nonexistent/dir".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nonexistent/dir/file.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn create_rejects_symlink_parent() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("linked")).unwrap();
+
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+
+        let (ctx, _events) = test_ctx_with_store(root, store);
+        let params = CreateParams {
+            path: "linked/file.txt".into(),
+            content: "hello".into(),
+            create_parents: false,
+        };
+        let err = registry
+            .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::PathContainment);
+        assert!(err.message.contains("symlink"));
     }
 
     #[tokio::test]
@@ -1607,6 +1877,7 @@ mod create_tests {
         let params = CreateParams {
             path: "test.txt".into(),
             content: "hello".into(),
+            create_parents: false,
         };
         let _ = registry
             .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
@@ -1804,6 +2075,7 @@ mod edit_tests {
                 BatchOperation::CreateFile {
                     path: "new.txt".into(),
                     content: "created\n".into(),
+                    create_parents: false,
                 },
             ],
         };
@@ -1822,6 +2094,63 @@ mod edit_tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
             "created\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_create_file_with_create_parents_creates_missing_dirs() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
+
+        let params = BatchParams {
+            operations: vec![
+                BatchOperation::CreateFile {
+                    path: "crates/lattice-tui/src/lib.rs".into(),
+                    content: "pub fn run() {}\n".into(),
+                    create_parents: true,
+                },
+                BatchOperation::CreateFile {
+                    path: "crates/lattice-tui/src/main.rs".into(),
+                    content: "fn main() {}\n".into(),
+                    create_parents: true,
+                },
+            ],
+        };
+        let result = registry
+            .dispatch(Batch::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap();
+        let parsed: BatchResult = serde_json::from_value(result).unwrap();
+
+        assert_eq!(
+            parsed.created_files,
+            vec![
+                "crates/lattice-tui/src/lib.rs",
+                "crates/lattice-tui/src/main.rs"
+            ]
+        );
+        assert_eq!(
+            parsed.created_dirs,
+            vec![
+                "crates".to_string(),
+                "crates/lattice-tui".to_string(),
+                "crates/lattice-tui/src".to_string()
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("crates/lattice-tui/src/lib.rs")).unwrap(),
+            "pub fn run() {}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("crates/lattice-tui/src/main.rs")).unwrap(),
+            "fn main() {}\n"
         );
     }
 }

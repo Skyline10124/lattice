@@ -18,6 +18,8 @@ pub(crate) mod linux;
 mod linux_canary_tests;
 pub(crate) mod overlay;
 pub(crate) mod plan;
+pub(crate) mod process;
+pub(crate) mod setup_report;
 pub(crate) mod snapshot;
 pub(crate) mod syscall;
 
@@ -35,6 +37,7 @@ pub(crate) enum SupervisorStage {
     SetgroupsDeny,
     UidMap,
     GidMap,
+    PidNamespace,
     NetworkNamespace,
     AssertNoVethOrDefaultRoute,
     MountNamespace,
@@ -47,6 +50,7 @@ pub(crate) enum SupervisorStage {
     ReadOnlyRemount,
     ReadOnlyBindScopeDecision,
     ScratchTmpfs,
+    ProcFs,
     MinimalDevices,
     OldRootCleanup,
     SavedFdOldRootCheck,
@@ -67,6 +71,7 @@ impl SupervisorStage {
             SupervisorStage::SetgroupsDeny => "setgroups_deny",
             SupervisorStage::UidMap => "uid_map",
             SupervisorStage::GidMap => "gid_map",
+            SupervisorStage::PidNamespace => "pid_namespace",
             SupervisorStage::NetworkNamespace => "network_namespace",
             SupervisorStage::AssertNoVethOrDefaultRoute => "assert_no_veth_or_default_route",
             SupervisorStage::MountNamespace => "mount_namespace",
@@ -79,6 +84,7 @@ impl SupervisorStage {
             SupervisorStage::ReadOnlyRemount => "read_only_remount",
             SupervisorStage::ReadOnlyBindScopeDecision => "read_only_bind_scope_decision",
             SupervisorStage::ScratchTmpfs => "scratch_tmpfs",
+            SupervisorStage::ProcFs => "procfs",
             SupervisorStage::MinimalDevices => "minimal_devices",
             SupervisorStage::OldRootCleanup => "old_root_cleanup",
             SupervisorStage::SavedFdOldRootCheck => "saved_fd_old_root_check",
@@ -99,6 +105,7 @@ impl SupervisorStage {
             "setgroups_deny" => SupervisorStage::SetgroupsDeny,
             "uid_map" => SupervisorStage::UidMap,
             "gid_map" => SupervisorStage::GidMap,
+            "pid_namespace" => SupervisorStage::PidNamespace,
             "network_namespace" => SupervisorStage::NetworkNamespace,
             "assert_no_veth_or_default_route" => SupervisorStage::AssertNoVethOrDefaultRoute,
             "mount_namespace" => SupervisorStage::MountNamespace,
@@ -111,6 +118,7 @@ impl SupervisorStage {
             "read_only_remount" => SupervisorStage::ReadOnlyRemount,
             "read_only_bind_scope_decision" => SupervisorStage::ReadOnlyBindScopeDecision,
             "scratch_tmpfs" => SupervisorStage::ScratchTmpfs,
+            "procfs" => SupervisorStage::ProcFs,
             "minimal_devices" => SupervisorStage::MinimalDevices,
             "old_root_cleanup" => SupervisorStage::OldRootCleanup,
             "saved_fd_old_root_check" => SupervisorStage::SavedFdOldRootCheck,
@@ -314,6 +322,7 @@ mod tests {
                 SupervisorStage::SetgroupsDeny,
                 SupervisorStage::UidMap,
                 SupervisorStage::GidMap,
+                SupervisorStage::PidNamespace,
                 SupervisorStage::NetworkNamespace,
                 SupervisorStage::AssertNoVethOrDefaultRoute,
                 SupervisorStage::MountNamespace,
@@ -392,6 +401,7 @@ mod tests {
                 SupervisorStage::SetgroupsDeny,
                 SupervisorStage::UidMap,
                 SupervisorStage::GidMap,
+                SupervisorStage::PidNamespace,
                 SupervisorStage::NetworkNamespace,
                 SupervisorStage::AssertNoVethOrDefaultRoute,
                 SupervisorStage::MountNamespace,

@@ -57,6 +57,13 @@ impl CommandPolicy {
                 vec!["cargo".into(), "check".into()],
                 vec!["cargo".into(), "clippy".into()],
                 vec!["cargo".into(), "doc".into()],
+                vec!["cargo".into(), "fmt".into(), "--check".into()],
+                vec![
+                    "cargo".into(),
+                    "fmt".into(),
+                    "--all".into(),
+                    "--check".into(),
+                ],
                 vec!["git".into(), "diff".into()],
                 vec!["git".into(), "status".into()],
                 vec!["git".into(), "log".into()],
@@ -406,6 +413,23 @@ mod tests {
         let err = classify_command(&["cargo".into(), "fmt".into()], None, &policy).unwrap_err();
         assert_eq!(err.code, CepErrorCode::GuardDenied);
         assert!(err.message.contains("declared_impact"));
+    }
+
+    #[test]
+    fn diagnostic_cargo_fmt_check() {
+        let policy = default_policy();
+        let result = classify_command(
+            &[
+                "cargo".into(),
+                "fmt".into(),
+                "--all".into(),
+                "--check".into(),
+            ],
+            Some(ImpactKind::CommandExecution),
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(result, EffectiveImpact::Diagnostic);
     }
 
     #[test]

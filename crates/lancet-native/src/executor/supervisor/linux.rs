@@ -188,6 +188,7 @@ fn apply_linux_stage<S: SupervisorSyscalls>(
         SupervisorStage::SetgroupsDeny => syscalls.write_setgroups_deny(),
         SupervisorStage::UidMap => syscalls.write_uid_map_current(),
         SupervisorStage::GidMap => syscalls.write_gid_map_current(),
+        SupervisorStage::PidNamespace => syscalls.enter_pid_namespace_child(),
         SupervisorStage::NetworkNamespace => syscalls.unshare_network_namespace(),
         SupervisorStage::AssertNoVethOrDefaultRoute => syscalls.assert_no_veth_or_default_route(),
         SupervisorStage::MountNamespace => syscalls.unshare_mount_namespace(),
@@ -255,6 +256,16 @@ fn apply_linux_stage<S: SupervisorSyscalls>(
                 .filter(|mount| mount.kind == MountKind::ScratchTmpfs)
             {
                 syscalls.mount_scratch_tmpfs(&mount.target)?;
+            }
+            Ok(())
+        }
+        SupervisorStage::ProcFs => {
+            for mount in plan
+                .mounts
+                .iter()
+                .filter(|mount| mount.kind == MountKind::ProcFs)
+            {
+                syscalls.mount_procfs(&mount.target)?;
             }
             Ok(())
         }
@@ -362,6 +373,7 @@ fn mount_view_applied(report: &super::SupervisorSetupReport) -> bool {
         SupervisorStage::ProjectBind,
         SupervisorStage::ReadOnlyBindScopeDecision,
         SupervisorStage::ScratchTmpfs,
+        SupervisorStage::ProcFs,
         SupervisorStage::MinimalDevices,
         SupervisorStage::OldRootCleanup,
         SupervisorStage::SavedFdOldRootCheck,
@@ -447,6 +459,10 @@ mod tests {
             self.record("write_gid_map_current")
         }
 
+        fn enter_pid_namespace_child(&mut self) -> Result<(), SyscallError> {
+            self.record("enter_pid_namespace_child")
+        }
+
         fn unshare_network_namespace(&mut self) -> Result<(), SyscallError> {
             self.record("unshare_network_namespace")
         }
@@ -475,10 +491,8 @@ mod tests {
             ));
             let operation = if target == Path::new("/project") {
                 "project_bind"
-            } else if target.starts_with("/toolchain") {
-                "read_only_toolchain_bind"
             } else {
-                "bind_mount"
+                "read_only_toolchain_bind"
             };
             if self.fail_operations.contains(operation) {
                 Err(SyscallError::new(operation, "injected failure"))
@@ -509,6 +523,16 @@ mod tests {
                 .push(format!("mount_scratch_tmpfs:{}", target.display()));
             if self.fail_operations.contains("scratch_tmpfs") {
                 Err(SyscallError::new("scratch_tmpfs", "injected failure"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn mount_procfs(&mut self, target: &Path) -> Result<(), SyscallError> {
+            self.calls
+                .push(format!("mount_procfs:{}", target.display()));
+            if self.fail_operations.contains("procfs") {
+                Err(SyscallError::new("procfs", "injected failure"))
             } else {
                 Ok(())
             }
@@ -874,6 +898,7 @@ mod tests {
             (SupervisorStage::SetgroupsDeny, "write_setgroups_deny"),
             (SupervisorStage::UidMap, "write_uid_map_current"),
             (SupervisorStage::GidMap, "write_gid_map_current"),
+            (SupervisorStage::PidNamespace, "enter_pid_namespace_child"),
             (
                 SupervisorStage::NetworkNamespace,
                 "unshare_network_namespace",
@@ -899,6 +924,7 @@ mod tests {
                 "record_read_only_bind_scope",
             ),
             (SupervisorStage::ScratchTmpfs, "scratch_tmpfs"),
+            (SupervisorStage::ProcFs, "procfs"),
             (SupervisorStage::MinimalDevices, "minimal_devices"),
             (SupervisorStage::OldRootCleanup, "detach_old_root"),
             (

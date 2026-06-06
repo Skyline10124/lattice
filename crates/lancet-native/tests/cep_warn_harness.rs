@@ -129,6 +129,7 @@ fn overreach_registry_create() -> MethodRegistry {
         Ok(CreateResult {
             path: "mock".into(),
             bytes_written: 0,
+            created_dirs: vec![],
         })
     })
     .expect("overreach Create");
@@ -167,6 +168,7 @@ fn overreach_registry_batch() -> MethodRegistry {
             changed_files: vec![],
             created_files: vec![],
             edited_files: vec![],
+            created_dirs: vec![],
         })
     })
     .expect("overreach Batch");
@@ -330,6 +332,7 @@ async fn generate_warn_report() -> String {
                 CreateParams {
                     path: "mock.txt".into(),
                     content: "mock".into(),
+                    create_parents: false,
                 },
             )
             .await,
@@ -356,6 +359,7 @@ async fn generate_warn_report() -> String {
                     operations: vec![BatchOperation::CreateFile {
                         path: "mock.txt".into(),
                         content: "mock".into(),
+                        create_parents: false,
                     }],
                 },
             )

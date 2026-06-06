@@ -439,12 +439,38 @@ pub(crate) fn cleanup_overlay<S: SupervisorSyscalls>(
     }
 
     if let Err(err) = syscalls.umount_overlay(&plan.paths.merged) {
+        if is_not_mounted_overlay_unmount(&err) {
+            return cleanup_overlay_dirs(
+                plan,
+                disposition,
+                child_cleanup_succeeded,
+                syscalls,
+                failures,
+            );
+        }
         failures.push(OverlayCleanupFailure {
             failure_kind: CleanupFailureKind::UnmountMerged,
             path_label: "merged",
             reason: err.to_string(),
         });
     }
+
+    cleanup_overlay_dirs(
+        plan,
+        disposition,
+        child_cleanup_succeeded,
+        syscalls,
+        failures,
+    )
+}
+
+fn cleanup_overlay_dirs<S: SupervisorSyscalls>(
+    plan: &OverlayPlan,
+    disposition: OverlayDisposition,
+    child_cleanup_succeeded: bool,
+    syscalls: &mut S,
+    mut failures: Vec<OverlayCleanupFailure>,
+) -> OverlayCleanupReport {
     for (kind, label, path) in [
         (
             CleanupFailureKind::RemoveMerged,
@@ -493,6 +519,20 @@ pub(crate) fn cleanup_overlay<S: SupervisorSyscalls>(
     }
 }
 
+fn is_not_mounted_overlay_unmount(err: &SyscallError) -> bool {
+    if err.operation != "umount2(overlay merged)" {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        matches!(err.errno, Some(libc::EINVAL | libc::ENOENT))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 fn sanitize_session_id(session_id: &str) -> String {
     let sanitized = session_id
         .chars()
@@ -524,11 +564,17 @@ mod tests {
     struct FakeOverlaySyscalls {
         calls: Vec<String>,
         fail: BTreeSet<&'static str>,
+        unmount_errno: Option<i32>,
     }
 
     impl FakeOverlaySyscalls {
         fn fail(mut self, operation: &'static str) -> Self {
             self.fail.insert(operation);
+            self
+        }
+
+        fn fail_unmount_errno(mut self, errno: i32) -> Self {
+            self.unmount_errno = Some(errno);
             self
         }
 
@@ -560,6 +606,9 @@ mod tests {
         fn write_gid_map_current(&mut self) -> Result<(), SyscallError> {
             Ok(())
         }
+        fn enter_pid_namespace_child(&mut self) -> Result<(), SyscallError> {
+            Ok(())
+        }
         fn unshare_network_namespace(&mut self) -> Result<(), SyscallError> {
             Ok(())
         }
@@ -588,6 +637,9 @@ mod tests {
             Ok(())
         }
         fn mount_scratch_tmpfs(&mut self, _target: &Path) -> Result<(), SyscallError> {
+            Ok(())
+        }
+        fn mount_procfs(&mut self, _target: &Path) -> Result<(), SyscallError> {
             Ok(())
         }
         fn mount_minimal_device(
@@ -650,6 +702,13 @@ mod tests {
         fn umount_overlay(&mut self, merged: &Path) -> Result<(), SyscallError> {
             self.calls
                 .push(format!("umount_overlay:{}", merged.display()));
+            if let Some(errno) = self.unmount_errno {
+                return Err(SyscallError::with_errno(
+                    "umount2(overlay merged)",
+                    "not mounted",
+                    errno,
+                ));
+            }
             self.maybe_fail("umount_overlay")
         }
         fn remove_overlay_tree(&mut self, path: &Path) -> Result<(), SyscallError> {
@@ -757,6 +816,53 @@ mod tests {
             report.cleanup_failures[0].failure_kind,
             CleanupFailureKind::UnmountMerged
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlay_cleanup_ignores_parent_namespace_not_mounted_unmount() {
+        let (_temp, plan) = overlay_plan(OverlayMode::Artifact);
+        let mut syscalls = FakeOverlaySyscalls::default().fail_unmount_errno(libc::EINVAL);
+
+        let report = cleanup_overlay(&plan, OverlayDisposition::Committed, true, &mut syscalls);
+
+        assert_eq!(report.outcome, CleanupOutcome::Succeeded);
+        assert_eq!(report.failure_kind, None);
+        assert_eq!(
+            syscalls
+                .calls
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                format!("umount_overlay:{}", plan.paths.merged.display()),
+                format!("remove_overlay_tree:{}", plan.paths.merged.display()),
+                format!("remove_overlay_tree:{}", plan.paths.upper.display()),
+                format!("remove_overlay_tree:{}", plan.paths.work.display()),
+                format!("remove_overlay_tree:{}", plan.session_root.display()),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlay_cleanup_live_parent_namespace_non_mount_removes_workdir_tree() {
+        let (_temp, plan) = overlay_plan(OverlayMode::Artifact);
+        std::fs::create_dir_all(&plan.paths.upper).unwrap();
+        std::fs::create_dir_all(&plan.paths.merged).unwrap();
+        let inner_work = plan.paths.work.join("work");
+        std::fs::create_dir_all(&inner_work).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&inner_work).unwrap().permissions();
+        permissions.set_mode(0);
+        std::fs::set_permissions(&inner_work, permissions).unwrap();
+
+        let mut syscalls = crate::executor::supervisor::syscall::LiveSupervisorSyscalls::default();
+        let report = cleanup_overlay(&plan, OverlayDisposition::Committed, true, &mut syscalls);
+
+        assert_eq!(report.outcome, CleanupOutcome::Succeeded);
+        assert!(!plan.session_root.exists());
     }
 
     #[test]

@@ -536,6 +536,7 @@ async fn cep_mode_off_policy_deny_still_enforced() {
         .call::<Create>(CreateParams {
             path: "should_be_denied.txt".into(),
             content: "this should never be written".into(),
+            create_parents: false,
         })
         .await
         .expect_err("mutate.create without WritePath must be denied even in Off mode");

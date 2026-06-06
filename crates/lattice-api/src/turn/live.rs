@@ -8,6 +8,7 @@
 //! that drains agent events concurrently via `tokio::select!`, and emits public
 //! [`TurnEvent`] values through a bounded channel before committing.
 
+use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -33,6 +34,11 @@ pub(super) const TURN_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// Max wait when forwarding a non-delta [`TurnEvent`] to a slow observer.
 /// After timeout, further public events are skipped but the turn still commits.
 const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Short grace period for CEP side-channel events after the agent future
+/// returns. The CEP server emits call-finished before the tool response, but
+/// live forwarding crosses a separate channel.
+const CEP_EVENT_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
 /// All state gathered during startup validation, before the live task spawns.
 ///
@@ -135,6 +141,71 @@ impl ObserverSink {
     }
 }
 
+#[derive(Default)]
+struct CepOrderedEmitter {
+    pending_calls: HashSet<u64>,
+    buffered: VecDeque<TurnEvent>,
+}
+
+impl CepOrderedEmitter {
+    async fn emit(&mut self, observer: &mut ObserverSink, event: TurnEvent) {
+        match event {
+            TurnEvent::CepCallStarted { call_id, .. } => {
+                self.pending_calls.insert(call_id);
+                observer.emit(event).await;
+            }
+            TurnEvent::CepCallFinished { call_id, .. } => {
+                observer.emit(event).await;
+                self.pending_calls.remove(&call_id);
+                if self.pending_calls.is_empty() {
+                    self.flush_buffered(observer).await;
+                }
+            }
+            event if is_cep_event(&event) => {
+                observer.emit(event).await;
+                if self.pending_calls.is_empty() {
+                    self.flush_buffered(observer).await;
+                }
+            }
+            event if self.pending_calls.is_empty() && !is_tool_call_finished(&event) => {
+                self.flush_buffered(observer).await;
+                observer.emit(event).await;
+            }
+            event => {
+                self.buffered.push_back(event);
+            }
+        }
+    }
+
+    async fn finish(&mut self, observer: &mut ObserverSink) {
+        self.pending_calls.clear();
+        self.flush_buffered(observer).await;
+    }
+
+    async fn flush_buffered(&mut self, observer: &mut ObserverSink) {
+        while let Some(event) = self.buffered.pop_front() {
+            observer.emit(event).await;
+        }
+    }
+}
+
+fn is_tool_call_finished(event: &TurnEvent) -> bool {
+    matches!(event, TurnEvent::ToolCallFinished { .. })
+}
+
+fn is_cep_event(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::CepCallStarted { .. }
+            | TurnEvent::CepCallFinished { .. }
+            | TurnEvent::CepEnvelopeDeclared { .. }
+            | TurnEvent::CepEnvelopeSuperseded { .. }
+            | TurnEvent::CepEnvelopeMissing { .. }
+            | TurnEvent::CepVerifyFailed { .. }
+            | TurnEvent::CepReplanRequired { .. }
+    )
+}
+
 /// Background task that runs the agent loop, maps events live, and commits.
 ///
 /// Event emission order: TurnStarted -> [agent events] -> [terminal] ->
@@ -200,13 +271,16 @@ async fn run_live_turn_task(
     let cep_forwarder = tokio::spawn(async move {
         while let Some(event) = cep_client.next_event().await {
             if let Some(agent_event) = map_cep_tool_event(event) {
-                let _ = cep_agent_tx.try_send(agent_event);
+                if cep_agent_tx.send(agent_event).await.is_err() {
+                    break;
+                }
             }
         }
     });
 
     // 4. Pin agent future
     let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
+    let mut ordered_events = CepOrderedEmitter::default();
 
     // 5. Concurrent drain loop. Forwarding uses non-blocking / bounded-wait
     // observer emission so a slow consumer cannot stall agent_rx drain.
@@ -214,22 +288,30 @@ async fn run_live_turn_task(
         tokio::select! {
             maybe_event = agent_rx.recv() => {
                 if let Some(event) = maybe_event {
-                    observer.emit(map_agent_event(event)).await;
+                    ordered_events.emit(&mut observer, map_agent_event(event)).await;
                 }
             }
             result = &mut agent_fut => {
-                cep_forwarder.abort();
                 break result;
             }
         }
     };
 
-    // 6. Post-loop drain: flush agent channel without blocking on observer.
-    while let Some(event) = agent_rx.recv().await {
-        observer.emit(map_agent_event(event)).await;
+    // 6. Post-loop drain: give CEP side-channel lifecycle events a short
+    // chance to arrive before aborting the forwarder, then flush local buffers.
+    while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
+        ordered_events
+            .emit(&mut observer, map_agent_event(event))
+            .await;
     }
 
     cep_forwarder.abort();
+    while let Ok(event) = agent_rx.try_recv() {
+        ordered_events
+            .emit(&mut observer, map_agent_event(event))
+            .await;
+    }
+    ordered_events.finish(&mut observer).await;
 
     runtime.shutdown().await;
     audit.await_pending().await;
@@ -302,4 +384,98 @@ pub(super) async fn stream_turn_live(
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    use super::*;
+
+    fn cep_started(call_id: u64) -> TurnEvent {
+        TurnEvent::CepCallStarted {
+            call_id,
+            method: "session.todo_write".to_string(),
+            impact_kind: "session_state_mutation".to_string(),
+            audit_id: 7,
+            semantic_stage: "cep_native".to_string(),
+            guard_stage: "cep_policy_lifecycle".to_string(),
+        }
+    }
+
+    fn cep_finished(call_id: u64) -> TurnEvent {
+        TurnEvent::CepCallFinished {
+            call_id,
+            method: "session.todo_write".to_string(),
+            impact_kind: "session_state_mutation".to_string(),
+            audit_id: 7,
+            ok: true,
+            semantic_stage: "cep_native".to_string(),
+            guard_stage: "cep_policy_lifecycle".to_string(),
+            error_code: None,
+        }
+    }
+
+    fn tool_finished() -> TurnEvent {
+        TurnEvent::ToolCallFinished {
+            id: "c1".to_string(),
+            name: "session.todo_write".to_string(),
+            ok: true,
+            output_len: 2,
+            error_summary: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cep_ordered_emitter_defers_tool_finish_until_late_cep_lifecycle() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut observer = ObserverSink::new(tx);
+        let mut ordered = CepOrderedEmitter::default();
+
+        ordered.emit(&mut observer, tool_finished()).await;
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        ordered.emit(&mut observer, cep_started(1)).await;
+        ordered.emit(&mut observer, cep_finished(1)).await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::CepCallStarted { call_id: 1, .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::CepCallFinished { call_id: 1, .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ToolCallFinished { id, .. }) if id == "c1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cep_ordered_emitter_releases_deferred_tool_finish_before_next_plain_event() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut observer = ObserverSink::new(tx);
+        let mut ordered = CepOrderedEmitter::default();
+
+        ordered.emit(&mut observer, tool_finished()).await;
+        ordered
+            .emit(
+                &mut observer,
+                TurnEvent::ModelStarted {
+                    provider: Some("test".to_string()),
+                    model: "model".to_string(),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ToolCallFinished { id, .. }) if id == "c1"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(TurnEvent::ModelStarted { model, .. }) if model == "model"
+        ));
+    }
 }

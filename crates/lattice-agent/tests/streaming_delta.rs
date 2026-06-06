@@ -384,6 +384,21 @@ async fn streaming_invalid_tool_call_json_no_execution() {
         .as_ref()
         .unwrap()
         .contains("invalid/incomplete tool call"));
+    assert!(result
+        .terminal_reason
+        .as_ref()
+        .unwrap()
+        .contains("finish_reason=tool_calls"));
+    assert!(result
+        .terminal_reason
+        .as_ref()
+        .unwrap()
+        .contains("args_len=14"));
+    assert!(result
+        .terminal_reason
+        .as_ref()
+        .unwrap()
+        .contains("ended=true"));
     assert!(
         result.messages.is_empty(),
         "malformed tool-only response should not commit an empty assistant message"
@@ -400,6 +415,47 @@ async fn streaming_invalid_tool_call_json_no_execution() {
         .events
         .iter()
         .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+}
+
+#[tokio::test]
+async fn streaming_truncated_tool_call_json_reports_finish_reason_length() {
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(vec![
+                LlmEvent::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "mutate.batch".to_string(),
+                },
+                LlmEvent::ToolCallDelta {
+                    id: "c1".to_string(),
+                    arguments_delta: r#"{"operations":["#.to_string(),
+                },
+                LlmEvent::Done {
+                    finish_reason: "length".to_string(),
+                    usage: None,
+                },
+            ])
+            .build(),
+    );
+
+    let executor = Arc::new(FakeToolExecutor::new(vec![]));
+    let loop_inst = AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: executor,
+    });
+
+    let result = loop_inst
+        .run_turn(make_request(
+            "create files",
+            vec![read_file_tool_definition()],
+        ))
+        .await;
+
+    let reason = result.terminal_reason.as_deref().unwrap_or_default();
+    assert_eq!(result.status, AgentTurnStatus::Error);
+    assert!(reason.contains("mutate.batch"));
+    assert!(reason.contains("finish_reason=length"));
+    assert!(reason.contains("ended=false"));
 }
 
 #[tokio::test]

@@ -172,7 +172,6 @@ struct SseStreamState {
     body_stream: Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
     parser: ProviderParser,
     buffer: Vec<u8>,
-    total_bytes: usize,
     event_count: usize,
     finished: bool,
     pending: std::collections::VecDeque<LlmEvent>,
@@ -181,8 +180,8 @@ struct SseStreamState {
 /// Stream SSE events incrementally from an HTTP response into [`LlmEvent`] values.
 ///
 /// Each call creates its own parser instance — no thread-local state leaks
-/// across requests. Body chunks are read incrementally; if the cumulative
-/// SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
+/// across requests. Body chunks are read incrementally; if the in-flight
+/// unframed SSE buffer exceeds `MAX_SSE_BUFFER_SIZE` or the event count exceeds
 /// `MAX_SSE_EVENTS`, an error event is emitted and the stream terminates.
 async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind) -> LlmStream {
     let body_stream = Box::pin(response.bytes_stream());
@@ -190,7 +189,6 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
         body_stream,
         parser: ProviderParser::new(provider),
         buffer: Vec::new(),
-        total_bytes: 0,
         event_count: 0,
         finished: false,
         pending: std::collections::VecDeque::new(),
@@ -211,15 +209,15 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
         loop {
             match state.body_stream.next().await {
                 Some(Ok(chunk)) => {
-                    state.total_bytes = state.total_bytes.saturating_add(chunk.len());
-                    if state.total_bytes > sse::MAX_SSE_BUFFER_SIZE {
+                    state.buffer.extend_from_slice(&chunk);
+                    if state.buffer.len() > sse::MAX_SSE_BUFFER_SIZE {
                         state.finished = true;
                         return Some((
                             LlmEvent::Error {
                                 message: LlmError::ProtocolLimit {
                                     message: format!(
-                                        "SSE buffer size exceeded: {} bytes",
-                                        state.total_bytes
+                                        "SSE in-flight buffer size exceeded: {} bytes",
+                                        state.buffer.len()
                                     ),
                                 }
                                 .to_string(),
@@ -227,7 +225,6 @@ async fn stream_sse_response(response: reqwest::Response, provider: ProviderKind
                             state,
                         ));
                     }
-                    state.buffer.extend_from_slice(&chunk);
                     drain_complete_events(&mut state);
                     if let Some(event) = state.pending.pop_front() {
                         return Some((event, state));
@@ -775,7 +772,6 @@ mod tests {
             body_stream: Box::pin(stream::empty()),
             parser: ProviderParser::new(ProviderKind::OpenAi),
             buffer: Vec::new(),
-            total_bytes: 0,
             event_count: 0,
             finished: false,
             pending: std::collections::VecDeque::new(),
@@ -803,7 +799,6 @@ mod tests {
             body_stream: Box::pin(stream::empty()),
             parser: ProviderParser::new(ProviderKind::OpenAi),
             buffer: Vec::new(),
-            total_bytes: 0,
             event_count: 0,
             finished: false,
             pending: std::collections::VecDeque::new(),
@@ -815,5 +810,35 @@ mod tests {
         drain_complete_events(&mut state);
         assert_eq!(state.event_count, 2);
         assert_eq!(state.pending.len(), 2);
+    }
+
+    #[test]
+    fn drain_allows_large_cumulative_stream_when_events_are_framed() {
+        let mut state = SseStreamState {
+            body_stream: Box::pin(stream::empty()),
+            parser: ProviderParser::new(ProviderKind::OpenAi),
+            buffer: Vec::new(),
+            event_count: 0,
+            finished: false,
+            pending: std::collections::VecDeque::new(),
+        };
+        let raw = b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"x\"}}]}\n\n";
+        let iterations = (sse::MAX_SSE_BUFFER_SIZE / raw.len()) + 128;
+
+        for _ in 0..iterations {
+            state.buffer.extend_from_slice(raw);
+            drain_complete_events(&mut state);
+            assert!(state.buffer.is_empty());
+            assert!(
+                !state
+                    .pending
+                    .iter()
+                    .any(|event| matches!(event, LlmEvent::Error { .. })),
+                "complete SSE events should not trip the in-flight buffer limit"
+            );
+            state.pending.clear();
+        }
+
+        assert_eq!(state.event_count, iterations);
     }
 }

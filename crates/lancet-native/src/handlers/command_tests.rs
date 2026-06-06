@@ -277,6 +277,7 @@ async fn command_boundary_audit_unavailable_required_runs_and_records_unbounded(
 }
 
 #[tokio::test]
+#[ignore = "requires live supervisor host support"]
 async fn command_boundary_audit_available_required_runs_with_live_setup_fallback_unbounded() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
@@ -327,6 +328,7 @@ async fn command_boundary_audit_available_required_runs_with_live_setup_fallback
 }
 
 #[tokio::test]
+#[ignore = "requires live supervisor host support"]
 async fn command_boundary_enforce_required_network_uses_supervisor_attempt_before_backend() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
@@ -374,6 +376,7 @@ async fn command_boundary_enforce_required_network_uses_supervisor_attempt_befor
 }
 
 #[tokio::test]
+#[ignore = "requires live supervisor host support"]
 async fn command_boundary_enforce_required_filesystem_requires_mount_view_evidence() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();

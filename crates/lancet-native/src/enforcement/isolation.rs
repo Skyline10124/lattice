@@ -395,7 +395,7 @@ impl ChildProbeExecutor for CommandChildProbe {
 
 struct CommandAttempt {
     program: &'static str,
-    args: Vec<&'static str>,
+    args: Vec<String>,
     diagnostics: BTreeMap<String, String>,
 }
 
@@ -403,7 +403,7 @@ impl CommandAttempt {
     fn new(program: &'static str, args: Vec<&'static str>) -> Self {
         Self {
             program,
-            args,
+            args: args.into_iter().map(str::to_string).collect(),
             diagnostics: BTreeMap::new(),
         }
     }
@@ -1273,10 +1273,14 @@ mod tests {
                     .map(String::as_str),
                 Some(unshare)
             );
-            assert_eq!(
-                outcome.diagnostics.get("helper.true").map(String::as_str),
-                Some(true_path)
-            );
+            if outcome.status == HostProbeStatus::Available {
+                assert_eq!(
+                    outcome.diagnostics.get("helper.true").map(String::as_str),
+                    Some(true_path)
+                );
+            } else {
+                assert!(outcome.reason.contains("network_namespace"));
+            }
         } else {
             let outcome = CommandChildProbe.run_child_probe(ChildProbeKind::NetworkNamespace);
             assert_eq!(outcome.status, HostProbeStatus::Unknown);

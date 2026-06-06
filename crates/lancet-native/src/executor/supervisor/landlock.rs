@@ -160,6 +160,18 @@ impl LandlockRefinementPlan {
         for mount in plan
             .mounts
             .iter()
+            .filter(|mount| mount.kind == MountKind::ProcFs)
+        {
+            rules.push(LandlockPathRulePlan {
+                path: mount.target.clone(),
+                access: LandlockRuleAccess::ReadOnly,
+                allowed_access_fs: read_only_access_for(rights.handled_access_fs),
+            });
+        }
+
+        for mount in plan
+            .mounts
+            .iter()
             .filter(|mount| mount.kind == MountKind::MinimalDevice)
         {
             rules.push(LandlockPathRulePlan {
@@ -336,22 +348,29 @@ mod tests {
             ..CommandIsolationRuntimeConfig::default()
         };
         let plan = SupervisorPlan::build(&root, None, &["run".to_string()], &config).unwrap();
+        let toolchain_target = plan
+            .read_only_toolchain_mounts()
+            .next()
+            .expect("toolchain mount")
+            .target
+            .clone();
         let refinement = LandlockRefinementPlan::from_supervisor_plan(&plan, 3, false, false);
 
         let rule_paths: Vec<_> = refinement.rules.iter().map(|rule| &rule.path).collect();
         assert!(rule_paths.contains(&&PathBuf::from("/project")));
-        assert!(rule_paths.contains(&&PathBuf::from("/toolchain/ro0")));
+        assert!(rule_paths.contains(&&toolchain_target));
         assert!(rule_paths.contains(&&PathBuf::from("/tmp")));
         assert!(rule_paths.contains(&&PathBuf::from("/scratch/build")));
+        assert!(rule_paths.contains(&&PathBuf::from("/proc")));
         assert!(rule_paths.contains(&&PathBuf::from("/dev/null")));
         assert!(!rule_paths
             .iter()
-            .any(|path| path.starts_with(temp.path()) || path.starts_with("/home")));
+            .any(|path| path == &&root || path == &&temp.path().join("project")));
 
         let toolchain_rule = refinement
             .rules
             .iter()
-            .find(|rule| rule.path == Path::new("/toolchain/ro0"))
+            .find(|rule| rule.path == toolchain_target)
             .unwrap();
         assert_eq!(toolchain_rule.access, LandlockRuleAccess::ReadOnly);
         assert_eq!(toolchain_rule.allowed_access_fs & ACCESS_FS_WRITE_FILE, 0);

@@ -504,6 +504,9 @@ mod verify_tests {
         fn write_gid_map_current(&mut self) -> Result<(), SyscallError> {
             Ok(())
         }
+        fn enter_pid_namespace_child(&mut self) -> Result<(), SyscallError> {
+            Ok(())
+        }
         fn unshare_network_namespace(&mut self) -> Result<(), SyscallError> {
             Ok(())
         }
@@ -532,6 +535,9 @@ mod verify_tests {
             Ok(())
         }
         fn mount_scratch_tmpfs(&mut self, _target: &Path) -> Result<(), SyscallError> {
+            Ok(())
+        }
+        fn mount_procfs(&mut self, _target: &Path) -> Result<(), SyscallError> {
             Ok(())
         }
         fn mount_minimal_device(

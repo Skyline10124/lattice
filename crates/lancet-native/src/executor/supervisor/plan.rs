@@ -3,6 +3,7 @@
 
 //! Deterministic parent-built supervisor plan for isolated commands.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use lancet_protocol::error::{CepErrorData, ValidationErrorData};
@@ -52,6 +53,7 @@ pub(crate) enum MountKind {
     ProjectRoot,
     ReadOnlyToolchain,
     ScratchTmpfs,
+    ProcFs,
     MinimalDevice,
 }
 
@@ -141,19 +143,20 @@ impl SupervisorPlan {
         }];
         let mut diagnostics = Vec::new();
         let mut toolchain_sources = Vec::new();
+        let mut read_only_toolchain_targets = BTreeSet::new();
         let mut generated_path_entries =
             vec![project_view_path.clone(), project_view_path.join("bin")];
 
         for (index, source) in config.read_only_toolchain_paths.iter().enumerate() {
             match std::fs::canonicalize(source) {
                 Ok(canonical) if canonical.is_dir() || canonical.is_file() => {
-                    let target = PathBuf::from(format!("/toolchain/ro{index}"));
-                    mounts.push(MountPlan {
-                        kind: MountKind::ReadOnlyToolchain,
-                        source: Some(canonical.clone()),
-                        target: target.clone(),
-                        read_only: true,
-                    });
+                    let target = toolchain_view_target(index, source);
+                    push_read_only_toolchain_mount(
+                        &mut mounts,
+                        &mut read_only_toolchain_targets,
+                        canonical.clone(),
+                        target.clone(),
+                    );
                     generated_path_entries.push(target.clone());
                     if canonical.join("bin").is_dir() {
                         generated_path_entries.push(target.join("bin"));
@@ -170,6 +173,11 @@ impl SupervisorPlan {
                 }),
             }
         }
+        mirror_declared_fhs_aliases(
+            &mut mounts,
+            &mut read_only_toolchain_targets,
+            &toolchain_sources,
+        );
 
         mounts.push(MountPlan {
             kind: MountKind::ScratchTmpfs,
@@ -185,6 +193,12 @@ impl SupervisorPlan {
                 read_only: false,
             });
         }
+        mounts.push(MountPlan {
+            kind: MountKind::ProcFs,
+            source: None,
+            target: PathBuf::from("/proc"),
+            read_only: true,
+        });
 
         for device in ["/dev/null", "/dev/zero", "/dev/urandom"] {
             mounts.push(MountPlan {
@@ -351,6 +365,9 @@ impl SupervisorPlan {
             stages.push(SupervisorStage::UidMap);
             stages.push(SupervisorStage::GidMap);
         }
+        if self.mount_view {
+            stages.push(SupervisorStage::PidNamespace);
+        }
         if self.network_namespace {
             stages.push(SupervisorStage::NetworkNamespace);
             stages.push(SupervisorStage::AssertNoVethOrDefaultRoute);
@@ -373,6 +390,13 @@ impl SupervisorPlan {
             stages.push(SupervisorStage::ReadOnlyBindScopeDecision);
             if !self.tmpfs_paths.is_empty() {
                 stages.push(SupervisorStage::ScratchTmpfs);
+            }
+            if self
+                .mounts
+                .iter()
+                .any(|mount| mount.kind == MountKind::ProcFs)
+            {
+                stages.push(SupervisorStage::ProcFs);
             }
             stages.push(SupervisorStage::MinimalDevices);
             stages.push(SupervisorStage::OldRootCleanup);
@@ -398,6 +422,17 @@ impl SupervisorPlan {
         }
         stages
     }
+
+    pub(crate) fn cargo_home_view_path(&self) -> Option<&Path> {
+        self.read_only_toolchain_mounts()
+            .find(|mount| {
+                mount
+                    .target
+                    .file_name()
+                    .is_some_and(|name| name == ".cargo")
+            })
+            .map(|mount| mount.target.as_path())
+    }
 }
 
 pub(crate) fn default_executable_view_paths() -> Vec<PathBuf> {
@@ -412,6 +447,57 @@ fn scratch_view_target(index: usize, scratch: &Path) -> PathBuf {
         scratch.to_path_buf()
     } else {
         PathBuf::from(format!("/scratch/{index}"))
+    }
+}
+
+fn toolchain_view_target(index: usize, source: &Path) -> PathBuf {
+    if source.is_absolute() && source != Path::new("/") {
+        source.to_path_buf()
+    } else {
+        PathBuf::from(format!("/toolchain/ro{index}"))
+    }
+}
+
+fn push_read_only_toolchain_mount(
+    mounts: &mut Vec<MountPlan>,
+    seen_targets: &mut BTreeSet<PathBuf>,
+    source: PathBuf,
+    target: PathBuf,
+) {
+    if seen_targets.insert(target.clone()) {
+        mounts.push(MountPlan {
+            kind: MountKind::ReadOnlyToolchain,
+            source: Some(source),
+            target,
+            read_only: true,
+        });
+    }
+}
+
+fn mirror_declared_fhs_aliases(
+    mounts: &mut Vec<MountPlan>,
+    seen_targets: &mut BTreeSet<PathBuf>,
+    toolchains: &[(PathBuf, PathBuf)],
+) {
+    for alias in ["/bin", "/sbin", "/lib", "/lib64"] {
+        let alias_path = Path::new(alias);
+        let Ok(canonical_alias) = std::fs::canonicalize(alias_path) else {
+            continue;
+        };
+        let Some((source, _target)) = toolchains.iter().find(|(source, _target)| {
+            canonical_alias == *source || canonical_alias.starts_with(source)
+        }) else {
+            continue;
+        };
+        let relative = canonical_alias
+            .strip_prefix(source)
+            .unwrap_or(Path::new(""));
+        push_read_only_toolchain_mount(
+            mounts,
+            seen_targets,
+            source.join(relative),
+            alias_path.to_path_buf(),
+        );
     }
 }
 
@@ -629,7 +715,7 @@ mod tests {
         let toolchain = temp.path().join("rust");
         touch(&toolchain.join("bin/cargo"));
         let config = CommandIsolationRuntimeConfig {
-            read_only_toolchain_paths: vec![toolchain],
+            read_only_toolchain_paths: vec![toolchain.clone()],
             ..CommandIsolationRuntimeConfig::default()
         };
 
@@ -638,17 +724,42 @@ mod tests {
                 .unwrap();
 
         assert_eq!(plan.executable.source, ExecutableSource::ReadOnlyToolchain);
-        assert_eq!(
-            plan.executable.view_path,
-            Path::new("/toolchain/ro0/bin/cargo")
-        );
+        assert_eq!(plan.executable.view_path, toolchain.join("bin/cargo"));
+        let toolchain_bin = toolchain.join("bin");
         assert!(plan
             .generated_path_entries
             .iter()
-            .any(|entry| entry == Path::new("/toolchain/ro0/bin")));
+            .any(|entry| entry == &toolchain_bin));
         assert!(plan
             .read_only_toolchain_mounts()
             .all(|mount| mount.read_only));
+    }
+
+    #[test]
+    fn mount_plan_mirrors_fhs_aliases_that_resolve_inside_declared_toolchain() {
+        let Ok(usr) = std::fs::canonicalize("/usr") else {
+            return;
+        };
+        let Ok(lib64) = std::fs::canonicalize("/lib64") else {
+            return;
+        };
+        if !lib64.starts_with(&usr) || !Path::new("/usr/bin/true").is_file() {
+            return;
+        }
+        let temp = TempDir::new().unwrap();
+        touch(&temp.path().join("project/run"));
+        let config = CommandIsolationRuntimeConfig {
+            read_only_toolchain_paths: vec![PathBuf::from("/usr")],
+            ..CommandIsolationRuntimeConfig::default()
+        };
+
+        let plan =
+            SupervisorPlan::build(&temp.path().join("project"), None, &argv("true"), &config)
+                .unwrap();
+
+        assert!(plan.read_only_toolchain_mounts().any(|mount| {
+            mount.target == Path::new("/lib64") && mount.source.as_deref() == Some(lib64.as_path())
+        }));
     }
 
     #[test]
@@ -716,7 +827,6 @@ mod tests {
             "SSH_AUTH_SOCK",
             ".ssh",
             ".config",
-            "/proc",
             "/tmp/host",
         ] {
             assert!(
@@ -729,6 +839,17 @@ mod tests {
             .iter()
             .any(|mount| mount.target == Path::new("/dev")
                 && mount.source == Some(PathBuf::from("/dev"))));
+        assert!(!plan
+            .mounts
+            .iter()
+            .any(|mount| mount.target == Path::new("/proc")
+                && mount.source == Some(PathBuf::from("/proc"))));
+        assert!(plan
+            .mounts
+            .iter()
+            .any(|mount| mount.kind == MountKind::ProcFs
+                && mount.target == Path::new("/proc")
+                && mount.source.is_none()));
     }
 
     #[test]

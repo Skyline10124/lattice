@@ -482,12 +482,19 @@ impl AgentLoop {
                         } else {
                             call.arguments.clone()
                         };
-                        // Validate via serde_json
-                        if serde_json::from_str::<serde_json::Value>(&normalized_args).is_err() {
+                        // Validate via serde_json.
+                        if let Err(err) =
+                            serde_json::from_str::<serde_json::Value>(&normalized_args)
+                        {
                             all_valid = false;
                             invalid_info = Some(format!(
-                                "invalid/incomplete tool call: {} (id={})",
-                                call.name, call.id
+                                "invalid/incomplete tool call: {} (id={}, finish_reason={}, args_len={}, ended={}, json_error={})",
+                                call.name,
+                                call.id,
+                                finish_reason,
+                                normalized_args.len(),
+                                call.ended,
+                                err
                             ));
                             break;
                         }

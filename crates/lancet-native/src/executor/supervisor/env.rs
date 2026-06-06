@@ -39,6 +39,23 @@ pub(crate) fn build_isolated_env(
         .any(|path| path == Path::new("/tmp"))
     {
         values.insert("TMPDIR".to_string(), "/tmp".to_string());
+        values.insert("HOME".to_string(), "/tmp".to_string());
+    }
+    if let Some(cargo_home) = plan.cargo_home_view_path() {
+        values.insert(
+            "CARGO_HOME".to_string(),
+            cargo_home.to_string_lossy().into_owned(),
+        );
+        values.insert("CARGO_NET_OFFLINE".to_string(), "true".to_string());
+        if plan
+            .tmpfs_paths
+            .iter()
+            .any(|path| path == Path::new("/tmp"))
+        {
+            values
+                .entry("CARGO_TARGET_DIR".to_string())
+                .or_insert_with(|| "/tmp/lattice-cargo-target".to_string());
+        }
     }
 
     Ok(IsolatedEnv {
@@ -118,8 +135,8 @@ mod tests {
             Some("/project/.tools/bin:/usr/bin")
         );
         assert_eq!(env.values.get("TMPDIR").map(String::as_str), Some("/tmp"));
+        assert_eq!(env.values.get("HOME").map(String::as_str), Some("/tmp"));
         for key in [
-            "HOME",
             "SSH_AUTH_SOCK",
             "GIT_ASKPASS",
             "GIT_CONFIG_GLOBAL",
@@ -157,6 +174,65 @@ mod tests {
     }
 
     #[test]
+    fn isolated_env_sets_cargo_home_from_read_only_toolchain_mount() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let cargo_home = temp.path().join(".cargo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(cargo_home.join("bin")).unwrap();
+        std::fs::write(cargo_home.join("bin/cargo"), b"#!/bin/sh\n").unwrap();
+        let config = crate::enforcement::isolation::CommandIsolationRuntimeConfig {
+            read_only_toolchain_paths: vec![cargo_home.clone()],
+            ..crate::enforcement::isolation::CommandIsolationRuntimeConfig::default()
+        };
+        let plan = SupervisorPlan::build(&project, None, &["cargo".to_string()], &config).unwrap();
+        let policy = CommandPolicy::defaults();
+
+        let env = build_isolated_env(&BTreeMap::new(), &policy, &plan, &fake_host_env()).unwrap();
+
+        assert_eq!(
+            env.values.get("CARGO_HOME").map(String::as_str),
+            Some(cargo_home.to_str().unwrap())
+        );
+        assert_eq!(
+            env.values.get("CARGO_NET_OFFLINE").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.values.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/lattice-cargo-target")
+        );
+    }
+
+    #[test]
+    fn isolated_env_keeps_allowed_caller_cargo_target_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project = temp.path().join("project");
+        let cargo_home = temp.path().join(".cargo");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(cargo_home.join("bin")).unwrap();
+        std::fs::write(cargo_home.join("bin/cargo"), b"#!/bin/sh\n").unwrap();
+        let config = crate::enforcement::isolation::CommandIsolationRuntimeConfig {
+            read_only_toolchain_paths: vec![cargo_home],
+            ..crate::enforcement::isolation::CommandIsolationRuntimeConfig::default()
+        };
+        let plan = SupervisorPlan::build(&project, None, &["cargo".to_string()], &config).unwrap();
+        let policy = CommandPolicy::defaults();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "CARGO_TARGET_DIR".to_string(),
+            "/tmp/custom-target".to_string(),
+        );
+
+        let env = build_isolated_env(&params, &policy, &plan, &fake_host_env()).unwrap();
+
+        assert_eq!(
+            env.values.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("/tmp/custom-target")
+        );
+    }
+
+    #[test]
     fn isolated_env_rejects_unallowed_caller_entries_with_policy_error() {
         let policy = CommandPolicy::defaults();
         let mut params = BTreeMap::new();
@@ -182,5 +258,6 @@ mod tests {
         let env = build_isolated_env(&BTreeMap::new(), &policy, &plan, &fake_host_env()).unwrap();
 
         assert!(!env.values.contains_key("TMPDIR"));
+        assert!(!env.values.contains_key("HOME"));
     }
 }

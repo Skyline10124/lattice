@@ -34,7 +34,7 @@ pub enum ObserveWorkspaceResult {
 
 impl CepMethod for ObserveWorkspace {
     const NAME: &'static str = "observe.workspace";
-    const DESCRIPTION: &'static str = "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root.";
+    const DESCRIPTION: &'static str = "Observe workspace content in one of four fixed modes: read_file for one path, grep for regex search under a root, list_directory for one directory, or find_files for glob-like path search under a root. read_file returns content_hash; copy that exact value into mutate.edit expected_hash when editing, and do not compute, transform, or narrate the hash.";
     type Params = ObserveWorkspaceParams;
     type Result = ObserveWorkspaceResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceObservation;
@@ -143,17 +143,23 @@ pub struct Create;
 pub struct CreateParams {
     pub path: String,
     pub content: String,
+    /// Create missing parent directories needed for `path`. When false, all
+    /// parent directories must already exist.
+    #[serde(default)]
+    pub create_parents: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CreateResult {
     pub path: String,
     pub bytes_written: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_dirs: Vec<String>,
 }
 
 impl CepMethod for Create {
     const NAME: &'static str = "mutate.create";
-    const DESCRIPTION: &'static str = "Create a new file under the declared workspace scope. The target file must not already exist, and parent directories must already exist.";
+    const DESCRIPTION: &'static str = "Create a new file under the declared workspace scope. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist. Directory creation is audited and bounded by the active WritePath envelope.";
     type Params = CreateParams;
     type Result = CreateResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -212,7 +218,7 @@ pub struct EditResult {
 
 impl CepMethod for Edit {
     const NAME: &'static str = "mutate.edit";
-    const DESCRIPTION: &'static str = "Edit an existing file with semantic text operations. Provide the path, the observe.workspace content_hash as expected_hash, and replace/insert operations; LANCET computes hashline anchors internally. This method never deletes files.";
+    const DESCRIPTION: &'static str = "Edit an existing file with semantic text operations. Provide the path, the observe.workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate.edit edits array. LANCET computes hashline anchors internally. This method never deletes files.";
     type Params = EditParams;
     type Result = EditResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -242,6 +248,10 @@ pub enum BatchOperation {
     CreateFile {
         path: String,
         content: String,
+        /// Create missing parent directories needed for `path`. When false,
+        /// all parent directories must already exist.
+        #[serde(default)]
+        create_parents: bool,
     },
     EditFile {
         path: String,
@@ -255,11 +265,13 @@ pub struct BatchResult {
     pub changed_files: Vec<String>,
     pub created_files: Vec<String>,
     pub edited_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_dirs: Vec<String>,
 }
 
 impl CepMethod for Batch {
     const NAME: &'static str = "mutate.batch";
-    const DESCRIPTION: &'static str = "Apply a multi-file workspace mutation as one LANCET operation. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Edit operations use expected_hash and runtime-computed hashline anchors.";
+    const DESCRIPTION: &'static str = "Apply a small multi-file workspace mutation as one LANCET operation. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Prefer mutate.create one file at a time for new source files or large content payloads. Use at most one operation per target path; put multiple edits to the same file inside one edit_file edits array. create_file supports create_parents=true for missing parent directories; otherwise parent directories must already exist. Edit operations use expected_hash and runtime-computed hashline anchors.";
     type Params = BatchParams;
     type Result = BatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -298,6 +310,7 @@ mod tests {
         let schema = schemars::schema_for!(ReadFileParams);
         let value = serde_json::to_value(schema).unwrap();
         assert!(value["properties"]["path"].is_object());
+        assert!(ObserveWorkspace::DESCRIPTION.contains("do not compute"));
     }
 
     #[test]
@@ -311,5 +324,39 @@ mod tests {
         let json = serde_json::to_string(&params).unwrap();
         let back: ReadFileParams = serde_json::from_str(&json).unwrap();
         assert_eq!(back, params);
+    }
+
+    #[test]
+    fn create_params_defaults_create_parents_to_false() {
+        let params: CreateParams =
+            serde_json::from_value(serde_json::json!({"path": "src/lib.rs", "content": ""}))
+                .unwrap();
+        assert!(!params.create_parents);
+    }
+
+    #[test]
+    fn create_params_schema_exposes_create_parents() {
+        let schema = schemars::schema_for!(CreateParams);
+        let value = serde_json::to_value(schema).unwrap();
+        assert!(value["properties"]["create_parents"].is_object());
+        assert!(Create::DESCRIPTION.contains("create_parents=true"));
+    }
+
+    #[test]
+    fn batch_create_file_defaults_create_parents_to_false() {
+        let params: BatchParams = serde_json::from_value(serde_json::json!({
+            "operations": [
+                {"op": "create_file", "path": "src/lib.rs", "content": ""}
+            ]
+        }))
+        .unwrap();
+        let BatchOperation::CreateFile { create_parents, .. } = &params.operations[0] else {
+            panic!("expected create_file operation");
+        };
+        assert!(!create_parents);
+        assert!(Batch::DESCRIPTION.contains("create_parents=true"));
+        assert!(Batch::DESCRIPTION.contains("new source files"));
+        assert!(Batch::DESCRIPTION.contains("at most one operation per target path"));
+        assert!(Edit::DESCRIPTION.contains("every operation object includes op"));
     }
 }

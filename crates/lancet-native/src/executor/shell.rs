@@ -10,10 +10,7 @@ use std::time::Duration;
 
 use tokio::process::Child;
 
-use crate::enforcement::isolation::{
-    AppliedBoundaryEvidence, BoundaryAttemptOutcome, CommandIsolationAttempt,
-    LandlockApplicationStatus, MinimalMountViewStatus, SupervisorSetupStatus,
-};
+use crate::enforcement::isolation::CommandIsolationAttempt;
 use crate::executor::supervisor::linux::{
     boundary_attempt_from_supervisor, run_linux_supervisor_attempt,
 };
@@ -22,18 +19,19 @@ use crate::executor::supervisor::overlay::CleanupFailureKind;
 use crate::executor::supervisor::overlay::{
     cleanup_overlay, OverlayCleanupReport, OverlayDisposition, OverlayMode, OverlayPlan,
 };
+#[cfg(unix)]
+use crate::executor::supervisor::process::{raw_write_all, spawn_live_supervisor_process};
+use crate::executor::supervisor::setup_report::{
+    decode_setup_attempt_report, encode_setup_attempt_report,
+};
 use crate::executor::supervisor::syscall::LiveSupervisorSyscalls;
 #[cfg(test)]
 use crate::executor::supervisor::syscall::SupervisorSyscalls;
 use crate::executor::supervisor::SupervisorPlan;
 use crate::server::registry::Cancellation;
-use lancet_authority::{
-    LandlockApplied, MinimalMountViewApplied, MountNamespaceApplied, NetnsApplied,
-};
 use lancet_protocol::error::GuardErrorData;
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use serde_json::Value;
 
 pub(crate) fn resolve_command_cwd(
     project_root: &str,
@@ -496,6 +494,23 @@ async fn execute_argv_inner(
         overlay_cleanup: None,
     })?;
 
+    #[cfg(unix)]
+    let supervisor = match supervisor {
+        Some(SupervisorExecution::Live { plan }) => {
+            return execute_argv_supervised_live_unix(
+                argv,
+                &cwd,
+                env,
+                timeout_ms,
+                cancellation,
+                max_output_bytes,
+                plan,
+            )
+            .await;
+        }
+        other => other,
+    };
+
     let mut cmd = tokio::process::Command::new(&argv[0]);
     if argv.len() > 1 {
         cmd.args(&argv[1..]);
@@ -778,6 +793,197 @@ fn cleanup_overlay_after_terminal(
     ))
 }
 
+#[cfg(unix)]
+async fn execute_argv_supervised_live_unix(
+    argv: &[String],
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    timeout_ms: u64,
+    cancellation: &mut Cancellation,
+    max_output_bytes: usize,
+    plan: SupervisorPlan,
+) -> Result<ExecuteInnerOutput, ExecuteInnerError> {
+    let overlay_execution = plan.overlay_plan.as_ref().map(|plan| OverlayExecution {
+        plan: plan.clone(),
+        #[cfg(test)]
+        cleanup_failures: None,
+    });
+    let setup_error = |error, setup_attempt| ExecuteInnerError {
+        error,
+        setup_attempt,
+        overlay_cleanup: cleanup_overlay_after_terminal(overlay_execution.as_ref(), true),
+    };
+
+    let mut setup_pipe = SetupReportPipe::new().map_err(|error| setup_error(error, None))?;
+    let mut process = spawn_live_supervisor_process(argv, cwd, env, plan, setup_pipe.child_write)
+        .map_err(|error| setup_error(error, None))?;
+    setup_pipe.close_child_writer();
+
+    let setup_attempt = setup_pipe.read_setup_attempt(None);
+    if let Some(attempt) = setup_attempt.as_ref() {
+        if attempt.outcome.failed_closed {
+            let cleanup = process.kill_and_reap().await;
+            let child_cleanup_succeeded = cleanup.is_ok();
+            let error = match cleanup {
+                Ok(()) => supervisor_setup_failed_error(&argv[0], attempt),
+                Err(err) => child_kill_failed(&argv[0], err),
+            };
+            return Err(ExecuteInnerError {
+                error,
+                setup_attempt,
+                overlay_cleanup: cleanup_overlay_after_terminal(
+                    overlay_execution.as_ref(),
+                    child_cleanup_succeeded,
+                ),
+            });
+        }
+    } else if let Some(err) = process.handshake_error.take() {
+        let cleanup = process.kill_and_reap().await;
+        return Err(ExecuteInnerError {
+            error: match cleanup {
+                Ok(()) => CepError::new(
+                    CepErrorCode::GuardDenied,
+                    format!("command supervisor userns mapping failed: {err}"),
+                    CepErrorData::Guard(GuardErrorData {
+                        method: "exec.command_run".into(),
+                        reason: "parent userns map handshake failed".into(),
+                    }),
+                    Retriability::Permanent,
+                ),
+                Err(cleanup_err) => child_kill_failed(&argv[0], cleanup_err),
+            },
+            setup_attempt: None,
+            overlay_cleanup: cleanup_overlay_after_terminal(overlay_execution.as_ref(), true),
+        });
+    }
+
+    let stdout_handle = tokio::spawn(bounded_read(process.take_stdout(), max_output_bytes));
+    let stderr_handle = tokio::spawn(bounded_read(process.take_stderr(), max_output_bytes));
+
+    tokio::select! {
+        status = process.wait() => {
+            match status {
+                Ok(exit_status) => {
+                    let stdout_meta = stdout_handle.await.unwrap_or_else(|_| BoundedStreamOutput {
+                        tail_bytes: Vec::new(),
+                        total_bytes: 0,
+                        truncated: false,
+                    });
+                    let stderr_meta = stderr_handle.await.unwrap_or_else(|_| BoundedStreamOutput {
+                        tail_bytes: Vec::new(),
+                        total_bytes: 0,
+                        truncated: false,
+                    });
+                    let output = std::process::Output {
+                        status: exit_status,
+                        stdout: stdout_meta.tail_bytes.clone(),
+                        stderr: stderr_meta.tail_bytes.clone(),
+                    };
+                    Ok(ExecuteInnerOutput {
+                        output,
+                        stdout_meta,
+                        stderr_meta,
+                        setup_attempt,
+                        overlay_cleanup: cleanup_overlay_after_terminal(
+                            overlay_execution.as_ref(),
+                            true,
+                        ),
+                    })
+                }
+                Err(e) => {
+                    let _ = stdout_handle.await;
+                    let _ = stderr_handle.await;
+                    Err(ExecuteInnerError {
+                        error: CepError::new(
+                            CepErrorCode::ExecutionFailed,
+                            format!("failed to wait for command: {e}"),
+                            CepErrorData::Execution(ExecutionErrorData {
+                                command: argv[0].clone(),
+                                exit_code: None,
+                                stderr: Some(e.to_string()),
+                            }),
+                            Retriability::Transient,
+                        ),
+                        setup_attempt,
+                        overlay_cleanup: cleanup_overlay_after_terminal(
+                            overlay_execution.as_ref(),
+                            true,
+                        ),
+                    })
+                }
+            }
+        }
+        _ = cancellation.cancelled() => {
+            let cleanup = process.kill_and_reap().await;
+            stdout_handle.abort();
+            stderr_handle.abort();
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+            match cleanup {
+                Ok(()) => Err(ExecuteInnerError {
+                    error: CepError::new(
+                        CepErrorCode::ExecutionFailed,
+                        "command cancelled",
+                        CepErrorData::Execution(ExecutionErrorData {
+                            command: argv[0].clone(),
+                            exit_code: None,
+                            stderr: Some("cancelled".into()),
+                        }),
+                        Retriability::Permanent,
+                    ),
+                    setup_attempt,
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        true,
+                    ),
+                }),
+                Err(err) => Err(ExecuteInnerError {
+                    error: child_kill_failed(&argv[0], err),
+                    setup_attempt,
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        false,
+                    ),
+                }),
+            }
+        }
+        _ = tokio::time::sleep(Duration::from_millis(timeout_ms)) => {
+            let cleanup = process.kill_and_reap().await;
+            stdout_handle.abort();
+            stderr_handle.abort();
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
+            match cleanup {
+                Ok(()) => Err(ExecuteInnerError {
+                    error: CepError::new(
+                        CepErrorCode::CommandTimeout,
+                        format!("command timed out after {timeout_ms}ms"),
+                        CepErrorData::Execution(ExecutionErrorData {
+                            command: argv[0].clone(),
+                            exit_code: None,
+                            stderr: Some(format!("timed out after {timeout_ms}ms")),
+                        }),
+                        Retriability::Transient,
+                    ),
+                    setup_attempt,
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        true,
+                    ),
+                }),
+                Err(err) => Err(ExecuteInnerError {
+                    error: child_kill_failed(&argv[0], err),
+                    setup_attempt,
+                    overlay_cleanup: cleanup_overlay_after_terminal(
+                        overlay_execution.as_ref(),
+                        false,
+                    ),
+                }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 struct FixedOverlayCleanupSyscalls {
     failures: Vec<CleanupFailureKind>,
@@ -822,6 +1028,11 @@ impl SupervisorSyscalls for FixedOverlayCleanupSyscalls {
         Ok(())
     }
     fn write_gid_map_current(
+        &mut self,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn enter_pid_namespace_child(
         &mut self,
     ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
         Ok(())
@@ -871,6 +1082,12 @@ impl SupervisorSyscalls for FixedOverlayCleanupSyscalls {
         Ok(())
     }
     fn mount_scratch_tmpfs(
+        &mut self,
+        _target: &Path,
+    ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
+        Ok(())
+    }
+    fn mount_procfs(
         &mut self,
         _target: &Path,
     ) -> Result<(), crate::executor::supervisor::syscall::SyscallError> {
@@ -1095,151 +1312,6 @@ fn install_supervisor_pre_exec(
     }
 }
 
-#[cfg(unix)]
-fn raw_write_all(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        let written =
-            unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };
-        if written < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        bytes = &bytes[written as usize..];
-    }
-    Ok(())
-}
-
-fn encode_setup_attempt_report(attempt: &CommandIsolationAttempt) -> String {
-    let outcome = &attempt.outcome;
-    let report = serde_json::json!({
-        "supervisor_backend": outcome.supervisor_backend,
-        "project_view_path": outcome.project_view_path.as_ref().map(|path| path.display().to_string()),
-        "cwd_view_path": outcome.cwd_view_path.as_ref().map(|path| path.display().to_string()),
-        "privilege_strategy": outcome.privilege_strategy,
-        "userns_status": outcome.userns_status,
-        "setgroups_status": outcome.setgroups_status,
-        "uid_map_status": outcome.uid_map_status,
-        "gid_map_status": outcome.gid_map_status,
-        "read_only_bind_scope": outcome.read_only_bind_scope,
-        "network_namespace_status": outcome.network_namespace_status.label(),
-        "mount_namespace_status": outcome.mount_namespace_status.label(),
-        "minimal_mount_view_status": outcome.minimal_mount_view_status.label(),
-        "landlock_status": outcome.landlock_status.label(),
-        "landlock_abi_version": outcome.landlock_abi_version,
-        "landlock_rights_mask": outcome.landlock_rights_mask,
-        "landlock_ruleset_status": outcome.landlock_ruleset_status,
-        "landlock_required": outcome.landlock_required,
-        "fd_cleanup_status": outcome.fd_cleanup_status,
-        "fd_cleanup_method": outcome.fd_cleanup_method,
-        "env_policy": outcome.env_policy,
-        "setup_failure_stage": outcome.setup_failure_stage,
-        "setup_failure_reason": outcome.setup_failure_reason,
-        "failed_closed": outcome.failed_closed,
-    });
-    format!("{report}\n")
-}
-
-fn decode_setup_attempt_report(bytes: &[u8]) -> Option<CommandIsolationAttempt> {
-    let value: Value = serde_json::from_slice(bytes).ok()?;
-    let mut outcome = BoundaryAttemptOutcome {
-        supervisor_backend: string_field(&value, "supervisor_backend"),
-        project_view_path: string_field(&value, "project_view_path").map(PathBuf::from),
-        cwd_view_path: string_field(&value, "cwd_view_path").map(PathBuf::from),
-        privilege_strategy: string_field(&value, "privilege_strategy"),
-        userns_status: string_field(&value, "userns_status"),
-        setgroups_status: string_field(&value, "setgroups_status"),
-        uid_map_status: string_field(&value, "uid_map_status"),
-        gid_map_status: string_field(&value, "gid_map_status"),
-        read_only_bind_scope: string_field(&value, "read_only_bind_scope"),
-        network_namespace_status: setup_status_field(&value, "network_namespace_status"),
-        mount_namespace_status: setup_status_field(&value, "mount_namespace_status"),
-        minimal_mount_view_status: mount_view_status_field(&value, "minimal_mount_view_status"),
-        landlock_status: landlock_status_field(&value, "landlock_status"),
-        landlock_abi_version: u32_field(&value, "landlock_abi_version"),
-        landlock_rights_mask: value.get("landlock_rights_mask").and_then(Value::as_u64),
-        landlock_ruleset_status: string_field(&value, "landlock_ruleset_status"),
-        landlock_required: value.get("landlock_required").and_then(Value::as_bool),
-        fd_cleanup_status: string_field(&value, "fd_cleanup_status"),
-        fd_cleanup_method: string_field(&value, "fd_cleanup_method"),
-        env_policy: string_field(&value, "env_policy"),
-        setup_failure_stage: string_field(&value, "setup_failure_stage"),
-        setup_failure_reason: string_field(&value, "setup_failure_reason"),
-        failed_closed: value
-            .get("failed_closed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        ..BoundaryAttemptOutcome::default()
-    };
-    add_evidence_for_statuses(&mut outcome);
-    Some(CommandIsolationAttempt::new(outcome))
-}
-
-fn add_evidence_for_statuses(outcome: &mut BoundaryAttemptOutcome) {
-    if outcome.network_namespace_status == SupervisorSetupStatus::Applied {
-        outcome
-            .evidence
-            .push(AppliedBoundaryEvidence::NetworkNamespace(
-                NetnsApplied::from_supervisor_netns_success(),
-            ));
-    }
-    if outcome.mount_namespace_status == SupervisorSetupStatus::Applied {
-        outcome
-            .evidence
-            .push(AppliedBoundaryEvidence::MountNamespace(
-                MountNamespaceApplied::from_supervisor_mount_namespace_success(),
-            ));
-    }
-    if outcome.minimal_mount_view_status == MinimalMountViewStatus::Applied {
-        outcome
-            .evidence
-            .push(AppliedBoundaryEvidence::MinimalMountView(
-                MinimalMountViewApplied::from_supervisor_minimal_mount_view_success(),
-            ));
-    }
-    if outcome.landlock_status == LandlockApplicationStatus::Applied {
-        outcome.evidence.push(AppliedBoundaryEvidence::Landlock(
-            LandlockApplied::from_supervisor_landlock_success(),
-        ));
-    }
-}
-
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-fn u32_field(value: &Value, key: &str) -> Option<u32> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-}
-
-fn setup_status_field(value: &Value, key: &str) -> SupervisorSetupStatus {
-    match value.get(key).and_then(Value::as_str) {
-        Some("applied") => SupervisorSetupStatus::Applied,
-        Some("not_applied") => SupervisorSetupStatus::NotApplied,
-        Some("failed_closed") => SupervisorSetupStatus::FailedClosed,
-        Some("unsupported") => SupervisorSetupStatus::Unsupported,
-        _ => SupervisorSetupStatus::NotAttempted,
-    }
-}
-
-fn mount_view_status_field(value: &Value, key: &str) -> MinimalMountViewStatus {
-    match value.get(key).and_then(Value::as_str) {
-        Some("applied") => MinimalMountViewStatus::Applied,
-        Some("not_applied") => MinimalMountViewStatus::NotApplied,
-        Some("failed_closed") => MinimalMountViewStatus::FailedClosed,
-        _ => MinimalMountViewStatus::NotAttempted,
-    }
-}
-
-fn landlock_status_field(value: &Value, key: &str) -> LandlockApplicationStatus {
-    match value.get(key).and_then(Value::as_str) {
-        Some("unsupported") => LandlockApplicationStatus::Unsupported,
-        Some("applied") => LandlockApplicationStatus::Applied,
-        _ => LandlockApplicationStatus::NotApplied,
-    }
-}
-
 fn spawn_failed_error(command: &str, err: std::io::Error) -> CepError {
     CepError::new(
         CepErrorCode::ExecutionFailed,
@@ -1266,10 +1338,14 @@ fn supervisor_setup_failed_error(command: &str, attempt: &CommandIsolationAttemp
         .unwrap_or("supervisor setup failed before exec");
     CepError::new(
         CepErrorCode::GuardDenied,
-        format!("command supervisor setup failed closed at {stage}: {reason}"),
+        format!(
+            "command supervisor setup failed closed at {stage}: {reason}; terminal under the current command isolation profile"
+        ),
         CepErrorData::Guard(GuardErrorData {
             method: "exec.command_run".into(),
-            reason: format!("supervisor setup failed before executing {command}"),
+            reason: format!(
+                "supervisor setup failed before executing {command}; do not retry equivalent exec.command_run without changing host/profile isolation, use non-command mutation tools for file changes"
+            ),
         }),
         Retriability::Permanent,
     )

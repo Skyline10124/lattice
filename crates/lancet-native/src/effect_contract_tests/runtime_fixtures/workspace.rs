@@ -134,6 +134,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
             CreateParams {
                 path: "created.txt".into(),
                 content: "created\n".into(),
+                create_parents: false,
             },
             ctx,
             mutation_region(&root),
@@ -152,6 +153,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
             CreateParams {
                 path: "hello.txt".into(),
                 content: "created\n".into(),
+                create_parents: false,
             },
             ctx,
             mutation_region(&root),
@@ -173,6 +175,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
             CreateParams {
                 path: "outside.txt".into(),
                 content: "outside\n".into(),
+                create_parents: false,
             },
             ctx,
             mutation_region(&root),
@@ -202,6 +205,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
             CreateParams {
                 path: "created_with_verify.txt".into(),
                 content: "created\n".into(),
+                create_parents: false,
             },
             ctx,
             mutation_region(&root),
@@ -231,6 +235,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
             CreateParams {
                 path: "created_then_verify_failed.txt".into(),
                 content: "created\n".into(),
+                create_parents: false,
             },
             ctx,
             mutation_region(&root),
@@ -336,6 +341,7 @@ pub(in crate::effect_contract_tests) fn batch_runtime_effects() -> Vec<RuntimeEf
                     BatchOperation::CreateFile {
                         path: "created.txt".into(),
                         content: "created\n".into(),
+                        create_parents: false,
                     },
                 ],
             },

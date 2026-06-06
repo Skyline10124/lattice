@@ -3,6 +3,10 @@
 
 //! Fakeable syscall surface for the Linux command supervisor.
 
+#[cfg(unix)]
+use std::os::fd::RawFd;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::fd::{cleanup_inherited_fds, FdCleanupStatus, LiveFdCleanupBackend};
@@ -15,6 +19,7 @@ use super::plan::ReadOnlyBindScope;
 pub(crate) struct SyscallError {
     pub(crate) operation: &'static str,
     pub(crate) reason: String,
+    pub(crate) errno: Option<i32>,
 }
 
 impl SyscallError {
@@ -22,6 +27,19 @@ impl SyscallError {
         Self {
             operation,
             reason: reason.into(),
+            errno: None,
+        }
+    }
+
+    pub(crate) fn with_errno(
+        operation: &'static str,
+        reason: impl Into<String>,
+        errno: i32,
+    ) -> Self {
+        Self {
+            operation,
+            reason: reason.into(),
+            errno: Some(errno),
         }
     }
 }
@@ -39,6 +57,7 @@ pub(crate) trait SupervisorSyscalls {
     fn write_setgroups_deny(&mut self) -> Result<(), SyscallError>;
     fn write_uid_map_current(&mut self) -> Result<(), SyscallError>;
     fn write_gid_map_current(&mut self) -> Result<(), SyscallError>;
+    fn enter_pid_namespace_child(&mut self) -> Result<(), SyscallError>;
     fn unshare_network_namespace(&mut self) -> Result<(), SyscallError>;
     fn assert_no_veth_or_default_route(&mut self) -> Result<(), SyscallError>;
     fn unshare_mount_namespace(&mut self) -> Result<(), SyscallError>;
@@ -49,6 +68,7 @@ pub(crate) trait SupervisorSyscalls {
     fn record_read_only_bind_scope(&mut self, scope: ReadOnlyBindScope)
         -> Result<(), SyscallError>;
     fn mount_scratch_tmpfs(&mut self, target: &Path) -> Result<(), SyscallError>;
+    fn mount_procfs(&mut self, target: &Path) -> Result<(), SyscallError>;
     fn mount_minimal_device(&mut self, source: &Path, target: &Path) -> Result<(), SyscallError>;
     fn detach_old_root(&mut self) -> Result<(), SyscallError>;
     fn assert_old_root_unreachable(&mut self) -> Result<(), SyscallError>;
@@ -77,6 +97,7 @@ pub(crate) trait SupervisorSyscalls {
 pub(crate) struct LiveSupervisorSyscalls {
     tmpfs_root: Option<PathBuf>,
     preserve_fds: Vec<std::os::fd::RawFd>,
+    userns_handshake: Option<UsernsChildHandshake>,
 }
 
 impl LiveSupervisorSyscalls {
@@ -84,6 +105,19 @@ impl LiveSupervisorSyscalls {
         Self {
             tmpfs_root: None,
             preserve_fds,
+            userns_handshake: None,
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_preserve_fds_and_userns_handshake(
+        preserve_fds: Vec<RawFd>,
+        userns_handshake: UsernsChildHandshake,
+    ) -> Self {
+        Self {
+            tmpfs_root: None,
+            preserve_fds,
+            userns_handshake: Some(userns_handshake),
         }
     }
 
@@ -98,6 +132,113 @@ impl LiveSupervisorSyscalls {
             }
         } else {
             root.join(target)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct UsernsChildHandshake {
+    request_write: RawFd,
+    response_read: RawFd,
+}
+
+#[cfg(unix)]
+impl UsernsChildHandshake {
+    pub(crate) fn new(request_write: RawFd, response_read: RawFd) -> Self {
+        Self {
+            request_write,
+            response_read,
+        }
+    }
+
+    fn request(&mut self, stage: UsernsMapStage) -> Result<(), SyscallError> {
+        write_all_fd(self.request_write, &[stage.request_byte()]).map_err(|err| {
+            SyscallError::new(
+                stage.operation(),
+                format!("userns map request failed: {err}"),
+            )
+        })?;
+        let mut response = [0u8; 1];
+        read_exact_fd(self.response_read, &mut response).map_err(|err| {
+            SyscallError::new(
+                stage.operation(),
+                format!("userns map response failed: {err}"),
+            )
+        })?;
+        match response[0] {
+            b'1' => {
+                if stage == UsernsMapStage::GidMap {
+                    self.close();
+                }
+                Ok(())
+            }
+            _ => Err(SyscallError::new(
+                stage.operation(),
+                "parent userns map write failed",
+            )),
+        }
+    }
+
+    fn close(&mut self) {
+        if self.request_write >= 0 {
+            unsafe {
+                libc::close(self.request_write);
+            }
+            self.request_write = -1;
+        }
+        if self.response_read >= 0 {
+            unsafe {
+                libc::close(self.response_read);
+            }
+            self.response_read = -1;
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UsernsChildHandshake {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UsernsMapStage {
+    UserNamespaceReady,
+    SetgroupsDeny,
+    UidMap,
+    GidMap,
+}
+
+#[cfg(unix)]
+impl UsernsMapStage {
+    pub(crate) fn from_request_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            b'U' => UsernsMapStage::UserNamespaceReady,
+            b'S' => UsernsMapStage::SetgroupsDeny,
+            b'u' => UsernsMapStage::UidMap,
+            b'g' => UsernsMapStage::GidMap,
+            _ => return None,
+        })
+    }
+
+    const fn request_byte(self) -> u8 {
+        match self {
+            UsernsMapStage::UserNamespaceReady => b'U',
+            UsernsMapStage::SetgroupsDeny => b'S',
+            UsernsMapStage::UidMap => b'u',
+            UsernsMapStage::GidMap => b'g',
+        }
+    }
+
+    const fn operation(self) -> &'static str {
+        match self {
+            UsernsMapStage::UserNamespaceReady => "userns_parent_ready",
+            UsernsMapStage::SetgroupsDeny => "write(/proc/child/setgroups)",
+            UsernsMapStage::UidMap => "write(/proc/child/uid_map)",
+            UsernsMapStage::GidMap => "write(/proc/child/gid_map)",
         }
     }
 }
@@ -122,24 +263,45 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
     }
 
     fn unshare_user_namespace(&mut self) -> Result<(), SyscallError> {
-        live_unshare(libc::CLONE_NEWUSER, "unshare(CLONE_NEWUSER)")
+        live_unshare(libc::CLONE_NEWUSER, "unshare(CLONE_NEWUSER)")?;
+        #[cfg(unix)]
+        if let Some(handshake) = self.userns_handshake.as_mut() {
+            handshake.request(UsernsMapStage::UserNamespaceReady)?;
+        }
+        Ok(())
     }
 
     fn write_setgroups_deny(&mut self) -> Result<(), SyscallError> {
+        #[cfg(unix)]
+        if let Some(handshake) = self.userns_handshake.as_mut() {
+            return handshake.request(UsernsMapStage::SetgroupsDeny);
+        }
         std::fs::write("/proc/self/setgroups", b"deny\n")
             .map_err(|err| SyscallError::new("write(/proc/self/setgroups)", err.to_string()))
     }
 
     fn write_uid_map_current(&mut self) -> Result<(), SyscallError> {
+        #[cfg(unix)]
+        if let Some(handshake) = self.userns_handshake.as_mut() {
+            return handshake.request(UsernsMapStage::UidMap);
+        }
         let uid = unsafe { libc::getuid() };
         std::fs::write("/proc/self/uid_map", format!("0 {uid} 1\n"))
             .map_err(|err| SyscallError::new("write(/proc/self/uid_map)", err.to_string()))
     }
 
     fn write_gid_map_current(&mut self) -> Result<(), SyscallError> {
+        #[cfg(unix)]
+        if let Some(handshake) = self.userns_handshake.as_mut() {
+            return handshake.request(UsernsMapStage::GidMap);
+        }
         let gid = unsafe { libc::getgid() };
         std::fs::write("/proc/self/gid_map", format!("0 {gid} 1\n"))
             .map_err(|err| SyscallError::new("write(/proc/self/gid_map)", err.to_string()))
+    }
+
+    fn enter_pid_namespace_child(&mut self) -> Result<(), SyscallError> {
+        live_enter_pid_namespace_child(&self.preserve_fds)
     }
 
     fn unshare_network_namespace(&mut self) -> Result<(), SyscallError> {
@@ -223,6 +385,19 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
             0,
             Some("mode=700"),
             "mount(tmpfs scratch)",
+        )
+    }
+
+    fn mount_procfs(&mut self, target: &Path) -> Result<(), SyscallError> {
+        let target = self.rooted_target(target);
+        prepare_mount_target(Path::new("."), &target, MountTargetKind::Directory)?;
+        live_mount(
+            Some(Path::new("proc")),
+            &target,
+            Some("proc"),
+            libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV | libc::MS_RDONLY,
+            None,
+            "mount(procfs)",
         )
     }
 
@@ -348,6 +523,9 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
     fn umount_overlay(&mut self, merged: &Path) -> Result<(), SyscallError> {
         #[cfg(target_os = "linux")]
         {
+            if !current_namespace_has_mountpoint(merged).unwrap_or(true) {
+                return Ok(());
+            }
             live_umount2(merged, libc::MNT_DETACH, "umount2(overlay merged)")
         }
         #[cfg(not(target_os = "linux"))]
@@ -361,6 +539,7 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
     }
 
     fn remove_overlay_tree(&mut self, path: &Path) -> Result<(), SyscallError> {
+        make_overlay_tree_removable(path)?;
         match std::fs::remove_dir_all(path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -370,6 +549,64 @@ impl SupervisorSyscalls for LiveSupervisorSyscalls {
             )),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_namespace_has_mountpoint(target: &Path) -> Result<bool, SyscallError> {
+    let target = target.to_string_lossy();
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|err| SyscallError::new("read(/proc/self/mountinfo)", err.to_string()))?;
+    Ok(mountinfo_contains_mountpoint(&mountinfo, &target))
+}
+
+#[cfg(target_os = "linux")]
+fn mountinfo_contains_mountpoint(mountinfo: &str, target: &str) -> bool {
+    mountinfo.lines().any(|line| {
+        line.split_ascii_whitespace()
+            .nth(4)
+            .is_some_and(|mountpoint| mountpoint == target)
+    })
+}
+
+#[cfg(unix)]
+fn make_overlay_tree_removable(path: &Path) -> Result<(), SyscallError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(SyscallError::new(
+                "metadata(overlay cleanup)",
+                err.to_string(),
+            ))
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    std::fs::set_permissions(path, permissions)
+        .map_err(|err| SyscallError::new("chmod(overlay cleanup)", err.to_string()))?;
+
+    let entries = std::fs::read_dir(path)
+        .map_err(|err| SyscallError::new("read_dir(overlay cleanup)", err.to_string()))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| SyscallError::new("read_dir(overlay cleanup)", err.to_string()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| SyscallError::new("metadata(overlay cleanup)", err.to_string()))?;
+        if file_type.is_dir() {
+            make_overlay_tree_removable(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_overlay_tree_removable(_path: &Path) -> Result<(), SyscallError> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -573,6 +810,77 @@ fn prepare_mount_target(
 }
 
 #[cfg(target_os = "linux")]
+fn live_enter_pid_namespace_child(parent_close_fds: &[RawFd]) -> Result<(), SyscallError> {
+    live_unshare(libc::CLONE_NEWPID, "unshare(CLONE_NEWPID)")?;
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(SyscallError::new(
+            "fork(pid namespace child)",
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    if pid == 0 {
+        return Ok(());
+    }
+
+    for fd in parent_close_fds {
+        if *fd >= 0 {
+            unsafe {
+                libc::close(*fd);
+            }
+        }
+    }
+
+    let code = match waitpid_status(pid) {
+        Ok(status) => wait_status_exit_code(status),
+        Err(_) => 127,
+    };
+    unsafe {
+        libc::_exit(code);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn live_enter_pid_namespace_child() -> Result<(), SyscallError> {
+    Err(SyscallError::new(
+        "unshare(CLONE_NEWPID)",
+        "unsupported_platform",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn waitpid_status(pid: libc::pid_t) -> Result<libc::c_int, SyscallError> {
+    let mut status = 0;
+    loop {
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc == pid {
+            return Ok(status);
+        }
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(SyscallError::new(
+                "waitpid(pid namespace child)",
+                err.to_string(),
+            ));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_status_exit_code(status: libc::c_int) -> libc::c_int {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        127
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn live_pivot_root(new_root: &Path, put_old: &Path) -> Result<(), SyscallError> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -612,10 +920,11 @@ fn live_umount2(
     if rc == 0 {
         Ok(())
     } else {
-        Err(SyscallError::new(
-            operation,
-            std::io::Error::last_os_error().to_string(),
-        ))
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(errno) => Err(SyscallError::with_errno(operation, err.to_string(), errno)),
+            None => Err(SyscallError::new(operation, err.to_string())),
+        }
     }
 }
 
@@ -807,6 +1116,45 @@ fn parse_sysctl_u64(name: &str, contents: &str) -> Result<u64, SyscallError> {
     })
 }
 
+#[cfg(unix)]
+fn write_all_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let written =
+            unsafe { libc::write(fd, bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) };
+        if written < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if written == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short write to userns handshake pipe",
+            ));
+        }
+        bytes = &bytes[written as usize..];
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_exact_fd(fd: RawFd, mut bytes: &mut [u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        let read =
+            unsafe { libc::read(fd, bytes.as_mut_ptr().cast::<libc::c_void>(), bytes.len()) };
+        if read < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "userns handshake pipe closed",
+            ));
+        }
+        let (_, rest) = bytes.split_at_mut(read as usize);
+        bytes = rest;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn live_unshare(flags: libc::c_int, operation: &'static str) -> Result<(), SyscallError> {
     let rc = unsafe { libc::unshare(flags) };
@@ -919,6 +1267,7 @@ eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
         let syscalls = LiveSupervisorSyscalls {
             tmpfs_root: Some(PathBuf::from("/tmp/lattice-supervisor-root-test")),
             preserve_fds: vec![9],
+            userns_handshake: None,
         };
 
         assert_eq!(
@@ -934,6 +1283,41 @@ eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
             Path::new("/tmp/lattice-supervisor-root-test/relative")
         );
         assert_eq!(syscalls.preserve_fds, vec![9]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_overlay_cleanup_removes_unsearchable_workdir_children() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let work = temp.path().join("work");
+        let inner = work.join("work");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let mut permissions = std::fs::metadata(&inner).unwrap().permissions();
+        permissions.set_mode(0);
+        std::fs::set_permissions(&inner, permissions).unwrap();
+
+        let mut syscalls = LiveSupervisorSyscalls::default();
+        syscalls
+            .remove_overlay_tree(&work)
+            .expect("overlay work tree cleanup should restore permissions before removal");
+
+        assert!(!work.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_match_requires_exact_mountpoint_field() {
+        let mountinfo = "\
+24 21 0:20 / / rw,relatime - ext4 /dev/root rw
+25 24 0:42 / /tmp/lattice-overlay rw,relatime - overlay overlay rw
+";
+
+        assert!(mountinfo_contains_mountpoint(
+            mountinfo,
+            "/tmp/lattice-overlay"
+        ));
+        assert!(!mountinfo_contains_mountpoint(mountinfo, "/tmp/lattice"));
     }
 
     #[test]

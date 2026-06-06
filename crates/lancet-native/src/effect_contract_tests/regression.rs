@@ -123,6 +123,7 @@ fn create_glob_pattern_within_region() {
     let params = CreateParams {
         path: "src/a.rs".into(),
         content: "fn main() {}".into(),
+        create_parents: false,
     };
     let outcome = rt().block_on(effect_contract_harness::<Create>(
         &registry,

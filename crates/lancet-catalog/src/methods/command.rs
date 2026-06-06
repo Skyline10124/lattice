@@ -45,7 +45,7 @@ pub struct RunResult {
 
 impl CepMethod for Run {
     const NAME: &'static str = "exec.command_run";
-    const DESCRIPTION: &'static str = "Run a command with argv, optional cwd/env/timeout, and declared_impact metadata. Use JSON argv arrays, never shell strings. Diagnostic commands such as cargo check/test/clippy/doc and git diff/status/log/show should use declared_impact workspace_observation or omit it. Unknown or possibly mutating commands must declare workspace_mutation and require an active envelope with RunCommand plus any needed WritePath scope. Do not use command_execution to claim an unknown command is read-only; policy rejects that as too weak.";
+    const DESCRIPTION: &'static str = "Run a command with argv, optional cwd/env/timeout, and declared_impact metadata. Use JSON argv arrays, never shell strings. Diagnostic commands such as cargo fmt --check, cargo check/test/clippy/doc, and git diff/status/log/show should use declared_impact workspace_observation or omit it. Unknown or possibly mutating commands must declare workspace_mutation and require an active envelope with RunCommand plus any needed WritePath scope; cargo fmt without --check and cargo commands that intentionally update Cargo.lock are workspace mutations. Do not use command_execution to claim an unknown command is read-only; policy rejects that as too weak. In command isolation, cargo uses the mounted read-only Cargo cache with offline semantics; Cargo.lock is not a cache inventory. If a new dependency is not cached, repeated cargo retries cannot fetch it. If command isolation fails closed, treat that as terminal for equivalent exec.command_run attempts under the current host/profile and use non-command mutation tools for file changes.";
     type Params = RunParams;
     type Result = RunResult;
     const IMPACT: ImpactKind = ImpactKind::CommandExecution;
@@ -85,7 +85,12 @@ mod tests {
         assert!(Run::DESCRIPTION.contains("declared_impact"));
         assert!(Run::DESCRIPTION.contains("workspace_observation"));
         assert!(Run::DESCRIPTION.contains("workspace_mutation"));
+        assert!(Run::DESCRIPTION.contains("cargo fmt --check"));
+        assert!(Run::DESCRIPTION.contains("Cargo.lock"));
+        assert!(Run::DESCRIPTION.contains("not a cache inventory"));
+        assert!(Run::DESCRIPTION.contains("offline semantics"));
         assert!(Run::DESCRIPTION.contains("never shell strings"));
+        assert!(Run::DESCRIPTION.contains("fails closed"));
     }
 
     #[test]
