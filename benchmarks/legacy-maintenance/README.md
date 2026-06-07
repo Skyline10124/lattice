@@ -2,7 +2,7 @@
 
 This benchmark is historical: its phase prompts still use pre-v1.3.1 CEP tool
 names. Keep it for comparison unless the whole benchmark is revalidated against
-the current 9-method LANCET catalog.
+the current 10-method LANCET catalog.
 
 This benchmark targets the product shift from code-specialized assistance to a
 general session-centric maintenance runtime.

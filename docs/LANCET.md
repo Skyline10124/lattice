@@ -47,7 +47,7 @@ The canonical method names are grouped by primary effect class:
 | `exec.command_run` | Command execution, plus optional observed workspace mutation diff when `effective_impact = workspace_mutation`. |
 | `fetch.web` | External observation through URL fetch policy. |
 | `session.todo_write` | Session-state mutation for todo state. |
-| `session.envelope` | Session-state mutation for explicit envelope declaration or derived intent. |
+| `session.envelope` | Session-state mutation for explicit envelope declaration. |
 | `observe.audit` | Audit observation for query/tail mode. |
 | `observe.audit_replay` | Audit observation for turn replay and attestation projection. |
 

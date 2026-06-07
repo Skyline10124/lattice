@@ -42,7 +42,7 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 | `lancet-cep` | Public CEP facade over protocol/catalog/dispatch, plus catalog-derived `ToolDefinition`, `ToolExposure`, catalog-declared base-authority aggregation, and explicit `BaseAuthorityPlan` construction. No native execution, policy side effects, audit persistence, or LATTICE dependencies. |
 | `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, and attestation persistence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, active envelopes, effect ledger, and effect-region checks. |
-| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and impact analysis. |
+| `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and effect-contract enforcement. |
 | `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |
 | `lattice-session` | Session graph contract, immutable turn commits, branch refs, HEAD state, and SQLite graph store. |
@@ -87,8 +87,8 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
    `CepClient` in a `CepExecutorAdapter`.
 4. `AgentLoop` reads session state, assembles messages, calls the LLM through
    `LlmClient`, and sends requested tool calls through the injected executor.
-5. Native handlers execute typed CEP methods behind policy, guard, audit,
-   invariant, effect, and verification checks.
+5. Native handlers execute typed CEP methods behind policy, Guard L1, effect,
+   audit, and verification checks.
 6. Turn outcomes are persisted as commits in the session graph.
 
 ## Review Records

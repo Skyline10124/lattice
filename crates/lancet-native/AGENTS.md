@@ -6,7 +6,7 @@ Crate-local guidance for `lancet-native`.
 
 This crate owns the production native CEP implementation: method handlers,
 native server lifecycle, policy/guard/audit integration, verification, edit
-application, shell/web helpers, and impact analysis.
+application, shell/web helpers, and effect-contract enforcement.
 
 ## Sub-Architecture
 
@@ -18,7 +18,6 @@ application, shell/web helpers, and impact analysis.
 - `src/edit/` owns patch parsing, hash checks, application, diagnostics, and
   patch write limits.
 - `src/executor/` owns crate-private shell/web/render helpers and output limits.
-- `src/impact/` owns impact analysis layers.
 - `src/effect_contract_tests/` exercises runtime effect contracts.
 
 ## Boundaries
@@ -27,7 +26,7 @@ application, shell/web helpers, and impact analysis.
 - Tool projection belongs in `lancet-cep`; do not add native compatibility
   projection shims.
 - Mutations must pass active envelope, Guard L1, effect checks, audit recording,
-  optional invariant checks, and optional verify.
+  and optional verify.
 - Do not expose direct native executors to `lattice-agent`.
 
 ## Recent Issues
