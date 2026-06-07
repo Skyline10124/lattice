@@ -236,8 +236,8 @@ async fn cep_mode_integration_off_still_runs_production_command_isolation_gate()
         unsupported_host: CommandIsolationUnsupportedHostBehavior::FailClosed,
         host_probe: Some(HostProbeReport::from_entries([HostProbeEntry::new(
             lancet_protocol::BoundaryPrimitive::NetworkNamespace,
-            lancet_protocol::HostProbeStatus::Available,
-            "test host probe available",
+            lancet_protocol::HostProbeStatus::Unavailable,
+            "test host probe unavailable",
         )])),
     };
     let mut capabilities = std::collections::BTreeSet::new();

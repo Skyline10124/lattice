@@ -109,21 +109,23 @@ pub(crate) fn spawn_live_supervisor_process(
     }
 
     if pid == 0 {
-        child_supervisor_main(
-            &argv_ptrs,
-            &env_ptrs,
-            &cwd_cstring,
+        child_supervisor_main(ChildSupervisorMain {
+            argv_ptrs: &argv_ptrs,
+            env_ptrs: &env_ptrs,
+            cwd: &cwd_cstring,
             plan,
-            stdout_pipe.read,
-            stdout_pipe.write,
-            stderr_pipe.read,
-            stderr_pipe.write,
-            setup_child_write,
-            userns_request.read,
-            userns_request.write,
-            userns_response.read,
-            userns_response.write,
-        );
+            fds: ChildSupervisorFds {
+                stdout_read: stdout_pipe.read,
+                stdout_write: stdout_pipe.write,
+                stderr_read: stderr_pipe.read,
+                stderr_write: stderr_pipe.write,
+                setup_child_write,
+                userns_request_read: userns_request.read,
+                userns_request_write: userns_request.write,
+                userns_response_read: userns_response.read,
+                userns_response_write: userns_response.write,
+            },
+        });
     }
 
     let child = ManualChild::new(pid);
@@ -312,7 +314,7 @@ impl ManualChild {
         let pid = self.pid;
         let status = tokio::task::spawn_blocking(move || waitpid_blocking(pid))
             .await
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))??;
+            .map_err(|err| io::Error::other(err.to_string()))??;
         self.waited = true;
         Ok(status)
     }
@@ -359,11 +361,16 @@ async fn kill_and_reap_manual_child(child: &mut ManualChild) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn child_supervisor_main(
-    argv_ptrs: &[*const libc::c_char],
-    env_ptrs: &[*const libc::c_char],
-    cwd: &CString,
+struct ChildSupervisorMain<'a> {
+    argv_ptrs: &'a [*const libc::c_char],
+    env_ptrs: &'a [*const libc::c_char],
+    cwd: &'a CString,
     plan: SupervisorPlan,
+    fds: ChildSupervisorFds,
+}
+
+#[cfg(unix)]
+struct ChildSupervisorFds {
     stdout_read: RawFd,
     stdout_write: RawFd,
     stderr_read: RawFd,
@@ -373,42 +380,47 @@ fn child_supervisor_main(
     userns_request_write: RawFd,
     userns_response_read: RawFd,
     userns_response_write: RawFd,
-) -> ! {
+}
+
+#[cfg(unix)]
+fn child_supervisor_main(args: ChildSupervisorMain<'_>) -> ! {
+    let fds = args.fds;
     unsafe {
-        libc::close(stdout_read);
-        libc::close(stderr_read);
-        libc::close(userns_request_read);
-        libc::close(userns_response_write);
+        libc::close(fds.stdout_read);
+        libc::close(fds.stderr_read);
+        libc::close(fds.userns_request_read);
+        libc::close(fds.userns_response_write);
         libc::setpgid(0, 0);
-        if libc::dup2(stdout_write, libc::STDOUT_FILENO) < 0 {
+        if libc::dup2(fds.stdout_write, libc::STDOUT_FILENO) < 0 {
             libc::_exit(127);
         }
-        if libc::dup2(stderr_write, libc::STDERR_FILENO) < 0 {
+        if libc::dup2(fds.stderr_write, libc::STDERR_FILENO) < 0 {
             libc::_exit(127);
         }
-        if stdout_write > libc::STDERR_FILENO {
-            libc::close(stdout_write);
+        if fds.stdout_write > libc::STDERR_FILENO {
+            libc::close(fds.stdout_write);
         }
-        if stderr_write > libc::STDERR_FILENO {
-            libc::close(stderr_write);
+        if fds.stderr_write > libc::STDERR_FILENO {
+            libc::close(fds.stderr_write);
         }
-        if libc::chdir(cwd.as_ptr()) != 0 {
+        if libc::chdir(args.cwd.as_ptr()) != 0 {
             libc::_exit(127);
         }
     }
 
-    let userns_handshake = UsernsChildHandshake::new(userns_request_write, userns_response_read);
+    let userns_handshake =
+        UsernsChildHandshake::new(fds.userns_request_write, fds.userns_response_read);
     let attempt = run_linux_supervisor_attempt(
-        plan,
+        args.plan,
         LiveSupervisorSyscalls::with_preserve_fds_and_userns_handshake(
-            vec![setup_child_write],
+            vec![fds.setup_child_write],
             userns_handshake,
         ),
     );
     let boundary = boundary_attempt_from_supervisor(&attempt);
     let report = encode_setup_attempt_report(&boundary);
-    let _ = raw_write_all(setup_child_write, report.as_bytes());
-    close_raw_fd(setup_child_write);
+    let _ = raw_write_all(fds.setup_child_write, report.as_bytes());
+    close_raw_fd(fds.setup_child_write);
     if boundary.outcome.failed_closed {
         unsafe {
             libc::_exit(126);
@@ -416,7 +428,11 @@ fn child_supervisor_main(
     }
 
     unsafe {
-        libc::execve(argv_ptrs[0], argv_ptrs.as_ptr(), env_ptrs.as_ptr());
+        libc::execve(
+            args.argv_ptrs[0],
+            args.argv_ptrs.as_ptr(),
+            args.env_ptrs.as_ptr(),
+        );
         libc::_exit(127);
     }
 }

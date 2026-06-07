@@ -1294,7 +1294,7 @@ eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
         std::fs::create_dir_all(&inner).unwrap();
 
         let mut permissions = std::fs::metadata(&inner).unwrap().permissions();
-        permissions.set_mode(0);
+        permissions.set_mode(0o0);
         std::fs::set_permissions(&inner, permissions).unwrap();
 
         let mut syscalls = LiveSupervisorSyscalls::default();

@@ -855,7 +855,7 @@ mod tests {
 
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = std::fs::metadata(&inner_work).unwrap().permissions();
-        permissions.set_mode(0);
+        permissions.set_mode(0o0);
         std::fs::set_permissions(&inner_work, permissions).unwrap();
 
         let mut syscalls = crate::executor::supervisor::syscall::LiveSupervisorSyscalls::default();
