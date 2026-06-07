@@ -344,7 +344,14 @@ mod tests {
                     summary: "read ok".into(),
                 },
                 Some("native_handler"),
-                Some(r#"{"content_hash":"sha256:abc","canonical_target":"hello.txt"}"#),
+                Some(
+                    r#"{
+                        "content_hash":"sha256:abc",
+                        "canonical_target":"hello.txt",
+                        "cep_policy":{"decision":"allowed","capability_match":true},
+                        "cep_preflight":{"kind":"workspace_observation","backend_invoked":false}
+                    }"#,
+                ),
             )
             .unwrap();
     }
@@ -390,6 +397,14 @@ mod tests {
         assert!(result.row_count >= 1);
         assert!(!result.fragment.activities.is_empty());
         assert!(!result.fragment.agents.is_empty());
+        assert_eq!(
+            result.fragment.activities[0].attributes["cep_policy"]["decision"],
+            serde_json::json!("allowed")
+        );
+        assert_eq!(
+            result.fragment.activities[0].attributes["cep_preflight"]["kind"],
+            serde_json::json!("workspace_observation")
+        );
 
         drop(client);
         server_task.abort();
@@ -427,6 +442,14 @@ mod tests {
 
         assert_eq!(result.trace.turn_id, "turn-replay");
         assert!(!result.trace.calls.is_empty());
+        assert_eq!(
+            result.trace.fragment.activities[0].attributes["cep_policy"]["decision"],
+            serde_json::json!("allowed")
+        );
+        assert_eq!(
+            result.trace.fragment.activities[0].attributes["cep_preflight"]["kind"],
+            serde_json::json!("workspace_observation")
+        );
         assert!(result.statement.is_some());
 
         drop(client);

@@ -19,6 +19,7 @@ use crate::enforcement::isolation::{
     CommandIsolationAttempt, CommandIsolationMode, CommandIsolationUnsupportedHostBehavior,
     MinimalMountViewStatus, SupervisorSetupStatus,
 };
+use crate::enforcement::preflight::{command_preflight_metadata, CommandPreflight};
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, run_verify_on_candidate_view, validate_verify_command,
     verify_failed_error,
@@ -93,6 +94,17 @@ async fn handle_run_as(
     // 4. HardDenied -> return GuardDenied error
     if effective_impact == EffectiveImpact::HardDenied {
         let cmd = params.argv.first().map(|s| s.as_str()).unwrap_or("<empty>");
+        record_command_preflight(
+            &ctx,
+            method,
+            &params.argv,
+            params.declared_impact.as_ref(),
+            &effective_impact,
+            None,
+            false,
+            false,
+            false,
+        );
         emit_denial_metadata(&ctx, "hard_denied", false, method).await;
         return Err(CepError::new(
             CepErrorCode::GuardDenied,
@@ -117,6 +129,17 @@ async fn handle_run_as(
                     .iter()
                     .any(|cap| matches!(cap, Capability::RunCommand { .. }));
                 if !has_run_command {
+                    record_command_preflight(
+                        &ctx,
+                        method,
+                        &params.argv,
+                        params.declared_impact.as_ref(),
+                        &effective_impact,
+                        Some(&record.envelope_id),
+                        false,
+                        false,
+                        false,
+                    );
                     emit_denial_metadata(&ctx, "run_command_not_granted", false, method).await;
                     return Err(CepError::new(
                         CepErrorCode::CapabilityNotGranted,
@@ -136,6 +159,17 @@ async fn handle_run_as(
                 }
                 // Check argv against allowlist
                 if !has_run_command_capability(&record.envelope.capabilities, &params.argv) {
+                    record_command_preflight(
+                        &ctx,
+                        method,
+                        &params.argv,
+                        params.declared_impact.as_ref(),
+                        &effective_impact,
+                        Some(&record.envelope_id),
+                        true,
+                        false,
+                        false,
+                    );
                     emit_denial_metadata(&ctx, "argv_not_in_allowlist", false, method).await;
                     return Err(CepError::new(
                         CepErrorCode::GuardDenied,
@@ -150,6 +184,17 @@ async fn handle_run_as(
                 Some(record)
             }
             None => {
+                record_command_preflight(
+                    &ctx,
+                    method,
+                    &params.argv,
+                    params.declared_impact.as_ref(),
+                    &effective_impact,
+                    None,
+                    false,
+                    false,
+                    false,
+                );
                 emit_denial_metadata(&ctx, "active_envelope", false, method).await;
                 return Err(CepError::new(
                     CepErrorCode::EnvelopeMissing,
@@ -210,6 +255,28 @@ async fn handle_run_as(
     let envelope_id = active_record
         .as_ref()
         .map(|record| record.envelope_id.clone());
+
+    let run_command_capability_present = active_record.as_ref().is_some_and(|record| {
+        record
+            .envelope
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, Capability::RunCommand { .. }))
+    });
+    let argv_allowlist_matched = active_record.as_ref().is_some_and(|record| {
+        has_run_command_capability(&record.envelope.capabilities, &params.argv)
+    });
+    record_command_preflight(
+        &ctx,
+        method,
+        &params.argv,
+        params.declared_impact.as_ref(),
+        &effective_impact,
+        envelope_id.as_deref(),
+        run_command_capability_present,
+        argv_allowlist_matched,
+        false,
+    );
 
     // 6. Diagnostic: no envelope required, but still enforce policy
 
@@ -2268,6 +2335,32 @@ fn command_observation_metadata(effective_impact: &EffectiveImpact) -> serde_jso
             "observed_effects": [],
         }),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_command_preflight(
+    ctx: &HandlerContext,
+    method: &'static str,
+    argv: &[String],
+    declared_impact: Option<&ImpactKind>,
+    effective_impact: &EffectiveImpact,
+    envelope_id: Option<&str>,
+    run_command_capability_present: bool,
+    argv_allowlist_matched: bool,
+    backend_invoked: bool,
+) {
+    let authorized_region = ctx.authorized_region.get();
+    ctx.record_durable_metadata(command_preflight_metadata(CommandPreflight {
+        method,
+        argv,
+        declared_impact,
+        effective_impact,
+        envelope_id,
+        run_command_capability_present,
+        argv_allowlist_matched,
+        authorized_region: authorized_region.as_ref(),
+        backend_invoked,
+    }));
 }
 
 struct CommandExecutionMetadata<'a> {

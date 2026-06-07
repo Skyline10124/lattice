@@ -149,8 +149,15 @@ fn parse_impact_kind(label: &str) -> ImpactKind {
 
 fn activity_attributes_from_metadata(meta: Option<&Value>) -> BTreeMap<String, Value> {
     let mut attributes = BTreeMap::new();
-    if let Some(boundary) = meta.and_then(|m| m.get("effective_boundary")) {
-        attributes.insert("effective_boundary".into(), boundary.clone());
+    for key in [
+        "effective_boundary",
+        "cep_policy",
+        "cep_preflight",
+        "approval_request",
+    ] {
+        if let Some(value) = meta.and_then(|m| m.get(key)) {
+            attributes.insert(key.into(), value.clone());
+        }
     }
     attributes
 }
@@ -364,6 +371,43 @@ mod tests {
         assert!(
             fragment.entities.is_empty(),
             "boundary metadata must remain on the per-call activity"
+        );
+    }
+
+    #[test]
+    fn preflight_and_policy_metadata_project_to_activity_attributes() {
+        let rows = vec![fixture_row(
+            1,
+            "mutate.edit",
+            r#"{
+                "cep_policy": {
+                    "decision": "allowed",
+                    "capability_match": true
+                },
+                "cep_preflight": {
+                    "kind": "workspace_mutation",
+                    "expected_hash_status": "stale"
+                },
+                "approval_request": {
+                    "status": "required"
+                }
+            }"#,
+        )];
+
+        let fragment = project_rows(&rows);
+        let attrs = &fragment.activities[0].attributes;
+
+        assert_eq!(
+            attrs["cep_policy"]["decision"],
+            serde_json::json!("allowed")
+        );
+        assert_eq!(
+            attrs["cep_preflight"]["expected_hash_status"],
+            serde_json::json!("stale")
+        );
+        assert_eq!(
+            attrs["approval_request"]["status"],
+            serde_json::json!("required")
         );
     }
 }

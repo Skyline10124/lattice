@@ -19,6 +19,7 @@ use crate::edit::parser::parse_patch_document;
 use crate::enforcement::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
+use crate::enforcement::preflight::{mutation_preflight_metadata, MutationPreflight};
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
@@ -122,7 +123,20 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
         std::slice::from_ref(&params.path),
     )
     .await?;
-    let patch = compile_edit_patch(&auth.project_root, &params)?;
+    let patch = match compile_edit_patch(&auth.project_root, &params) {
+        Ok(patch) => patch,
+        Err(err) => {
+            record_mutation_replan_metadata(
+                &ctx,
+                Edit::NAME,
+                &auth,
+                std::slice::from_ref(&params.path),
+                expected_hash_replan_status(&err),
+                replan_reason_for_error(&err),
+            );
+            return Err(err);
+        }
+    };
     let result = apply_compiled_patch(&ctx, Edit::NAME, &auth, &patch).await?;
     run_mutation_verify_if_configured(&ctx, Edit::NAME, &auth).await?;
 
@@ -186,7 +200,20 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     let patch = if edit_inputs.is_empty() {
         None
     } else {
-        Some(compile_batch_edit_patch(&auth.project_root, &edit_inputs)?)
+        match compile_batch_edit_patch(&auth.project_root, &edit_inputs) {
+            Ok(patch) => Some(patch),
+            Err(err) => {
+                record_mutation_replan_metadata(
+                    &ctx,
+                    Batch::NAME,
+                    &auth,
+                    &changed_paths,
+                    expected_hash_replan_status(&err),
+                    replan_reason_for_error(&err),
+                );
+                return Err(err);
+            }
+        }
     };
 
     let mut edited_files = Vec::new();
@@ -293,6 +320,18 @@ async fn authorize_workspace_mutation(
     }
 
     if !out_of_scope.is_empty() {
+        record_mutation_preflight(
+            ctx,
+            method,
+            &envelope_id,
+            changed_paths,
+            &patterns,
+            &out_of_scope,
+            None,
+            extract_verify_command(&envelope).is_some(),
+            Some("out_of_scope_paths"),
+            false,
+        );
         emit_replan_required(ctx, method, &envelope_id, &out_of_scope).await;
         return Err(CepError::new(
             CepErrorCode::ReplanRequired,
@@ -308,11 +347,99 @@ async fn authorize_workspace_mutation(
         ));
     }
 
+    record_mutation_preflight(
+        ctx,
+        method,
+        &envelope_id,
+        changed_paths,
+        &patterns,
+        &[],
+        expected_hash_success_status(method),
+        extract_verify_command(&envelope).is_some(),
+        None,
+        false,
+    );
+
     Ok(MutationAuthorization {
         envelope_id,
         envelope,
         project_root,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_mutation_preflight(
+    ctx: &HandlerContext,
+    method: &str,
+    envelope_id: &str,
+    changed_paths: &[String],
+    write_patterns: &[String],
+    out_of_scope_paths: &[String],
+    expected_hash_status: Option<&str>,
+    verify_configured: bool,
+    replan_reason: Option<&str>,
+    backend_invoked: bool,
+) {
+    ctx.record_durable_metadata(mutation_preflight_metadata(MutationPreflight {
+        method,
+        envelope_id,
+        changed_paths,
+        write_patterns,
+        out_of_scope_paths,
+        expected_hash_status,
+        verify_configured,
+        replan_reason,
+        backend_invoked,
+    }));
+}
+
+fn record_mutation_replan_metadata(
+    ctx: &HandlerContext,
+    method: &str,
+    auth: &MutationAuthorization,
+    changed_paths: &[String],
+    expected_hash_status: Option<&str>,
+    replan_reason: Option<&str>,
+) {
+    let patterns = extract_write_path_patterns(&auth.envelope.capabilities);
+    record_mutation_preflight(
+        ctx,
+        method,
+        &auth.envelope_id,
+        changed_paths,
+        &patterns,
+        &[],
+        expected_hash_status,
+        extract_verify_command(&auth.envelope).is_some(),
+        replan_reason,
+        false,
+    );
+}
+
+fn expected_hash_success_status(method: &str) -> Option<&'static str> {
+    match method {
+        "mutate.edit" | "mutate.batch" => Some("matched"),
+        _ => None,
+    }
+}
+
+fn expected_hash_replan_status(err: &CepError) -> Option<&'static str> {
+    if err.code == CepErrorCode::ReplanRequired && err.message.contains("expected_hash") {
+        Some("stale")
+    } else {
+        None
+    }
+}
+
+fn replan_reason_for_error(err: &CepError) -> Option<&'static str> {
+    if err.code != CepErrorCode::ReplanRequired {
+        return None;
+    }
+    if err.message.contains("expected_hash") {
+        Some("expected_hash_stale")
+    } else {
+        Some("semantic_replan")
+    }
 }
 
 async fn run_mutation_verify_if_configured(
@@ -1442,6 +1569,7 @@ mod create_tests {
         store.declare(envelope, 0, "test-turn").await.unwrap();
 
         let (ctx, _events) = test_ctx_with_store(root, store);
+        let durable = ctx.durable_metadata.clone();
 
         let params = CreateParams {
             path: "README.md".into(),
@@ -1453,6 +1581,17 @@ mod create_tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert_eq!(
+            metadata["cep_preflight"]["replan_reason"],
+            "out_of_scope_paths"
+        );
+        assert_eq!(
+            metadata["cep_preflight"]["out_of_scope_paths"],
+            serde_json::json!(["README.md"])
+        );
+        assert_eq!(metadata["backend_invoked"], false);
     }
 
     #[tokio::test]
@@ -1817,6 +1956,54 @@ mod edit_tests {
             .unwrap_err();
 
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_stale_expected_hash_records_preflight_replan_metadata() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let before = "alpha\nbeta\n";
+        std::fs::write(dir.path().join("target.txt"), before).unwrap();
+        let registry = mutation_registry();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        store
+            .declare(envelope_with_write_path("."), 0, "test-turn")
+            .await
+            .unwrap();
+        let (ctx, _events) = test_ctx_with_store(root, store);
+        let durable = ctx.durable_metadata.clone();
+
+        let params = EditParams {
+            path: "target.txt".into(),
+            expected_hash:
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            edits: vec![EditOperation::ReplaceText {
+                old: "beta".into(),
+                new: "gamma".into(),
+                occurrence: None,
+            }],
+        };
+        let err = registry
+            .dispatch(Edit::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert_eq!(metadata["cep_preflight"]["expected_hash_status"], "stale");
+        assert_eq!(
+            metadata["cep_preflight"]["replan_reason"],
+            "expected_hash_stale"
+        );
+        assert_eq!(
+            metadata["cep_preflight"]["changed_paths"],
+            serde_json::json!(["target.txt"])
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("target.txt")).unwrap(),
             before

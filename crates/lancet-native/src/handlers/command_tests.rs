@@ -1772,6 +1772,7 @@ async fn diagnostic_echo_succeeds_without_envelope() {
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (ctx, _events, _cancel_tx) = test_ctx_with_run_command(root, vec!["echo".into()]).await;
+    let durable = ctx.durable_metadata.clone();
 
     let params = RunParams {
         argv: vec!["echo".into(), "hello".into()],
@@ -1787,6 +1788,16 @@ async fn diagnostic_echo_succeeds_without_envelope() {
     let parsed: RunResult = serde_json::from_value(result).unwrap();
     assert_eq!(parsed.exit_code, 0);
     assert!(parsed.stdout.contains("hello"));
+
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(metadata["cep_preflight"]["kind"], "command");
+    assert_eq!(metadata["cep_preflight"]["effective_impact"], "diagnostic");
+    assert_eq!(
+        metadata["cep_preflight"]["effective_effect"],
+        serde_json::json!(["command_execution"])
+    );
+    assert_eq!(metadata["cep_preflight"]["requires_active_envelope"], false);
+    assert_eq!(metadata["cep_policy"]["decision"], "allowed");
 }
 
 #[tokio::test]
@@ -2067,6 +2078,7 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
+    let durable = ctx.durable_metadata.clone();
 
     let params = RunParams {
         argv: vec!["touch".into(), "new.txt".into()],
@@ -2081,6 +2093,22 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
         .unwrap();
     let parsed: RunResult = serde_json::from_value(result).unwrap();
     assert_eq!(parsed.exit_code, 0);
+
+    let metadata = command_boundary_metadata_json(&durable);
+    assert_eq!(
+        metadata["cep_preflight"]["effective_impact"],
+        "workspace_mutation"
+    );
+    assert_eq!(metadata["cep_preflight"]["requires_active_envelope"], true);
+    assert_eq!(
+        metadata["cep_preflight"]["run_command_capability_present"],
+        true
+    );
+    assert_eq!(metadata["cep_preflight"]["argv_allowlist_matched"], true);
+    let write_prefix = metadata["cep_preflight"]["write_region"]["write_path_prefixes"][0]
+        .as_str()
+        .expect("write prefix");
+    assert!(std::path::Path::new(root).starts_with(std::path::Path::new(write_prefix)));
 }
 
 #[tokio::test]

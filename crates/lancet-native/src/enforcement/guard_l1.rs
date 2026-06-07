@@ -13,6 +13,9 @@ pub use lancet_authority::guard::{
     map_decision_to_cep_error, normalize_write_path_pattern, PolicyEvaluation, WritePathPattern,
 };
 
+use crate::enforcement::preflight::{
+    approval_request_metadata, policy_denial_preflight_metadata, policy_metadata,
+};
 use crate::server::registry::HandlerContext;
 use lancet_protocol::policy::{
     PolicyAuditContext, PolicyBudgetSnapshot, PolicyDecision, PolicyInput,
@@ -84,14 +87,8 @@ pub async fn evaluate_and_enforce_policy(
 
     match &evaluation.decision {
         PolicyDecision::Allowed => {
+            let mut authorized_region = None;
             if let Some(evidence) = &evaluation.evidence {
-                ctx.record_durable_metadata(serde_json::json!({
-                    "cep_policy": {
-                        "capability_match": evidence.capability_match.is_some(),
-                        "budget_remaining": evidence.budget_remaining,
-                    }
-                }));
-
                 let matched_cap = evidence
                     .capability_match
                     .as_ref()
@@ -102,10 +99,19 @@ pub async fn evaluate_and_enforce_policy(
                         &ctx.cep_context.policy,
                     );
                 ctx.authorized_region.set(region);
+                authorized_region = ctx.authorized_region.get();
             }
+            ctx.record_durable_metadata(policy_metadata(
+                method,
+                &evaluation,
+                authorized_region.as_ref(),
+            ));
         }
-        PolicyDecision::Denied { reason_code, .. }
-        | PolicyDecision::HumanReview { reason_code, .. } => {
+        PolicyDecision::Denied { reason_code, .. } => {
+            ctx.record_durable_metadata(policy_metadata(method, &evaluation, None));
+            if let Some(metadata) = policy_denial_preflight_metadata(method, &input, &evaluation) {
+                ctx.record_durable_metadata(metadata);
+            }
             ctx.record_durable_metadata(serde_json::json!({
                 "method": method,
                 "denial_source": "cep_policy",
@@ -113,6 +119,26 @@ pub async fn evaluate_and_enforce_policy(
                 "backend_invoked": false,
                 "reason_code": format!("{:?}", reason_code),
             }));
+        }
+        PolicyDecision::HumanReview { reason_code, .. } => {
+            let approval_request = approval_request_metadata(method, &input, &evaluation);
+            ctx.record_durable_metadata(policy_metadata(method, &evaluation, None));
+            ctx.record_durable_metadata(serde_json::json!({
+                "method": method,
+                "denial_source": "cep_policy",
+                "policy_enforced": true,
+                "backend_invoked": false,
+                "reason_code": format!("{:?}", reason_code),
+                "approval_request": approval_request.clone(),
+            }));
+            if let Some(request) = approval_request {
+                ctx.events
+                    .emit(
+                        "cep.approval_required",
+                        serde_json::json!({ "method": method, "approval_request": request }),
+                    )
+                    .await;
+            }
         }
     }
 
@@ -128,7 +154,7 @@ mod tests {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
-    use lancet_protocol::policy::PolicyHook;
+    use lancet_protocol::policy::{PolicyHook, PolicyReasonCode};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
@@ -193,6 +219,61 @@ mod tests {
                 .budget_snapshot
                 .turn_observation_bytes_limit
                 > 0
+        );
+    }
+
+    struct HumanReviewHook;
+
+    impl PolicyHook for HumanReviewHook {
+        fn decide(&self, _input: &PolicyInput) -> PolicyDecision {
+            PolicyDecision::HumanReview {
+                reason_code: PolicyReasonCode::NonDeterminable,
+                message: "external approval required".into(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn human_review_records_approval_ready_evidence() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let (mut ctx, mut events) = test_handler_context(root);
+        ctx.policy_hook = Arc::new(HumanReviewHook);
+        ctx.default_policy_hook = None;
+        let durable = ctx.durable_metadata.clone();
+
+        let err = match evaluate_and_enforce_policy(
+            &ctx,
+            "observe.workspace",
+            &serde_json::json!({"mode": "list_directory", "path": "."}),
+        )
+        .await
+        {
+            Ok(_) => panic!("human review is not auto-approved"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
+        let metadata: serde_json::Value =
+            serde_json::from_str(&durable.take_json().expect("durable metadata")).unwrap();
+        assert_eq!(metadata["backend_invoked"], false);
+        assert_eq!(metadata["cep_policy"]["decision"], "human_review");
+        assert_eq!(
+            metadata["approval_request"]["status"],
+            serde_json::json!("required")
+        );
+        assert_eq!(
+            metadata["approval_request"]["retry_hint"],
+            serde_json::json!("obtain_human_approval_or_replan")
+        );
+
+        let guard_event = events.recv().await.expect("guard verdict event");
+        assert_eq!(guard_event.method, "cep.guard_verdict");
+        let approval_event = events.recv().await.expect("approval event");
+        assert_eq!(approval_event.method, "cep.approval_required");
+        assert_eq!(
+            approval_event.params["approval_request"]["method"],
+            serde_json::json!("observe.workspace")
         );
     }
 }

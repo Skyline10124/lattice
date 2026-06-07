@@ -5,4 +5,5 @@
 
 pub mod guard_l1;
 pub mod isolation;
+pub(crate) mod preflight;
 pub mod verify;
