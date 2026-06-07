@@ -185,9 +185,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         }))
         .await
         .expect("session.envelope for exec.command_run");
-    let EnvelopeResult::Declare(declare_run) = declare_run else {
-        panic!("session.envelope returned non-declare result");
-    };
+    let EnvelopeResult::Declare(declare_run) = declare_run;
     assert!(declare_run.accepted, "RunCommand envelope must be accepted");
 
     // Row 2 — CommandExecution: exec.command_run echo
@@ -230,9 +228,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
         }))
         .await
         .expect("session.envelope for mutate.edit");
-    let EnvelopeResult::Declare(declare_write) = declare_write else {
-        panic!("session.envelope returned non-declare result");
-    };
+    let EnvelopeResult::Declare(declare_write) = declare_write;
     assert!(
         declare_write.accepted,
         "WritePath envelope must be accepted"

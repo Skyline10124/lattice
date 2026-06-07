@@ -11,7 +11,7 @@
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
 //! Runs each of the 10 CATALOG methods through `CepMode::Warn`, collects
-//! `effect_warning` / `l2_warn_violations` from the `CepAuditStore`, and
+//! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
 //! Method categories
@@ -37,9 +37,7 @@ use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
 };
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
-use lancet_catalog::methods::envelope::{
-    DeclareParams, Envelope, EnvelopeParams, EnvelopeResult, SubmitIntentParams,
-};
+use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams, EnvelopeResult};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -52,7 +50,10 @@ use lancet_native::{
     register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig,
 };
-use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode, ImpactKind};
+use lancet_protocol::envelope::{
+    BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact, ImpactKind,
+    ImpactScope, Intent, Scope,
+};
 use tempfile::TempDir;
 
 // ── Shared overreach builder ─────────────────────────────────────────────────
@@ -309,7 +310,6 @@ fn find_repo_root() -> PathBuf {
 // ── Report generator ─────────────────────────────────────────────────────────
 
 async fn generate_warn_report() -> String {
-    use lancet_protocol::envelope::{Constraints, ExecutionEnvelope, Intent, Scope};
     use std::collections::BTreeSet;
 
     // ── Overreach-capable canonical methods ──────────────────────────────
@@ -446,12 +446,34 @@ async fn generate_warn_report() -> String {
         .await
         .is_ok();
 
-    // session.envelope derive_intent — base MutateSessionState; target must be a valid path
+    // session.envelope declare — base MutateSessionState
     let si_ok = success_client
-        .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
-            action: "patch".into(),
-            target: "src/lib.rs".into(),
-            params: None,
+        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
+            envelope: ExecutionEnvelope {
+                intent: Intent {
+                    description: "warn harness envelope smoke".into(),
+                },
+                capabilities: [Capability::ReadPath {
+                    path_pattern: "src/lib.rs".into(),
+                }]
+                .into_iter()
+                .collect(),
+                scope: Scope {
+                    workspace_root: Some("src/lib.rs".into()),
+                    extensions: serde_json::Map::new(),
+                },
+                impact: vec![Impact {
+                    kind: ImpactKind::WorkspaceObservation,
+                    target: "src/lib.rs".into(),
+                    scope: Some(ImpactScope::ExactFile("src/lib.rs".into())),
+                    confidence: Default::default(),
+                    unknowns: vec![],
+                }],
+                constraints: Constraints::default(),
+                verify: None,
+                on_failure: None,
+                extensions: serde_json::Map::new(),
+            },
             supersede: false,
             reason: None,
         }))

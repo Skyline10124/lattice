@@ -108,10 +108,6 @@ echo "  --> lancet-authority"
 cargo test -p lancet-authority
 echo ""
 
-echo "  --> lancet-invariants"
-cargo test -p lancet-invariants
-echo ""
-
 echo "  --> lancet-native: guard_decide_fuzz"
 cargo test -p lancet-native guard_decide_fuzz
 echo ""

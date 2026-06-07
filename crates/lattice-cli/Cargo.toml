@@ -28,7 +28,6 @@ lattice-profile = { workspace = true }
 lattice-llm = { workspace = true }
 lattice-session = { workspace = true }
 lancet-catalog = { workspace = true }
-lancet-invariants = { workspace = true }
 lancet-native = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }

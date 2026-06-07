@@ -6,7 +6,7 @@ LATTICE is a Rust LLM runtime for session-centered agent work: sessions own the 
 
 The current LANCET tool surface is organized by effect contract: observation,
 mutation, command execution, external fetch, session-state mutation, and audit
-observation. The canonical catalog has 9 methods; legacy pre-v1.3.1 method names
+observation. The canonical catalog has 10 methods; legacy pre-v1.3.1 method names
 are removed and are not accepted by the adapter or native registry.
 
 ## Workspace
@@ -19,7 +19,6 @@ lattice/
 │   ├── lancet-dispatch/ # CEP typed dispatch, client/transport, cancellation, event sinks
 │   ├── lancet-audit/    # LANCET audit store, query filters, rows, stages, attestations
 │   ├── lancet-authority/ # CEP policy, Guard L1, envelope store, and effect-region semantics
-│   ├── lancet-invariants/ # LANCET invariant cards and Guard L2 AST checks
 │   ├── lancet-native/   # LANCET native handlers, transport integration, verify, edit, shell/web helpers
 │   ├── lattice-llm/         # Transport, SSE streaming, model resolution, tool types, SSRF security
 │   ├── lattice-session/     # Session graph, SQLite persistence, branch refs
@@ -37,7 +36,7 @@ Internal dependency flow:
 ```
 lancet-protocol ─┬─> lancet-catalog ─┬─> lancet-dispatch ─┐
                       ├─> lattice-profile       ├─> lancet-audit     ├─> lancet-native
-                      └─> lancet-authority └─> lancet-invariants┘
+                      └─> lancet-authority ──────────────────────────┘
 lattice-llm ─────────────> lattice-agent ─────────────────┐
 lattice-session ─────────> lattice-agent <────────────────┤
                                                            ├─> lattice-api ─> lattice-cli

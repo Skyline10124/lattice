@@ -73,7 +73,6 @@ mod scaffold_tests {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::methods::scaffold::InspectParams;
-    use lancet_invariants::InvariantCardIndex;
     use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::policy::PolicyHook;
@@ -113,7 +112,6 @@ mod scaffold_tests {
                 ..Default::default()
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
             cep_mode: CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),

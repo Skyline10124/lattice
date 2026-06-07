@@ -496,11 +496,14 @@ mod cep_native_registry {
 mod attestation_and_dispatch {
     use super::*;
     use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-    use lancet_catalog::methods::envelope::{Envelope, EnvelopeParams, SubmitIntentParams};
+    use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
     use lancet_catalog::methods::workspace::{
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
     use lancet_native::canonicalize_in_toto_statement;
+    use lancet_protocol::envelope::{
+        Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, ImpactScope, Intent, Scope,
+    };
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
     use lattice_llm::{FunctionCall, ToolCall};
@@ -510,7 +513,7 @@ mod attestation_and_dispatch {
     use lancet_api::store_turn_attestation;
 
     #[tokio::test]
-    async fn dispatch_typed_routes_submit_intent() {
+    async fn dispatch_typed_routes_envelope_declare() {
         let dir = TempDir::new().unwrap();
         let llm: Arc<dyn LlmClient> = Arc::new(
             FakeStreamingLlmClient::builder()
@@ -534,27 +537,47 @@ mod attestation_and_dispatch {
         let adapter =
             CepExecutorAdapter::new(deps.cep_client.clone(), [Envelope::NAME.to_string()]);
         let call = ToolCall {
-            id: "call_submit".into(),
+            id: "call_declare".into(),
             function: FunctionCall {
                 name: Envelope::NAME.to_string(),
-                arguments: serde_json::to_string(&EnvelopeParams::DeriveIntent(
-                    SubmitIntentParams {
-                        action: "write".into(),
-                        target: "mutate.create".into(),
-                        params: None,
-                        supersede: false,
-                        reason: None,
+                arguments: serde_json::to_string(&EnvelopeParams::Declare(DeclareParams {
+                    envelope: ExecutionEnvelope {
+                        intent: Intent {
+                            description: "adapter envelope declare test".into(),
+                        },
+                        capabilities: [Capability::ReadPath {
+                            path_pattern: "Cargo.toml".into(),
+                        }]
+                        .into_iter()
+                        .collect(),
+                        scope: Scope {
+                            workspace_root: Some("Cargo.toml".into()),
+                            extensions: serde_json::Map::new(),
+                        },
+                        impact: vec![Impact {
+                            kind: ImpactKind::WorkspaceObservation,
+                            target: "Cargo.toml".into(),
+                            scope: Some(ImpactScope::ExactFile("Cargo.toml".into())),
+                            confidence: Default::default(),
+                            unknowns: vec![],
+                        }],
+                        constraints: Constraints::default(),
+                        verify: None,
+                        on_failure: None,
+                        extensions: serde_json::Map::new(),
                     },
-                ))
+                    supersede: false,
+                    reason: Some("adapter route test".into()),
+                }))
                 .unwrap(),
             },
         };
         let output = adapter
             .execute(&call)
             .await
-            .expect("session.envelope derive_intent must route through the typed CEP adapter");
+            .expect("session.envelope declare must route through the typed CEP adapter");
         let result: serde_json::Value = serde_json::from_str(&output).expect("json result");
-        assert_eq!(result["mode"], "derive_intent");
+        assert_eq!(result["mode"], "declare");
         assert_eq!(result["result"]["accepted"], true);
     }
 

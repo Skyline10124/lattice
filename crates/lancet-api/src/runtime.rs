@@ -3,7 +3,6 @@
 
 //! LANCET runtime composition: spawn a native CEP server and hand back a client.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use lancet_audit::{CepAuditContext, CepAuditStore};
@@ -11,7 +10,6 @@ use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
 use lancet_cep::{BaseAuthorityPlan, ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
-use lancet_invariants::{load_invariant_index_from_dir, resolve_invariants_dir};
 use lancet_native::{register_production_method_registry, MethodRegistry, ServerRunConfig};
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use tokio::sync::RwLock;
@@ -130,7 +128,6 @@ impl LancetRuntime {
             command_isolation,
             cep_mode,
             audit,
-            invariants_dir,
             model_id,
             runtime_version,
         } = config;
@@ -174,12 +171,6 @@ impl LancetRuntime {
         let active_envelope = Arc::new(ActiveEnvelopeStore::new());
         let default_hook = Arc::new(DefaultPolicyHook::new(policy));
 
-        let invariants_dir = invariants_dir.as_deref().and_then(Path::to_str);
-        let invariant_index = load_invariant_index_from_dir(&resolve_invariants_dir(
-            Path::new(&workspace_root),
-            invariants_dir,
-        ));
-
         let server_config = ServerRunConfig {
             audit: Arc::clone(&audit),
             audit_context: Arc::clone(&audit_context),
@@ -190,7 +181,6 @@ impl LancetRuntime {
             default_policy_hook: Some(default_hook),
             cep_mode,
             command_isolation,
-            invariant_index,
         };
 
         let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;

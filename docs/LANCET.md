@@ -19,9 +19,9 @@ plus base-authority planning. The underlying contract remains split across
 | `PolicyHook` / `PolicyDecision` | Pluggable policy hook interface in `lancet-protocol` |
 | Audit/provenance schemas | `ProvGraphFragment` wire shapes in `lancet-protocol`; audit rows, filters, and attestation persistence in `lancet-audit` |
 
-Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics), `lancet-invariants` (invariant cards and Guard L2), and `lancet-native` (production handlers, transport lifecycle, verify/edit/shell/web integration).
+Internal implementation is split across `lancet-authority` (default policy, Guard L1, active envelope, effect-region semantics) and `lancet-native` (production handlers, transport lifecycle, verify/edit/shell/web integration).
 
-**Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority/invariant implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
+**Not public surface:** `lancet-native` handler internals, private low-level executor helpers, authority implementation details, and any `#[doc(hidden)]` re-exports. These are implementation details of the native LANCET server.
 
 Pre-v1.3.1 method names are removed. They are not accepted by the adapter or
 native registry, and LLM-facing tool definitions are projected only from the 10
@@ -77,11 +77,9 @@ The gate keeps release evidence in three separate proof categories:
 - **Warn-mode report:** `docs/lancet-warn-report.md` — coverage report for the canonical effect-contract surface; the baseline is N=0 leaks and no `fix-now` triage rows.
 - **Capability boundary walkthrough:** `docs/v1.3-alpha-walkthrough.md` — explains what Layer-1 e2e proves and what is deferred to beta.
 
-If a checkout still has pre-cutover invariant cards, migrate them with `mv .cep .lancet`; new cards live under `.lancet/invariants/`.
-
 ### Mode semantics
 
-`mode = "off"` under `[lancet]` skips the effect-region L2 check only. The CEP policy hook still runs; capability declarations are still required, and effect-kind denial remains a hard fail. Legacy direct tool calls are not re-enabled — there is no legacy tool executor path in the production stack.
+`mode = "off"` under `[lancet]` skips effect-region enforcement only. The CEP policy hook still runs; capability declarations are still required, and effect-kind denial remains a hard fail. Legacy direct tool calls are not re-enabled — there is no legacy tool executor path in the production stack.
 
 Effect-kind denial is enforced at checker time, after runtime effects are
 observed. Configure it as `deny = ["workspace_mutation"]` under

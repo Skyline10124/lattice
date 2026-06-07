@@ -13,7 +13,6 @@ lancet-dispatch = { workspace = true }
 lancet-cep = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
-lancet-invariants = { workspace = true }
 lancet-native = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -12,7 +12,6 @@ pub mod observation;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
 pub mod session_state;
-pub mod submit_intent;
 
 pub use audit::register_audit_methods;
 pub use command::register_command_methods;

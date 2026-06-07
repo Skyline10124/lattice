@@ -8,16 +8,15 @@ use std::sync::Arc;
 
 use lancet_authority::CepTurnContext;
 use lancet_catalog::catalog::catalog;
-use lancet_catalog::methods::envelope::{
-    Envelope, EnvelopeParams, EnvelopeResult, SubmitIntentParams,
-};
-use lancet_invariants::invariants::loader::load_cards_from_dir;
-use lancet_invariants::resolve_invariants_dir;
+use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams, EnvelopeResult};
 use lancet_native::{
     probe_host_capabilities, register_production_method_registry, unavailable_required_boundaries,
     MethodRegistry, MissingRequiredBoundary, ServerRunConfig,
 };
-use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::envelope::{
+    BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind,
+    ImpactScope, Intent, Scope,
+};
 use lancet_protocol::{BoundaryDimension, HostProbeEntry, HostProbeReport, HostProbeStatus};
 
 use crate::error::{LancetError, LancetResult};
@@ -27,7 +26,6 @@ use crate::runtime::LancetServer;
 #[derive(Clone, Debug)]
 pub struct LancetDoctorRequest {
     pub project_root: PathBuf,
-    pub invariants_dir: Option<PathBuf>,
     pub host_probe: Option<HostProbeReport>,
     pub gate: Option<LancetDoctorGate>,
 }
@@ -36,7 +34,6 @@ impl LancetDoctorRequest {
     pub fn new(project_root: impl Into<PathBuf>) -> Self {
         Self {
             project_root: project_root.into(),
-            invariants_dir: None,
             host_probe: None,
             gate: None,
         }
@@ -56,7 +53,6 @@ pub struct LancetDoctorOutput {
     pub ok_items: Vec<String>,
     pub warnings: Vec<String>,
     pub issues: Vec<String>,
-    pub card_ids: Vec<String>,
     pub host_probe: HostProbeReport,
     pub gate_profile: Option<String>,
     pub gate_missing: Vec<MissingRequiredBoundary>,
@@ -64,21 +60,12 @@ pub struct LancetDoctorOutput {
 
 /// Run LANCET doctor checks and return structured frontend data.
 pub fn run_doctor_checks(request: LancetDoctorRequest) -> LancetDoctorOutput {
-    let invariants_dir = request
-        .invariants_dir
-        .unwrap_or_else(|| resolve_invariants_dir(&request.project_root, None));
     let host_probe = request.host_probe.unwrap_or_else(probe_host_capabilities);
-    collect_doctor_output(
-        &request.project_root,
-        &invariants_dir,
-        host_probe,
-        request.gate,
-    )
+    collect_doctor_output(&request.project_root, host_probe, request.gate)
 }
 
 fn collect_doctor_output(
     project_root: &Path,
-    invariants_dir: &Path,
     host_probe: HostProbeReport,
     gate: Option<LancetDoctorGate>,
 ) -> LancetDoctorOutput {
@@ -109,34 +96,6 @@ fn collect_doctor_output(
             Err(err) => issues.push(format!("registry: {}", err.message)),
         }
     }
-
-    let card_ids: Vec<String> = match load_cards_from_dir(invariants_dir) {
-        Ok(cards) if cards.is_empty() => {
-            ok_items.push("invariants: ok_empty (no cards)".to_string());
-            vec![]
-        }
-        Ok(cards) => {
-            let ids: Vec<String> = cards.iter().map(|card| card.id.clone()).collect();
-            ok_items.push(format!(
-                "invariants: ok_loaded ({} card(s): {})",
-                ids.len(),
-                ids.join(", ")
-            ));
-            ids
-        }
-        Err(err) => {
-            issues.push(format!("invariants: parse error: {err}"));
-            return LancetDoctorOutput {
-                ok_items,
-                warnings,
-                issues,
-                card_ids: vec![],
-                host_probe,
-                gate_profile,
-                gate_missing,
-            };
-        }
-    };
 
     for entry in host_probe.entries() {
         match entry.status {
@@ -184,40 +143,39 @@ fn collect_doctor_output(
         }
     }
 
-    match run_submit_intent_smoke_for_project_root(project_root) {
-        Ok(()) => ok_items.push("submit_intent smoke: ok (unknowns == 0)".to_string()),
-        Err(err) => issues.push(format!("submit_intent smoke: {err}")),
+    match run_envelope_declare_smoke_for_project_root(project_root) {
+        Ok(()) => ok_items.push("envelope declare smoke: ok".to_string()),
+        Err(err) => issues.push(format!("envelope declare smoke: {err}")),
     }
 
     LancetDoctorOutput {
         ok_items,
         warnings,
         issues,
-        card_ids,
         host_probe,
         gate_profile,
         gate_missing,
     }
 }
 
-/// Run an isolated submit_intent smoke using an in-memory LANCET runtime.
-pub fn run_submit_intent_smoke_for_project_root(project_root: &Path) -> LancetResult<()> {
+/// Run an isolated explicit envelope declaration smoke using an in-memory LANCET runtime.
+pub fn run_envelope_declare_smoke_for_project_root(project_root: &Path) -> LancetResult<()> {
     let project_root = project_root.to_path_buf();
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            tokio::task::block_in_place(|| handle.block_on(submit_intent_smoke_async(project_root)))
-        }
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(envelope_declare_smoke_async(project_root))
+        }),
         Err(_) => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|err| {
-                LancetError::Internal(format!("tokio runtime for submit_intent smoke: {err}"))
+                LancetError::Internal(format!("tokio runtime for envelope declare smoke: {err}"))
             })?
-            .block_on(submit_intent_smoke_async(project_root)),
+            .block_on(envelope_declare_smoke_async(project_root)),
     }
 }
 
-async fn submit_intent_smoke_async(project_root: PathBuf) -> LancetResult<()> {
+async fn envelope_declare_smoke_async(project_root: PathBuf) -> LancetResult<()> {
     let root_str = project_root
         .to_str()
         .ok_or_else(|| LancetError::Config("project root path is not UTF-8".to_string()))?;
@@ -230,36 +188,54 @@ async fn submit_intent_smoke_async(project_root: PathBuf) -> LancetResult<()> {
 
     let (client, mut lifecycle) = LancetServer::spawn(config, 64)?;
 
-    let result = client
-        .call::<Envelope>(EnvelopeParams::DeriveIntent(SubmitIntentParams {
-            action: "read".to_string(),
+    let envelope = ExecutionEnvelope {
+        intent: Intent {
+            description: "lancet doctor explicit envelope smoke".to_string(),
+        },
+        capabilities: [Capability::ReadPath {
+            path_pattern: "Cargo.toml".to_string(),
+        }]
+        .into_iter()
+        .collect(),
+        scope: Scope {
+            workspace_root: Some("Cargo.toml".to_string()),
+            extensions: serde_json::Map::new(),
+        },
+        impact: vec![Impact {
+            kind: ImpactKind::WorkspaceObservation,
             target: "Cargo.toml".to_string(),
-            params: None,
+            scope: Some(ImpactScope::ExactFile(PathBuf::from("Cargo.toml"))),
+            confidence: Default::default(),
+            unknowns: vec![],
+        }],
+        constraints: Constraints::default(),
+        verify: None,
+        on_failure: None,
+        extensions: serde_json::Map::new(),
+    };
+
+    let result = client
+        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
+            envelope,
             supersede: false,
-            reason: None,
+            reason: Some("lancet doctor smoke".to_string()),
         }))
         .await
         .map_err(|err| {
             LancetError::Internal(format!(
-                "session.envelope derive_intent smoke failed: {}",
+                "session.envelope declare smoke failed: {}",
                 err.message
             ))
         })?;
-    let EnvelopeResult::DeriveIntent(result) = result else {
+    let EnvelopeResult::Declare(result) = result;
+    if !result.accepted {
         lifecycle.shutdown().await;
         return Err(LancetError::Internal(
-            "session.envelope derive_intent smoke returned declare result".to_string(),
+            "session.envelope declare smoke was not accepted".to_string(),
         ));
     };
 
     lifecycle.shutdown().await;
-
-    if !result.impact.unknowns.is_empty() {
-        return Err(LancetError::Internal(format!(
-            "{} unknown(s) in impact analysis",
-            result.impact.unknowns.len()
-        )));
-    }
 
     Ok(())
 }

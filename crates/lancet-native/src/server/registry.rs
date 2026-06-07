@@ -10,7 +10,6 @@ use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::policy::CepTurnContext;
 pub use lancet_dispatch::{Cancellation, EventSink};
-use lancet_invariants::InvariantCardIndex;
 use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 use lancet_protocol::policy::PolicyHook;
 use serde_json::Value;
@@ -37,7 +36,6 @@ pub struct HandlerContext {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub audit: Arc<CepAuditStore>,
-    pub invariant_index: Arc<InvariantCardIndex>,
     pub cep_mode: CepMode,
     pub command_isolation: CommandIsolationRuntimeConfig,
 }
@@ -57,7 +55,6 @@ impl std::fmt::Debug for HandlerContext {
             .field("policy_hook", &"<dyn PolicyHook>")
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
-            .field("invariant_index", &self.invariant_index)
             .field("cep_mode", &self.cep_mode)
             .field("command_isolation", &self.command_isolation)
             .finish()

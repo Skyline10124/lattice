@@ -33,11 +33,11 @@ impl AuditBacking {
 /// is the host's responsibility, keeping LANCET decoupled from LATTICE.
 ///
 /// `project_root` is the runtime workspace root used for the base observation
-/// envelope, audit DB path, and invariant card discovery. The guard's effective
-/// root travels inside `policy.project_root` and may differ (e.g. a configured
-/// sub-root); both are honored independently, matching prior behavior.
+/// envelope and audit DB path. The guard's effective root travels inside
+/// `policy.project_root` and may differ (e.g. a configured sub-root); both are
+/// honored independently, matching prior behavior.
 pub struct LancetRuntimeConfig {
-    /// Runtime workspace root (base envelope, audit path, invariant discovery).
+    /// Runtime workspace root (base envelope, audit path).
     pub project_root: PathBuf,
     /// Catalog method names the runtime should expose to callers.
     pub enabled_tools: Vec<String>,
@@ -49,8 +49,6 @@ pub struct LancetRuntimeConfig {
     pub cep_mode: CepMode,
     /// Audit store backing.
     pub audit: AuditBacking,
-    /// Optional invariant-cards directory, relative to `project_root` unless absolute.
-    pub invariants_dir: Option<PathBuf>,
     /// Model identifier recorded in the audit context.
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
@@ -72,7 +70,6 @@ impl LancetRuntimeConfig {
             command_isolation: CommandIsolationRuntimeConfig::default(),
             cep_mode: CepMode::Enforce,
             audit: AuditBacking::InMemory,
-            invariants_dir: None,
             model_id: String::new(),
             runtime_version: String::new(),
         }

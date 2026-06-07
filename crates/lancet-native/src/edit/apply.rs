@@ -12,6 +12,7 @@ use super::commit_baseline::{
     CommitBaselineReport, CommitBaselineValidation, HunkAnchorMatchResult,
 };
 use super::hash::{content_hash, line_hash};
+#[cfg(test)]
 use super::parser::parse_patch_document;
 use super::types::{
     ApplyPlan, AttemptedOperation, ChangedFile, FileOperationKind, HashLine, LineChange,
@@ -33,7 +34,8 @@ impl Default for PatchApplyLimits {
     }
 }
 
-pub async fn apply_patch(
+#[cfg(test)]
+async fn apply_patch(
     project_root: &Path,
     limits: &PatchApplyLimits,
     patch: &str,
@@ -49,6 +51,14 @@ pub async fn apply_patch(
         }
     };
 
+    apply_parsed_patch(project_root, limits, document).await
+}
+
+pub(crate) async fn apply_parsed_patch(
+    project_root: &Path,
+    limits: &PatchApplyLimits,
+    document: PatchDocument,
+) -> PatchResultEnvelope {
     let attempted_operations = document
         .operations
         .iter()
@@ -796,6 +806,7 @@ fn failure_envelope(
     }
 }
 
+#[cfg(test)]
 fn attempted_operations_from_headers(patch: &str) -> Vec<AttemptedOperation> {
     let mut attempted = Vec::new();
     let mut current: Option<AttemptedOperation> = None;
@@ -834,6 +845,7 @@ fn attempted_operations_from_headers(patch: &str) -> Vec<AttemptedOperation> {
     attempted
 }
 
+#[cfg(test)]
 fn push_current(attempted: &mut Vec<AttemptedOperation>, current: &mut Option<AttemptedOperation>) {
     if let Some(operation) = current.take() {
         attempted.push(operation);

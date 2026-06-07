@@ -89,7 +89,6 @@ pub struct CapabilityMatch {
 pub enum SessionStateOperation {
     TodoWrite,
     EnvelopeDeclare,
-    SubmitIntent,
 }
 
 // ── Invocation facts ────────────────────────────────────────────────────

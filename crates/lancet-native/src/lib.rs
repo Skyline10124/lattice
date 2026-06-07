@@ -13,7 +13,6 @@ pub(crate) mod edit;
 pub mod enforcement;
 pub(crate) mod executor;
 mod handlers;
-pub mod impact;
 pub mod provenance {
     pub use lancet_audit::provenance::*;
 }

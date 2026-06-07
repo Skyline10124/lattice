@@ -8,7 +8,7 @@
 //! All methods require an active `ExecutionEnvelope`; multi-file mutations
 //! perform all-or-nothing scope preflight before applying changes.
 
-use crate::edit::apply::PatchApplyLimits;
+use crate::edit::apply::{apply_parsed_patch, PatchApplyLimits};
 use crate::edit::commit_baseline::{
     commit_baseline_details_json, CommitBaselineFailureReason, CommitBaselineReport,
     CommitBaselineValidation,
@@ -16,7 +16,6 @@ use crate::edit::commit_baseline::{
 use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
-use crate::edit::types::PatchOperation;
 use crate::enforcement::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
@@ -33,8 +32,7 @@ use lancet_catalog::methods::workspace::{
     EditOperation, EditParams, EditResult,
 };
 use lancet_catalog::CepMethod;
-use lancet_invariants::{guard_l2, InvariantCardIndex};
-use lancet_protocol::envelope::{CepMode, ExecutionEnvelope, ImpactKind};
+use lancet_protocol::envelope::{ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
@@ -82,14 +80,7 @@ async fn handle_create_as(
         authorize_workspace_mutation(&ctx, method, &params, std::slice::from_ref(&params.path))
             .await?;
 
-    let create = preflight_create_file(
-        &auth.project_root,
-        &params,
-        &ctx.invariant_index,
-        ctx.cep_mode.clone(),
-        method,
-        &ctx,
-    )?;
+    let create = preflight_create_file(&auth.project_root, &params, method)?;
 
     write_preflighted_create(&auth.project_root, &create).await?;
 
@@ -173,10 +164,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
                 create_inputs.push(preflight_create_file(
                     &auth.project_root,
                     &params,
-                    &ctx.invariant_index,
-                    ctx.cep_mode.clone(),
                     Batch::NAME,
-                    &ctx,
                 )?);
             }
             BatchOperation::EditFile {
@@ -364,10 +352,7 @@ async fn run_mutation_verify_if_configured(
 fn preflight_create_file(
     project_root: &str,
     params: &CreateParams,
-    invariant_index: &InvariantCardIndex,
-    cep_mode: CepMode,
     method: &str,
-    ctx: &HandlerContext,
 ) -> Result<PreflightCreate, CepError> {
     let (full_path, _parent) = resolve_create_target(project_root, &params.path)?;
     let created_dirs = missing_parent_dirs(project_root, &params.path)?;
@@ -398,27 +383,6 @@ fn preflight_create_file(
             }),
             Retriability::Permanent,
         ));
-    }
-
-    let cards = invariant_index.match_target(&params.path);
-    if let Some(message) = lancet_invariants::opaque_human_review_message(&cards) {
-        return Err(lancet_invariants::opaque_human_review_error(
-            method, &message,
-        ));
-    }
-
-    if params.path.ends_with(".rs") && !matches!(cep_mode, CepMode::Off) {
-        let _status = guard_l2::l2_status_for_method(method);
-        let has_forbidden = cards.iter().any(|c| !c.forbidden.is_empty());
-        if has_forbidden {
-            let result = guard_l2::check_l2(
-                &params.path,
-                params.content.as_bytes(),
-                &[(0, params.content.len())],
-                &cards,
-            );
-            enforce_l2_result(ctx, method, &params.path, &result)?;
-        }
     }
 
     Ok(PreflightCreate {
@@ -756,28 +720,8 @@ async fn apply_compiled_patch(
         )
     })?;
 
-    for operation in &document.operations {
-        let path = operation.path();
-        let cards = ctx.invariant_index.match_target(path);
-        if let Some(message) = lancet_invariants::opaque_human_review_message(&cards) {
-            return Err(lancet_invariants::opaque_human_review_error(
-                method, &message,
-            ));
-        }
-        if path.ends_with(".rs")
-            && !matches!(ctx.cep_mode, CepMode::Off)
-            && cards.iter().any(|c| !c.forbidden.is_empty())
-        {
-            if let Some((before, after)) = projected_patch_content(&auth.project_root, operation)? {
-                let ranges = changed_line_byte_ranges(before.as_deref(), &after);
-                let result = guard_l2::check_l2(path, after.as_bytes(), &ranges, &cards);
-                enforce_l2_result(ctx, method, path, &result)?;
-            }
-        }
-    }
-
     let limits = PatchApplyLimits::default();
-    let result = crate::edit::apply_patch(Path::new(&auth.project_root), &limits, patch).await;
+    let result = apply_parsed_patch(Path::new(&auth.project_root), &limits, document).await;
 
     if let Some(report) = result.commit_baseline_report.as_ref() {
         let metadata = commit_baseline_metadata_json(report);
@@ -928,162 +872,6 @@ fn commit_baseline_replan_error(
         }),
         Retriability::RequiresReplan,
     )
-}
-
-fn enforce_l2_result(
-    ctx: &HandlerContext,
-    method: &str,
-    path: &str,
-    result: &guard_l2::L2CheckResult,
-) -> Result<(), CepError> {
-    ctx.record_durable_metadata(json!({
-        "l2_status": result.status,
-        "l2_path": path,
-    }));
-
-    if result.violations.is_empty() {
-        return Ok(());
-    }
-
-    let reasons: Vec<String> = result
-        .violations
-        .iter()
-        .map(|v| format!("{} {} (card {})", v.category, v.reason, v.card_id))
-        .collect();
-
-    match ctx.cep_mode {
-        CepMode::Enforce => Err(CepError::new(
-            CepErrorCode::GuardDenied,
-            format!(
-                "L2 guard: forbidden categories in {}: {}",
-                path,
-                reasons.join("; ")
-            ),
-            CepErrorData::Guard(GuardErrorData {
-                method: method.into(),
-                reason: format!("L2 violations: {:?}", reasons),
-            }),
-            Retriability::Permanent,
-        )),
-        CepMode::Warn => {
-            tracing::warn!(
-                method = method,
-                path = path,
-                violations = ?reasons,
-                "L2 guard violations allowed in warn mode"
-            );
-            ctx.record_durable_metadata(json!({
-                "l2_warn_violations": reasons,
-                "l2_path": path,
-            }));
-            Ok(())
-        }
-        CepMode::Off => Ok(()),
-    }
-}
-
-fn projected_patch_content(
-    project_root: &str,
-    operation: &PatchOperation,
-) -> Result<Option<(Option<String>, String)>, CepError> {
-    match operation {
-        PatchOperation::UpdateFile { path, hunks, .. } => {
-            let full_path = std::path::Path::new(project_root).join(path);
-            let before = std::fs::read_to_string(&full_path).map_err(|err| {
-                CepError::new(
-                    CepErrorCode::ExecutionFailed,
-                    format!("cannot read patch target '{path}' for L2 preflight: {err}"),
-                    CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                        command: "patch_l2_preflight".into(),
-                        exit_code: Some(1),
-                        stderr: Some(err.to_string()),
-                    }),
-                    Retriability::Permanent,
-                )
-            })?;
-            let after = crate::edit::apply::apply_hunks(path, &before, hunks, 0)
-                .map_err(|diagnostic| {
-                    CepError::new(
-                        CepErrorCode::SchemaMismatch,
-                        format!("patch L2 preflight hunk error: {}", diagnostic.message),
-                        CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
-                            field: "patch".into(),
-                            reason: diagnostic.message,
-                        }),
-                        Retriability::Permanent,
-                    )
-                })?
-                .after_text;
-            Ok(Some((Some(before), after)))
-        }
-        PatchOperation::DeleteFile { .. } => Ok(None),
-    }
-}
-
-fn changed_line_byte_ranges(before: Option<&str>, after: &str) -> Vec<(usize, usize)> {
-    let Some(before) = before else {
-        return if after.is_empty() {
-            vec![]
-        } else {
-            vec![(0, after.len())]
-        };
-    };
-
-    if before == after {
-        return vec![];
-    }
-
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
-    let bounds = line_byte_bounds(after);
-    let mut ranges = Vec::new();
-    let mut current_start: Option<usize> = None;
-
-    for (idx, line) in after_lines.iter().enumerate() {
-        let changed = before_lines.get(idx).copied() != Some(*line);
-        if changed && current_start.is_none() {
-            current_start = Some(
-                bounds
-                    .get(idx)
-                    .map(|(start, _)| *start)
-                    .unwrap_or(after.len()),
-            );
-        } else if !changed && current_start.is_some() {
-            let start = current_start.take().unwrap_or(0);
-            let end = bounds
-                .get(idx.saturating_sub(1))
-                .map(|(_, end)| *end)
-                .unwrap_or(start);
-            ranges.push((start, end));
-        }
-    }
-
-    if let Some(start) = current_start {
-        let end = bounds.last().map(|(_, end)| *end).unwrap_or(after.len());
-        ranges.push((start, end));
-    }
-
-    if ranges.is_empty() && before != after && !after.is_empty() {
-        ranges.push((0, after.len()));
-    }
-
-    ranges
-}
-
-fn line_byte_bounds(source: &str) -> Vec<(usize, usize)> {
-    let mut bounds = Vec::new();
-    let mut offset = 0;
-    for line in source.split_inclusive('\n') {
-        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
-        let start = offset;
-        let end = offset + line_without_newline.len();
-        bounds.push((start, end));
-        offset += line.len();
-    }
-    if !source.ends_with('\n') && source.is_empty() {
-        return vec![];
-    }
-    bounds
 }
 
 fn resolve_create_target(
@@ -1426,8 +1214,7 @@ mod create_tests {
     use crate::handlers::register_envelope_methods;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::envelope_store::ActiveEnvelopeStore;
-    use lancet_catalog::methods::envelope::{Envelope, EnvelopeParams, SubmitIntentParams};
-    use lancet_invariants::InvariantCardIndex;
+    use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
     use lancet_protocol::envelope::{
         BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
         ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
@@ -1469,7 +1256,6 @@ mod create_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -1482,19 +1268,13 @@ mod create_tests {
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
-        test_ctx_with_store_and_index(
-            root,
-            store,
-            Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
-            lancet_protocol::envelope::CepMode::Off,
-        )
+        test_ctx_with_store_and_mode(root, store, lancet_protocol::envelope::CepMode::Off)
     }
 
-    fn test_ctx_with_store_and_index(
+    fn test_ctx_with_store_and_mode(
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
-        invariant_index: Arc<InvariantCardIndex>,
-        cep_mode: CepMode,
+        cep_mode: lancet_protocol::envelope::CepMode,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1527,7 +1307,6 @@ mod create_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index,
                 cep_mode,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -1542,7 +1321,7 @@ mod create_tests {
         registry
     }
 
-    fn mutation_and_intent_registry() -> MethodRegistry {
+    fn mutation_and_envelope_registry() -> MethodRegistry {
         let mut registry = mutation_registry();
         register_envelope_methods(&mut registry).unwrap();
         registry
@@ -1720,11 +1499,11 @@ mod create_tests {
     }
 
     #[tokio::test]
-    async fn test_replan_flow_mutation_outside_scope_then_submit_intent_resumes() {
+    async fn test_replan_flow_mutation_outside_scope_then_explicit_envelope_resumes() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         std::fs::create_dir_all(dir.path().join("src/other")).unwrap();
-        let registry = mutation_and_intent_registry();
+        let registry = mutation_and_envelope_registry();
         let store = Arc::new(ActiveEnvelopeStore::new());
 
         let envelope = envelope_with_write_path("src/allowed/**");
@@ -1748,17 +1527,15 @@ mod create_tests {
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
 
         let (ctx2, _events2) = test_ctx_with_store(root, Arc::clone(&store));
-        let intent_params = SubmitIntentParams {
-            action: "write".into(),
-            target: "src/other/file.rs".into(),
-            params: None,
+        let declare_params = DeclareParams {
+            envelope: envelope_with_write_path("src/other/file.rs"),
             supersede: true,
             reason: Some("expand scope for out-of-band file".into()),
         };
         registry
             .dispatch(
                 Envelope::NAME,
-                serde_json::to_value(EnvelopeParams::DeriveIntent(intent_params)).unwrap(),
+                serde_json::to_value(EnvelopeParams::Declare(declare_params)).unwrap(),
                 ctx2,
             )
             .await
@@ -1936,8 +1713,7 @@ mod edit_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
-                cep_mode: CepMode::Off,
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             },

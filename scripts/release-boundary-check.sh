@@ -41,8 +41,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 cd "$repo_root"
 
-old_hyphen='(lattice-(core|runtime|prompt|sandbox|policy|cep-(protocol|catalog|dispatch|audit|authority|invariants|native))|lancet-executor)'
-old_underscore='(lattice_(core|runtime|prompt|sandbox|policy|cep_(protocol|catalog|dispatch|audit|authority|invariants|native))|lancet_executor)'
+old_hyphen='(lattice-(core|runtime|prompt|sandbox|policy|cep-(protocol|catalog|dispatch|audit|authority|native))|lancet-executor)'
+old_underscore='(lattice_(core|runtime|prompt|sandbox|policy|cep_(protocol|catalog|dispatch|audit|authority|native))|lancet_executor)'
 old_any="${old_hyphen}|${old_underscore}"
 old_cep_methods='envelope\.declare|workspace\.(read_file|grep|list_directory|find_files|write_file|patch)|command\.run|web\.fetch'
 old_doc_refs='docs/CEP\.md|scripts/cep-boundary-check\.sh|14 production|all 10|all 14'

@@ -48,8 +48,6 @@ pub struct LancetSection {
     #[serde(default)]
     pub isolation: Option<LancetIsolationSection>,
     #[serde(default)]
-    pub invariants: Option<LancetInvariantsSection>,
-    #[serde(default)]
     pub effects: Option<LancetEffectsSection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
@@ -346,14 +344,6 @@ fn default_lancet_unsupported_host_behavior() -> LancetUnsupportedHostBehavior {
     LancetUnsupportedHostBehavior::ModeDefault
 }
 
-/// `[lancet.invariants]` — invariant card directory configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct LancetInvariantsSection {
-    #[serde(default)]
-    pub dir: Option<String>,
-}
-
 /// `[lancet.effects]` — runtime effect-kind deny switch.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -376,7 +366,6 @@ impl Default for LancetSection {
             command: None,
             policy: None,
             isolation: None,
-            invariants: None,
             effects: None,
             extensions: BTreeMap::new(),
         }
@@ -426,10 +415,6 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("isolation")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
-        let invariants = raw
-            .remove("invariants")
-            .map(|value| value.try_into().map_err(de::Error::custom))
-            .transpose()?;
         let effects = raw
             .remove("effects")
             .map(|value| value.try_into().map_err(de::Error::custom))
@@ -443,7 +428,6 @@ impl<'de> Deserialize<'de> for LancetSection {
             command,
             policy,
             isolation,
-            invariants,
             effects,
             extensions: raw,
         })
@@ -1434,7 +1418,6 @@ required_boundaries = ["network"]
             command: None,
             policy: None,
             isolation: None,
-            invariants: None,
             effects: None,
             extensions,
         };
@@ -1556,49 +1539,5 @@ unknown = true
             err.to_string().contains("unknown"),
             "should reject unknown field, got: {err}"
         );
-    }
-
-    // ── LancetInvariantsSection ──────────────────────────────────────────
-
-    #[test]
-    fn cep_section_parses_invariants_section() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet]
-mode = "enforce"
-
-[lancet.invariants]
-dir = ".lancet/cards/"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        let invariants = profile.lancet.invariants.as_ref().unwrap();
-        assert_eq!(invariants.dir.as_deref(), Some(".lancet/cards/"));
-    }
-
-    #[test]
-    fn cep_section_absent_invariants_is_none() {
-        let profile = parse(minimal_profile_prefix()).unwrap();
-        assert!(profile.lancet.invariants.is_none());
-    }
-
-    #[test]
-    fn cep_invariants_does_not_leak_to_extensions() {
-        let toml = format!(
-            r#"{prefix}
-
-[lancet.invariants]
-dir = "foo/"
-"#,
-            prefix = minimal_profile_prefix()
-        );
-        let profile = parse(&toml).unwrap();
-        assert!(
-            !profile.lancet.extensions.contains_key("invariants"),
-            "invariants must not leak to extensions"
-        );
-        assert!(profile.lancet.invariants.is_some());
     }
 }

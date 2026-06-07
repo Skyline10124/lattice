@@ -66,7 +66,6 @@ fn test_ctx(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -644,7 +643,6 @@ async fn test_ctx_with_artifact_caps(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -1759,7 +1757,6 @@ async fn test_ctx_with_run_command(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -1902,7 +1899,6 @@ async fn workspace_mutation_with_envelope_succeeds() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -1984,7 +1980,6 @@ async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2069,7 +2064,6 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2154,7 +2148,6 @@ async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_req
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2272,7 +2265,6 @@ async fn workspace_mutation_timeout_checks_out_of_scope_changes() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2374,7 +2366,6 @@ async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2662,7 +2653,6 @@ async fn command_cancel_returns_execution_failed() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2768,7 +2758,6 @@ async fn workspace_mutation_inside_scope_succeeds() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };
@@ -2854,7 +2843,6 @@ async fn workspace_mutation_verify_failure_records_backend_invoked() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };

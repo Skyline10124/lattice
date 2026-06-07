@@ -6,7 +6,7 @@
 //! - `lancet status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
 //!   the latest session.envelope fields, recent calls, and last guard verdict.
 //! - `lancet doctor`: catalog count, transport smoke, invariant-card parse, and an
-//!   isolated `session.envelope` derive-intent smoke that asserts `unknowns == 0`.
+//!   isolated explicit `session.envelope` declaration smoke.
 
 use std::path::{Path, PathBuf};
 
@@ -305,7 +305,7 @@ fn format_effective_boundary_details(entry: &serde_json::Value) -> String {
 // lancet doctor
 // ---------------------------------------------------------------------------
 
-/// Public entry point — derives invariants dir from `$PWD/.lancet/invariants/`.
+/// Public entry point for LANCET runtime diagnostics.
 pub fn run_doctor(json: bool, enforce_profile: Option<String>) -> Result<()> {
     let project_root = std::env::current_dir().context("current working directory")?;
     let gate = enforce_profile
@@ -318,27 +318,9 @@ pub fn run_doctor(json: bool, enforce_profile: Option<String>) -> Result<()> {
     emit_doctor_result(&output, json)
 }
 
-/// Testable core — accepts an explicit invariants directory.
 #[cfg(test)]
-pub(crate) fn run_doctor_inner(invariants_dir: &Path, json: bool) -> Result<()> {
-    let project_root = invariants_dir
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or(invariants_dir);
-    let mut request = LancetDoctorRequest::new(project_root);
-    request.invariants_dir = Some(invariants_dir.to_path_buf());
-    let output = run_doctor_checks(request);
-    emit_doctor_result(&output, json)
-}
-
-#[cfg(test)]
-pub(crate) fn run_doctor_inner_for_project_root(
-    project_root: &Path,
-    invariants_dir: &Path,
-    json: bool,
-) -> Result<()> {
-    let mut request = LancetDoctorRequest::new(project_root);
-    request.invariants_dir = Some(invariants_dir.to_path_buf());
+pub(crate) fn run_doctor_inner_for_project_root(project_root: &Path, json: bool) -> Result<()> {
+    let request = LancetDoctorRequest::new(project_root);
     let output = run_doctor_checks(request);
     emit_doctor_result(&output, json)
 }
@@ -346,13 +328,11 @@ pub(crate) fn run_doctor_inner_for_project_root(
 #[cfg(test)]
 pub(crate) fn run_doctor_inner_with_probe(
     project_root: &Path,
-    invariants_dir: &Path,
     json: bool,
     host_probe: HostProbeReport,
     gate: Option<LancetDoctorGate>,
 ) -> Result<()> {
     let mut request = LancetDoctorRequest::new(project_root);
-    request.invariants_dir = Some(invariants_dir.to_path_buf());
     request.host_probe = Some(host_probe);
     request.gate = gate;
     let output = run_doctor_checks(request);
@@ -443,7 +423,6 @@ fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
     serde_json::json!({
         "ok": all_ok,
         "checks": checks,
-        "card_ids": &output.card_ids,
         "doctor_mode": if output.gate_profile.is_some() { "profile_gate" } else { "informational" },
         "gate_profile": &output.gate_profile,
         "host_probe": host_probe_json_value(&output.host_probe),
@@ -464,7 +443,6 @@ fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
 mod tests {
     use super::*;
     use clap::Parser;
-    use lancet_invariants::invariants::types::CardAnchor;
     use lancet_native::audit::{AuditOutcome, CallAuditMetadata};
     use lancet_native::{CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
@@ -659,9 +637,8 @@ mod tests {
             .expect("crates/")
             .parent()
             .expect("workspace root");
-        let invariants_dir = workspace_root.join(".lancet").join("invariants");
 
-        let result = run_doctor_inner_for_project_root(workspace_root, &invariants_dir, false);
+        let result = run_doctor_inner_for_project_root(workspace_root, false);
         assert!(
             result.is_ok(),
             "doctor should pass on repo root: {:?}",
@@ -670,75 +647,17 @@ mod tests {
     }
 
     #[test]
-    fn cep_doctor_reports_invariant_cards() {
+    fn cep_doctor_envelope_declare_smoke_succeeds() {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("crates/")
             .parent()
             .expect("workspace root");
-        let invariants_dir = workspace_root.join(".lancet").join("invariants");
-
-        let cards = lancet_invariants::invariants::loader::load_cards_from_dir(&invariants_dir)
-            .expect("cards should load without parse errors");
-
-        assert!(
-            cards.len() >= 2,
-            "expected at least 2 invariant cards, got {}",
-            cards.len()
-        );
-
-        // alpha-wire-freeze card
-        let wire_freeze = cards
-            .iter()
-            .find(|c| c.id == "ALPHA-WIRE-FREEZE")
-            .expect("ALPHA-WIRE-FREEZE card must exist");
-        assert!(
-            wire_freeze.title.contains("wire freeze") || wire_freeze.title.contains("Wire"),
-            "wire-freeze title: {}",
-            wire_freeze.title
-        );
-        assert!(
-            !wire_freeze.forbidden.is_empty(),
-            "wire-freeze card should have forbidden entries"
-        );
-        assert!(matches!(wire_freeze.anchor, CardAnchor::Glob(_)));
-
-        // no-legacy-public-expansion card
-        let legacy_card = cards
-            .iter()
-            .find(|c| c.id == "NO-LEGACY-EXPANSION")
-            .expect("NO-LEGACY-EXPANSION card must exist");
-        assert!(
-            !legacy_card.forbidden.is_empty(),
-            "no-legacy-expansion card should have forbidden entries"
-        );
-        assert!(matches!(legacy_card.anchor, CardAnchor::Glob(_)));
-    }
-
-    #[test]
-    fn cep_doctor_submit_intent_unknowns_zero() {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/")
-            .parent()
-            .expect("workspace root");
-        let result = lancet_api::run_submit_intent_smoke_for_project_root(workspace_root);
+        let result = lancet_api::run_envelope_declare_smoke_for_project_root(workspace_root);
         assert!(
             result.is_ok(),
-            "submit_intent smoke should succeed: {:?}",
+            "envelope declare smoke should succeed: {:?}",
             result
-        );
-    }
-
-    #[test]
-    fn cep_doctor_fails_on_broken_card() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("bad.toml"), "this is not valid toml {{{").unwrap();
-
-        let result = run_doctor_inner(dir.path(), false);
-        assert!(
-            result.is_err(),
-            "doctor should fail when invariants dir has an unparseable card"
         );
     }
 
@@ -810,7 +729,6 @@ mod tests {
     fn lancet_doctor_json_includes_all_host_probe_primitives() {
         let dir = TempDir::new().unwrap();
         let mut request = LancetDoctorRequest::new(dir.path());
-        request.invariants_dir = Some(dir.path().to_path_buf());
         request.host_probe = Some(mixed_probe_for_tests());
         let output = run_doctor_checks(request);
         let json = doctor_json_value(&output);
@@ -1435,13 +1353,8 @@ mod tests {
     #[test]
     fn cep_doctor_default_mode_is_informational_for_unavailable_boundaries() {
         let dir = TempDir::new().unwrap();
-        let result = run_doctor_inner_with_probe(
-            dir.path(),
-            dir.path(),
-            false,
-            unavailable_probe_for_tests(),
-            None,
-        );
+        let result =
+            run_doctor_inner_with_probe(dir.path(), false, unavailable_probe_for_tests(), None);
         assert!(
             result.is_ok(),
             "default doctor should report unavailable primitives without failing"
@@ -1452,7 +1365,6 @@ mod tests {
     fn cep_doctor_profile_gate_fails_for_missing_required_boundary() {
         let dir = TempDir::new().unwrap();
         let result = run_doctor_inner_with_probe(
-            dir.path(),
             dir.path(),
             false,
             unavailable_probe_for_tests(),
@@ -1471,7 +1383,6 @@ mod tests {
     fn cep_doctor_profile_gate_lists_exact_missing_boundary_reason() {
         let dir = TempDir::new().unwrap();
         let mut request = LancetDoctorRequest::new(dir.path());
-        request.invariants_dir = Some(dir.path().to_path_buf());
         request.host_probe = Some(unavailable_probe_for_tests());
         request.gate = Some(LancetDoctorGate {
             profile_label: "test-profile".into(),

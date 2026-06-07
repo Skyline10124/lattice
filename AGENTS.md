@@ -23,12 +23,11 @@ Layer 1:         lancet-catalog(->protocol)
 Layer 2:         lancet-dispatch(->protocol,catalog)
                  lancet-audit(->protocol,catalog)
                  lancet-authority(->protocol,catalog,llm)
-                 lancet-invariants(->protocol,catalog)
 Layer 2.5:       lancet-cep(->protocol,catalog,dispatch)
 Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
-                               authority,invariants,llm)
+                               authority,llm)
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
-                            authority,invariants,native)
+                            authority,native)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
 Layer 5:         lattice-cli(-> api + presentation dependencies)
 ```
@@ -43,7 +42,6 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 | `lancet-cep` | Public CEP facade over protocol/catalog/dispatch, plus catalog-derived `ToolDefinition`, `ToolExposure`, catalog-declared base-authority aggregation, and explicit `BaseAuthorityPlan` construction. No native execution, policy side effects, audit persistence, or LATTICE dependencies. |
 | `lancet-audit` | CEP audit persistence, query filters, stage/impact labels, provenance projection, and attestation persistence. |
 | `lancet-authority` | Policy semantics, capability matching, Guard L1 path/scope checks, active envelopes, effect ledger, and effect-region checks. |
-| `lancet-invariants` | Invariant card loading/indexing/review helpers and Guard L2 Rust AST checks. |
 | `lancet-native` | Production native handlers, server lifecycle, verify, edit/shell/web helpers, audit integration, and impact analysis. |
 | `lancet-api` | Unified LANCET public API. Composes the CEP runtime (`LancetRuntime`/`LancetServer`: server lifecycle, `CepClient`, audit, attestation, catalog-derived tool exposure) from the native crates, taking LANCET-native policy types. Independent of LATTICE session/agent/profile layers. |
 | `lattice-llm` | Provider adapters, SSE streaming, model routing, tool-call vocabulary, URL/DNS security, and logging. |

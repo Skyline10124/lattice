@@ -41,7 +41,7 @@ agent loop over `lancet-api`'s CEP runtime.
 - FIXED M-24-05: turn/LANCET runtime composition extracted into the new
   `lancet-api` crate. `cep.rs` is now only the LATTICE↔LANCET seam (profile→policy
   translation, `CepExecutorAdapter`, event mapping); `enabled_tools.rs` moved to
-  `lancet-api`. This crate no longer depends on `lancet-invariants` directly.
+  `lancet-api`.
 - FIXED H-06: `stream_turn` now streams live instead of replaying buffered
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.

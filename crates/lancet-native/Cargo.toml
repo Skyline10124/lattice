@@ -13,7 +13,6 @@ lancet-catalog = { workspace = true }
 lancet-dispatch = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
-lancet-invariants = { workspace = true }
 schemars = { workspace = true }
 blake3 = { workspace = true }
 futures = { workspace = true }

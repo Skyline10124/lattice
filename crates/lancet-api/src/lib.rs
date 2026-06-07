@@ -51,7 +51,7 @@ pub use audit::{
 };
 pub use config::{AuditBacking, LancetRuntimeConfig};
 pub use doctor::{
-    run_doctor_checks, run_submit_intent_smoke_for_project_root, LancetDoctorGate,
+    run_doctor_checks, run_envelope_declare_smoke_for_project_root, LancetDoctorGate,
     LancetDoctorOutput, LancetDoctorRequest,
 };
 pub use error::{LancetError, LancetResult};

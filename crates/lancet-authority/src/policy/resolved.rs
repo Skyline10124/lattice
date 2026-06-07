@@ -295,12 +295,9 @@ fn extract_observe_workspace_path(params: &serde_json::Value) -> Option<String> 
 }
 
 fn session_envelope_operation(
-    params: &serde_json::Value,
+    _params: &serde_json::Value,
 ) -> super::capability::SessionStateOperation {
-    match params.get("mode").and_then(|v| v.as_str()) {
-        Some("derive_intent") => super::capability::SessionStateOperation::SubmitIntent,
-        _ => super::capability::SessionStateOperation::EnvelopeDeclare,
-    }
+    super::capability::SessionStateOperation::EnvelopeDeclare
 }
 
 fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {

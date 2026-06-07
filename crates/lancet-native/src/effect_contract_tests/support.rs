@@ -208,7 +208,6 @@ pub fn build_test_context(
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
     };

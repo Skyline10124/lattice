@@ -13,5 +13,4 @@ pub mod hash;
 pub mod parser;
 pub mod types;
 
-pub use apply::apply_patch;
 pub use hash::content_hash;

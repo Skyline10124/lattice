@@ -34,11 +34,6 @@ async fn handle_envelope(
         EnvelopeParams::Declare(params) => handle_declare(params, ctx)
             .await
             .map(EnvelopeResult::Declare),
-        EnvelopeParams::DeriveIntent(params) => {
-            crate::handlers::submit_intent::handle_submit_intent(params, ctx)
-                .await
-                .map(EnvelopeResult::DeriveIntent)
-        }
     }
 }
 
@@ -306,7 +301,6 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                invariant_index: Arc::new(lancet_invariants::InvariantCardIndex::new(vec![])),
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
@@ -365,10 +359,8 @@ mod tests {
                 ctx,
             )
             .await?;
-        match serde_json::from_value(result).unwrap() {
-            EnvelopeResult::Declare(result) => Ok(result),
-            other => panic!("unexpected session.envelope result: {other:?}"),
-        }
+        let EnvelopeResult::Declare(result) = serde_json::from_value(result).unwrap();
+        Ok(result)
     }
 
     #[tokio::test]

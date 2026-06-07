@@ -607,10 +607,6 @@ pub(crate) fn build_production_turn_deps(
     let cep_mode = lancet
         .map(|c| c.mode.clone())
         .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
-    let invariants_dir = lancet
-        .and_then(|section| section.invariants.as_ref())
-        .and_then(|section| section.dir.as_deref())
-        .map(PathBuf::from);
     let audit = if in_memory_audit {
         AuditBacking::InMemory
     } else {
@@ -624,7 +620,6 @@ pub(crate) fn build_production_turn_deps(
         command_isolation,
         cep_mode,
         audit,
-        invariants_dir,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
     })
@@ -1096,9 +1091,9 @@ allowed_diagnostic_commands = [["echo"]]
                 reason: Some("external policy command timeout test".into()),
             }))
             .await
-            .map(|result| match result {
-                EnvelopeResult::Declare(result) => result,
-                EnvelopeResult::DeriveIntent(_) => panic!("unexpected derive_intent result"),
+            .map(|result| {
+                let EnvelopeResult::Declare(result) = result;
+                result
             })
             .expect("declare RunCommand envelope");
 

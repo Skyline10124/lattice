@@ -15,7 +15,6 @@ use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::policy::CepTurnContext;
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
-use lancet_invariants::InvariantCardIndex;
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     envelope::{BaseExecutionEnvelope, CepMode},
@@ -44,8 +43,6 @@ pub struct ServerRunConfig {
     pub cep_mode: CepMode,
     /// Independent command physical-boundary runtime configuration.
     pub command_isolation: CommandIsolationRuntimeConfig,
-    /// Invariant cards indexed for this turn/session.
-    pub invariant_index: Arc<InvariantCardIndex>,
 }
 
 impl ServerRunConfig {
@@ -70,7 +67,6 @@ impl ServerRunConfig {
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
             command_isolation: CommandIsolationRuntimeConfig::default(),
-            invariant_index: Arc::new(InvariantCardIndex::new(vec![])),
         }
     }
 }
@@ -125,7 +121,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         default_policy_hook,
         cep_mode,
         command_isolation,
-        invariant_index,
     } = config;
 
     let id = call.id();
@@ -166,7 +161,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         default_policy_hook: default_policy_hook.clone(),
         audit_context: Arc::clone(&audit_context),
         audit: Arc::clone(&audit),
-        invariant_index: Arc::clone(&invariant_index),
         cep_mode: cep_mode.clone(),
         command_isolation,
     };
