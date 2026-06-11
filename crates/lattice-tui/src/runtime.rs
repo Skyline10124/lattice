@@ -85,15 +85,10 @@ pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
         }
 
         // execute turn — errors go to stderr, we keep the REPL alive
-        if let Err(e) = execute_turn(
-            &options,
-            &session_id,
-            &active_agent,
-            &input,
-        )
-        .await
-        {
-            eprintln!("{} {e}", "error:".red());
+        if let Err(e) = execute_turn(&options, &session_id, &active_agent, &input).await {
+            // `{:#}` prints the full anyhow context chain (outer: inner: root cause)
+            // so the underlying cause is not swallowed by the outermost context.
+            eprintln!("{} {e:#}", "error:".red());
         }
 
         // ensure a clean line after turn output
@@ -160,7 +155,10 @@ async fn execute_turn(
                 writeln!(err, "  {} {name}", "·".dimmed())?;
             }
             TurnEvent::ToolCallFinished {
-                name, ok, output_len, ..
+                name,
+                ok,
+                output_len,
+                ..
             } => {
                 flush_mid_token(&mut out, &mut err, &mut tokens_ended_without_newline)?;
                 if ok {

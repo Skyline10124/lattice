@@ -85,7 +85,9 @@ async fn main() -> std::process::ExitCode {
     match run_commands(cli).await {
         Ok(exit_code) => exit_code,
         Err(e) => {
-            eprintln!("{}: {}", "error".red(), e);
+            // `{:#}` prints the full anyhow context chain (outer: inner: root cause)
+            // so the underlying cause is not swallowed by the outermost context.
+            eprintln!("{}: {:#}", "error".red(), e);
             std::process::ExitCode::from(1)
         }
     }

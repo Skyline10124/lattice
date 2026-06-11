@@ -241,7 +241,7 @@ async fn cmd_send_api(
     }) {
         Ok(session) => session,
         Err(error) => {
-            eprintln!("{}: {}", "error".red(), error);
+            eprintln!("{}: {:#}", "error".red(), error);
             return std::process::ExitCode::from(2);
         }
     };
@@ -249,7 +249,7 @@ async fn cmd_send_api(
     let loaded = match load_agent_checked(&session.active_agent_name) {
         Ok(loaded) => loaded,
         Err(error) => {
-            eprintln!("{}: {}", "error".red(), error);
+            eprintln!("{}: {:#}", "error".red(), error);
             return std::process::ExitCode::from(2);
         }
     };

@@ -446,7 +446,8 @@ pub async fn run_session_prompt(
     match run_inner(prompt, session_id, loaded_profile, verbose, json).await {
         Ok(exit_code) => exit_code,
         Err(error) => {
-            eprintln!("{}: {}", "error".red(), error);
+            // `{:#}` prints the full anyhow context chain (outer: inner: root cause).
+            eprintln!("{}: {:#}", "error".red(), error);
             std::process::ExitCode::from(2)
         }
     }
