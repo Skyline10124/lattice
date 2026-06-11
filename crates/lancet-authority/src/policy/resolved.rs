@@ -18,9 +18,10 @@ use lancet_protocol::policy::{
 };
 
 use super::capability::InvocationFacts;
-use super::command::{classify_command, CommandPolicy, EffectiveImpact};
+use super::command::{classify_command_line, CommandPolicy, EffectiveImpact};
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
+use super::shell_ast::{resolve_command_line, CommandLine};
 use super::BudgetLimits;
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
@@ -41,6 +42,9 @@ pub struct ResolvedCommand {
     pub env_keys: Vec<String>,
     pub declared_impact: Option<ImpactKind>,
     pub effective_impact: EffectiveImpact,
+    /// Expanded sub-command argvs when the invocation is a validated
+    /// inline-shell composite; empty for direct argv execution.
+    pub sub_argvs: Vec<Vec<String>>,
 }
 
 /// Resolved network facts for `fetch.web`.
@@ -199,14 +203,29 @@ impl PolicyResolver {
                     .unwrap_or_else(|| self.project_root.clone());
                 invocation_facts.cwd = Some(cwd.clone());
 
-                let effective_impact =
-                    match classify_command(&argv, declared_impact.clone(), &self.command) {
-                        Ok(impact) => impact,
-                        Err(err) => {
-                            command_error = Some(err);
-                            EffectiveImpact::Diagnostic
+                // Inline-shell carriers expand to sub-commands; expansion
+                // rejections defer like classification errors so the rest of
+                // the facts table is still populated.
+                let mut sub_argvs = Vec::new();
+                let effective_impact = match resolve_command_line(&argv, &self.command) {
+                    Ok(line) => {
+                        if let CommandLine::Shell(expansion) = &line {
+                            sub_argvs = expansion.sub_argvs.clone();
+                            invocation_facts.sub_argvs = expansion.sub_argvs.clone();
                         }
-                    };
+                        match classify_command_line(&line, declared_impact.clone(), &self.command) {
+                            Ok(impact) => impact,
+                            Err(err) => {
+                                command_error = Some(err);
+                                EffectiveImpact::Diagnostic
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        command_error = Some(err);
+                        EffectiveImpact::Diagnostic
+                    }
+                };
 
                 resolved_command = Some(ResolvedCommand {
                     argv,
@@ -214,6 +233,7 @@ impl PolicyResolver {
                     env_keys,
                     declared_impact,
                     effective_impact,
+                    sub_argvs,
                 });
             }
             "fetch.web" => {

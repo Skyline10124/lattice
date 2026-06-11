@@ -3001,3 +3001,134 @@ fn command_observation_metadata_is_derived_for_diagnostic() {
         .iter()
         .any(|effect| effect.as_str() == Some("workspace_mutation_diff")));
 }
+
+// ── Inline shell (AST-screened sh -c) integration ───────────────────────
+
+/// Test context whose command policy enables inline shell, denies only `rm`,
+/// and allowlists `tr` for diagnostics. Declares an active envelope granting
+/// RunCommand over the test commands (and the `sh` carrier, so rejections
+/// surface at the command-policy layer rather than as capability misses).
+/// Mutates both policy carriers (turn context and default policy hook) so
+/// handler and hook agree.
+async fn inline_shell_test_ctx(
+    root: &str,
+) -> (
+    HandlerContext,
+    mpsc::Receiver<lancet_protocol::ToolEvent>,
+    watch::Sender<bool>,
+) {
+    fn mutate(command: &mut lancet_authority::policy::command::CommandPolicy) {
+        command.allow_inline_shell = true;
+        command.denied_commands = vec![vec!["rm".into()]];
+        command.allowed_diagnostic_commands.push(vec!["tr".into()]);
+    }
+
+    let allowlist: Vec<String> = vec!["echo".into(), "tr".into(), "rm".into(), "sh".into()];
+    let (mut ctx, event_rx, cancel_tx) = test_ctx_with_run_command(root, allowlist).await;
+
+    let mut cep_policy = CepPolicyConfig::defaults_for_project_root(root);
+    mutate(&mut cep_policy.command);
+    ctx.cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
+
+    let mut hook_config =
+        lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+            std::path::PathBuf::from(root),
+        );
+    mutate(&mut hook_config.command);
+    let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+        hook_config,
+    ));
+    ctx.policy_hook = hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>;
+    ctx.default_policy_hook = Some(hook);
+
+    (ctx, event_rx, cancel_tx)
+}
+
+async fn dispatch_inline_shell(
+    root: &str,
+    ctx: HandlerContext,
+    script: &str,
+    declared_impact: Option<ImpactKind>,
+) -> Result<serde_json::Value, CepError> {
+    let registry = native_command_registry(root);
+    let params = RunParams {
+        argv: vec!["sh".into(), "-c".into(), script.into()],
+        cwd: None,
+        env: BTreeMap::new(),
+        timeout_ms: None,
+        declared_impact,
+    };
+    registry
+        .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+        .await
+}
+
+#[tokio::test]
+async fn inline_shell_pipeline_executes_via_canonical_reemission() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+    let (ctx, _events, _cancel) = inline_shell_test_ctx(&root).await;
+
+    let result = dispatch_inline_shell(&root, ctx, "echo abc | tr b x && echo done", None)
+        .await
+        .expect("diagnostic inline shell pipeline should execute");
+    let run: RunResult = serde_json::from_value(result).unwrap();
+    assert_eq!(run.exit_code, 0);
+    assert_eq!(run.stdout, "axc\ndone\n");
+}
+
+#[tokio::test]
+async fn inline_shell_dynamic_construct_fails_closed_with_reason() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+    let (ctx, _events, _cancel) = inline_shell_test_ctx(&root).await;
+
+    let err = dispatch_inline_shell(&root, ctx, "echo $(id)", None)
+        .await
+        .expect_err("command substitution must be rejected");
+    assert!(
+        err.message.contains("command substitution"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn inline_shell_denied_sub_command_rejects_whole_script() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+    let (ctx, _events, _cancel) = inline_shell_test_ctx(&root).await;
+
+    let err = dispatch_inline_shell(
+        &root,
+        ctx,
+        "echo a && rm -rf target",
+        Some(ImpactKind::WorkspaceMutation),
+    )
+    .await
+    .expect_err("denied sub-command must reject the whole script");
+    assert!(
+        err.message.to_lowercase().contains("denied"),
+        "unexpected message: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn inline_shell_disabled_default_policy_still_hard_denies_carrier() {
+    // Regression: with the default policy (inline shell off, `sh -c` in
+    // denied_commands) the carrier must keep failing exactly as before.
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path().to_string_lossy().to_string();
+    let (ctx, _events, _cancel) =
+        test_ctx_with_run_command(&root, vec!["echo".into(), "sh".into()]).await;
+
+    let err = dispatch_inline_shell(&root, ctx, "echo hi", Some(ImpactKind::CommandExecution))
+        .await
+        .expect_err("default policy must keep hard-denying sh -c");
+    assert!(
+        err.message.to_lowercase().contains("denied"),
+        "unexpected message: {}",
+        err.message
+    );
+}

@@ -176,6 +176,40 @@ pub fn normalize_write_path_pattern(pattern: &str) -> Result<WritePathPattern, C
     }
 }
 
+/// Pure lexical coverage check: does `pattern` cover `relative_path` under the
+/// same `ExactFile`/`DirectoryGlob` classification used by [`check_write_scope`],
+/// but without any filesystem access (no canonicalization, no symlink checks)?
+///
+/// Both inputs must be project-root-relative. This is the single source of
+/// truth for WritePath scope semantics shared by the capability matcher
+/// (pure, pre-filesystem) and Guard L1 (which additionally canonicalizes for
+/// symlink-escape safety). Keeping both layers on this function prevents the
+/// classification drift where one layer treats `crates/foo` as a directory
+/// prefix while the other treats it as an exact file.
+///
+/// Returns `Err` for malformed inputs (`..`, NUL, absolute, bad glob syntax),
+/// matching the rejection these would also receive at envelope-declare time.
+pub fn write_pattern_covers_relative(pattern: &str, relative_path: &str) -> Result<bool, CepError> {
+    if relative_path.contains('\0') {
+        return Err(guard_denied("target path contains NUL byte"));
+    }
+    if relative_path.contains("..") {
+        return Err(guard_denied(&format!(
+            "target path contains '..' traversal: '{relative_path}'"
+        )));
+    }
+    if Path::new(relative_path).is_absolute() {
+        return Err(guard_denied("target path must be project-root-relative"));
+    }
+    let target = normalize_lexical(relative_path)?;
+    Ok(match normalize_write_path_pattern(pattern)? {
+        // An empty `DirectoryGlob` base (from the `.` pattern) is a prefix of
+        // every path, so `.` covers the whole workspace.
+        WritePathPattern::ExactFile(expected) => target == expected,
+        WritePathPattern::DirectoryGlob(dir) => target == dir || target.starts_with(&dir),
+    })
+}
+
 /// Normalize a path lexically: resolve `.` components, reject `..` and NUL.
 fn normalize_lexical(path: &str) -> Result<PathBuf, CepError> {
     let mut result = PathBuf::new();
@@ -464,8 +498,10 @@ fn replan_required(target: &str, patterns: &[String]) -> CepError {
     CepError::new(
         CepErrorCode::ReplanRequired,
         format!(
-            "target '{}' is not within active WritePath scope: {:?}",
-            target, patterns
+            "target '{target}' is not within active WritePath scope: {patterns:?}. \
+             A WritePath pattern matches a directory only with a trailing '/**' \
+             (e.g. 'crates/foo/**'); a bare 'crates/foo' matches that exact path \
+             only. Re-declare the envelope with a pattern that covers '{target}'."
         ),
         CepErrorData::Guard(GuardErrorData {
             method: "guard.l1".into(),
@@ -707,6 +743,46 @@ mod guard_l1_tests {
             pattern,
             WritePathPattern::DirectoryGlob(PathBuf::from("src"))
         );
+    }
+
+    // --- write_pattern_covers_relative: shared lexical semantics ---
+
+    #[test]
+    fn covers_directory_glob_children_and_self() {
+        assert!(write_pattern_covers_relative("crates/foo/**", "crates/foo/src/x.rs").unwrap());
+        assert!(write_pattern_covers_relative("crates/foo/**", "crates/foo").unwrap());
+        // Component-wise, not string prefix: a sibling sharing a name prefix
+        // must not be covered.
+        assert!(!write_pattern_covers_relative("crates/foo/**", "crates/foobar/x.rs").unwrap());
+    }
+
+    #[test]
+    fn covers_single_component_directory() {
+        assert!(write_pattern_covers_relative("src", "src/main.rs").unwrap());
+        assert!(write_pattern_covers_relative(".", "anything/at/all.rs").unwrap());
+    }
+
+    #[test]
+    fn multi_component_no_extension_is_exact_file_not_directory() {
+        // Regression: `crates/lattice-agent` (a `/`-containing, extensionless
+        // pattern) is classified ExactFile. It must NOT cover child paths —
+        // this is exactly where the capability layer and Guard L1 used to
+        // disagree, producing declare-pass / use-time-out-of-scope churn.
+        assert!(
+            write_pattern_covers_relative("crates/lattice-agent", "crates/lattice-agent").unwrap()
+        );
+        assert!(!write_pattern_covers_relative(
+            "crates/lattice-agent",
+            "crates/lattice-agent/src/x.rs"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn covers_rejects_malformed_inputs() {
+        assert!(write_pattern_covers_relative("src/**", "../escape").is_err());
+        assert!(write_pattern_covers_relative("src/**", "/abs/path").is_err());
+        assert!(write_pattern_covers_relative("src/*.rs", "src/a.rs").is_err());
     }
 
     #[test]

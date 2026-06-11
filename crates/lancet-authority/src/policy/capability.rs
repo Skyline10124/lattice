@@ -105,6 +105,10 @@ pub struct InvocationFacts {
     pub normalized_path: Option<String>,
     /// Command argv (for RunCommand).
     pub argv: Option<Vec<String>>,
+    /// Expanded sub-command argvs for a validated inline-shell invocation.
+    /// When non-empty, RunCommand matching requires every sub-command to be
+    /// covered by the allowlist instead of the carrier `argv`.
+    pub sub_argvs: Vec<Vec<String>>,
     /// Command working directory.
     pub cwd: Option<std::path::PathBuf>,
     /// Environment variable keys supplied in the invocation.
@@ -307,7 +311,17 @@ fn check_pattern_coverage(
             }
         }
         Capability::RunCommand { argv_allowlist } => {
-            if let Some(argv) = &invocation.argv {
+            if !invocation.sub_argvs.is_empty() {
+                // Inline-shell composite: every expanded sub-command must be
+                // covered; the carrier argv itself is not what will run.
+                if invocation
+                    .sub_argvs
+                    .iter()
+                    .any(|sub_argv| !matches_argv_allowlist(argv_allowlist, sub_argv))
+                {
+                    return Some(CapabilityFailureReason::ArgvNotAllowed);
+                }
+            } else if let Some(argv) = &invocation.argv {
                 if !matches_argv_allowlist(argv_allowlist, argv) {
                     return Some(CapabilityFailureReason::ArgvNotAllowed);
                 }
@@ -429,86 +443,28 @@ fn check_read_path_pattern(pattern: &str, path: &str) -> Option<CapabilityFailur
 }
 
 /// Check a write path against a WritePath pattern.
-/// as read paths but also validates pattern syntax (no absolute, no ..).
+///
+/// Delegates the `ExactFile`/`DirectoryGlob` decision to
+/// [`crate::guard::write_pattern_covers_relative`] — the single source of
+/// truth shared with Guard L1 — so the capability layer and the mutation
+/// scope check can never disagree on whether a pattern covers a path. (The
+/// historical divergence: a bare directory-looking pattern like
+/// `crates/foo` was treated as a directory prefix here but an exact file by
+/// Guard L1, so a declare-time pass turned into a use-time out-of-scope.)
+///
+/// `..`/NUL are reported with the capability-specific `PathTraversalRejected`
+/// reason; all other classification failures collapse to `PathOutsidePattern`.
+/// Patterns the shared normalizer rejects (absolute, glob syntax) are already
+/// blocked at envelope-declare time, so reaching `Err` here is a not-covered
+/// fallback, not a live path.
 fn check_write_path_pattern(pattern: &str, path: &str) -> Option<CapabilityFailureReason> {
-    if path.contains('\0') {
+    if path.contains('\0') || path.contains("..") || pattern.contains("..") {
         return Some(CapabilityFailureReason::PathTraversalRejected);
     }
-
-    if path.contains("..") {
-        return Some(CapabilityFailureReason::PathTraversalRejected);
+    match crate::guard::write_pattern_covers_relative(pattern, path) {
+        Ok(true) => None,
+        Ok(false) | Err(_) => Some(CapabilityFailureReason::PathOutsidePattern),
     }
-
-    if pattern.contains("..") {
-        return Some(CapabilityFailureReason::PathTraversalRejected);
-    }
-
-    if Path::new(pattern).is_absolute() {
-        return Some(CapabilityFailureReason::PathTraversalRejected);
-    }
-
-    if path == pattern {
-        return None;
-    }
-
-    if pattern == "." {
-        return None;
-    }
-
-    // Normalize absolute pattern: if both pattern and path are absolute,
-    // check if the path starts with the pattern (directory containment).
-    if Path::new(pattern).is_absolute() && Path::new(path).is_absolute() {
-        if path == pattern {
-            return None;
-        }
-        if let Some(remainder) = path.strip_prefix(pattern) {
-            if remainder.is_empty() || remainder.starts_with('/') {
-                return None;
-            }
-        }
-        return Some(CapabilityFailureReason::PathOutsidePattern);
-    }
-
-    // If pattern is absolute but path is relative, check if path starts with
-    // the pattern's last component (handles project-root-relative paths).
-    if Path::new(pattern).is_absolute() && !Path::new(path).is_absolute() {
-        if let Some(last_component) = Path::new(pattern).file_name() {
-            let prefix = last_component.to_string_lossy();
-            if path.starts_with(prefix.as_ref()) {
-                let remainder = &path[prefix.len()..];
-                if remainder.is_empty() || remainder.starts_with('/') {
-                    return None;
-                }
-            }
-        }
-        return Some(CapabilityFailureReason::PathOutsidePattern);
-    }
-
-    if let Some(base) = pattern.strip_suffix("/**") {
-        if base.is_empty() {
-            return None;
-        }
-        if path == base {
-            return None;
-        }
-        let prefix = if base.ends_with('/') {
-            base.to_string()
-        } else {
-            format!("{}/", base)
-        };
-        if path.starts_with(&prefix) {
-            return None;
-        }
-        return Some(CapabilityFailureReason::PathOutsidePattern);
-    }
-
-    if let Some(remainder) = path.strip_prefix(pattern) {
-        if remainder.is_empty() || remainder.starts_with('/') {
-            return None;
-        }
-    }
-
-    Some(CapabilityFailureReason::PathOutsidePattern)
 }
 
 /// Check if argv matches any entry in the allowlist (prefix match).
@@ -839,6 +795,74 @@ mod tests {
         assert_eq!(
             result.action_required,
             Some(CapabilityActionRequired::ChangeCommand)
+        );
+    }
+
+    // ── Test 9b: RunCommand with inline-shell sub_argvs ──
+
+    #[test]
+    fn run_command_sub_argvs_all_matching_is_satisfied() {
+        let caps = vec![SourcedCapability {
+            capability: Capability::RunCommand {
+                argv_allowlist: vec!["cargo".into(), "echo".into()],
+            },
+            source: declared_source(),
+        }];
+        let invocation = InvocationFacts {
+            argv: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "cargo check && echo ok".into(),
+            ]),
+            sub_argvs: vec![
+                vec!["cargo".into(), "check".into()],
+                vec!["echo".into(), "ok".into()],
+            ],
+            ..Default::default()
+        };
+        let result = match_capability(
+            RequiredCapability::RunCommand,
+            &invocation,
+            &caps,
+            "exec.command_run",
+            &CapabilitySourcePolicy::default(),
+        );
+        assert_eq!(result.verdict, CapabilityMatchVerdict::Satisfied);
+    }
+
+    #[test]
+    fn run_command_sub_argvs_any_unmatched_is_pattern_rejected() {
+        // The carrier argv itself matching the allowlist must not mask an
+        // uncovered sub-command.
+        let caps = vec![SourcedCapability {
+            capability: Capability::RunCommand {
+                argv_allowlist: vec!["cargo".into(), "sh".into()],
+            },
+            source: declared_source(),
+        }];
+        let invocation = InvocationFacts {
+            argv: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "cargo check && curl example.com".into(),
+            ]),
+            sub_argvs: vec![
+                vec!["cargo".into(), "check".into()],
+                vec!["curl".into(), "example.com".into()],
+            ],
+            ..Default::default()
+        };
+        let result = match_capability(
+            RequiredCapability::RunCommand,
+            &invocation,
+            &caps,
+            "exec.command_run",
+            &CapabilitySourcePolicy::default(),
+        );
+        assert_eq!(result.verdict, CapabilityMatchVerdict::PatternRejected);
+        assert_eq!(
+            result.failure_reason,
+            Some(CapabilityFailureReason::ArgvNotAllowed)
         );
     }
 

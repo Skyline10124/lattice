@@ -498,6 +498,12 @@ fn trusted_helper(paths: &'static [&'static str]) -> Option<&'static str> {
     paths.iter().copied().find(|path| Path::new(path).is_file())
 }
 
+/// Absolute path of the trusted POSIX shell used to run canonical
+/// re-emissions of validated inline-shell expansions.
+pub(crate) fn trusted_sh_path() -> Option<&'static str> {
+    trusted_helper(TRUSTED_SH_PATHS)
+}
+
 fn missing_trusted_helper(label: &str, helper: &str) -> ProbeOutcome {
     ProbeOutcome::new(
         HostProbeStatus::Unknown,

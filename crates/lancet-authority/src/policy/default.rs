@@ -172,6 +172,15 @@ impl PolicyConfig {
             if let Some(v) = cmd.allow_inline_shell {
                 self.command.allow_inline_shell = v;
             }
+            if let Some(v) = cmd.inline_shell_max_script_bytes {
+                self.command.inline_shell_max_script_bytes = v;
+            }
+            if let Some(v) = cmd.inline_shell_max_commands {
+                self.command.inline_shell_max_commands = v;
+            }
+            if let Some(v) = cmd.inline_shell_max_words_per_command {
+                self.command.inline_shell_max_words_per_command = v;
+            }
             if let Some(v) = &cmd.allowed_diagnostic_commands {
                 self.command.allowed_diagnostic_commands = v.clone();
             }
@@ -314,6 +323,9 @@ pub struct ExternalCommandPolicy {
     pub max_timeout_ms: Option<u64>,
     pub max_output_bytes: Option<usize>,
     pub allow_inline_shell: Option<bool>,
+    pub inline_shell_max_script_bytes: Option<usize>,
+    pub inline_shell_max_commands: Option<usize>,
+    pub inline_shell_max_words_per_command: Option<usize>,
     pub allowed_diagnostic_commands: Option<Vec<Vec<String>>>,
     pub denied_commands: Option<Vec<Vec<String>>>,
     pub allowed_env: Option<Vec<String>>,
@@ -437,6 +449,9 @@ pub struct PolicyEvidence {
     pub network_host: Option<String>,
     pub budget_remaining: Option<u64>,
     pub resolved_paths: Vec<String>,
+    /// Sub-command argvs of a validated inline-shell expansion, when the
+    /// invocation was an `exec.command_run` shell carrier.
+    pub shell_expansion: Option<Vec<Vec<String>>>,
 }
 
 // ── Default policy hook ────────────────────────────────────────────────
@@ -570,8 +585,10 @@ impl DefaultPolicyHook {
                 ),
             };
             let message = format!(
-                "capability match failed for {}: {:?}",
-                resolved.method, cap_match.verdict
+                "capability match failed for {}: {:?}{}",
+                resolved.method,
+                cap_match.verdict,
+                capability_failure_hint(&cap_match)
             );
             return RichPolicyOutcome {
                 decision: PolicyDecision::Denied {
@@ -718,6 +735,11 @@ impl DefaultPolicyHook {
                         .saturating_sub(budget.turn_observation_bytes_used),
                 ),
                 resolved_paths,
+                shell_expansion: resolved
+                    .resolved_command
+                    .as_ref()
+                    .filter(|c| !c.sub_argvs.is_empty())
+                    .map(|c| c.sub_argvs.clone()),
             },
         }
     }
@@ -727,6 +749,41 @@ impl PolicyHook for DefaultPolicyHook {
     fn decide(&self, input: &PolicyInput) -> PolicyDecision {
         self.decide_with_evidence(input).decision
     }
+}
+
+/// Actionable hint appended to a capability-failure message, telling the
+/// agent how to fix its envelope instead of leaving it to guess (the churn
+/// observed in practice: re-declaring WritePath patterns by trial and error).
+fn capability_failure_hint(cap_match: &CapabilityMatch) -> String {
+    use super::capability::{CapabilityFailureReason as R, CapabilityMatchVerdict as V};
+    let hint = match (&cap_match.verdict, &cap_match.failure_reason) {
+        (V::NoMatchingCapability, _) => {
+            " — declare an ExecutionEnvelope granting the required capability before this call."
+        }
+        (V::PatternRejected, Some(R::PathOutsidePattern)) => {
+            " — the target is outside the declared WritePath scope. A pattern matches a \
+             directory only with a trailing '/**' (e.g. 'crates/foo/**'); a bare 'crates/foo' \
+             matches that exact path only. Re-declare with a covering pattern."
+        }
+        (V::PatternRejected, Some(R::ArgvNotAllowed)) => {
+            " — the command argv is not covered by any RunCommand allowlist entry (for an \
+             inline shell, every sub-command must be covered). Re-declare with a matching \
+             argv prefix."
+        }
+        (V::PatternRejected, Some(R::HostNotAllowed)) => {
+            " — the URL host is not in the declared FetchUrl allowlist. Re-declare with the host."
+        }
+        (V::PatternRejected, Some(R::PathTraversalRejected | R::GlobEscapeRejected)) => {
+            " — the path or pattern is malformed ('..', NUL, or unsupported glob). Use a \
+             project-root-relative path and a 'dir/**' or exact-file pattern."
+        }
+        (V::SourceNotAllowed, _) => {
+            " — a matching capability exists but its source is not allowed for this method; \
+             declare it explicitly in an ExecutionEnvelope."
+        }
+        _ => "",
+    };
+    hint.to_string()
 }
 
 fn map_cap_action(action: super::capability::CapabilityActionRequired) -> PolicyActionRequired {
@@ -1108,5 +1165,37 @@ max_grep_matches = 500
         assert!(external.network.is_some());
         assert!(external.budget.is_some());
         assert!(external.observation.is_some());
+    }
+
+    #[test]
+    fn write_path_pattern_rejection_hint_points_to_glob_suffix() {
+        use super::super::capability::{CapabilityFailureReason, CapabilityMatchVerdict};
+        let cap_match = CapabilityMatch {
+            required: lancet_catalog::method::RequiredCapability::WritePath,
+            matched: None,
+            source_allowed: false,
+            verdict: CapabilityMatchVerdict::PatternRejected,
+            failure_reason: Some(CapabilityFailureReason::PathOutsidePattern),
+            action_required: None,
+        };
+        let hint = capability_failure_hint(&cap_match);
+        assert!(
+            hint.contains("/**"),
+            "hint should teach the directory glob form: {hint}"
+        );
+    }
+
+    #[test]
+    fn satisfied_match_has_no_hint() {
+        use super::super::capability::CapabilityMatchVerdict;
+        let cap_match = CapabilityMatch {
+            required: lancet_catalog::method::RequiredCapability::WritePath,
+            matched: None,
+            source_allowed: true,
+            verdict: CapabilityMatchVerdict::Satisfied,
+            failure_reason: None,
+            action_required: None,
+        };
+        assert!(capability_failure_hint(&cap_match).is_empty());
     }
 }

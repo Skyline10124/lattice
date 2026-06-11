@@ -11,6 +11,7 @@ lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lattice-llm = { workspace = true }
 blake3 = { workspace = true }
+brush-parser = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

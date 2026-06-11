@@ -324,6 +324,15 @@ fn command_policy_from_profile(lancet: &LancetSection) -> CommandPolicy {
             allow_inline_shell: section
                 .allow_inline_shell
                 .unwrap_or(defaults.allow_inline_shell),
+            inline_shell_max_script_bytes: section
+                .inline_shell_max_script_bytes
+                .unwrap_or(defaults.inline_shell_max_script_bytes),
+            inline_shell_max_commands: section
+                .inline_shell_max_commands
+                .unwrap_or(defaults.inline_shell_max_commands),
+            inline_shell_max_words_per_command: section
+                .inline_shell_max_words_per_command
+                .unwrap_or(defaults.inline_shell_max_words_per_command),
             allowed_diagnostic_commands: section
                 .allowed_diagnostic_commands
                 .clone()
@@ -885,6 +894,9 @@ mod cep_context_profile_policy {
                 max_timeout_ms: Some(60_000),
                 max_output_bytes: Some(50_000),
                 allow_inline_shell: Some(true),
+                inline_shell_max_script_bytes: Some(2_048),
+                inline_shell_max_commands: Some(8),
+                inline_shell_max_words_per_command: Some(32),
                 allowed_diagnostic_commands: Some(vec![vec!["mytool".into(), "info".into()]]),
                 denied_commands: Some(vec![vec!["rm".into(), "-rf".into()]]),
                 allowed_env: Some(vec!["MY_VAR".into()]),
@@ -897,6 +909,9 @@ mod cep_context_profile_policy {
         assert_eq!(policy.max_timeout_ms, 60_000);
         assert_eq!(policy.max_output_bytes, 50_000);
         assert!(policy.allow_inline_shell);
+        assert_eq!(policy.inline_shell_max_script_bytes, 2_048);
+        assert_eq!(policy.inline_shell_max_commands, 8);
+        assert_eq!(policy.inline_shell_max_words_per_command, 32);
         assert_eq!(
             policy.allowed_diagnostic_commands,
             vec![vec!["mytool".to_string(), "info".to_string()]]
@@ -926,6 +941,18 @@ mod cep_context_profile_policy {
         assert_eq!(policy.default_timeout_ms, 10_000);
         assert_eq!(policy.max_timeout_ms, defaults.max_timeout_ms);
         assert_eq!(policy.allow_inline_shell, defaults.allow_inline_shell);
+        assert_eq!(
+            policy.inline_shell_max_script_bytes,
+            defaults.inline_shell_max_script_bytes
+        );
+        assert_eq!(
+            policy.inline_shell_max_commands,
+            defaults.inline_shell_max_commands
+        );
+        assert_eq!(
+            policy.inline_shell_max_words_per_command,
+            defaults.inline_shell_max_words_per_command
+        );
         assert_eq!(
             policy.allowed_diagnostic_commands,
             defaults.allowed_diagnostic_commands

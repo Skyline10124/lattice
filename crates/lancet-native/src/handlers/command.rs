@@ -50,9 +50,10 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::envelope_store::EnvelopeRecord;
 use lancet_authority::policy::command::{
-    build_allowed_params_env, build_effective_env, classify_command, validate_timeout,
+    build_allowed_params_env, build_effective_env, classify_command_line, validate_timeout,
     EffectiveImpact,
 };
+use lancet_authority::policy::shell_ast::{resolve_command_line, CommandLine};
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::CepMethod;
@@ -88,8 +89,11 @@ async fn handle_run_as(
 
     let policy = ctx.cep_context.policy.command.clone();
 
-    // 3. Classify command
-    let effective_impact = classify_command(&params.argv, params.declared_impact.clone(), &policy)?;
+    // 3. Resolve inline shell (if any) and classify. A validated shell
+    // carrier classifies per expanded sub-command, folded conservatively.
+    let command_line = resolve_command_line(&params.argv, &policy)?;
+    let effective_impact =
+        classify_command_line(&command_line, params.declared_impact.clone(), &policy)?;
 
     // 4. HardDenied -> return GuardDenied error
     if effective_impact == EffectiveImpact::HardDenied {
@@ -157,8 +161,18 @@ async fn handle_run_as(
                         Retriability::Permanent,
                     ));
                 }
-                // Check argv against allowlist
-                if !has_run_command_capability(&record.envelope.capabilities, &params.argv) {
+                // Check argv against allowlist. For an inline-shell composite
+                // every expanded sub-command must be covered; the carrier
+                // argv itself is not what will run.
+                let allowlist_covered = match &command_line {
+                    CommandLine::Shell(expansion) => expansion.sub_argvs.iter().all(|sub_argv| {
+                        has_run_command_capability(&record.envelope.capabilities, sub_argv)
+                    }),
+                    CommandLine::Direct(argv) => {
+                        has_run_command_capability(&record.envelope.capabilities, argv)
+                    }
+                };
+                if !allowlist_covered {
                     record_command_preflight(
                         &ctx,
                         method,
@@ -263,9 +277,16 @@ async fn handle_run_as(
             .iter()
             .any(|cap| matches!(cap, Capability::RunCommand { .. }))
     });
-    let argv_allowlist_matched = active_record.as_ref().is_some_and(|record| {
-        has_run_command_capability(&record.envelope.capabilities, &params.argv)
-    });
+    let argv_allowlist_matched = active_record
+        .as_ref()
+        .is_some_and(|record| match &command_line {
+            CommandLine::Shell(expansion) => expansion.sub_argvs.iter().all(|sub_argv| {
+                has_run_command_capability(&record.envelope.capabilities, sub_argv)
+            }),
+            CommandLine::Direct(argv) => {
+                has_run_command_capability(&record.envelope.capabilities, argv)
+            }
+        });
     record_command_preflight(
         &ctx,
         method,
@@ -277,6 +298,37 @@ async fn handle_run_as(
         argv_allowlist_matched,
         false,
     );
+
+    // 5c. A validated inline-shell expansion executes as its canonical
+    // re-emission under the pinned trusted shell. The preflight above keeps
+    // the original carrier argv for audit; everything below (supervisor
+    // plan, overlay routing, fallback) executes the synthesized argv.
+    let mut params = params;
+    if let CommandLine::Shell(expansion) = &command_line {
+        let shell = crate::enforcement::isolation::trusted_sh_path().ok_or_else(|| {
+            CepError::new(
+                CepErrorCode::ExecutionFailed,
+                "inline shell expansion accepted but no trusted shell found at \
+                 /usr/bin/sh or /bin/sh",
+                CepErrorData::Guard(GuardErrorData {
+                    method: method.into(),
+                    reason: "InlineShellRejected: trusted shell unavailable".into(),
+                }),
+                Retriability::Permanent,
+            )
+        })?;
+        tracing::info!(
+            target: "lancet::command",
+            sub_commands = ?expansion.sub_argvs,
+            canonical = %expansion.canonical_script,
+            "inline shell expansion accepted"
+        );
+        params.argv = vec![
+            shell.to_string(),
+            "-c".to_string(),
+            expansion.canonical_script.clone(),
+        ];
+    }
 
     // 6. Diagnostic: no envelope required, but still enforce policy
 

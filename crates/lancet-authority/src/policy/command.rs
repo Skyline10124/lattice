@@ -34,6 +34,15 @@ pub struct CommandPolicy {
     pub max_output_bytes: usize,
     /// Whether inline shell invocations (sh -c, bash -c, etc.) are allowed.
     pub allow_inline_shell: bool,
+    /// Maximum accepted inline-shell script length in bytes. Clamped to a
+    /// hard ceiling in the shell AST screen.
+    pub inline_shell_max_script_bytes: usize,
+    /// Maximum number of simple commands in one inline-shell script.
+    /// Clamped to a hard ceiling in the shell AST screen.
+    pub inline_shell_max_commands: usize,
+    /// Maximum number of words per inline-shell simple command. Clamped to
+    /// a hard ceiling in the shell AST screen.
+    pub inline_shell_max_words_per_command: usize,
     /// Commands classified as diagnostic (read-only). Token-prefix matched.
     pub allowed_diagnostic_commands: Vec<Vec<String>>,
     /// Commands that are always denied. Token-prefix matched with highest precedence.
@@ -52,6 +61,9 @@ impl CommandPolicy {
             max_timeout_ms: 300_000,
             max_output_bytes: 200_000,
             allow_inline_shell: false,
+            inline_shell_max_script_bytes: 4096,
+            inline_shell_max_commands: 16,
+            inline_shell_max_words_per_command: 64,
             allowed_diagnostic_commands: vec![
                 vec!["cargo".into(), "test".into()],
                 vec!["cargo".into(), "check".into()],
@@ -152,6 +164,47 @@ pub fn classify_command(
         Some(ImpactKind::CommandExecution) => Err(impact_mismatch(argv)),
         Some(_) => Err(impact_mismatch(argv)),
         None => Err(impact_required(argv)),
+    }
+}
+
+/// Whether argv matches the policy's denied-command prefix list.
+///
+/// Exposed so inline-shell resolution can honor operator denial of the
+/// carrier itself before any expansion happens.
+pub(crate) fn command_matches_denied(argv: &[String], policy: &CommandPolicy) -> bool {
+    matches_prefix(argv, &policy.denied_commands)
+}
+
+/// Classify a resolved command line.
+///
+/// `Direct` argvs go through [`classify_command`] unchanged. Validated
+/// inline-shell expansions are classified per sub-command and folded to the
+/// most conservative result: any hard-denied sub-command denies the whole
+/// composite, any `WorkspaceMutation` sub-command escalates the composite,
+/// and classification errors (e.g. an unknown sub-command without a
+/// sufficient `declared_impact`) propagate as-is.
+pub fn classify_command_line(
+    line: &super::shell_ast::CommandLine,
+    declared_impact: Option<ImpactKind>,
+    policy: &CommandPolicy,
+) -> Result<EffectiveImpact, CepError> {
+    match line {
+        super::shell_ast::CommandLine::Direct(argv) => {
+            classify_command(argv, declared_impact, policy)
+        }
+        super::shell_ast::CommandLine::Shell(expansion) => {
+            let mut effective = EffectiveImpact::Diagnostic;
+            for sub_argv in &expansion.sub_argvs {
+                match classify_command(sub_argv, declared_impact.clone(), policy)? {
+                    EffectiveImpact::HardDenied => return Ok(EffectiveImpact::HardDenied),
+                    EffectiveImpact::WorkspaceMutation => {
+                        effective = EffectiveImpact::WorkspaceMutation;
+                    }
+                    EffectiveImpact::Diagnostic => {}
+                }
+            }
+            Ok(effective)
+        }
     }
 }
 
@@ -265,8 +318,12 @@ fn impact_required(argv: &[String]) -> CepError {
     CepError::new(
         CepErrorCode::GuardDenied,
         format!(
-            "Missing declared_impact for unknown command '{cmd}'. \
-             Commands not in the diagnostic allowlist must declare their impact."
+            "Missing declared_impact for unknown command '{cmd}'. If '{cmd}' is \
+             read-only, add its prefix to the profile's allowed_diagnostic_commands \
+             so it is classified as diagnostic; if it mutates the workspace, declare \
+             workspace_mutation with an active envelope (RunCommand + any WritePath \
+             scope). Do not declare command_execution to make a mutating command look \
+             read-only — policy rejects that."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
             method: "exec.command_run".into(),
@@ -281,8 +338,11 @@ fn impact_mismatch(argv: &[String]) -> CepError {
     CepError::new(
         CepErrorCode::GuardDenied,
         format!(
-            "declared_impact=CommandExecution is too weak for unknown command '{cmd}'. \
-             Declare WorkspaceMutation or use a diagnostic allowlist command."
+            "declared_impact=command_execution is too weak for unknown command '{cmd}'. \
+             command_execution cannot be used to assert an unknown command is read-only. \
+             If '{cmd}' is genuinely read-only, add its prefix to the profile's \
+             allowed_diagnostic_commands; otherwise declare workspace_mutation with an \
+             active envelope (RunCommand + any WritePath scope)."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
             method: "exec.command_run".into(),
@@ -324,9 +384,94 @@ fn timeout_exceeded(requested: u64, max: u64) -> CepError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::shell_ast::{resolve_command_line, CommandLine};
 
     fn default_policy() -> CommandPolicy {
         CommandPolicy::defaults()
+    }
+
+    fn inline_shell_policy() -> CommandPolicy {
+        let mut policy = CommandPolicy::defaults();
+        policy.allow_inline_shell = true;
+        policy.denied_commands = vec![vec!["rm".into()]];
+        policy
+    }
+
+    fn shell_line(script: &str, policy: &CommandPolicy) -> CommandLine {
+        let argv: Vec<String> = vec!["sh".into(), "-c".into(), script.into()];
+        resolve_command_line(&argv, policy).unwrap()
+    }
+
+    // --- classify_command_line composite folding ---
+
+    #[test]
+    fn command_line_all_diagnostic_folds_to_diagnostic() {
+        let policy = inline_shell_policy();
+        let line = shell_line("cargo check && cargo test; echo done", &policy);
+        let result = classify_command_line(&line, None, &policy).unwrap();
+        assert_eq!(result, EffectiveImpact::Diagnostic);
+    }
+
+    #[test]
+    fn command_line_unknown_sub_command_with_declared_mutation_escalates() {
+        let policy = inline_shell_policy();
+        let line = shell_line("cargo check && touch marker", &policy);
+        let result =
+            classify_command_line(&line, Some(ImpactKind::WorkspaceMutation), &policy).unwrap();
+        assert_eq!(result, EffectiveImpact::WorkspaceMutation);
+    }
+
+    #[test]
+    fn command_line_unknown_sub_command_without_impact_errors() {
+        let policy = inline_shell_policy();
+        let line = shell_line("cargo check && touch marker", &policy);
+        let err = classify_command_line(&line, None, &policy).unwrap_err();
+        assert!(err.message.contains("touch"));
+    }
+
+    #[test]
+    fn command_line_denied_sub_command_hard_denies_composite() {
+        let policy = inline_shell_policy();
+        let line = shell_line("echo a && rm -rf target", &policy);
+        let result =
+            classify_command_line(&line, Some(ImpactKind::WorkspaceMutation), &policy).unwrap();
+        assert_eq!(result, EffectiveImpact::HardDenied);
+    }
+
+    #[test]
+    fn command_line_nested_shell_sub_command_hard_denies() {
+        let policy = inline_shell_policy();
+        let line = shell_line("echo a && sh -c 'echo b'", &policy);
+        let result = classify_command_line(&line, None, &policy).unwrap();
+        assert_eq!(result, EffectiveImpact::HardDenied);
+    }
+
+    #[test]
+    fn command_line_denied_carrier_stays_hard_denied_regardless_of_inline_shell() {
+        // Default policy denies `sh -c` and disables inline shell; both
+        // settings independently keep the carrier on the direct path.
+        for policy in [default_policy(), {
+            let mut p = default_policy();
+            p.allow_inline_shell = true;
+            p
+        }] {
+            let argv: Vec<String> = vec!["sh".into(), "-c".into(), "echo hi".into()];
+            let line = resolve_command_line(&argv, &policy).unwrap();
+            assert!(matches!(line, CommandLine::Direct(_)));
+            let result = classify_command_line(&line, None, &policy).unwrap();
+            assert_eq!(result, EffectiveImpact::HardDenied);
+        }
+    }
+
+    #[test]
+    fn command_line_direct_matches_classify_command() {
+        let policy = default_policy();
+        let argv: Vec<String> = vec!["cargo".into(), "test".into()];
+        let line = resolve_command_line(&argv, &policy).unwrap();
+        assert_eq!(
+            classify_command_line(&line, None, &policy).unwrap(),
+            classify_command(&argv, None, &policy).unwrap()
+        );
     }
 
     // --- Classification tests ---
@@ -638,6 +783,26 @@ mod tests {
         let policy = default_policy();
         let result = validate_timeout(Some(300_000), &policy).unwrap();
         assert_eq!(result, 300_000);
+    }
+
+    // --- Rejection messages point to a concrete fix ---
+
+    #[test]
+    fn unknown_command_errors_point_to_diagnostic_allowlist() {
+        let policy = default_policy();
+        let argv = vec!["jq".into(), ".".into()];
+
+        let required = classify_command(&argv, None, &policy).unwrap_err();
+        assert!(required.message.contains("allowed_diagnostic_commands"));
+
+        let mismatch =
+            classify_command(&argv, Some(ImpactKind::CommandExecution), &policy).unwrap_err();
+        assert!(mismatch.message.contains("allowed_diagnostic_commands"));
+        assert!(mismatch.message.contains("workspace_mutation"));
+        // Must not advise asserting read-only via command_execution.
+        assert!(mismatch
+            .message
+            .contains("cannot be used to assert an unknown command is read-only"));
     }
 
     // --- EffectiveImpact variants ---

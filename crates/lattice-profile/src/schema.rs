@@ -103,6 +103,12 @@ pub struct LancetCommandSection {
     #[serde(default)]
     pub allow_inline_shell: Option<bool>,
     #[serde(default)]
+    pub inline_shell_max_script_bytes: Option<usize>,
+    #[serde(default)]
+    pub inline_shell_max_commands: Option<usize>,
+    #[serde(default)]
+    pub inline_shell_max_words_per_command: Option<usize>,
+    #[serde(default)]
     pub allowed_diagnostic_commands: Option<Vec<Vec<String>>>,
     #[serde(default)]
     pub denied_commands: Option<Vec<Vec<String>>>,
@@ -1020,6 +1026,9 @@ default_timeout_ms = 60000
 max_timeout_ms = 180000
 max_output_bytes = 100000
 allow_inline_shell = true
+inline_shell_max_script_bytes = 2048
+inline_shell_max_commands = 8
+inline_shell_max_words_per_command = 32
 allowed_diagnostic_commands = [["cargo", "test"], ["git", "diff"]]
 denied_commands = [["rm", "-rf"]]
 allowed_env = ["RUST_LOG"]
@@ -1033,6 +1042,9 @@ inherited_env = ["PATH", "HOME"]
         assert_eq!(cmd.max_timeout_ms, Some(180000));
         assert_eq!(cmd.max_output_bytes, Some(100000));
         assert_eq!(cmd.allow_inline_shell, Some(true));
+        assert_eq!(cmd.inline_shell_max_script_bytes, Some(2048));
+        assert_eq!(cmd.inline_shell_max_commands, Some(8));
+        assert_eq!(cmd.inline_shell_max_words_per_command, Some(32));
         assert_eq!(
             cmd.allowed_diagnostic_commands.as_ref().unwrap(),
             &vec![

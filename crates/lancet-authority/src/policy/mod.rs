@@ -10,6 +10,7 @@ pub mod default;
 pub mod network;
 pub mod observation;
 pub mod resolved;
+pub mod shell_ast;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -19,11 +20,13 @@ pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
 pub use command::{
-    build_effective_env, classify_command, validate_timeout, CommandPolicy, EffectiveImpact,
+    build_effective_env, classify_command, classify_command_line, validate_timeout, CommandPolicy,
+    EffectiveImpact,
 };
 use lancet_protocol::envelope::ImpactKind;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
+pub use shell_ast::{resolve_command_line, CommandLine, ShellExpansion};
 
 /// Immutable CEP policy limits and roots assembled once per turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
