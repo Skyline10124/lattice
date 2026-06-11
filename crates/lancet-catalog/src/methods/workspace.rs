@@ -159,7 +159,7 @@ pub struct CreateResult {
 
 impl CepMethod for Create {
     const NAME: &'static str = "mutate.create";
-    const DESCRIPTION: &'static str = "Create a new file under the declared workspace scope. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist. Directory creation is audited and bounded by the active WritePath envelope.";
+    const DESCRIPTION: &'static str = "Create a new file under the declared workspace scope. Requires an active envelope granting WritePath that covers this path — declare it with session.envelope first, using a 'dir/**' pattern to cover a directory. The target file must not already exist. Set create_parents=true to create missing parent directories required for path; otherwise parent directories must already exist. Directory creation is audited and bounded by the active WritePath envelope.";
     type Params = CreateParams;
     type Result = CreateResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -218,7 +218,7 @@ pub struct EditResult {
 
 impl CepMethod for Edit {
     const NAME: &'static str = "mutate.edit";
-    const DESCRIPTION: &'static str = "Edit an existing file with semantic text operations. Provide the path, the observe.workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate.edit edits array. LANCET computes hashline anchors internally. This method never deletes files.";
+    const DESCRIPTION: &'static str = "Edit an existing file with semantic text operations. Requires an active envelope granting WritePath that covers this path — declare it with session.envelope first, using a 'dir/**' pattern to cover a directory (a pattern without /** matches only one exact file). Provide the path, the observe.workspace content_hash as expected_hash, and an edits array where every operation object includes op plus its required fields: replace_text uses old/new, insert_before and insert_after use anchor/content. Put multiple changes to the same file in one mutate.edit edits array. LANCET computes hashline anchors internally. This method never deletes files.";
     type Params = EditParams;
     type Result = EditResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -271,7 +271,7 @@ pub struct BatchResult {
 
 impl CepMethod for Batch {
     const NAME: &'static str = "mutate.batch";
-    const DESCRIPTION: &'static str = "Apply a small multi-file workspace mutation as one LANCET operation. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Prefer mutate.create one file at a time for new source files or large content payloads. Use at most one operation per target path; put multiple edits to the same file inside one edit_file edits array. create_file supports create_parents=true for missing parent directories; otherwise parent directories must already exist. Edit operations use expected_hash and runtime-computed hashline anchors.";
+    const DESCRIPTION: &'static str = "Apply a small multi-file workspace mutation as one LANCET operation. Every target path must be covered by the active envelope's WritePath scope — declare it with session.envelope first, using 'dir/**' patterns to cover directories. Supported operations are create_file and edit_file only; file deletion is intentionally unavailable. Prefer mutate.create one file at a time for new source files or large content payloads. Use at most one operation per target path; put multiple edits to the same file inside one edit_file edits array. create_file supports create_parents=true for missing parent directories; otherwise parent directories must already exist. Edit operations use expected_hash and runtime-computed hashline anchors.";
     type Params = BatchParams;
     type Result = BatchResult;
     const IMPACT: ImpactKind = ImpactKind::WorkspaceMutation;
@@ -358,5 +358,22 @@ mod tests {
         assert!(Batch::DESCRIPTION.contains("new source files"));
         assert!(Batch::DESCRIPTION.contains("at most one operation per target path"));
         assert!(Edit::DESCRIPTION.contains("every operation object includes op"));
+    }
+
+    #[test]
+    fn mutation_descriptions_point_to_envelope_declaration() {
+        // Each mutating method must tell the agent to declare a covering
+        // WritePath envelope first and to use 'dir/**' for directories,
+        // so it does not discover the requirement by trial and error.
+        for desc in [Create::DESCRIPTION, Edit::DESCRIPTION, Batch::DESCRIPTION] {
+            assert!(
+                desc.contains("session.envelope"),
+                "missing declaration pointer: {desc}"
+            );
+            assert!(
+                desc.contains("/**"),
+                "missing directory pattern guidance: {desc}"
+            );
+        }
     }
 }

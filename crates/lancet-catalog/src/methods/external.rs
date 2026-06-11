@@ -34,7 +34,7 @@ pub struct FetchResult {
 
 impl CepMethod for Fetch {
     const NAME: &'static str = "fetch.web";
-    const DESCRIPTION: &'static str = "Fetch a URL and return its text content.";
+    const DESCRIPTION: &'static str = "Fetch a URL over HTTP(S) and return its text content. The URL host must be permitted by policy: it needs a FetchUrl capability for that host (declared via session.envelope) and the host must satisfy the network allowlist. A blocked host is a policy decision, not a transient error — do not retry the same host; use an allowed host or request the host be added to the profile network allowlist.";
     type Params = FetchParams;
     type Result = FetchResult;
     const IMPACT: ImpactKind = ImpactKind::ExternalObservation;
@@ -60,6 +60,13 @@ mod tests {
         assert_eq!(Fetch::NAME, "fetch.web");
         assert!(Fetch::NAME.contains('.'));
         assert!(!Fetch::NAME.contains('/'));
+    }
+
+    #[test]
+    fn fetch_description_explains_host_allowlist_and_no_retry() {
+        assert!(Fetch::DESCRIPTION.contains("FetchUrl capability"));
+        assert!(Fetch::DESCRIPTION.contains("allowlist"));
+        assert!(Fetch::DESCRIPTION.contains("do not retry"));
     }
 
     #[test]

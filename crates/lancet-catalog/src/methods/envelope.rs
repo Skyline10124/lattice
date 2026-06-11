@@ -51,7 +51,7 @@ pub enum EnvelopeResult {
 
 impl CepMethod for Envelope {
     const NAME: &'static str = "session.envelope";
-    const DESCRIPTION: &'static str = "Declare an execution envelope, mutating the active session authorization state. The caller supplies the explicit envelope capabilities, scope, impact, constraints, and optional verification.";
+    const DESCRIPTION: &'static str = "Declare an execution envelope, replacing the active session authorization state with the supplied capabilities, scope, impact, constraints, and optional verification. Mutating methods (mutate.create/edit/batch and workspace-mutating exec.command_run) require an active envelope whose capabilities already cover the target before the call: declare first, and re-declare when you start a new change — the active envelope is replaced per declaration, not accumulated, so authority from a previous intent does not carry over. WritePath pattern syntax (project-root-relative): end a pattern with /** to authorize a directory and everything under it (e.g. 'crates/foo/**'); a pattern WITHOUT /** matches only that one exact file path (e.g. 'crates/foo/lib.rs'), so 'crates/foo' alone will NOT cover files inside it. '..', absolute paths, and glob metacharacters other than a trailing /** are rejected. RunCommand grants argv by token prefix (e.g. 'cargo test' covers 'cargo test --release'); for an inline shell every expanded sub-command must be covered. FetchUrl grants one host.";
     type Params = EnvelopeParams;
     type Result = EnvelopeResult;
     const IMPACT: ImpactKind = ImpactKind::SessionStateMutation;
@@ -77,5 +77,15 @@ mod tests {
         assert_eq!(Envelope::NAME, "session.envelope");
         assert!(Envelope::NAME.contains('.'));
         assert!(!Envelope::NAME.contains('/'));
+    }
+
+    #[test]
+    fn envelope_description_guides_writepath_and_declaration_order() {
+        // The two highest-friction agent mistakes: not declaring before
+        // mutating, and writing a directory pattern without `/**`.
+        assert!(Envelope::DESCRIPTION.contains("declare first"));
+        assert!(Envelope::DESCRIPTION.contains("replaced per declaration"));
+        assert!(Envelope::DESCRIPTION.contains("/**"));
+        assert!(Envelope::DESCRIPTION.contains("one exact file path"));
     }
 }
