@@ -221,9 +221,9 @@ fn smoke_session_status_specific_session() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The CLI truncates long IDs to 12 chars + ".."
-    let truncated = if session_id.len() > 12 {
-        &session_id[..12]
+    // The CLI truncates long IDs to 8 chars + ".."
+    let truncated = if session_id.len() > 8 {
+        &session_id[..8]
     } else {
         session_id
     };

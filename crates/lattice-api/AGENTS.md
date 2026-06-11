@@ -46,6 +46,12 @@ agent loop over `lancet-api`'s CEP runtime.
   events after full turn completion.
 - FIXED M-19b: observer backpressure no longer blocks live task drain/commit.
 - FIXED M-15: session error mapping preserves structured error categories.
+- FIXED: `SessionApi` now resolves abbreviated session ID prefixes via
+  `resolve_id()` — exact match first, then prefix scan over `store.list()`.
+  Ambiguous prefixes list up to 5 candidate IDs and suggest more characters.
+  Empty/whitespace IDs are rejected. Canonical IDs remain 32-char UUIDs;
+  abbreviation is a presentation/input concern. `display_id` in the CLI
+  truncates to 8 chars for compact output.
 
 ## Next Actions
 

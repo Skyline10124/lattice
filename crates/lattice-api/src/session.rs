@@ -63,6 +63,49 @@ impl SessionApi {
         &self.store
     }
 
+    /// Resolve a possibly-abbreviated session ID to the full session ID.
+    fn resolve_id(&self, prefix: &str) -> Result<String> {
+        // Reject empty or whitespace-only input.
+        let prefix = prefix.trim();
+        if prefix.is_empty() {
+            return Err(ApiError::BadRequest("session ID must not be empty".into()));
+        }
+        // Try exact match first.
+        match self.store.open_session(prefix) {
+            Ok(_) => return Ok(prefix.to_string()),
+            Err(lattice_session::SessionError::NotFound(_)) => {} // fall through to prefix match
+            Err(e) => return Err(map_session_error(e)),
+        }
+        // Require at least 4 characters for prefix matching.
+        if prefix.len() < 4 {
+            return Err(ApiError::BadRequest(format!(
+                "prefix '{}' too short: at least 4 characters required",
+                prefix
+            )));
+        }
+        // Prefix match via list.
+        let sessions = self.store.list().map_err(map_session_error)?;
+        let matches: Vec<&str> = sessions
+            .iter()
+            .filter(|s| s.session_id.starts_with(prefix))
+            .map(|s| s.session_id.as_str())
+            .collect();
+        match matches.len() {
+            0 => Err(ApiError::NotFound(prefix.to_string())),
+            1 => Ok(matches[0].to_string()),
+            _ => {
+                let ids: Vec<&str> = matches.iter().take(5).copied().collect();
+                let suffix = if matches.len() > 5 { ", …" } else { "" };
+                Err(ApiError::BadRequest(format!(
+                    "ambiguous prefix '{}': matches {}{} — use more characters",
+                    prefix,
+                    ids.join(", "),
+                    suffix
+                )))
+            }
+        }
+    }
+
     pub fn create_session(&self, request: CreateSessionRequest) -> Result<GraphSession> {
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
@@ -71,13 +114,15 @@ impl SessionApi {
     }
 
     pub fn open_session(&self, request: OpenSessionRequest) -> Result<GraphSession> {
+        let resolved = self.resolve_id(&request.id)?;
         self.store
-            .open_session(&request.id)
+            .open_session(&resolved)
             .map_err(map_session_error)
     }
 
     pub fn status(&self, session_id: &str) -> Result<SessionStatus> {
-        self.store.status(session_id).map_err(map_session_error)
+        let resolved = self.resolve_id(session_id)?;
+        self.store.status(&resolved).map_err(map_session_error)
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionGraphSummary>> {
@@ -86,52 +131,62 @@ impl SessionApi {
 
     /// Get the turn log for a session.
     pub fn log(&self, session_id: &str) -> Result<Vec<TurnLogEntry>> {
-        self.store.log(session_id).map_err(map_session_error)
+        let resolved = self.resolve_id(session_id)?;
+        self.store.log(&resolved).map_err(map_session_error)
     }
 
     /// Change branch or detach HEAD at a commit.
     pub fn checkout(&self, session_id: &str, target: &str) -> Result<GraphHead> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .checkout(session_id, target)
+            .checkout(&resolved, target)
             .map_err(map_session_error)
     }
 
     /// Create or move a branch ref to a commit.
     pub fn branch(&self, session_id: &str, name: &str, from: Option<&str>) -> Result<GraphRef> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .branch(session_id, name, from)
+            .branch(&resolved, name, from)
             .map_err(map_session_error)
     }
 
     pub fn set_active_agent(&self, session_id: &str, agent_name: &str) -> Result<GraphSession> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .set_active_agent(session_id, agent_name)
+            .set_active_agent(&resolved, agent_name)
             .map_err(map_session_error)
     }
 
     /// Compare graph paths between two commits.
     pub fn diff(&self, session_id: &str, from: &str, to: &str) -> Result<GraphDiff> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .diff(session_id, from, to)
+            .diff(&resolved, from, to)
             .map_err(map_session_error)
     }
 
     /// Move branch pointer to a target commit.
     pub fn reset(&self, session_id: &str, target: &str) -> Result<ResetResult> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .reset(session_id, target)
+            .reset(&resolved, target)
             .map_err(map_session_error)
     }
 
     /// Read the ordered transcript for the current branch HEAD.
     pub(crate) fn head_transcript(&self, session_id: &str) -> Result<HeadTranscript> {
+        let resolved = self.resolve_id(session_id)?;
         self.store
-            .head_transcript(session_id)
+            .head_transcript(&resolved)
             .map_err(map_session_error)
     }
 
     /// Commit a completed turn atomically.
     pub(crate) fn commit_turn(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+        let resolved = self.resolve_id(&input.session_id)?;
+        let mut input = input;
+        input.session_id = resolved;
         self.store.commit_turn(input).map_err(map_session_error)
     }
 }
@@ -290,6 +345,74 @@ mod session_graph {
             .find(|s| s.session_id == "sess-b")
             .expect("sess-b");
         assert_eq!(b.commit_count, 2);
+    }
+
+    #[test]
+    fn session_id_is_32_char_hex() {
+        let api = api("id_format");
+        let created = api
+            .create_session(CreateSessionRequest {
+                label: None,
+                active_agent: "coder".into(),
+            })
+            .expect("create");
+        assert_eq!(created.session_id.len(), 32);
+        assert!(created.session_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn prefix_resolve_unique_match() {
+        let api = api("prefix_unique");
+        setup_with_commits(&api, "abc12345678901234567890123456789", 1, None);
+        setup_with_commits(&api, "xyz98765432109876543210987654321", 1, None);
+        // Full ID works.
+        let status = api
+            .status("abc12345678901234567890123456789")
+            .expect("full id");
+        assert_eq!(status.session_id, "abc12345678901234567890123456789");
+        // First 4 chars uniquely resolve to abc…
+        let status = api.status("abc1").expect("prefix abc1");
+        assert_eq!(status.session_id, "abc12345678901234567890123456789");
+    }
+
+    #[test]
+    fn prefix_resolve_ambiguous_reports_error() {
+        let api = api("prefix_ambiguous");
+        setup_with_commits(&api, "abcd1234567890123456789012345678", 1, None);
+        setup_with_commits(&api, "abcd9876543210987654321098765432", 1, None);
+        let err = api.status("abcd").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("ambiguous"), "expected ambiguous, got: {msg}");
+        assert!(
+            msg.contains("use more characters"),
+            "should suggest more chars: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_prefix_rejected() {
+        let api = api("prefix_empty");
+        setup_with_commits(&api, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, None);
+        for input in ["", "  "] {
+            let err = api.status(input).unwrap_err();
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("must not be empty"),
+                "expected empty rejection for {input:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn short_prefix_rejected() {
+        let api = api("prefix_short");
+        setup_with_commits(&api, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, None);
+        let err = api.status("aaa").unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("too short"),
+            "expected too-short rejection: {msg}"
+        );
     }
 
     #[test]
