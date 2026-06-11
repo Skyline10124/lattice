@@ -60,6 +60,14 @@ enum Commands {
         #[command(subcommand)]
         action: Option<lancet_cmd::LancetAction>,
     },
+    /// Open the terminal UI.
+    Tui {
+        /// Optional session id to open. If omitted, a new session is created.
+        session_id: Option<String>,
+        /// Agent profile name used when creating a new TUI session.
+        #[arg(long, default_value = "default")]
+        agent: String,
+    },
 }
 
 #[tokio::main]
@@ -102,6 +110,18 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Some(Commands::Lancet { action }) => {
             lancet_cmd::run(action, cli.json)?;
+        }
+        Some(Commands::Tui { session_id, agent }) => {
+            let agents_dir =
+                commands::run::safe_agents_dir(None).map_err(|error| anyhow::anyhow!(error))?;
+            return lattice_tui::run(lattice_tui::TuiOptions {
+                session_id,
+                agent,
+                session_dir: session_cmd::default_session_dir(),
+                agents_dir,
+                project_root: std::env::current_dir()?,
+            })
+            .await;
         }
         None => {
             let _ = Cli::command().print_help();
@@ -204,7 +224,9 @@ mod tests {
     fn cli_surface_help_contains_supported_commands() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
-        for name in &["models", "resolve", "session", "doctor", "audit", "lancet"] {
+        for name in &[
+            "models", "resolve", "session", "doctor", "audit", "lancet", "tui",
+        ] {
             assert!(
                 help.contains(name),
                 "help should contain supported command '{name}'"
@@ -220,8 +242,26 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["models", "resolve", "session", "doctor", "audit", "lancet"]
+            vec!["models", "resolve", "session", "doctor", "audit", "lancet", "tui"]
         );
+    }
+
+    #[test]
+    fn cli_surface_tui_parses_without_session_id() {
+        let cli = Cli::try_parse_from(["lattice", "tui"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Tui { .. })));
+    }
+
+    #[test]
+    fn cli_surface_tui_parses_session_id_and_agent() {
+        let cli = Cli::try_parse_from(["lattice", "tui", "sess1", "--agent", "coder"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Tui { session_id, agent } => {
+                assert_eq!(session_id.as_deref(), Some("sess1"));
+                assert_eq!(agent, "coder");
+            }
+            _ => panic!("expected Tui"),
+        }
     }
 
     #[test]

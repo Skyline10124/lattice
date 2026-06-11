@@ -1152,6 +1152,7 @@ dependencies = [
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
+ "lattice-tui",
  "serde_json",
  "tempfile",
  "tokio",
@@ -1196,6 +1197,18 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "lattice-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "colored",
+ "futures",
+ "lattice-api",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

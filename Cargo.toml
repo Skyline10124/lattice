@@ -13,6 +13,7 @@ members = [
     "crates/lancet-authority",
     "crates/lancet-native",
     "crates/lancet-api",
+    "crates/lattice-tui",
     "crates/lattice-cli",
     "crates/lattice-profile",
 ]
@@ -38,6 +39,7 @@ lancet-audit    = { path = "crates/lancet-audit" }
 lancet-authority = { path = "crates/lancet-authority" }
 lancet-native   = { path = "crates/lancet-native" }
 lancet-api      = { path = "crates/lancet-api" }
+lattice-tui      = { path = "crates/lattice-tui" }
 lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 
@@ -68,12 +70,14 @@ schemars = "0.8"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.28"
 dirs = "5"
 colored = "2"
 anyhow = "1"
 base64 = "0.22"
 dotenvy = "0.15"
 toml_edit = "0.22"
+ratatui = "0.29"
 
 # Dev dependencies
 tempfile = "3"

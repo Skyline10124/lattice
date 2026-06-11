@@ -1,0 +1,17 @@
+[package]
+name = "lattice-tui"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE inline CLI chat"
+
+[dependencies]
+lattice-api = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+colored = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

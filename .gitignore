@@ -8,6 +8,9 @@ target/
 .codex/
 .planning/
 .sisyphus/
+.codegraph/
+.mcp.json
+opencode.jsonc
 .pytest_cache/
 .worktrees/
 .cargo/

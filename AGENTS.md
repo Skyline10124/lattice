@@ -29,7 +29,8 @@ Layer 3:         lancet-native(->protocol,catalog,dispatch,audit,
 Layer 3.5:       lancet-api(->cep,protocol,catalog,dispatch,audit,
                             authority,native)
 Layer 4:         lattice-api(-> lancet-api + lattice runtime crates)
-Layer 5:         lattice-cli(-> api + presentation dependencies)
+Layer 5:         lattice-tui(-> api + presentation dependencies)
+                 lattice-cli(-> api,tui + presentation dependencies)
 ```
 
 ## Crate Roles
@@ -49,7 +50,8 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
 | `lattice-profile` | Strict `agent.toml` schema, discovery, defaults, and LANCET profile sections. |
 | `lattice-agent` | Multi-turn `AgentLoop`, state machine, message assembly, and injectable LLM/tool traits. |
 | `lattice-api` | Thin public facade for session creation/opening and turn execution. Translates profile `[lancet]` policy into LANCET-native config and wires the agent loop over `lancet-api`'s CEP runtime. |
-| `lattice-cli` | Binary entry point and presentation layer over API/session/model/audit commands. |
+| `lattice-tui` | Ratatui/crossterm terminal UI shell over `lattice-api` sessions and `stream_turn`. Owns terminal lifecycle, input handling, transcript/status rendering, and in-band TUI errors. |
+| `lattice-cli` | Binary entry point and argument dispatch over API/session/model/audit commands plus the `lattice-tui` presentation crate. |
 
 ## CEP And LANCET Contracts
 
@@ -140,5 +142,6 @@ Layer 5:         lattice-cli(-> api + presentation dependencies)
   the registry/transport/server dance.
 - Keep public session and turn API contracts in `lattice-api`; it owns the
   profile→policy translation and the agent-loop wiring over `lancet-api`. Keep
-  CLI output and argument parsing in `lattice-cli`.
+  TUI terminal lifecycle, input state, and rendering in `lattice-tui`. Keep CLI
+  output, non-interactive rendering, and argument parsing in `lattice-cli`.
 - Prefer crate-local `AGENTS.md` files for detailed navigation before editing.
