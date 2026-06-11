@@ -20,6 +20,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use lattice_session::{GraphMessage, GraphToolCall, TurnUsage};
 use tokio::time::Instant;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use messages::{append_llm_message, graph_messages_to_llm};
 
@@ -31,6 +32,35 @@ use messages::{append_llm_message, graph_messages_to_llm};
 /// well under 50 rounds; we cap at 200 to prevent runaway loops without
 /// constraining legitimate long tasks).
 const MAX_TURN_ROUNDS: u32 = 200;
+
+/// Maximum display columns for error summaries shown in tool-finished events.
+/// CJK characters are 2 columns wide, so 200 columns ≈ 100 CJK chars.
+const ERROR_SUMMARY_MAX_COLS: usize = 200;
+
+/// Truncate `s` to at most `max_width` display columns, appending `…` if cut.
+///
+/// NOTE: `lattice-cli/src/commands/session.rs::summarize` contains a similar
+/// column-width truncation loop. Keep both in sync if this logic changes.
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    let mut width = 0_usize;
+    let mut end = 0_usize;
+    let ellipsis_width = '…'.width().unwrap_or(1);
+    let limit = max_width.saturating_sub(ellipsis_width);
+    for (i, c) in s.char_indices() {
+        let cw = c.width().unwrap_or(0);
+        if width + cw > limit {
+            break;
+        }
+        width += cw;
+        end = i + c.len_utf8();
+    }
+    let mut out = s[..end].to_string();
+    out.push('…');
+    out
+}
 
 pub use traits::{CepErrorPayload, LlmClient, ToolCallExecutor, ToolExecutionError};
 pub use types::{
@@ -667,7 +697,7 @@ impl AgentLoop {
                         let error_summary = if ok {
                             None
                         } else {
-                            Some(tool_content.chars().take(200).collect::<String>())
+                            Some(truncate_to_width(&tool_content, ERROR_SUMMARY_MAX_COLS))
                         };
 
                         emit_agent_event(
@@ -677,7 +707,7 @@ impl AgentLoop {
                                 id: call.id.clone(),
                                 name: call.name.clone(),
                                 ok,
-                                output_len: tool_content.len(),
+                                output_len: tool_content.chars().count(),
                                 error_summary: error_summary.clone(),
                             },
                         )
@@ -687,7 +717,7 @@ impl AgentLoop {
                             tool_call_id: call.id.clone(),
                             name: call.name.clone(),
                             ok,
-                            output_len: tool_content.len(),
+                            output_len: tool_content.chars().count(),
                             error_summary,
                             cep_error,
                         });
@@ -1184,4 +1214,57 @@ fn flush_partial_assistant_message(
     };
     messages.push(msg.clone());
     all_messages.push(msg);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ascii_short_noop() {
+        assert_eq!(truncate_to_width("hello", 20), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_long() {
+        let s = "a".repeat(100);
+        let result = truncate_to_width(&s, 10);
+        assert!(result.width() <= 10, "width {} > 10", result.width());
+        assert!(result.ends_with('…'));
+        assert!(result.chars().count() < s.chars().count());
+    }
+
+    #[test]
+    fn truncate_cjk_short_noop() {
+        // 4 CJK = 8 columns, under 20
+        assert_eq!(truncate_to_width("你好世界", 20), "你好世界");
+    }
+
+    #[test]
+    fn truncate_cjk_at_column_boundary() {
+        // 10 CJK = 20 columns, max 7 columns → 3 chars (6 cols) + … (1 col) = 7
+        let result = truncate_to_width("你好世界测试中文显示宽度", 7);
+        assert!(result.width() <= 7, "width {} > 7", result.width());
+        assert!(result.ends_with('…'));
+        assert_eq!(result.chars().count(), 4); // 3 CJK + …
+    }
+
+    #[test]
+    fn truncate_mixed_ascii_cjk() {
+        // "hello世界" = 5 ascii + 2 cjk = 5 + 4 = 9 columns
+        let result = truncate_to_width("hello世界", 6);
+        assert!(result.width() <= 6, "width {} > 6", result.width());
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_exact_width_noop() {
+        // "abc" = 3 columns, max 3
+        assert_eq!(truncate_to_width("abc", 3), "abc");
+    }
+
+    #[test]
+    fn truncate_empty() {
+        assert_eq!(truncate_to_width("", 10), "");
+    }
 }

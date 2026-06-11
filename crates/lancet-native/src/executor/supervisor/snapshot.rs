@@ -255,8 +255,25 @@ fn platform_mode(metadata: &std::fs::Metadata) -> u32 {
     }
 }
 
+/// Directory name of the supervisor's own overlay scratch (see
+/// [`super::overlay::OverlayPlan`]). Each session root holds a kernel-created
+/// `work/work` directory with mode `000`; walking into it aborts the entire
+/// workspace snapshot with `EACCES`, so it must be skipped wherever it appears.
+const OVERLAY_SCRATCH_DIR_NAME: &str = ".lattice-overlays";
+
 pub(crate) fn is_snapshot_skipped_path(relative: &str) -> bool {
     if relative == "target" || relative.starts_with("target/") {
+        return true;
+    }
+
+    // Skip the supervisor's own overlay scratch wherever it appears in the tree
+    // (e.g. `.worktrees/.lattice-overlays/...` when the main repo is snapshotted
+    // while a worktree session is active). Its mode-000 `work/work` trap would
+    // otherwise fail the whole snapshot, blocking every supervised command.
+    if relative
+        .split('/')
+        .any(|component| component == OVERLAY_SCRATCH_DIR_NAME)
+    {
         return true;
     }
 
@@ -539,6 +556,36 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_capture_skips_overlay_scratch_with_mode_000_workdir() {
+        // Regression: a residual overlay session left a kernel-created
+        // `.lattice-overlays/<sess>/work/work` directory with mode 000 inside
+        // the snapshot scope (e.g. under `.worktrees/`). Walking into it aborted
+        // the whole snapshot with EACCES, blocking every supervised command.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "real content").unwrap();
+        let trap = dir
+            .path()
+            .join(".worktrees/.lattice-overlays/diagnostic-x/work/work");
+        std::fs::create_dir_all(&trap).unwrap();
+        std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = capture_workspace_snapshot(dir.path());
+
+        // Restore perms BEFORE asserting so a failure here cannot leak the
+        // mode-000 directory past TempDir cleanup.
+        std::fs::set_permissions(&trap, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let snapshot = result.unwrap();
+        assert!(snapshot.contains_key("keep.txt"));
+        assert!(
+            !snapshot.keys().any(|p| p.contains(".lattice-overlays")),
+            "overlay scratch must be excluded from the snapshot"
+        );
+    }
+
+    #[test]
     fn snapshot_capture_preserves_active_git_hooks_and_skips_samples() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join(".git/objects")).unwrap();
@@ -573,6 +620,23 @@ mod tests {
         assert!(!is_snapshot_skipped_path(".git/hooks"));
         assert!(!is_snapshot_skipped_path(".git/hooks/pre-commit"));
         assert!(is_snapshot_skipped_path(".git/hooks/pre-commit.sample"));
+    }
+
+    #[test]
+    fn snapshot_skip_rules_cover_overlay_scratch_anywhere() {
+        assert!(is_snapshot_skipped_path(".lattice-overlays"));
+        assert!(is_snapshot_skipped_path(
+            ".lattice-overlays/diagnostic-x/work"
+        ));
+        assert!(is_snapshot_skipped_path(
+            ".worktrees/.lattice-overlays/sess/work/work"
+        ));
+        assert!(is_snapshot_skipped_path(
+            "build/tmp/run-1/.lattice-overlays/s"
+        ));
+        // A regular file that merely starts with the reserved name is not skipped.
+        assert!(!is_snapshot_skipped_path(".lattice-overlays-notes.md"));
+        assert!(!is_snapshot_skipped_path("docs/.lattice-overlays.md"));
     }
 
     #[test]

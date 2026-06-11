@@ -519,7 +519,7 @@ fn render_human_tool_finished_ok_renders_byte_size() {
     let mut err = Vec::new();
     render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
     let err_str = String::from_utf8(err).unwrap();
-    assert!(err_str.contains("412B"));
+    assert!(err_str.contains("412 chars"));
     assert!(err_str.contains("read_file"));
 }
 
@@ -537,7 +537,7 @@ fn render_human_tool_finished_err_renders_summary() {
     let mut err = Vec::new();
     render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
     let err_str = String::from_utf8(err).unwrap();
-    assert!(err_str.contains("120B"));
+    assert!(err_str.contains("120 chars"));
     assert!(err_str.contains("permission denied"));
 }
 
@@ -999,8 +999,8 @@ fn seq_tool_failure_renders_summary() {
     ];
     let (_out, err, state) = fake_event_loop(events, false);
     let err_str = s(&err);
-    // Tool failure renders byte count and error summary with failure glyph
-    assert!(err_str.contains("120B"));
+    // Tool failure renders char count and error summary with failure glyph
+    assert!(err_str.contains("120 chars"));
     assert!(err_str.contains("permission denied"));
     assert!(err_str.contains("✗"));
     // D-A4: tool failure inside a successful turn does NOT change exit code

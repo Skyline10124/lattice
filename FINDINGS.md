@@ -16,6 +16,13 @@
 
 ## LOW
 
+### L-34-01: SIGKILL/崩溃在 overlay teardown 之前会遗留孤儿 scratch，无启动清扫 — `robustness` / `hygiene`
+- **位置**: `crates/lancet-native/src/executor/supervisor/overlay.rs`（`cleanup_overlay`）；scratch 根由 `OverlayPlan::deterministic` 建于 `<project_root>/../.lattice-overlays/<mode>-<sess>/`。
+- **背景**: 正常 teardown 路径已正确清理 —— `remove_overlay_tree`（`syscall.rs`）在 `remove_dir_all` 前递归 `chmod 0o700`，能穿过内核建的 mode-000 `work/work`（commit `84847387`, 2026-06-07）。
+- **问题**: 仅当进程在 `cleanup_overlay` **之前**被 SIGKILL / panic / 断电时，session scratch 不会被回收，留下 mode-000 `work/work` 孤儿。无启动期清扫来回收上次崩溃的 `.lattice-overlays`。
+- **影响**: 低。孤儿曾经会让全树遍历 `EACCES`（`capture_workspace_snapshot` 在受控命令预检时硬失败，"连 `ls` 都过不去"）。该症状已由 `is_snapshot_skipped_path` 跳过 `.lattice-overlays` 缓解（2026-06-11，含复现 000 陷阱的回归测试）；剩余仅为磁盘累积与对"消费方记得跳过"的依赖。
+- **计划**: executor 启动时清扫 `.lattice-overlays` 下的陈旧 session（按 mtime / pid 存活判定）；次要：`is_snapshot_skipped_path` 的内部 scratch 名（`target` / `.git` / `.lattice-overlays`）为散落字面量，可收拢为集中常量集。
+
 ### L-20: `SqliteSessionGraphStore` 单连接 `Mutex` 应用层串行化 — `performance` / `architecture`
 - **位置**: `crates/lattice-session/src/sqlite_graph/mod.rs`
 - **问题**: 虽启用 WAL，但全进程共享一个 `Connection` + `Mutex`，读写均独占；多会话/多任务并行时 DB 成为串行瓶颈。

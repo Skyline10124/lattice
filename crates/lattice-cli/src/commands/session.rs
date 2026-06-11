@@ -13,6 +13,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
 pub(crate) fn lattice_config_dir() -> PathBuf {
@@ -556,18 +557,31 @@ fn display_id(id: &str) -> String {
     }
 }
 
+/// Truncate `text` to at most `max` display columns, appending `…` if cut.
+///
+/// NOTE: `lattice-agent/src/agent_loop/mod.rs::truncate_to_width` contains a
+/// similar column-width truncation loop. Keep both in sync if this logic changes.
 fn summarize(text: &str, max: usize) -> String {
     let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= max {
-        one_line
-    } else {
-        let mut out = one_line
-            .chars()
-            .take(max.saturating_sub(1))
-            .collect::<String>();
-        out.push('\u{2026}');
-        out
+    if one_line.width() <= max {
+        return one_line;
     }
+    let mut width = 0_usize;
+    let mut end = 0_usize;
+    let ellipsis = '\u{2026}';
+    let ellipsis_width = ellipsis.width().unwrap_or(1);
+    let limit = max.saturating_sub(ellipsis_width);
+    for (i, c) in one_line.char_indices() {
+        let cw = c.width().unwrap_or(0);
+        if width + cw > limit {
+            break;
+        }
+        width += cw;
+        end = i + c.len_utf8();
+    }
+    let mut out = one_line[..end].to_string();
+    out.push(ellipsis);
+    out
 }
 
 #[cfg(test)]
@@ -850,6 +864,30 @@ mod session_cli {
         let long = "a".repeat(200);
         let result = summarize(&long, 50);
         assert!(result.chars().count() <= 50);
+        assert!(result.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn summarize_cjk_short_unchanged() {
+        // 5 CJK chars = 10 columns, well under 120 max
+        assert_eq!(summarize("你好世界测试", 120), "你好世界测试");
+    }
+
+    #[test]
+    fn summarize_cjk_truncated_at_column_boundary() {
+        // 10 CJK chars = 20 columns, max 7 columns
+        let cjk = "你好世界测试中文显示宽度";
+        let result = summarize(cjk, 7);
+        assert!(result.width() <= 7, "width {} > 7", result.width());
+        assert!(result.ends_with('\u{2026}'));
+        assert!(result.chars().count() < cjk.chars().count());
+    }
+
+    #[test]
+    fn summarize_mixed_ascii_cjk_truncated() {
+        // "hello世界" = 5 ascii + 2 cjk = 5 + 4 = 9 columns, max 5
+        let result = summarize("hello世界", 5);
+        assert!(result.width() <= 5, "width {} > 5", result.width());
         assert!(result.ends_with('\u{2026}'));
     }
 

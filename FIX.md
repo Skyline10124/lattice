@@ -487,3 +487,24 @@ Verified: `cargo fmt --all --check` ✓, `git diff --check` ✓, `cargo build` �
 | P28-CR-01 | CRITICAL | Verify-failed `exec.command_run` workspace mutations could leave durable metadata at `backend_invoked=false` after the backend had already run | Command execution metadata is now recorded and emitted immediately after `execute_argv` succeeds, before diff/verify return paths; added a verify-failure regression asserting durable metadata and events report `backend_invoked=true` |
 | P28-WR-01 | WARNING | Native and CLI host-probe output used a separate Vec-shaped report instead of the protocol primitive-keyed `HostProbeReport` | Native now reuses `lancet_protocol::HostProbeReport`/`HostProbeEntry`; CLI JSON exposes the canonical `host_probe.primitives.<primitive>` shape and serializes gate-missing primitive reasons through the protocol type |
 | P28-WR-02 | WARNING | Live host capability probes resolved `unshare`, `sh`, and child helpers through ambient `PATH` | Probes now use trusted absolute helper candidates, sanitize child `PATH`, and record helper paths in diagnostics; missing trusted helpers are reported as unknown instead of falling back to ambient `PATH` |
+
+## Phase 34: CJK double-width character display fixes — 2026-06-07
+
+User reported TUI output label calculation issues with Chinese double-width characters. Root cause: the entire codebase used `.len()` (byte count) or `.chars().count()` (Unicode scalar count) for display-relevant string lengths, with zero awareness of terminal column width (CJK = 2 columns, ASCII = 1 column).
+
+Severity: LOW — display-only, no behavioral impact.
+
+**Changes:**
+
+| File | Change |
+|------|--------|
+| `Cargo.toml` | Added `unicode-width = "0.1"` workspace dependency |
+| `crates/lattice-agent/Cargo.toml` | Added `unicode-width` dependency |
+| `crates/lattice-cli/Cargo.toml` | Added `unicode-width` dependency |
+| `lattice-agent/src/agent_loop/mod.rs` | Added `truncate_to_width()` using `UnicodeWidthStr`/`UnicodeWidthChar`; error summary now truncates to 200 display columns instead of 200 chars; `output_len` changed from `.len()` (bytes) to `.chars().count()` |
+| `lattice-tui/src/runtime.rs` | `{output_len}B` → `{output_len} chars` |
+| `lattice-cli/src/commands/run.rs` | Same `{output_len}B` → `{output_len} chars` |
+| `lattice-cli/src/commands/session.rs` | `summarize()` switched from `.chars().count()` to `.width()` for display-column-aware truncation |
+| `lattice-cli/src/commands/run_tests.rs` | Updated test assertions from `"412B"`/`"120B"` to `"412 chars"`/`"120 chars"` |
+
+Verification: pending `cargo check`, `cargo clippy`, `cargo test` (blocked by stale overlay directory permissions).

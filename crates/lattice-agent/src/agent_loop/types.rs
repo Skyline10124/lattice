@@ -99,9 +99,9 @@ pub struct AgentToolResultSummary {
     pub name: String,
     /// Whether the tool executed successfully.
     pub ok: bool,
-    /// Length of the tool output in bytes.
+    /// Length of the tool output in Unicode characters.
     pub output_len: usize,
-    /// Optional error summary (first 200 chars of error output).
+    /// Optional error summary (first 200 display columns of error output).
     pub error_summary: Option<String>,
     /// Structured CEP error metadata when the executor adapter mapped a CEP failure.
     pub cep_error: Option<CepErrorPayload>,

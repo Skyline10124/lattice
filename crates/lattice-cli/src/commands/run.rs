@@ -251,10 +251,14 @@ fn render_human_event<WOut: Write, WErr: Write>(
         } => {
             flush_before_status(out, err, state)?;
             if *ok {
-                writeln!(err, "{} tool {name} {output_len}B", "✓".green())?;
+                writeln!(err, "{} tool {name} {output_len} chars", "✓".green())?;
             } else {
                 let summary = error_summary.as_deref().unwrap_or("error");
-                writeln!(err, "{} tool {name} {output_len}B: {summary}", "✗".red())?;
+                writeln!(
+                    err,
+                    "{} tool {name} {output_len} chars: {summary}",
+                    "✗".red()
+                )?;
             }
         }
         TurnEvent::TurnFailed { reason } => {

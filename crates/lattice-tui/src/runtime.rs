@@ -162,9 +162,9 @@ async fn execute_turn(
             } => {
                 flush_mid_token(&mut out, &mut err, &mut tokens_ended_without_newline)?;
                 if ok {
-                    writeln!(err, "  {} {name} ({output_len}B)", "✓".green())?;
+                    writeln!(err, "  {} {name} ({output_len} chars)", "✓".green())?;
                 } else {
-                    writeln!(err, "  {} {name} ({output_len}B)", "✗".red())?;
+                    writeln!(err, "  {} {name} ({output_len} chars)", "✗".red())?;
                 }
             }
             TurnEvent::TurnCommitted { commit_id, .. } => {
