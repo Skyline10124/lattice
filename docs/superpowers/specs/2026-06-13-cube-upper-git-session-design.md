@@ -2,13 +2,18 @@
 
 Date: 2026-06-13
 
-Status: Accepted in design discussion; awaiting written-spec review.
+Status: Accepted in design discussion; revised 2026-06-13 after written-spec
+review (CubeSandbox platform facts, managed Lower default, promotion seam,
+`pending_promotion` disposition, Profile-configured egress policy,
+snapshot-bounded verification).
 
 ## 1. Summary
 
 LATTICE will execute every model-visible workspace operation inside an isolated
-CubeSandbox MicroVM called the Upper workspace. The host checkout is the Lower
-workspace. Models and tool commands never access Lower directly.
+CubeSandbox MicroVM called the Upper workspace. The Lower workspace is a clean
+host Git worktree owned by LATTICE — by default a managed worktree dedicated to
+the target branch, optionally the user's own checkout. Models and tool commands
+never access Lower directly.
 
 At the end of a turn, LATTICE accepts only an Upper Git repository whose index
 and non-ignored working tree are clean. The host freezes Upper, preserves a Cube
@@ -55,6 +60,9 @@ without combining their distinct semantics.
 9. Making a multi-file host working-tree update physically atomic to arbitrary
    external processes. Git refs are atomic; working-tree materialization is
    journaled and crash-recoverable.
+10. Supporting non-Linux, non-x86_64, or non-KVM hosts with the production
+    Cube adapter.
+11. Treating in-VM verification as a security boundary.
 
 ## 4. Terminology
 
@@ -66,8 +74,10 @@ happen here.
 
 ### Lower
 
-A clean host Git worktree associated with a target project ref. Models and tool
-commands never receive its path and cannot write it.
+A clean host Git worktree associated with a target project ref. By default
+LATTICE provisions and owns a managed worktree per target branch, written only
+by promotion; using the user's own checkout as Lower is an explicit opt-in.
+Models and tool commands never receive its path and cannot write it.
 
 ### Candidate
 
@@ -112,7 +122,20 @@ command. The host owns:
 - Lower working-tree materialization.
 
 CubeSandbox and its process/files interface are infrastructure trusted by v1.
-There is no additional persistent `lancet-worker` inside the VM.
+There is no additional persistent `lancet-worker` inside the VM. The
+CubeSandbox service daemon runs privileged on the host and belongs to the
+trusted computing base together with the KVM stack beneath it.
+
+Verification executes inside the model-controlled Upper. A hostile agent can
+tamper with the toolchain that verification invokes, so the verification
+result is advisory evidence, not a security boundary. Promotion-time policy
+and effect checks on the candidate range remain the authoritative gate.
+
+Promotion is the only local path by which Upper content reaches Lower. A
+remote round trip — content pushed from Upper and later pulled by the user —
+bypasses promotion review entirely. The Profile egress policy is the mechanism
+that narrows or closes this channel; under `open` egress the layer guarantee
+is local-path-only, and LATTICE documents it as such.
 
 CEP tool-time checks remain useful for early rejection, deterministic policy
 semantics, and complete audit evidence. The final candidate and promotion facts
@@ -154,7 +177,7 @@ Its interface hides these ordering invariants:
 3. create or restore Upper;
 4. run AgentLoop with Host CEP;
 5. enforce clean completion;
-6. verify, freeze, snapshot, and export;
+6. freeze, export, and run snapshot-bounded verification;
 7. request promotion;
 8. write exactly one terminal Session commit for the turn;
 9. release or retain Cube resources according to disposition.
@@ -176,8 +199,33 @@ interface covers:
 - export validated Git objects and repository facts;
 - destroy or retain the sandbox.
 
-The production adapter uses CubeSandbox. A deterministic test adapter provides
-the second adapter at this seam.
+The production adapter uses CubeSandbox, TencentCloud's open-source sandbox
+service (github.com/TencentCloud/CubeSandbox, Apache-2.0) built on RustVMM and
+KVM. A deterministic test adapter provides the second adapter at this seam.
+
+Facts the production adapter depends on:
+
+- CubeSandbox runs only on x86_64 Linux hosts with KVM; the production adapter
+  is unavailable elsewhere — an accepted v1 constraint;
+- it is a separately deployed HTTP service with an OpenAPI description and an
+  E2B-compatible surface, not an embedded library; `lattice doctor` detects
+  service availability, and an unreachable service follows the Cube creation
+  failure path;
+- the official SDK is Python-only; `lattice-workspace` owns a Rust client
+  written against the pinned OpenAPI description;
+- snapshot, in-place rollback, clone, snapshot deletion, and
+  snapshot-as-template creation are CubeCoW operations (service v0.3.0 and
+  later); LATTICE pins the service version it certifies against;
+- CubeVS provides eBPF-based egress filtering, used to enforce the Profile
+  network policy at Upper creation.
+
+Freeze maps to a CubeCoW consistency point: the adapter quiesces the VM, takes
+a snapshot, and exports candidate Git objects from that snapshotted state (for
+example via `git pack-objects` through the process interface), so exported
+objects always correspond to the frozen state. The same snapshot is the
+verification discard boundary: verification runs on the live VM after the
+snapshot, so its writes can never reach the exported candidate or a retained
+snapshot.
 
 Upper must:
 
@@ -187,6 +235,22 @@ Upper must:
 - never receive the Lower absolute path;
 - keep its own `.git` directory;
 - use `/workspace` as the model-visible project root.
+
+#### Upper Provisioning and Build Caches
+
+Ignored files are never copied from Lower, so a bare Upper would rebuild
+dependency caches on every turn. The adapter therefore maintains a per-project
+warm template:
+
+- the template snapshot contains the toolchain and prebuilt dependency caches
+  (such as `target/`), never credentials;
+- each turn clones from the warm snapshot, then the host resets `/workspace`
+  to the exact `baseline_oid`, transferring any missing Git objects;
+- template rebuilds are policy-driven: a manual command plus staleness signals
+  such as lockfile changes;
+- a stale template costs build time only; candidate correctness never depends
+  on template state because ancestry and object validation run against
+  `baseline_oid` regardless.
 
 ### 6.3 Host CEP
 
@@ -206,11 +270,15 @@ Promotion is the only module allowed to write Lower. It has two phases:
 
 **Prepare, outside the Lower lock**
 
-- validate imported Git objects;
+- validate imported Git objects with fsck-level checks, connectivity
+  verification, and object size limits;
+- surface tree-entry hazards in review facts: `.gitmodules` changes, symlink
+  additions or retargets, and any tree entry named `.git`;
 - require `baseline_oid` to be an ancestor of `candidate_oid`;
 - calculate and review the complete `baseline_oid..candidate_oid` range;
 - run final policy and effect checks;
-- consume the recorded verification result;
+- consume the recorded verification result, requiring its bound OID to equal
+  `candidate_oid`; a mismatch requires re-verification, never reuse;
 - construct immutable Session payload inputs except the final disposition;
 - prepare a recovery journal.
 
@@ -231,8 +299,14 @@ verification never holds it.
 ### 6.5 GitSessionGraphStore
 
 `GitSessionGraphStore` replaces the production SQLite session graph backend. It
-implements the existing session graph interface using Git commits, parents,
-trees, and refs.
+implements the session graph interface using Git commits, parents, trees, and
+refs. The Session commit manifest is a superset of today's `TurnCommitInput`,
+so this extends the existing `SessionGraphStore` contract with workspace and
+disposition fields rather than implementing it unchanged.
+
+For promotion, the store separates object preparation from ref movement: it
+constructs a Session commit object and returns its OID without updating any
+ref, so a caller can move the Session ref inside a wider Git ref transaction.
 
 It owns conversation topology only. It does not resolve Profiles, construct
 Agents, operate Cube, execute CEP, or promote workspaces.
@@ -249,6 +323,7 @@ Profile remains a declarative input owned by `lattice-profile`. It contains:
 - CEP policy;
 - verification command;
 - Cube settings;
+- Upper egress network policy (`open`, `allowlist`, or `blocked`);
 - Git author and committer identity;
 - secret references and exposed injection targets.
 
@@ -314,6 +389,17 @@ LATTICE does not add a remote push refspec for `refs/lattice/**`. Session data
 is local by default, but it remains readable to any principal with access to
 the local Git object database.
 
+Sharing one object database is a deliberate trade-off: it is what allows one
+Git ref transaction to span the project ref and the Session ref. The cost is
+that session history physically lives in the user's repository, and commands
+such as `git push --mirror` or an explicit `refs/lattice/*` push publish it to
+a remote. LATTICE documents this hazard, and `lattice doctor` warns when a
+configured remote already contains `refs/lattice/**`.
+
+Sessions with no target project repository use a standalone bare repository
+under the LATTICE data directory with the same ref layout and commit schema;
+only promotion does not apply.
+
 ### 8.2 Session Commit Tree
 
 Each Session commit stores per-turn data:
@@ -362,6 +448,10 @@ remains reachable independently of later project branch rewrites.
 The candidate ref points to the exact Upper `HEAD`. Promotion never rewrites
 the candidate commit.
 
+Candidate refs accumulate one per turn. v1 ships a manual pruning command that
+deletes candidate refs and retained Cube snapshots for turns the user
+discards; automatic garbage collection stays excluded.
+
 ### 8.4 Upper Git Semantics
 
 The Agent may use:
@@ -394,6 +484,11 @@ Signatures are preserved but are not automatically trusted.
 ## 9. Lower and Upper Cleanliness
 
 ### 9.1 Lower Cleanliness
+
+By default the target Lower is a LATTICE-managed worktree created from the
+target branch and written only by promotion, so it is clean by construction
+and the user's own checkout is never touched. Pointing Lower at the user's
+checkout is an explicit opt-in and grants no additional promotion rights.
 
 Before starting a turn and again inside promotion, the target Lower worktree
 must satisfy:
@@ -430,8 +525,13 @@ The Host never auto-commits and never auto-discards.
 If the configured cleanup round limit is exhausted, the turn ends as
 `pending_worktree` and retains the Cube snapshot.
 
-Verification runs after a clean check. Because verification may modify files,
-the Host checks cleanliness again before freeze and export.
+Verification runs only after a clean check, in a discard layer rebuilt from
+CubeCoW: the Host first records the clean `HEAD` as `candidate_oid` and takes
+the consistency snapshot, then runs verification on the live VM. The recorded
+verification result is bound to `candidate_oid`. Verification writes exist
+only in the post-snapshot VM state — they are never exported, never part of a
+retained snapshot, and never reach the candidate. No second cleanliness check
+is needed because export reads the pre-verify snapshot.
 
 ## 10. Turn Lifecycle
 
@@ -444,14 +544,16 @@ the Host checks cleanliness again before freeze and export.
 5. Inject configured credentials and Git identity.
 6. Run AgentLoop through Host CEP.
 7. Treat final output as provisional until Upper is clean.
-8. Run profile-defined verification inside Upper under Host orchestration.
-9. Recheck Upper cleanliness.
-10. Freeze Upper.
-11. Create the Cube runtime snapshot when retention is required.
-12. Export and validate the candidate Git objects.
-13. Run promotion prepare checks.
-14. Acquire the Lower promotion lock and recheck cleanliness and baseline.
-15. Commit the terminal disposition and release or retain resources.
+8. Record the clean `HEAD` as `candidate_oid` and freeze Upper by taking the
+   CubeCoW consistency snapshot.
+9. Export and validate the candidate Git objects from the snapshotted state.
+10. Run profile-defined verification on the live VM under Host orchestration;
+    bind the recorded result to `candidate_oid`. The snapshot boundary
+    discards verification writes.
+11. Run promotion prepare checks.
+12. Acquire the Lower promotion lock and recheck cleanliness and baseline.
+13. Commit the terminal disposition; retain or release the snapshot according
+    to that disposition.
 
 ### 10.2 Resume Turn
 
@@ -459,7 +561,12 @@ A resume is a new turn and creates a new immutable Session commit. It records
 `resumes_turn_oid` pointing to the prior pending turn.
 
 - `pending_worktree`: restore the runtime snapshot and continue cleanup.
-- `pending_verification`: restore and let the Agent create new fixing commits.
+- `pending_verification`: restore the pre-verify snapshot and let the Agent
+  create new fixing commits; a new clean `HEAD` yields a new `candidate_oid`
+  and requires fresh verification.
+- `pending_promotion`: the candidate stays valid and the baseline unchanged;
+  retry promotion only. No Upper restore is needed because the candidate Git
+  objects are already exported and reachable.
 - `pending_conflict`: never combine the old snapshot with a new baseline.
   The user must abandon it or explicitly start a new Upper from current Lower.
 
@@ -485,6 +592,7 @@ Terminal workspace disposition:
 - `promoted`;
 - `pending_worktree`;
 - `pending_verification`;
+- `pending_promotion`;
 - `pending_conflict`;
 - `rejected`;
 - `aborted`.
@@ -497,7 +605,10 @@ Session commit.
 
 Resource retention:
 
-- `pending_*`: retain Cube snapshot;
+- `pending_worktree`, `pending_verification`, `pending_conflict`: retain Cube
+  snapshot;
+- `pending_promotion`: release the snapshot; the clean candidate is fully
+  represented by its exported Git objects;
 - `promoted`, `rejected`, `aborted`: release Cube snapshot;
 - clean candidate Git objects remain reachable through their candidate ref;
 - a lost runtime snapshot can be rebuilt from a clean candidate, without
@@ -518,7 +629,9 @@ Sessions targeting the same Lower worktree serialize.
 ### 12.2 Conflict
 
 If the target project ref no longer equals `baseline_oid`, the turn becomes
-`pending_conflict`.
+`pending_conflict`. If the baseline still matches but promotion is temporarily
+blocked — Lower dirty in the opt-in checkout mode, or recovery incomplete —
+the turn becomes `pending_promotion` and only promotion is retried.
 
 LATTICE does not:
 
@@ -543,6 +656,14 @@ If the compare-and-swap fails, no promoted Session commit is created. The Host
 creates one `pending_conflict` Session commit after leaving the project ref
 transaction. For other pending or rejected turns, only Lattice refs move.
 
+The workspace module executes the ref transaction but never builds Session
+commits itself. Promotion's commit phase takes a caller-supplied preparation
+step: after the compare-and-swap succeeds inside the lock, it invokes that
+step to obtain the promoted Session commit OID from `lattice-session` (object
+creation only, no ref movement), then updates both refs in one transaction.
+`lattice-api` wires the step, keeping `lattice-session` and `lattice-workspace`
+independent of each other.
+
 ### 12.4 Working-Tree Materialization
 
 Git ref updates are atomic. Updating multiple files in an existing host
@@ -552,7 +673,10 @@ Promotion therefore uses:
 
 - an exclusive Lower worktree lock for cooperating LATTICE operations;
 - a durable journal containing old and new refs and materialization state;
-- deterministic recovery to the project ref's tree after interruption;
+- deterministic recovery to the project ref's tree after interruption,
+  rewriting only paths the journal records as in flight; a path whose current
+  content matches neither the old nor the new tree is surfaced, never
+  overwritten;
 - refusal to start another turn while recovery is incomplete.
 
 A promotion is considered committed only when the ref transaction succeeds.
@@ -646,6 +770,7 @@ The promotion module records:
 
 - baseline and candidate OIDs;
 - candidate commit range;
+- the verification result's OID binding check;
 - final diff and effect verdict;
 - Lower cleanliness checks;
 - baseline compare-and-swap result;
@@ -661,13 +786,29 @@ module before persistence or display.
 
 ## 15. Network and Credentials
 
-Upper network access is open in v1.
+Upper egress is governed by a Profile-configured network policy with three
+modes:
+
+- `open`: unrestricted egress — the default;
+- `allowlist`: only configured destinations (domains and CIDRs) are reachable;
+- `blocked`: no egress.
+
+Enforcement uses CubeSandbox's eBPF egress filtering (CubeVS), applied by the
+host at Upper creation. The policy is part of the immutable Profile snapshot
+and is not model-addressable; LATTICE does not implement its own filter, and
+domain-rule resolution follows CubeVS semantics.
+
+Under `open` or a permissive allowlist, a remote round trip — `git push` from
+Upper, later pulled by the user — bypasses promotion review. `allowlist` and
+`blocked` exist to close this channel for users who need the full layer
+guarantee.
 
 Remote writes such as `git push`, HTTP mutations, database changes, messages,
 and package publication are outside the workspace transaction. Cube rollback
 and Git promotion cannot undo them. LATTICE records CEP-visible operations but
 does not claim complete syscall or network-effect observation for arbitrary
-shell commands.
+shell commands; the egress policy bounds where traffic can go, not what it
+means.
 
 Host credentials are not inherited.
 
@@ -699,8 +840,8 @@ risk, not a security guarantee.
 
 ### `lattice-profile`
 
-- owns strict schema for verify, Cube settings, Git identity, and secret
-  references;
+- owns strict schema for verify, Cube settings, egress network policy, Git
+  identity, and secret references;
 - remains declarative and read-only.
 
 ### `lattice-agent`
@@ -755,13 +896,24 @@ path and therefore cannot be used by a model to operate Lower.
 A new `lattice-workspace` crate owns:
 
 - the CubeWorkspace production and test adapters;
-- Lower cleanliness inspection;
+- the Rust Cube client, written against the pinned CubeSandbox OpenAPI
+  description;
+- applying the Profile egress policy at Upper creation through CubeVS;
+- managed Lower worktree provisioning and cleanliness inspection;
+- warm template provisioning and rebuild policy;
 - Git object export/import validation;
 - promotion prepare and commit phases;
-- locking, journaling, and recovery.
+- locking, journaling, and recovery;
+- candidate ref and snapshot deletion for the manual pruning command.
 
 It does not own Session commits, Agent execution, Profile loading, CEP audit
 persistence, or model-facing events.
+
+### Unchanged Crates
+
+`lancet-dispatch`, `lancet-audit`, `lattice-llm`, `lattice-tui`, and
+`lattice-cli` keep their current roles. The CEP audit SQLite database in
+`lancet-audit` is unaffected by the Session migration.
 
 ## 17. Failure Handling
 
@@ -771,7 +923,8 @@ persistence, or model-facing events.
 - Verification failure: `pending_verification`; snapshot retained.
 - Candidate object validation failure: `rejected`; Lower unchanged.
 - Policy or effect rejection: `rejected`; Lower unchanged.
-- Lower dirty at promotion: `pending_conflict`; Lower unchanged.
+- Lower dirty at promotion with unchanged baseline: `pending_promotion`;
+  Lower unchanged.
 - Baseline compare-and-swap failure: `pending_conflict`; Lower unchanged.
 - Ref transaction failure: no refs change; journal records failure.
 - Materialization failure after ref success: repository recovery mode; no new
@@ -788,8 +941,16 @@ equivalent Session Git commits and refs. It records legacy session and commit
 IDs in each migrated manifest for traceability. Migration verifies transcript
 and topology equivalence before switching the production store.
 
+Legacy SQLite sessions carry no project association; migration writes them
+into the standalone data-directory Session repository.
+
 The CEP audit SQLite database remains independent and is not migrated into the
 Session Git object database.
+
+The change that deletes the envelope also rewrites workspace documentation:
+the `AGENTS.md` CEP contract section (the ten-method catalog list and the
+active-envelope requirement for mutating methods) moves to the nine-method
+direct-policy model in the same change.
 
 ## 19. Verification Strategy
 
@@ -804,6 +965,8 @@ Session Git object database.
 - Lower and Upper cleanliness classification covers staged, unstaged,
   untracked, ignored, and conflicted states;
 - candidate ancestry and object validation reject invalid inputs;
+- import validation flags `.gitmodules` changes, symlink changes, and `.git`
+  tree entries, and enforces object size limits;
 - secret redaction covers audit, logs, tool results, and Session payloads.
 
 ### Adapter tests
@@ -812,6 +975,8 @@ Session Git object database.
 - no Lower absolute path appears in Cube requests or model context;
 - Upper uses the Lower Git object format;
 - Cube snapshot restore preserves dirty and clean states;
+- egress policy is enforced inside Upper: `blocked` denies all egress and
+  `allowlist` denies non-listed destinations;
 - object import preserves commit OIDs, topology, authors, and committers;
 - Upper hooks, config, refs, index, and reflogs are not imported.
 
@@ -821,11 +986,16 @@ Session Git object database.
 - dirty provisional completion resumes AgentLoop in the same turn;
 - cleanup exhaustion creates `pending_worktree`;
 - failed verification creates `pending_verification`;
+- verification writes never appear in exported candidates or retained
+  snapshots;
+- promotion rejects a verification result bound to a different OID;
 - concurrent sessions execute independently;
 - the first successful promotion makes an older baseline conflict;
 - conflict never auto-rebases;
 - promoted project and Session refs update in one ref transaction;
 - pending and rejected turns update only Lattice refs;
+- a `pending_promotion` turn retries promotion without restoring Upper;
+- workspace-less sessions persist to the data-directory repository;
 - no-op turns create Session history without rewriting project history;
 - tool-time audit and promotion-time facts both appear in attestation;
 - crash injection at every journal stage recovers Lower to the committed ref.
@@ -841,6 +1011,9 @@ Session Git object database.
 V1 includes:
 
 - CubeSandbox as the production Upper adapter;
+- a Rust Cube client pinned to a certified CubeSandbox service version;
+- managed Lower worktrees as the default promotion target;
+- per-project warm template provisioning;
 - Host CEP using Cube process/files operations;
 - optional one-shot runner for POSIX-specific tool behavior;
 - complete envelope deletion;
@@ -855,6 +1028,9 @@ V1 includes:
 - pending resume through Cube snapshots;
 - multiple concurrently executing sessions;
 - exposed credential injection and host redaction;
+- Profile-configured Upper egress policy (`open`, `allowlist`, `blocked`)
+  enforced through CubeVS;
+- a manual pruning command for candidate refs and Cube snapshots;
 - SQLite Session migration.
 
 V1 deliberately excludes:
@@ -862,10 +1038,11 @@ V1 deliberately excludes:
 - automatic rebase or merge;
 - partial-file promotion;
 - credential brokerage;
-- network allowlists or complete egress accounting;
+- complete egress accounting and per-protocol traffic inspection;
 - persistent VM LANCET workers;
 - VM multi-user hardening;
 - non-Cube production adapters;
+- non-Linux, non-x86_64, or non-KVM production hosts;
 - non-Git Lower workspaces;
 - automatic snapshot garbage collection;
 - remote synchronization of `refs/lattice/**`;
