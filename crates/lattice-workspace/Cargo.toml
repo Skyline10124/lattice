@@ -1,0 +1,23 @@
+[package]
+name = "lattice-workspace"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE Upper-workspace execution adapter seam with microsandbox and CubeSandbox backends (MVP)"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[[bin]]
+name = "sandbox-demo"
+path = "src/bin/sandbox_demo.rs"
+
+[features]
+default = []

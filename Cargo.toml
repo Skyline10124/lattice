@@ -16,6 +16,7 @@ members = [
     "crates/lattice-tui",
     "crates/lattice-cli",
     "crates/lattice-profile",
+    "crates/lattice-workspace",
 ]
 
 [workspace.package]
