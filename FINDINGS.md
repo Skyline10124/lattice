@@ -12,7 +12,31 @@
 
 ## MEDIUM
 
-(None)
+### M-33-01: Profile `[workspace]` → `UpperSpec` 翻译未在 Phase 33 规划 — `planning` / `v1.5-alpha`
+- **位置**: `.planning/phases/33-workspace-adapter-production-hardening/33-03-PLAN.md`（schema only）；composition 层无 plan task
+- **问题**: Phase 33 交付 `WorkspaceSection` / `CredentialRef` 与 `UpperSpec` / `apply_egress`，但无 `lattice-api` 将 profile 解析结果映射为 adapter 调用的任务。PLAN-CHECK rev2 以 warning 放行，此前无正式 defer 台账。
+- **当前状态**: 已记录于 `33-DEFERRALS.md` **D-33-01**；Phase 33 验收以 schema + adapter 单测/集成为准。
+- **计划**: **Phase 34** turn/CEP 组合层实现 `WorkspaceSection` → `UpperSpec`（含 egress、credential 解析）；执行 Phase 33 时不得将此缺口判为 phase 失败。
+
+### M-33-02: WS-04 按项目 warm template 自动选择未接线 — `planning` / `v1.5-alpha`
+- **位置**: `crates/lattice-workspace/src/template.rs`（helpers）；`33-05-PLAN.md`（仅 `ImageOrTemplate::Template` 显式传入时 restore）
+- **问题**: ROADMAP SC3 要求 per-project template 支撑 Upper 创建；Phase 33 有 SDK snapshot API 与 `WarmTemplate::is_stale`，但 `create_upper` Image 路径不会自动解析 `proj-<hash>-template`。
+- **当前状态**: 已记录于 `33-DEFERRALS.md` **D-33-02**；V-05 覆盖显式 template 名路径。
+- **计划**: **Phase 34** turn 启动编排，或 **33-05 执行期**扩展 05-T2；verify-phase 不得要求端到端自动 template 选择。
+
+### M-33-03: 生产 adapter 上 WS-02 contract suite 非强制 — `verification` / `v1.5-alpha`
+- **位置**: `33-05-PLAN.md` T3（`test_microsandbox_contract_suite` optional）
+- **问题**: WS-02 路径泄漏契约在 `DeterministicWorkspace`（33-04）上保证；`MicrosandboxWorkspace` KVM lane 仅 V-05/V-08，contract suite 可选。
+- **当前状态**: 已记录于 `33-DEFERRALS.md` **D-33-03**。
+- **计划**: **33-05 执行时**将 integration lane contract suite 改为 mandatory（推荐）；非 Phase 33 planning blocker。
+
+### M-33-04: Phase 33 计划/研究的 microsandbox SDK API 与锁定 crate 不符（已校正）— `planning` / `v1.5-alpha`
+- **位置**: `33-RESEARCH.md`、`33-PATTERNS.md`、`33-01/02/05-PLAN.md`、`33-VALIDATION.md`
+- **问题**: RESEARCH/PATTERNS 依 Context7 文档推导 SDK 面，三处 API 在 `microsandbox 0.5.6` 实际 crate 中**不存在**：`Snapshot::save(name,&sandbox)`、`Snapshot::get(name).restore_with(...)`、`NetworkPolicy::allowlist([...])`；`apply_egress` 签名按值收发 `microsandbox::SandboxBuilder`（crate root 未导出，实为 `microsandbox::sandbox::SandboxBuilder`）。`33-PLAN-CHECK` rev3 PASS 仅做结构/依赖/覆盖校验，未对 SDK 调用核对源码。按原计划执行 33-05 会编译失败。
+- **当前状态**: 已校正（2026-06-13）。六份文件改为对照 `~/.cargo/.../microsandbox-0.5.6/lib/` 源码验证的真实 API：save=`Snapshot::builder(src).destination(Name(t)).create()`、restore=`Sandbox::builder(new).from_snapshot(t).create()`、allowlist=`NetworkPolicy::none().allow_domains([...])?`、类型路径 `microsandbox::sandbox::SandboxBuilder`；`apply_egress` 拆出可测纯函数 `plan_egress→NetPlan`（让 V-06/V-07 det 层从空转变真断言）；RESEARCH 顶部加 API-CORRECTION 横幅；`33-PLAN-CHECK` 加 rev4 注记。
+- **残留**: Wave 0 新增 **A4**（真机快照往返探针）与修正后的 A7 尚未在 KVM 宿主执行；若 A4 实测的 save/restore 调用形状仍与上述不符，33-05 / 33-PATTERNS Pattern 4 须按 A4 记录的逐字调用再校。plan-checker 未重跑（仍 rev3 结构结论 + rev4 注记）。
+- **计划**: 执行 33-01 时跑 A4/A7 实证；A4 PASS 即闭环，FAIL 则按记录修 33-05 后闭环。根因教训：LLM/SDK 集成的 API 形状以锁定 crate 源码为准，Context7/训练记忆仅作线索。
+
 
 ## LOW
 
