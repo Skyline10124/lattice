@@ -20,13 +20,13 @@ pub use budget::{
     BudgetExhausted, BudgetLimits, ObservationBudgetSnapshot, ObservationBudgetTracker,
 };
 pub use command::{
-    build_effective_env, classify_command, classify_command_line, validate_timeout, CommandPolicy,
-    EffectiveImpact,
+    CommandPolicy, EffectiveImpact, build_effective_env, classify_command, classify_command_line,
+    validate_timeout,
 };
 use lancet_protocol::envelope::ImpactKind;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
-pub use shell_ast::{resolve_command_line, CommandLine, ShellExpansion};
+pub use shell_ast::{CommandLine, ShellExpansion, resolve_command_line};
 
 /// Immutable CEP policy limits and roots assembled once per turn.
 #[derive(Clone, Debug, PartialEq, Eq)]

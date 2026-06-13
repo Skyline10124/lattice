@@ -19,10 +19,10 @@ use lattice_session::GraphHead;
 
 use lancet_api::store_turn_attestation;
 
-use super::cep::{map_cep_tool_event, ProductionTurnDeps};
+use super::cep::{ProductionTurnDeps, map_cep_tool_event};
 use super::execute::{
-    build_commit_input, build_profile_snapshot_metadata, derive_terminal_event, map_agent_event,
-    TurnCommitContext,
+    TurnCommitContext, build_commit_input, build_profile_snapshot_metadata, derive_terminal_event,
+    map_agent_event,
 };
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
@@ -270,10 +270,10 @@ async fn run_live_turn_task(
     let cep_agent_tx = agent_tx.clone();
     let cep_forwarder = tokio::spawn(async move {
         while let Some(event) = cep_client.next_event().await {
-            if let Some(agent_event) = map_cep_tool_event(event) {
-                if cep_agent_tx.send(agent_event).await.is_err() {
-                    break;
-                }
+            if let Some(agent_event) = map_cep_tool_event(event)
+                && cep_agent_tx.send(agent_event).await.is_err()
+            {
+                break;
             }
         }
     });

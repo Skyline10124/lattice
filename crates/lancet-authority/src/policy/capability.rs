@@ -321,18 +321,18 @@ fn check_pattern_coverage(
                 {
                     return Some(CapabilityFailureReason::ArgvNotAllowed);
                 }
-            } else if let Some(argv) = &invocation.argv {
-                if !matches_argv_allowlist(argv_allowlist, argv) {
-                    return Some(CapabilityFailureReason::ArgvNotAllowed);
-                }
+            } else if let Some(argv) = &invocation.argv
+                && !matches_argv_allowlist(argv_allowlist, argv)
+            {
+                return Some(CapabilityFailureReason::ArgvNotAllowed);
             }
             None
         }
         Capability::FetchUrl { host: allowed_host } => {
-            if let Some(host) = &invocation.host {
-                if !matches_host(allowed_host, host) {
-                    return Some(CapabilityFailureReason::HostNotAllowed);
-                }
+            if let Some(host) = &invocation.host
+                && !matches_host(allowed_host, host)
+            {
+                return Some(CapabilityFailureReason::HostNotAllowed);
             }
             None
         }
@@ -394,10 +394,10 @@ fn check_read_path_pattern(pattern: &str, path: &str) -> Option<CapabilityFailur
         if path == pattern {
             return None;
         }
-        if let Some(remainder) = path.strip_prefix(pattern) {
-            if remainder.is_empty() || remainder.starts_with('/') {
-                return None;
-            }
+        if let Some(remainder) = path.strip_prefix(pattern)
+            && (remainder.is_empty() || remainder.starts_with('/'))
+        {
+            return None;
         }
         return Some(CapabilityFailureReason::PathOutsidePattern);
     }
@@ -433,10 +433,10 @@ fn check_read_path_pattern(pattern: &str, path: &str) -> Option<CapabilityFailur
         return Some(CapabilityFailureReason::PathOutsidePattern);
     }
 
-    if let Some(remainder) = path.strip_prefix(pattern) {
-        if remainder.is_empty() || remainder.starts_with('/') {
-            return None;
-        }
+    if let Some(remainder) = path.strip_prefix(pattern)
+        && (remainder.is_empty() || remainder.starts_with('/'))
+    {
+        return None;
     }
 
     Some(CapabilityFailureReason::PathOutsidePattern)

@@ -26,7 +26,7 @@ use brush_parser::{Parser, ParserOptions};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
-use super::command::{command_matches_denied, CommandPolicy};
+use super::command::{CommandPolicy, command_matches_denied};
 
 /// Hard ceilings for the profile-tunable inline-shell resource limits
 /// (`CommandPolicy::inline_shell_max_*`). The profile may lower the limits

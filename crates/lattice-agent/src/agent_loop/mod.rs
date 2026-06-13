@@ -13,8 +13,8 @@ mod types;
 
 use std::fmt;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -214,18 +214,18 @@ impl AgentLoop {
             round += 1;
 
             // Check cancellation before starting the next model round.
-            if let Some(flag) = &request.cancel_flag {
-                if flag.load(Ordering::Relaxed) {
-                    return AgentTurnResult {
-                        messages: all_messages,
-                        assistant_output: String::new(),
-                        usage: accumulated_usage,
-                        tool_results: tool_summaries,
-                        status: AgentTurnStatus::Cancelled,
-                        terminal_reason: Some("cancelled by caller".to_string()),
-                        events: all_events,
-                    };
-                }
+            if let Some(flag) = &request.cancel_flag
+                && flag.load(Ordering::Relaxed)
+            {
+                return AgentTurnResult {
+                    messages: all_messages,
+                    assistant_output: String::new(),
+                    usage: accumulated_usage,
+                    tool_results: tool_summaries,
+                    status: AgentTurnStatus::Cancelled,
+                    terminal_reason: Some("cancelled by caller".to_string()),
+                    events: all_events,
+                };
             }
 
             // Call the LLM (M-21: reuse incrementally maintained provider cache).
@@ -257,18 +257,18 @@ impl AgentLoop {
                 // The awaited ModelStarted emission can yield; check cancellation
                 // here so a flip between the round-top check and stream opening is
                 // observed before opening the stream. No partial state exists yet.
-                if let Some(flag) = &request.cancel_flag {
-                    if flag.load(Ordering::Relaxed) {
-                        return AgentTurnResult {
-                            messages: all_messages,
-                            assistant_output: String::new(),
-                            usage: accumulated_usage,
-                            tool_results: tool_summaries,
-                            status: AgentTurnStatus::Cancelled,
-                            terminal_reason: Some("cancelled by caller".to_string()),
-                            events: all_events,
-                        };
-                    }
+                if let Some(flag) = &request.cancel_flag
+                    && flag.load(Ordering::Relaxed)
+                {
+                    return AgentTurnResult {
+                        messages: all_messages,
+                        assistant_output: String::new(),
+                        usage: accumulated_usage,
+                        tool_results: tool_summaries,
+                        status: AgentTurnStatus::Cancelled,
+                        terminal_reason: Some("cancelled by caller".to_string()),
+                        events: all_events,
+                    };
                 }
 
                 match await_with_deadline(
@@ -617,18 +617,18 @@ impl AgentLoop {
                     // The assistant tool-call message is committed above.
                     // Observe cancellation here so the transcript keeps that
                     // assistant message but no tool result messages.
-                    if let Some(flag) = &request.cancel_flag {
-                        if flag.load(Ordering::Relaxed) {
-                            return AgentTurnResult {
-                                messages: all_messages,
-                                assistant_output: stream_result.assistant_content,
-                                usage: accumulated_usage,
-                                tool_results: tool_summaries,
-                                status: AgentTurnStatus::Cancelled,
-                                terminal_reason: Some("cancelled by caller".to_string()),
-                                events: all_events,
-                            };
-                        }
+                    if let Some(flag) = &request.cancel_flag
+                        && flag.load(Ordering::Relaxed)
+                    {
+                        return AgentTurnResult {
+                            messages: all_messages,
+                            assistant_output: stream_result.assistant_content,
+                            usage: accumulated_usage,
+                            tool_results: tool_summaries,
+                            status: AgentTurnStatus::Cancelled,
+                            terminal_reason: Some("cancelled by caller".to_string()),
+                            events: all_events,
+                        };
                     }
 
                     // Execute validated tool calls sequentially.
@@ -638,18 +638,18 @@ impl AgentLoop {
                         // Skips the rest of the batch on cancel; no
                         // `ToolCallStarted` for the skipped tool, prior tools'
                         // events / `tool_summaries` / messages are preserved.
-                        if let Some(flag) = &request.cancel_flag {
-                            if flag.load(Ordering::Relaxed) {
-                                return AgentTurnResult {
-                                    messages: all_messages,
-                                    assistant_output: stream_result.assistant_content,
-                                    usage: accumulated_usage,
-                                    tool_results: tool_summaries,
-                                    status: AgentTurnStatus::Cancelled,
-                                    terminal_reason: Some("cancelled by caller".to_string()),
-                                    events: all_events,
-                                };
-                            }
+                        if let Some(flag) = &request.cancel_flag
+                            && flag.load(Ordering::Relaxed)
+                        {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: stream_result.assistant_content,
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Cancelled,
+                                terminal_reason: Some("cancelled by caller".to_string()),
+                                events: all_events,
+                            };
                         }
 
                         emit_agent_event(
@@ -751,18 +751,18 @@ impl AgentLoop {
                         // are all committed above. On cancel, exit before
                         // the next iteration starts another tool — already
                         // in-flight tools are never aborted.
-                        if let Some(flag) = &request.cancel_flag {
-                            if flag.load(Ordering::Relaxed) {
-                                return AgentTurnResult {
-                                    messages: all_messages,
-                                    assistant_output: stream_result.assistant_content.clone(),
-                                    usage: accumulated_usage,
-                                    tool_results: tool_summaries,
-                                    status: AgentTurnStatus::Cancelled,
-                                    terminal_reason: Some("cancelled by caller".to_string()),
-                                    events: all_events,
-                                };
-                            }
+                        if let Some(flag) = &request.cancel_flag
+                            && flag.load(Ordering::Relaxed)
+                        {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: stream_result.assistant_content.clone(),
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Cancelled,
+                                terminal_reason: Some("cancelled by caller".to_string()),
+                                events: all_events,
+                            };
                         }
                     }
                 }
@@ -1016,17 +1016,17 @@ impl AgentLoop {
             // Observe cancellation after the per-event emit and pending-call
             // mutations, but before the next `stream.next().await`. Done is
             // excluded above; malformed-toolcall error returns are also above.
-            if let Some(flag) = cancel_flag {
-                if flag.load(Ordering::Relaxed) {
-                    return StreamResult {
-                        assistant_content,
-                        reasoning_content,
-                        tool_calls: pending_calls,
-                        usage,
-                        finish_reason,
-                        outcome: StreamOutcome::Cancelled,
-                    };
-                }
+            if let Some(flag) = cancel_flag
+                && flag.load(Ordering::Relaxed)
+            {
+                return StreamResult {
+                    assistant_content,
+                    reasoning_content,
+                    tool_calls: pending_calls,
+                    usage,
+                    finish_reason,
+                    outcome: StreamOutcome::Cancelled,
+                };
             }
         }
     }

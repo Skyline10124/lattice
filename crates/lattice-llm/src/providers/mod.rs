@@ -50,7 +50,7 @@ pub(crate) fn extract_api_error(root: &serde_json::Value) -> Option<LlmEvent> {
 /// Append `text` to an optional system-message accumulator.
 pub(crate) fn push_system_text(slot: &mut Option<String>, text: &str) {
     match slot {
-        Some(ref mut existing) => {
+        Some(existing) => {
             existing.push_str("\n\n");
             existing.push_str(text);
         }

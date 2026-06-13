@@ -11,7 +11,7 @@ use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 use lancet_authority::policy::capability::{
-    match_capability, CapabilityMatchVerdict, InvocationFacts, SessionStateOperation,
+    CapabilityMatchVerdict, InvocationFacts, SessionStateOperation, match_capability,
 };
 use lancet_authority::policy::default::CapabilitySourcePolicy;
 

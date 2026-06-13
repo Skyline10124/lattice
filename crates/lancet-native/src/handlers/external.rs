@@ -11,9 +11,9 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::policy::budget::BudgetExhausted;
 use lancet_authority::policy::network::validate_fetch_url;
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ExecutionErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -360,10 +360,12 @@ mod tests {
         assert_eq!(event.method, "cep.native_external_metadata");
         assert_eq!(event.params["metadata"]["truncated"], true);
         assert_eq!(event.params["metadata"]["observation_source"], "external");
-        assert!(!event.params["metadata"]
-            .as_object()
-            .unwrap()
-            .contains_key("body"));
+        assert!(
+            !event.params["metadata"]
+                .as_object()
+                .unwrap()
+                .contains_key("body")
+        );
     }
 
     #[tokio::test]

@@ -10,9 +10,9 @@
 //! mpsc channel never deadlocks.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{
@@ -703,14 +703,18 @@ async fn scenario_04_receiver_drop_does_not_cancel_turn() {
         result.events.len() >= 2,
         "buffered events should still be populated after receiver drop"
     );
-    assert!(result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. })));
-    assert!(result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelStarted { .. }))
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
     // Assistant message present.
     assert_eq!(
         result
@@ -896,10 +900,12 @@ async fn scenario_05_cancel_mid_stream_preserves_partial_content() {
     );
 
     // No ModelFinished event in the Cancelled branch.
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 
     // Exactly two TokenDelta events with the expected split.
     let tokens: Vec<&AgentTurnEvent> = result

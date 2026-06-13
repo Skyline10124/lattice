@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 
 use crate::graph::{
-    derive_commit_message, GraphHead, GraphMessage, SessionGraphStore, TurnCommitInput,
-    TurnCommitStatus, TurnUsage,
+    GraphHead, GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, TurnUsage,
+    derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
@@ -111,13 +111,15 @@ fn head_transcript_reads_current_branch_history_in_commit_order() {
     let messages3 = vec![user_msg("Turn 2"), assistant_msg("Response 2")];
     let input3 = commit_input_with_usage(
         "sess-1",
-        vec![store
-            .log("sess-1")
-            .expect("log")
-            .last()
-            .unwrap()
-            .commit_id
-            .clone()],
+        vec![
+            store
+                .log("sess-1")
+                .expect("log")
+                .last()
+                .unwrap()
+                .commit_id
+                .clone(),
+        ],
         messages3,
         TurnCommitStatus::Completed,
         None,

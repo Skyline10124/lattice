@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lancet_audit::{impact_kind_from_label, CepAuditContext, CepAuditStore};
+use lancet_audit::{CepAuditContext, CepAuditStore, impact_kind_from_label};
 use lancet_authority::CepTurnContext;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditTailResult,

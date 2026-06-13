@@ -172,150 +172,147 @@ impl GeminiSseParser {
         let mut events = Vec::new();
         let mut done_emitted = false;
 
-        if let Some(cands) = root.get("candidates").and_then(|c| c.as_array()) {
-            if let Some(cand) = cands.first() {
-                let parts = cand
-                    .get("content")
-                    .and_then(|c| c.get("parts"))
-                    .and_then(|p| p.as_array());
+        if let Some(cands) = root.get("candidates").and_then(|c| c.as_array())
+            && let Some(cand) = cands.first()
+        {
+            let parts = cand
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array());
 
-                let mut has_tool_calls = false;
+            let mut has_tool_calls = false;
 
-                if let Some(parts_arr) = parts {
-                    for part in parts_arr {
-                        // Thinking/reasoning parts
-                        if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
-                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                if !text.is_empty() {
-                                    events.push(LlmEvent::Reasoning {
-                                        content: text.to_string(),
-                                    });
-                                }
-                            }
-                            continue;
-                        }
-
-                        // Text parts
-                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                            if !text.is_empty() {
-                                events.push(LlmEvent::Token {
-                                    content: text.to_string(),
-                                });
-                            }
-                        }
-
-                        // Function call parts
-                        if let Some(fc) = part.get("functionCall") {
-                            let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                            let args: serde_json::Value = fc
-                                .get("args")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                            let arguments = serde_json::to_string(&args).unwrap_or_default();
-                            let counter = self.tc_counter;
-                            let id = format!("tc_{name}_{counter}");
-                            self.tool_call_ids.push(id.clone());
-                            self.tc_counter += 1;
-
-                            events.push(LlmEvent::ToolCallStart {
-                                id: id.clone(),
-                                name: name.to_string(),
-                            });
-                            events.push(LlmEvent::ToolCallDelta {
-                                id,
-                                arguments_delta: arguments,
-                            });
-                            has_tool_calls = true;
-                        }
-                    }
-                }
-
-                // Finish reason
-                if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
-                    let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
-                    for id in self.tool_call_ids.drain(..) {
-                        events.push(LlmEvent::ToolCallEnd { id });
-                    }
-
-                    // Safety ratings
-                    if let Some(ratings) = cand.get("safetyRatings").and_then(|r| r.as_array()) {
-                        for rating in ratings {
-                            if let (Some(cat), Some(prob)) = (
-                                rating.get("category").and_then(|c| c.as_str()),
-                                rating.get("probability").and_then(|p| p.as_str()),
-                            ) {
-                                events.push(LlmEvent::SafetyRating {
-                                    category: cat.to_string(),
-                                    probability: prob.to_string(),
-                                });
-                            }
-                        }
-                    }
-
-                    // Grounding metadata (web search / Google Search)
-                    if let Some(grounding) = cand.get("groundingMetadata") {
-                        if let Some(chunks) =
-                            grounding.get("groundingChunks").and_then(|c| c.as_array())
+            if let Some(parts_arr) = parts {
+                for part in parts_arr {
+                    // Thinking/reasoning parts
+                    if part.get("thought").and_then(|v| v.as_bool()) == Some(true) {
+                        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                            && !text.is_empty()
                         {
-                            for chunk in chunks {
-                                if let Some(web) = chunk.get("web") {
-                                    let text = web
-                                        .get("title")
-                                        .or_else(|| web.get("snippet"))
-                                        .and_then(|t| t.as_str())
-                                        .unwrap_or("");
-                                    let url = web
-                                        .get("uri")
-                                        .and_then(|u| u.as_str())
-                                        .map(|s| s.to_string());
-                                    if !text.is_empty() || url.is_some() {
-                                        events.push(LlmEvent::GroundingChunk {
-                                            text: text.to_string(),
-                                            url,
-                                        });
-                                    }
-                                }
-                            }
+                            events.push(LlmEvent::Reasoning {
+                                content: text.to_string(),
+                            });
                         }
+                        continue;
                     }
 
-                    let mapped = if had_tool_calls {
-                        "tool_calls".to_string()
-                    } else {
-                        Self::map_finish_reason(reason)
-                    };
+                    // Text parts
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str())
+                        && !text.is_empty()
+                    {
+                        events.push(LlmEvent::Token {
+                            content: text.to_string(),
+                        });
+                    }
 
-                    let usage = root.get("usageMetadata").map(|u| {
-                        super::token_usage_from_keys(
-                            u,
-                            "promptTokenCount",
-                            "candidatesTokenCount",
-                            "totalTokenCount",
-                        )
-                    });
+                    // Function call parts
+                    if let Some(fc) = part.get("functionCall") {
+                        let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let args: serde_json::Value = fc
+                            .get("args")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                        let arguments = serde_json::to_string(&args).unwrap_or_default();
+                        let counter = self.tc_counter;
+                        let id = format!("tc_{name}_{counter}");
+                        self.tool_call_ids.push(id.clone());
+                        self.tc_counter += 1;
 
-                    events.push(LlmEvent::Done {
-                        finish_reason: mapped,
-                        usage,
-                    });
-                    done_emitted = true;
+                        events.push(LlmEvent::ToolCallStart {
+                            id: id.clone(),
+                            name: name.to_string(),
+                        });
+                        events.push(LlmEvent::ToolCallDelta {
+                            id,
+                            arguments_delta: arguments,
+                        });
+                        has_tool_calls = true;
+                    }
                 }
             }
-        }
 
-        // Fallback: usageMetadata without finishReason
-        if !done_emitted {
-            if let Some(u) = root.get("usageMetadata") {
-                events.push(LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: Some(super::token_usage_from_keys(
+            // Finish reason
+            if let Some(reason) = cand.get("finishReason").and_then(|r| r.as_str()) {
+                let had_tool_calls = has_tool_calls || !self.tool_call_ids.is_empty();
+                for id in self.tool_call_ids.drain(..) {
+                    events.push(LlmEvent::ToolCallEnd { id });
+                }
+
+                // Safety ratings
+                if let Some(ratings) = cand.get("safetyRatings").and_then(|r| r.as_array()) {
+                    for rating in ratings {
+                        if let (Some(cat), Some(prob)) = (
+                            rating.get("category").and_then(|c| c.as_str()),
+                            rating.get("probability").and_then(|p| p.as_str()),
+                        ) {
+                            events.push(LlmEvent::SafetyRating {
+                                category: cat.to_string(),
+                                probability: prob.to_string(),
+                            });
+                        }
+                    }
+                }
+
+                // Grounding metadata (web search / Google Search)
+                if let Some(grounding) = cand.get("groundingMetadata")
+                    && let Some(chunks) =
+                        grounding.get("groundingChunks").and_then(|c| c.as_array())
+                {
+                    for chunk in chunks {
+                        if let Some(web) = chunk.get("web") {
+                            let text = web
+                                .get("title")
+                                .or_else(|| web.get("snippet"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+                            let url = web
+                                .get("uri")
+                                .and_then(|u| u.as_str())
+                                .map(|s| s.to_string());
+                            if !text.is_empty() || url.is_some() {
+                                events.push(LlmEvent::GroundingChunk {
+                                    text: text.to_string(),
+                                    url,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                let mapped = if had_tool_calls {
+                    "tool_calls".to_string()
+                } else {
+                    Self::map_finish_reason(reason)
+                };
+
+                let usage = root.get("usageMetadata").map(|u| {
+                    super::token_usage_from_keys(
                         u,
                         "promptTokenCount",
                         "candidatesTokenCount",
                         "totalTokenCount",
-                    )),
+                    )
                 });
+
+                events.push(LlmEvent::Done {
+                    finish_reason: mapped,
+                    usage,
+                });
+                done_emitted = true;
             }
+        }
+
+        // Fallback: usageMetadata without finishReason
+        if !done_emitted && let Some(u) = root.get("usageMetadata") {
+            events.push(LlmEvent::Done {
+                finish_reason: "stop".to_string(),
+                usage: Some(super::token_usage_from_keys(
+                    u,
+                    "promptTokenCount",
+                    "candidatesTokenCount",
+                    "totalTokenCount",
+                )),
+            });
         }
 
         events

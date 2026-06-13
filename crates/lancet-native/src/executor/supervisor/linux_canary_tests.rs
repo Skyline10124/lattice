@@ -16,11 +16,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
-use super::fd::{cleanup_inherited_fds, set_cloexec, LiveFdCleanupBackend};
+use super::fd::{LiveFdCleanupBackend, cleanup_inherited_fds, set_cloexec};
 use super::landlock::{LandlockRefinementPlan, LandlockRightsMask};
 use super::syscall::{
-    assert_proc_net_dev_has_only_loopback, assert_proc_net_route_has_no_default_route,
-    LiveSupervisorSyscalls, SupervisorSyscalls,
+    LiveSupervisorSyscalls, SupervisorSyscalls, assert_proc_net_dev_has_only_loopback,
+    assert_proc_net_route_has_no_default_route,
 };
 use crate::enforcement::isolation::{
     CommandIsolationLandlockBehavior, CommandIsolationMode, CommandIsolationRuntimeConfig,
@@ -30,8 +30,8 @@ use crate::handlers::register_command_methods;
 use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
-use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_catalog::CepMethod;
+use lancet_catalog::methods::command::{Run, RunParams, RunResult};
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
     ImpactKind, Intent, OnFailure, Scope, VerifyCommand,
@@ -240,7 +240,7 @@ fn canary_minimal_mount_view() -> CanaryResult {
         Err(err) => {
             return CanaryResult::SkippedUnsupported(format!(
                 "mount namespace unavailable: tempdir failed: {err}"
-            ))
+            ));
         }
     };
     let root = temp.path().join("root");
@@ -297,7 +297,7 @@ fn canary_fd_and_setup_pipe_cleanup() -> CanaryResult {
         Err(err) => {
             return CanaryResult::SkippedUnsupported(format!(
                 "fd cleanup unavailable: temp file failed: {err}"
-            ))
+            ));
         }
     };
     let leak_fd = temp.as_file().as_raw_fd();
@@ -1062,7 +1062,7 @@ fn run_v1_4_overlay_canary(
         Err(err) => {
             return CanaryResult::SkippedUnsupported(format!(
                 "{name} unavailable: tokio runtime setup failed: {err}"
-            ))
+            ));
         }
     };
     match f(&runtime) {

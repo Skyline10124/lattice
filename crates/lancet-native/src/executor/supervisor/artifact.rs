@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::edit::commit_baseline::{
-    validate_commit_baseline_evidence, CommitBaselineFailureReason, CommitBaselineValidation,
-    HunkAnchorEvidence, HunkAnchorSummary,
+    CommitBaselineFailureReason, CommitBaselineValidation, HunkAnchorEvidence, HunkAnchorSummary,
+    validate_commit_baseline_evidence,
 };
 use crate::enforcement::guard_l1::check_write_scope;
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
@@ -30,8 +30,8 @@ use super::overlay::{
     VerifyLayerStatus,
 };
 use super::snapshot::{
-    is_snapshot_skipped_path, recheck_lower_baseline, LowerBaseline, LowerConsistencyStatus,
-    SnapshotEntry, SnapshotFileKind,
+    LowerBaseline, LowerConsistencyStatus, SnapshotEntry, SnapshotFileKind,
+    is_snapshot_skipped_path, recheck_lower_baseline,
 };
 
 #[cfg(unix)]
@@ -1352,13 +1352,13 @@ fn apply_regular_entry(
     entry: &PreparedRegularArtifactEntry,
 ) -> Result<(), String> {
     let target = ensure_parent_for_target(project_root, &entry.path)?;
-    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to write regular artifact through symlink '{}'",
-                target.display()
-            ));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(&target)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(format!(
+            "refusing to write regular artifact through symlink '{}'",
+            target.display()
+        ));
     }
     let content = std::fs::read(&entry.staged_path).map_err(|err| {
         format!(
@@ -1393,13 +1393,13 @@ fn apply_directory_entry(
     entry: &PreparedDirectoryArtifactEntry,
 ) -> Result<(), String> {
     let target = target_path(project_root, &entry.path)?;
-    if let Ok(metadata) = std::fs::symlink_metadata(&target) {
-        if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to create directory through symlink '{}'",
-                target.display()
-            ));
-        }
+    if let Ok(metadata) = std::fs::symlink_metadata(&target)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(format!(
+            "refusing to create directory through symlink '{}'",
+            target.display()
+        ));
     }
     ensure_existing_components_are_not_symlinks(project_root, &entry.path)?;
     std::fs::create_dir_all(&target)

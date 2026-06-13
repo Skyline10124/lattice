@@ -46,21 +46,21 @@ mod status;
 
 pub use attestation::store_turn_attestation;
 pub use audit::{
-    query_audit, tail_audit, AuditQueryOutput, AuditRequest, AuditTailOutput,
-    AUDIT_TAIL_MAX_BATCHES,
+    AUDIT_TAIL_MAX_BATCHES, AuditQueryOutput, AuditRequest, AuditTailOutput, query_audit,
+    tail_audit,
 };
 pub use config::{AuditBacking, LancetRuntimeConfig};
 pub use doctor::{
-    run_doctor_checks, run_envelope_declare_smoke_for_project_root, LancetDoctorGate,
-    LancetDoctorOutput, LancetDoctorRequest,
+    LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
+    run_envelope_declare_smoke_for_project_root,
 };
 pub use error::{LancetError, LancetResult};
 pub use runtime::{
-    base_observation_envelope, cep_policy_from_policy_config, LancetRuntime, LancetRuntimeParts,
-    LancetServer, ServerLifecycle, DEFAULT_CHANNEL_CAPACITY,
+    DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
+    base_observation_envelope, cep_policy_from_policy_config,
 };
 pub use status::{
-    collect_status, collect_status_with_probe, LancetRecentCallEntry, LancetStatusOutput,
+    LancetRecentCallEntry, LancetStatusOutput, collect_status, collect_status_with_probe,
 };
 
 // --- Curated re-exports: types that appear in this crate's public signatures,
@@ -73,8 +73,8 @@ pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
 pub use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 pub use lancet_native::{
-    register_production_method_registry, AuditQueryFilters, CepAuditContext, CepAuditStore,
-    MethodRegistry, MissingRequiredBoundary, ServerRunConfig,
+    AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, MissingRequiredBoundary,
+    ServerRunConfig, register_production_method_registry,
 };
 pub use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 pub use lancet_protocol::{

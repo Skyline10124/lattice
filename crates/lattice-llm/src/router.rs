@@ -217,37 +217,9 @@ impl ModelRouter {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{LazyLock, Mutex};
-
     use super::*;
+    use crate::test_env::with_env_vars;
     use crate::types::ModelTarget;
-
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn with_env_vars(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-
-        let previous: Vec<(&str, Option<String>)> = vars
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(key).ok()))
-            .collect();
-
-        for (key, value) in vars {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        f();
-
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
 
     #[test]
     fn credential_status_present_from_env() {

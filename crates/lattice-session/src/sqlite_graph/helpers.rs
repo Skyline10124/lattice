@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::graph::{GraphMessage, GraphToolCall, TurnCommitStatus, TurnLogEntry};
 use crate::{Result, SessionError};

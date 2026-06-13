@@ -1042,7 +1042,7 @@ fn seq_turn_failed_then_commit_drains_stream() {
     assert!(err_str.contains("committing"));
     assert!(err_str.contains("C"));
     assert!(err_str.contains("error")); // D-B2: lowercase status
-                                        // State accumulated correctly
+    // State accumulated correctly
     assert!(state.last_terminal.is_some());
     assert_eq!(state.last_status, Some(RunTurnStatus::Error));
     assert!(state.last_commit.is_some());

@@ -433,7 +433,7 @@ mod tests {
                         ImpactKind::WorkspaceMutation,
                     ],
                     violations: vec![
-                        "observed workspace_mutation not in declared effect ceiling".into()
+                        "observed workspace_mutation not in declared effect ceiling".into(),
                     ],
                 })),
             ),

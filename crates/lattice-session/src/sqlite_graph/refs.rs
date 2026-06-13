@@ -4,7 +4,7 @@
 //! Branch ref operations: checkout, branch, reset, diff.
 
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use crate::graph::{GraphDiff, GraphHead, GraphRef, GraphRefKind, ResetResult};
 use crate::{Result, SessionError};

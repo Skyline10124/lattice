@@ -340,7 +340,11 @@ fn hash_json(kind: &str, value: &serde_json::Value) -> String {
     hasher.update(kind.as_bytes());
     hasher.update(b"\0");
     hasher.update(json.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Canonicalize JSON by sorting object keys alphabetically (recursive).

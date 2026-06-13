@@ -285,8 +285,10 @@ mod catalog_default_snapshot {
     #[test]
     fn catalog_default_snapshot_scaffold_is_separate() {
         assert_eq!(scaffold_catalog().len(), 2);
-        assert!(!catalog()
-            .iter()
-            .any(|d| d.name == "workspace.inspect" || d.name == "workspace.navigate"));
+        assert!(
+            !catalog()
+                .iter()
+                .any(|d| d.name == "workspace.inspect" || d.name == "workspace.navigate")
+        );
     }
 }

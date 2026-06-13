@@ -3,16 +3,16 @@
 
 //! In-process Tokio channel transport for CEP JSON-RPC frames.
 
-use crate::registry::{call_cancelled, Cancellation, EventSink, MethodRegistry};
+use crate::registry::{Cancellation, EventSink, MethodRegistry, call_cancelled};
 use lancet_catalog::CatalogMethod;
-use lancet_protocol::{error::to_jsonrpc_error, CepError, ErrorObject, Id, ToolEvent, ToolResult};
-use serde::de::DeserializeOwned;
+use lancet_protocol::{CepError, ErrorObject, Id, ToolEvent, ToolResult, error::to_jsonrpc_error};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
@@ -418,10 +418,10 @@ impl CepServer {
 mod tests {
     use super::*;
     use crate::registry::MethodRegistry;
+    use lancet_catalog::methods::TodoWrite;
     use lancet_catalog::methods::session::{
         TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
     };
-    use lancet_catalog::methods::TodoWrite;
 
     #[tokio::test]
     async fn transport_round_trip_returns_typed_result() {

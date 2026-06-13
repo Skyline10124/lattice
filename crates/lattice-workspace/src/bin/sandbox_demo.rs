@@ -15,7 +15,7 @@
 use std::time::Instant;
 
 use lattice_workspace::{
-    cube::CubeWorkspace, microsandbox::MicrosandboxWorkspace, SandboxSpec, Workspace,
+    SandboxSpec, Workspace, cube::CubeWorkspace, microsandbox::MicrosandboxWorkspace,
 };
 
 fn ms(t: Instant) -> u128 {
@@ -27,7 +27,11 @@ async fn run_scenario(ws: Box<dyn Workspace>, image: &str) {
     println!("\n========== backend: {} ==========", ws.backend());
     println!(
         "capabilities: exec={} stdout_capture={} disk_snapshot={} memory_snapshot={} needs_root_exec={}",
-        caps.exec, caps.stdout_capture, caps.disk_snapshot, caps.memory_snapshot, caps.needs_root_exec
+        caps.exec,
+        caps.stdout_capture,
+        caps.disk_snapshot,
+        caps.memory_snapshot,
+        caps.needs_root_exec
     );
 
     let spec = SandboxSpec {
@@ -57,7 +61,12 @@ async fn run_scenario(ws: Box<dyn Workspace>, image: &str) {
             } else {
                 o.stdout.trim().to_string()
             };
-            println!("exec     : exit={} stdout={:?}  ({} ms)", o.exit_code, shown, ms(t));
+            println!(
+                "exec     : exit={} stdout={:?}  ({} ms)",
+                o.exit_code,
+                shown,
+                ms(t)
+            );
         }
         Err(e) => println!("exec     : FAILED: {e}"),
     }
@@ -79,7 +88,10 @@ async fn run_scenario(ws: Box<dyn Workspace>, image: &str) {
 
     // --- snapshot: verify-discard-layer primitive ---
     let t = Instant::now();
-    match ws.snapshot(&handle, &format!("demo-{}", ws.backend())).await {
+    match ws
+        .snapshot(&handle, &format!("demo-{}", ws.backend()))
+        .await
+    {
         Ok(s) => println!("snapshot : ok  ref={s}  ({} ms)", ms(t)),
         Err(e) => println!("snapshot : {e}"),
     }
@@ -96,8 +108,8 @@ async fn run_scenario(ws: Box<dyn Workspace>, image: &str) {
 async fn main() -> anyhow::Result<()> {
     let msb_image = std::env::var("MSB_IMAGE")
         .unwrap_or_else(|_| "docker.m.daocloud.io/library/python:3.12-slim".to_string());
-    let cube_tpl =
-        std::env::var("CUBE_TEMPLATE_ID").unwrap_or_else(|_| "tpl-962da20ccb2b41f392b0f760".to_string());
+    let cube_tpl = std::env::var("CUBE_TEMPLATE_ID")
+        .unwrap_or_else(|_| "tpl-962da20ccb2b41f392b0f760".to_string());
 
     println!("LATTICE workspace adapter MVP — one trait, two sandbox backends");
 

@@ -32,8 +32,8 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
-    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
-    ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
+    register_production_method_registry,
 };
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,

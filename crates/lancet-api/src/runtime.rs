@@ -10,7 +10,7 @@ use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
 use lancet_cep::{BaseAuthorityPlan, ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
-use lancet_native::{register_production_method_registry, MethodRegistry, ServerRunConfig};
+use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use tokio::sync::RwLock;
 
@@ -284,8 +284,8 @@ fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_catalog::methods::{AuditObserve, Fetch, ObserveWorkspace, TodoWrite};
     use lancet_catalog::CepMethod;
+    use lancet_catalog::methods::{AuditObserve, Fetch, ObserveWorkspace, TodoWrite};
     use lancet_protocol::Capability;
 
     #[test]
@@ -305,10 +305,12 @@ mod tests {
         assert!(envelope.inner.capabilities.contains(&Capability::FetchUrl {
             host: "example.com".to_string()
         }));
-        assert!(envelope
-            .inner
-            .capabilities
-            .contains(&Capability::MutateSessionState));
+        assert!(
+            envelope
+                .inner
+                .capabilities
+                .contains(&Capability::MutateSessionState)
+        );
         assert!(envelope.inner.capabilities.contains(&Capability::ReadAudit));
         assert!(envelope.validate_no_write_or_command().is_ok());
     }
@@ -323,11 +325,13 @@ mod tests {
         let envelope =
             base_observation_envelope(dir.path().to_str().unwrap(), &enabled, &policy).unwrap();
 
-        assert!(!envelope
-            .inner
-            .capabilities
-            .iter()
-            .any(|cap| matches!(cap, Capability::FetchUrl { .. })));
+        assert!(
+            !envelope
+                .inner
+                .capabilities
+                .iter()
+                .any(|cap| matches!(cap, Capability::FetchUrl { .. }))
+        );
         assert!(envelope.validate_no_write_or_command().is_ok());
     }
 }

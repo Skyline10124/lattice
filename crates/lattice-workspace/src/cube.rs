@@ -144,7 +144,10 @@ impl Workspace for CubeWorkspace {
         } else if let Some(code) = parse_guest_exit(&stderr) {
             code
         } else {
-            return Err(Self::proc_err(format!("cubecli exec failed: {}", stderr.trim())));
+            return Err(Self::proc_err(format!(
+                "cubecli exec failed: {}",
+                stderr.trim()
+            )));
         };
         Ok(ExecOutput {
             exit_code,

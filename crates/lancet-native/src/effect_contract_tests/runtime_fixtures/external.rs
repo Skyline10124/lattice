@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::super::fixtures::*;
 use super::super::support::{build_test_context, effect_contract_harness, rt};
-use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::NetworkPolicyConfig;
+use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::*;
 use lancet_protocol::envelope::{Capability, ImpactKind};

@@ -1,11 +1,11 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::{SessionGraphStore, TurnCommitStatus};
 
@@ -146,11 +146,13 @@ async fn run_turn_failed_outcome_is_committed() {
     assert_eq!(result.assistant_output, "");
     let entry = last_log_entry(&fixture.store, &result.session_id);
     assert_eq!(entry.status, TurnCommitStatus::Error);
-    assert!(entry
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("provider unavailable"));
+    assert!(
+        entry
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("provider unavailable")
+    );
 }
 
 #[tokio::test]
@@ -197,11 +199,13 @@ async fn run_turn_cancelled_outcome_is_committed() {
     assert_eq!(result.status, RunTurnStatus::Cancelled);
     let entry = last_log_entry(&fixture.store, &result.session_id);
     assert_eq!(entry.status, TurnCommitStatus::Cancelled);
-    assert!(entry
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("cancelled"));
+    assert!(
+        entry
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("cancelled")
+    );
     assert_eq!(entry.usage.as_ref().unwrap().total_tokens, 7);
 }
 

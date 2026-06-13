@@ -4,8 +4,8 @@
 //! Turn attestation persistence built from recorded audit rows.
 
 use lancet_native::{
-    build_in_toto_statement, source_audit_range_hash, AttestationRecord, AuditQueryFilters,
-    CepAuditContext, CepAuditStore,
+    AttestationRecord, AuditQueryFilters, CepAuditContext, CepAuditStore, build_in_toto_statement,
+    source_audit_range_hash,
 };
 
 use crate::error::LancetError;

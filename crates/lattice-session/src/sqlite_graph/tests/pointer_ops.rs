@@ -9,13 +9,13 @@ use std::path::PathBuf;
 
 use rusqlite::Connection;
 
+use crate::SessionError;
 use crate::graph::{
-    derive_commit_message, GraphHead, GraphMessage, SessionGraphStore, TurnCommit, TurnCommitInput,
-    TurnCommitStatus,
+    GraphHead, GraphMessage, SessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
+    derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
-use crate::SessionError;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = env::temp_dir()

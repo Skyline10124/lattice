@@ -19,22 +19,22 @@ pub mod provenance {
 mod server;
 
 pub use enforcement::isolation::{
-    probe_host_capabilities, unavailable_required_boundaries, HostProbeEntry, HostProbeReport,
-    MissingRequiredBoundary,
+    HostProbeEntry, HostProbeReport, MissingRequiredBoundary, probe_host_capabilities,
+    unavailable_required_boundaries,
 };
 #[cfg(feature = "inspect-scaffold")]
 pub use handlers::register_inspect_scaffold_methods;
 pub use lancet_audit::{
-    impact_kind_for_method, impact_kind_from_label, impact_kind_label, AttestationRecord,
-    AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_NATIVE,
+    AttestationRecord, AuditQueryFilters, CallAuditMetadata, CepAuditContext, CepAuditStore,
+    SEMANTIC_STAGE_NATIVE, impact_kind_for_method, impact_kind_from_label, impact_kind_label,
 };
-pub use lancet_dispatch::{wire_code_for_error, CepClient, CepServer, CepTransport};
+pub use lancet_dispatch::{CepClient, CepServer, CepTransport, wire_code_for_error};
 pub use provenance::{
     build_in_toto_statement, canonicalize_in_toto_statement, source_audit_range_hash,
 };
 pub use server::{
-    register_production_method_registry, CepServerNativeExt, HandlerContext, MethodRegistry,
-    ServerRunConfig,
+    CepServerNativeExt, HandlerContext, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
 
 #[cfg(test)]

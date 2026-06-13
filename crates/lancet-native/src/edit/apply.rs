@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 use super::commit_baseline::{
-    collect_hunk_anchor_evidence, validate_commit_baseline_evidence, CommitBaselineFailureReason,
-    CommitBaselineReport, CommitBaselineValidation, HunkAnchorMatchResult,
+    CommitBaselineFailureReason, CommitBaselineReport, CommitBaselineValidation,
+    HunkAnchorMatchResult, collect_hunk_anchor_evidence, validate_commit_baseline_evidence,
 };
 use super::hash::{content_hash, line_hash};
 #[cfg(test)]
@@ -447,10 +447,10 @@ pub(crate) fn apply_hunks(
     }
 
     for (index, line) in lines.iter().enumerate() {
-        if let Some(change_index) = line.added_change_index {
-            if let Some(change) = line_changes.get_mut(change_index) {
-                change.new_hash = Some(line_hash(index + 1, &line.text));
-            }
+        if let Some(change_index) = line.added_change_index
+            && let Some(change) = line_changes.get_mut(change_index)
+        {
+            change.new_hash = Some(line_hash(index + 1, &line.text));
         }
     }
 
@@ -636,16 +636,18 @@ async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> 
                 previous_bytes: change.bytes_before.clone(),
             }),
             Err(error) => {
-                let mut diagnostics = vec![PatchDiagnostic::new(
-                    PatchErrorCode::IoError,
-                    ToolError::IoError {
-                        path: change.target_path.display().to_string(),
-                        error,
-                    }
-                    .to_string(),
-                )
-                .with_path(change.path.clone())
-                .with_operation_index(change.operation_index)];
+                let mut diagnostics = vec![
+                    PatchDiagnostic::new(
+                        PatchErrorCode::IoError,
+                        ToolError::IoError {
+                            path: change.target_path.display().to_string(),
+                            error,
+                        }
+                        .to_string(),
+                    )
+                    .with_path(change.path.clone())
+                    .with_operation_index(change.operation_index),
+                ];
                 diagnostics.extend(rollback_failed(&backups).await);
                 return Err(diagnostics);
             }
@@ -834,10 +836,10 @@ fn attempted_operations_from_headers(patch: &str) -> Vec<AttemptedOperation> {
             if let Some(operation) = current.as_mut() {
                 operation.old_hash = Some(hash.trim().to_string());
             }
-        } else if line.starts_with("@@") {
-            if let Some(operation) = current.as_mut() {
-                operation.hunk_count += 1;
-            }
+        } else if line.starts_with("@@")
+            && let Some(operation) = current.as_mut()
+        {
+            operation.hunk_count += 1;
         }
     }
 
@@ -1215,13 +1217,17 @@ mod tests {
         assert_eq!(std::fs::read_to_string(file).unwrap(), "new one\nnew two\n");
         assert_eq!(result.changed_files.len(), 1);
         assert_eq!(result.changed_files[0].line_changes.len(), 4);
-        assert!(result.changed_files[0]
-            .line_changes
-            .iter()
-            .any(|change| matches!(change.kind, LineChangeKind::Removed)));
-        assert!(result.changed_files[0]
-            .line_changes
-            .iter()
-            .any(|change| matches!(change.kind, LineChangeKind::Added)));
+        assert!(
+            result.changed_files[0]
+                .line_changes
+                .iter()
+                .any(|change| matches!(change.kind, LineChangeKind::Removed))
+        );
+        assert!(
+            result.changed_files[0]
+                .line_changes
+                .iter()
+                .any(|change| matches!(change.kind, LineChangeKind::Added))
+        );
     }
 }

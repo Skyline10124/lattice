@@ -7,14 +7,14 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
+use crate::SessionError;
 use crate::graph::{
-    derive_commit_message, GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
+    GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
-use crate::SessionError;
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = env::temp_dir()
@@ -407,13 +407,15 @@ fn commit_turn_accepts_completed_error_and_cancelled_statuses() {
             vec![]
         } else {
             // Use the previous commit as parent.
-            vec![store
-                .log("sess-1")
-                .expect("log")
-                .last()
-                .unwrap()
-                .commit_id
-                .clone()]
+            vec![
+                store
+                    .log("sess-1")
+                    .expect("log")
+                    .last()
+                    .unwrap()
+                    .commit_id
+                    .clone(),
+            ]
         };
         let input = TurnCommitInput {
             session_id: "sess-1".to_string(),

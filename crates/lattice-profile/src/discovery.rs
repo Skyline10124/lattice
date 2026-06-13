@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use crate::error::ProfileError;
-use crate::load::{load_agent_profile, LoadedAgentProfile};
+use crate::load::{LoadedAgentProfile, load_agent_profile};
 
 /// How the caller identifies which profile to load.
 #[derive(Debug, Clone)]

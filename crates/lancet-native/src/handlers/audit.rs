@@ -3,16 +3,16 @@
 
 //! Native `observe.audit` and `observe.audit_replay` handlers.
 
-use crate::audit::{AuditError, AuditQueryFilters, AUDIT_QUERY_MAX_ROWS};
+use crate::audit::{AUDIT_QUERY_MAX_ROWS, AuditError, AuditQueryFilters};
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::provenance::{project_rows, project_turn_trace};
 use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditQueryResult,
     AuditReplay, AuditReplayParams, AuditReplayResult, AuditTailParams, AuditTailResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::provenance::InTotoStatement;

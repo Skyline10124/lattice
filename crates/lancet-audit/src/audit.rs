@@ -3,9 +3,9 @@
 
 //! Flat append-only SQLite audit store for CEP execution records.
 
-use lancet_catalog::{catalog, RequiredCapability};
+use lancet_catalog::{RequiredCapability, catalog};
 use lancet_protocol::envelope::ImpactKind;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -673,11 +673,7 @@ pub struct AuditRow {
 }
 
 fn null_if_empty(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn reject_symlink_path(path: &Path) -> Result<(), AuditError> {

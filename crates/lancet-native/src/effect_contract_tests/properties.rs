@@ -10,8 +10,8 @@ use super::support::{
     assert_negative_no_backend_effects, assert_positive, build_test_context,
     effect_contract_harness, rt,
 };
-use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::NetworkPolicyConfig;
+use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWriteParams};

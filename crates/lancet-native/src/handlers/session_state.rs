@@ -6,11 +6,11 @@
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::session::{
     TodoItem, TodoStatus, TodoWrite, TodoWriteParams, TodoWriteResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};

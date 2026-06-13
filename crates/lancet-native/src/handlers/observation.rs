@@ -11,18 +11,18 @@ use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::executor::render::render_file_slice;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_authority::policy::CepPolicyConfig;
 use lancet_authority::policy::budget::BudgetExhausted;
 use lancet_authority::policy::observation::{
-    resolve_observation_target, ResolvedObservationTarget,
+    ResolvedObservationTarget, resolve_observation_target,
 };
-use lancet_authority::policy::CepPolicyConfig;
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
     DirectoryEntry, DirectoryEntryKind, FindFilesParams, FindFilesResult, GrepMatch, GrepParams,
     GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace, ObserveWorkspaceParams,
     ObserveWorkspaceResult, ReadFileParams, ReadFileResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -787,8 +787,8 @@ async fn emit_denial_metadata(
 mod tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
-    use lancet_authority::policy::observation::reject_parent_traversal;
     use lancet_authority::policy::CepTurnContext;
+    use lancet_authority::policy::observation::reject_parent_traversal;
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::fs;
     use std::sync::Arc;

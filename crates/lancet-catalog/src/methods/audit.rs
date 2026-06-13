@@ -4,8 +4,8 @@
 //! Read-only audit provenance methods (`observe.audit`, `observe.audit_replay`).
 
 use crate::method::{BaseAuthorityRequirement, CatalogMethod, CepMethod};
-use lancet_protocol::provenance::{InTotoStatement, ProvGraphFragment, TurnExecutionTrace};
 use lancet_protocol::RequiredCapability;
+use lancet_protocol::provenance::{InTotoStatement, ProvGraphFragment, TurnExecutionTrace};
 use lancet_protocol::{
     EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
 };

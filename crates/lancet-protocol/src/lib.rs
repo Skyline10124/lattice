@@ -43,8 +43,7 @@ pub use policy::{
     SourcedCapability,
 };
 pub use provenance::{
-    InTotoStatement, InTotoSubjectDescriptor, ProvActivity, ProvAgent, ProvEntity,
-    ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
-    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE, InTotoStatement, InTotoSubjectDescriptor, ProvActivity,
+    ProvAgent, ProvEntity, ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy,
+    ProvWasInformedBy, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
 };

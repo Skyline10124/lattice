@@ -5,9 +5,9 @@ use super::super::fixtures::*;
 use super::super::support::{build_test_context, rt};
 use lancet_audit::{AuditOutcome, CallAuditMetadata};
 use lancet_authority::NetworkPolicyConfig;
+use lancet_catalog::CepMethod;
 use lancet_catalog::methods::audit::{AuditObserveParams, AuditQueryParams, AuditReplayParams};
 use lancet_catalog::methods::*;
-use lancet_catalog::CepMethod;
 
 pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<RuntimeEffectScenario>
 {

@@ -146,14 +146,18 @@ async fn streaming_multi_chunk_tokens_assemble_into_one_message() {
     assert_eq!(result.messages[0].content, "pong");
 
     // Verify TokenDelta events for each chunk and ModelFinished
-    assert!(result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::TokenDelta { content } if content == "p")));
-    assert!(result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::TokenDelta { content } if content == "ong")));
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { content } if content == "p"))
+    );
+    assert!(
+        result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::TokenDelta { content } if content == "ong"))
+    );
     assert!(result.events.iter().any(|e| matches!(e, AgentTurnEvent::ModelFinished { finish_reason, .. } if finish_reason == "stop")));
 }
 
@@ -334,10 +338,12 @@ async fn streaming_incomplete_tool_call_error_no_execution() {
     assert!(result.messages[0].tool_calls.is_none());
 
     // No ModelFinished event on error path
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -379,26 +385,34 @@ async fn streaming_invalid_tool_call_json_no_execution() {
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("invalid/incomplete tool call"));
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("finish_reason=tool_calls"));
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("args_len=14"));
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("ended=true"));
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("invalid/incomplete tool call")
+    );
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("finish_reason=tool_calls")
+    );
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("args_len=14")
+    );
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("ended=true")
+    );
     assert!(
         result.messages.is_empty(),
         "malformed tool-only response should not commit an empty assistant message"
@@ -406,15 +420,19 @@ async fn streaming_invalid_tool_call_json_no_execution() {
     assert!(result.tool_results.is_empty());
 
     // No ToolCallStarted event (invalid calls are not executed)
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. }))
+    );
     // No ModelFinished event (invalid tool calls path does not emit ModelFinished)
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 }
 
 #[tokio::test]
@@ -497,24 +515,32 @@ async fn streaming_tool_call_delta_after_end_is_error_no_execution() {
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("delta after end"));
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("delta after end")
+    );
     assert!(result.tool_results.is_empty());
-    assert!(result
-        .messages
-        .iter()
-        .all(|message| message.tool_calls.is_none()));
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })));
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|message| message.tool_calls.is_none())
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. }))
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 }
 
 #[tokio::test]
@@ -555,24 +581,32 @@ async fn streaming_duplicate_tool_call_end_is_error_no_execution() {
         .await;
 
     assert_eq!(result.status, AgentTurnStatus::Error);
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("duplicate end"));
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("duplicate end")
+    );
     assert!(result.tool_results.is_empty());
-    assert!(result
-        .messages
-        .iter()
-        .all(|message| message.tool_calls.is_none()));
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. })));
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        result
+            .messages
+            .iter()
+            .all(|message| message.tool_calls.is_none())
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ToolCallStarted { .. }))
+    );
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -744,17 +778,21 @@ async fn streaming_mid_stream_error_preserves_partial_content() {
     );
 
     // No ModelFinished on error
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 
     // Terminal reason mentions LLM error
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("LLM error"));
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("LLM error")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -793,17 +831,21 @@ async fn streaming_exhausted_without_done_is_error() {
         Some("thought".to_string())
     );
 
-    assert!(result
-        .terminal_reason
-        .as_ref()
-        .unwrap()
-        .contains("stream ended without completion"));
+    assert!(
+        result
+            .terminal_reason
+            .as_ref()
+            .unwrap()
+            .contains("stream ended without completion")
+    );
 
     // No ModelFinished on exhausted stream
-    assert!(!result
-        .events
-        .iter()
-        .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. })));
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|e| matches!(e, AgentTurnEvent::ModelFinished { .. }))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -862,11 +904,13 @@ async fn streaming_failed_tool_does_not_make_turn_error() {
     assert_eq!(result.assistant_output, "recovered");
 
     assert!(!result.tool_results[0].ok);
-    assert!(result.tool_results[0]
-        .error_summary
-        .as_ref()
-        .unwrap()
-        .contains("file not found"));
+    assert!(
+        result.tool_results[0]
+            .error_summary
+            .as_ref()
+            .unwrap()
+            .contains("file not found")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,11 +1180,13 @@ async fn streaming_open_retry_exhaustion_returns_structured_error() {
 
     assert_eq!(result.status, AgentTurnStatus::Error);
     assert_eq!(llm.call_count(), 2);
-    assert!(result
-        .terminal_reason
-        .as_deref()
-        .unwrap_or_default()
-        .contains("transport error: connection reset again"));
+    assert!(
+        result
+            .terminal_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("transport error: connection reset again")
+    );
 
     let will_retry: Vec<bool> = result
         .events

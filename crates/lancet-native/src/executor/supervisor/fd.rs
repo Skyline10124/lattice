@@ -111,7 +111,7 @@ pub(crate) fn cleanup_inherited_fds<B: FdCleanupBackend>(
 
     match cleanup_with_rlimit_loop(backend, &preserve) {
         Ok(closed) => {
-            return FdCleanupReport::applied(FdCleanupMethod::RlimitLoop, closed, preserved)
+            return FdCleanupReport::applied(FdCleanupMethod::RlimitLoop, closed, preserved);
         }
         Err(_err) => {}
     }
@@ -243,10 +243,10 @@ fn live_proc_self_fds() -> Result<Vec<RawFd>, FdCleanupError> {
         let entry = entry.map_err(|err| {
             FdCleanupError::Unavailable(format!("/proc/self/fd entry failed: {err}"))
         })?;
-        if let Some(name) = entry.file_name().to_str() {
-            if let Ok(fd) = name.parse::<RawFd>() {
-                fds.push(fd);
-            }
+        if let Some(name) = entry.file_name().to_str()
+            && let Ok(fd) = name.parse::<RawFd>()
+        {
+            fds.push(fd);
         }
     }
     Ok(fds)
@@ -390,10 +390,12 @@ mod tests {
 
         assert_eq!(report.status, FdCleanupStatus::Failed);
         assert_eq!(report.method, FdCleanupMethod::None);
-        assert!(report
-            .error
-            .as_deref()
-            .is_some_and(|err| err.contains("no proc fd")));
+        assert!(
+            report
+                .error
+                .as_deref()
+                .is_some_and(|err| err.contains("no proc fd"))
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -7,8 +7,9 @@
 //! scope, impact, constraints, and guard verdicts for controlled execution.
 
 use crate::capability::RequiredCapability;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -65,11 +66,12 @@ impl Serialize for EffectKindSet {
 }
 
 impl JsonSchema for EffectKindSet {
-    fn schema_name() -> String {
-        "EffectKindSet".to_owned()
+    fn schema_name() -> Cow<'static, str> {
+        "EffectKindSet".into()
     }
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        <Vec<ImpactKind>>::json_schema(gen)
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        <Vec<ImpactKind>>::json_schema(generator)
     }
 }
 
@@ -535,11 +537,12 @@ mod tests {
         let base = BaseExecutionEnvelope::for_workspace_root("/home/user/project", "with todos")
             .with_session_state();
         assert!(base.validate_no_write_or_command().is_ok());
-        assert!(base
-            .inner
-            .capabilities
-            .iter()
-            .any(|c| matches!(c, Capability::MutateSessionState)));
+        assert!(
+            base.inner
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::MutateSessionState))
+        );
     }
 
     #[test]
@@ -547,11 +550,12 @@ mod tests {
         let base = BaseExecutionEnvelope::for_workspace_root("/home/user/project", "audit read")
             .with_read_audit();
         assert!(base.validate_no_write_or_command().is_ok());
-        assert!(base
-            .inner
-            .capabilities
-            .iter()
-            .any(|c| matches!(c, Capability::ReadAudit)));
+        assert!(
+            base.inner
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, Capability::ReadAudit))
+        );
 
         let mut inner = base.inner.clone();
         inner.capabilities.insert(Capability::WritePath {

@@ -4,7 +4,7 @@
 //! Session lifecycle and read-only metadata operations.
 
 use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use crate::graph::{
     GraphHead, GraphRef, GraphRefKind, GraphSession, SessionGraphStore, SessionGraphSummary,
@@ -12,7 +12,7 @@ use crate::graph::{
 };
 use crate::{Result, SessionError};
 
-use super::{SqliteSessionGraphStore, DEFAULT_BRANCH};
+use super::{DEFAULT_BRANCH, SqliteSessionGraphStore};
 
 impl SqliteSessionGraphStore {
     pub(super) fn create_session_impl(

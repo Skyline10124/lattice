@@ -10,8 +10,8 @@
 use crate::LlmClient;
 use lattice_llm::{ChatRequest, ChatResponse, FunctionCall, LlmEvent, LlmStream, ToolCall};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 enum FakeStreamingResponse {
     Events(Vec<LlmEvent>),
@@ -143,10 +143,10 @@ fn aggregate_events_to_chat_response(
                 id,
                 arguments_delta,
             } => {
-                if let Some(calls) = &mut tool_calls {
-                    if let Some(call) = calls.iter_mut().find(|call| call.id == id) {
-                        call.function.arguments.push_str(&arguments_delta);
-                    }
+                if let Some(calls) = &mut tool_calls
+                    && let Some(call) = calls.iter_mut().find(|call| call.id == id)
+                {
+                    call.function.arguments.push_str(&arguments_delta);
                 }
             }
             LlmEvent::ToolCallEnd { .. } => {}

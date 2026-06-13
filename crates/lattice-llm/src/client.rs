@@ -501,6 +501,7 @@ mod tests {
     use super::*;
     use crate::endpoints::{ANTHROPIC_BASE_URL, GEMINI_BASE_URL, OPENAI_BASE_URL};
     use crate::router::{CredentialStatus, ModelRouter};
+    use crate::test_env::with_env_vars;
     use crate::types::{Message, ModelTarget};
 
     fn make_router() -> ModelRouter {
@@ -529,62 +530,65 @@ mod tests {
 
     #[test]
     fn present_credential_reads_key_value() {
-        std::env::set_var("LATTICE_TEST_CLIENT_KEY", "sk-secret-do-not-leak");
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "LATTICE_TEST_CLIENT_KEY".to_string(),
-            credential_status: CredentialStatus::Present,
-        };
-        let result = validate_and_read_key(&resolved);
-        assert!(result.is_ok());
-        let key = result.unwrap();
-        assert_eq!(key, "sk-secret-do-not-leak");
-        std::env::remove_var("LATTICE_TEST_CLIENT_KEY");
+        with_env_vars(
+            &[("LATTICE_TEST_CLIENT_KEY", Some("sk-secret-do-not-leak"))],
+            || {
+                let resolved = ResolvedModel {
+                    alias: "gpt-4o".to_string(),
+                    provider: ProviderKind::OpenAi,
+                    provider_model: "gpt-4o".to_string(),
+                    base_url: OPENAI_BASE_URL.to_string(),
+                    api_key_env: "LATTICE_TEST_CLIENT_KEY".to_string(),
+                    credential_status: CredentialStatus::Present,
+                };
+                let result = validate_and_read_key(&resolved);
+                assert!(result.is_ok());
+                let key = result.unwrap();
+                assert_eq!(key, "sk-secret-do-not-leak");
+            },
+        );
     }
 
     #[test]
     fn missing_credential_error_never_leaks_key_value() {
-        std::env::set_var("LATTICE_TEST_OK_KEY", "sk-ok-value");
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "LATTICE_TEST_MISSING_KEY".to_string(),
-            credential_status: CredentialStatus::Missing,
-        };
-        let result = validate_and_read_key(&resolved);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            !err.contains("sk-ok-value"),
-            "error must not leak other keys: {}",
-            err
-        );
-        assert!(
-            err.contains("LATTICE_TEST_MISSING_KEY"),
-            "error should name the missing env var"
-        );
-        std::env::remove_var("LATTICE_TEST_OK_KEY");
+        with_env_vars(&[("LATTICE_TEST_OK_KEY", Some("sk-ok-value"))], || {
+            let resolved = ResolvedModel {
+                alias: "gpt-4o".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_model: "gpt-4o".to_string(),
+                base_url: OPENAI_BASE_URL.to_string(),
+                api_key_env: "LATTICE_TEST_MISSING_KEY".to_string(),
+                credential_status: CredentialStatus::Missing,
+            };
+            let result = validate_and_read_key(&resolved);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(
+                !err.contains("sk-ok-value"),
+                "error must not leak other keys: {}",
+                err
+            );
+            assert!(
+                err.contains("LATTICE_TEST_MISSING_KEY"),
+                "error should name the missing env var"
+            );
+        });
     }
 
     #[test]
     fn empty_credential_returns_error() {
-        std::env::set_var("LATTICE_TEST_EMPTY_KEY", "");
-        let resolved = ResolvedModel {
-            alias: "gpt-4o".to_string(),
-            provider: ProviderKind::OpenAi,
-            provider_model: "gpt-4o".to_string(),
-            base_url: OPENAI_BASE_URL.to_string(),
-            api_key_env: "LATTICE_TEST_EMPTY_KEY".to_string(),
-            credential_status: CredentialStatus::Missing,
-        };
-        let result = validate_and_read_key(&resolved);
-        assert!(result.is_err());
-        std::env::remove_var("LATTICE_TEST_EMPTY_KEY");
+        with_env_vars(&[("LATTICE_TEST_EMPTY_KEY", Some(""))], || {
+            let resolved = ResolvedModel {
+                alias: "gpt-4o".to_string(),
+                provider: ProviderKind::OpenAi,
+                provider_model: "gpt-4o".to_string(),
+                base_url: OPENAI_BASE_URL.to_string(),
+                api_key_env: "LATTICE_TEST_EMPTY_KEY".to_string(),
+                credential_status: CredentialStatus::Missing,
+            };
+            let result = validate_and_read_key(&resolved);
+            assert!(result.is_err());
+        });
     }
 
     #[test]

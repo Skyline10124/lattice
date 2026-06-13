@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{
-    collect_turn_result_from_events, run_turn, stream_turn, RunTurnRequest, RunTurnResult,
-    RunTurnStatus, SessionApi, TurnEvent, TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStatus, SessionApi, TurnEvent, TurnUsageSummary,
+    collect_turn_result_from_events, run_turn, stream_turn,
 };
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};

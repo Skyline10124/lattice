@@ -131,10 +131,10 @@ impl StubLlm {
                     id,
                     arguments_delta,
                 } => {
-                    if let Some(calls) = &mut tool_calls {
-                        if let Some(call) = calls.iter_mut().find(|c| c.id == id) {
-                            call.function.arguments.push_str(&arguments_delta);
-                        }
+                    if let Some(calls) = &mut tool_calls
+                        && let Some(call) = calls.iter_mut().find(|c| c.id == id)
+                    {
+                        call.function.arguments.push_str(&arguments_delta);
                     }
                 }
                 LlmEvent::Done {
@@ -233,10 +233,10 @@ pub async fn chat(request: ChatRequest) -> Result<ChatResponse, LlmError> {
                 id,
                 arguments_delta,
             } => {
-                if let Some(calls) = &mut tool_calls {
-                    if let Some(call) = calls.iter_mut().find(|c| c.id == id) {
-                        call.function.arguments.push_str(&arguments_delta);
-                    }
+                if let Some(calls) = &mut tool_calls
+                    && let Some(call) = calls.iter_mut().find(|c| c.id == id)
+                {
+                    call.function.arguments.push_str(&arguments_delta);
                 }
             }
             LlmEvent::Done {

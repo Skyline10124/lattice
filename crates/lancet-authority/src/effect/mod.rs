@@ -30,10 +30,10 @@ pub use region::{AuthorizedEffectRegion, EffectiveEffect};
 
 #[cfg(test)]
 pub(crate) fn shared_test_policy() -> crate::policy::CepPolicyConfig {
+    use crate::policy::BudgetLimits;
     use crate::policy::command::CommandPolicy;
     use crate::policy::network::NetworkPolicyConfig;
     use crate::policy::observation::ObservationPolicyConfig;
-    use crate::policy::BudgetLimits;
     use std::path::PathBuf;
 
     crate::policy::CepPolicyConfig {

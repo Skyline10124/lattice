@@ -13,50 +13,50 @@ use crate::enforcement::guard_l1::{
     has_run_command_capability,
 };
 use crate::enforcement::isolation::{
-    command_boundary_metadata, effective_boundary_metadata_json_with_observation,
-    evaluate_command_boundary_attempt, evaluate_command_boundary_preflight,
-    unavailable_required_boundaries, BoundaryAttemptOutcome, CommandBoundaryPreflight,
-    CommandIsolationAttempt, CommandIsolationMode, CommandIsolationUnsupportedHostBehavior,
-    MinimalMountViewStatus, SupervisorSetupStatus,
+    BoundaryAttemptOutcome, CommandBoundaryPreflight, CommandIsolationAttempt,
+    CommandIsolationMode, CommandIsolationUnsupportedHostBehavior, MinimalMountViewStatus,
+    SupervisorSetupStatus, command_boundary_metadata,
+    effective_boundary_metadata_json_with_observation, evaluate_command_boundary_attempt,
+    evaluate_command_boundary_preflight, unavailable_required_boundaries,
 };
-use crate::enforcement::preflight::{command_preflight_metadata, CommandPreflight};
+use crate::enforcement::preflight::{CommandPreflight, command_preflight_metadata};
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, run_verify_on_candidate_view, validate_verify_command,
     verify_failed_error,
 };
 use crate::executor::shell::{
-    execute_argv, execute_argv_supervised, BoundedStreamOutput, ExecuteConfig,
-    SupervisedCommandError, SupervisorExecution,
+    BoundedStreamOutput, ExecuteConfig, SupervisedCommandError, SupervisorExecution, execute_argv,
+    execute_argv_supervised,
 };
 use crate::executor::supervisor::artifact::{
-    adjudicate_artifact_manifest, commit_artifact_manifest, prepare_artifact_commit_set,
-    scan_overlay_upper, ArtifactAdjudicationReport, ArtifactCommitFailure, ArtifactCommitReport,
-    CommitOutcome, PreparedArtifactSet, RejectedArtifactKind,
+    ArtifactAdjudicationReport, ArtifactCommitFailure, ArtifactCommitReport, CommitOutcome,
+    PreparedArtifactSet, RejectedArtifactKind, adjudicate_artifact_manifest,
+    commit_artifact_manifest, prepare_artifact_commit_set, scan_overlay_upper,
 };
 use crate::executor::supervisor::env::build_isolated_env;
 use crate::executor::supervisor::overlay::{
-    cleanup_overlay, prepare_candidate_artifact_view, CleanupOutcome, OverlayCleanupReport,
-    OverlayDisposition, OverlayMode, OverlayPlan, OverlayStatus, VerifyDiscardReport,
-    VerifyLayerStatus,
+    CleanupOutcome, OverlayCleanupReport, OverlayDisposition, OverlayMode, OverlayPlan,
+    OverlayStatus, VerifyDiscardReport, VerifyLayerStatus, cleanup_overlay,
+    prepare_candidate_artifact_view,
 };
 use crate::executor::supervisor::snapshot::{
+    LowerBaseline, LowerConsistencyStatus, LowerFingerprint, WorkspaceSnapshot,
     capture_lower_baseline, capture_lower_fingerprint, capture_workspace_snapshot,
-    compute_changed_paths, LowerBaseline, LowerConsistencyStatus, LowerFingerprint,
-    WorkspaceSnapshot,
+    compute_changed_paths,
 };
 use crate::executor::supervisor::syscall::LiveSupervisorSyscalls;
-use crate::executor::supervisor::{default_executable_view_paths, SupervisorPlan};
+use crate::executor::supervisor::{SupervisorPlan, default_executable_view_paths};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::envelope_store::EnvelopeRecord;
 use lancet_authority::policy::command::{
-    build_allowed_params_env, build_effective_env, classify_command_line, validate_timeout,
-    EffectiveImpact,
+    EffectiveImpact, build_allowed_params_env, build_effective_env, classify_command_line,
+    validate_timeout,
 };
-use lancet_authority::policy::shell_ast::{resolve_command_line, CommandLine};
+use lancet_authority::policy::shell_ast::{CommandLine, resolve_command_line};
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::Capability;
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{CepErrorData, GuardErrorData, PermissionErrorData};
@@ -233,18 +233,17 @@ async fn handle_run_as(
         let mut write_paths = Vec::new();
         let mut write_path_prefixes = Vec::new();
         for cap in &record.envelope.capabilities {
-            if let Capability::WritePath { path_pattern } = cap {
-                if let Some((path, is_prefix)) =
+            if let Capability::WritePath { path_pattern } = cap
+                && let Some((path, is_prefix)) =
                     lancet_authority::effect::region::normalize_write_region_path(
                         path_pattern,
                         &ctx.cep_context.policy.project_root,
                     )
-                {
-                    if is_prefix {
-                        write_path_prefixes.push(path);
-                    } else {
-                        write_paths.push(path);
-                    }
+            {
+                if is_prefix {
+                    write_path_prefixes.push(path);
+                } else {
+                    write_paths.push(path);
                 }
             }
         }
@@ -541,67 +540,66 @@ async fn handle_run_as(
                 .await;
 
             // 12. Post-execution diff check for WorkspaceMutation.
-            if effective_impact == EffectiveImpact::WorkspaceMutation {
-                if let Some(ref record) = active_record {
-                    let envelope = &record.envelope;
-                    let diff = record_workspace_mutation_diff(
-                        &ctx,
-                        record,
-                        &project_root,
-                        &pre_snapshot,
+            if effective_impact == EffectiveImpact::WorkspaceMutation
+                && let Some(ref record) = active_record
+            {
+                let envelope = &record.envelope;
+                let diff = record_workspace_mutation_diff(
+                    &ctx,
+                    record,
+                    &project_root,
+                    &pre_snapshot,
+                    method,
+                )
+                .await?;
+                if !diff.out_of_scope_paths.is_empty() {
+                    return Err(out_of_scope_changed_paths_error(
+                        diff.out_of_scope_paths,
                         method,
-                    )
-                    .await?;
-                    if !diff.out_of_scope_paths.is_empty() {
-                        return Err(out_of_scope_changed_paths_error(
-                            diff.out_of_scope_paths,
-                            method,
-                        ));
-                    }
+                    ));
+                }
 
-                    // Run verify after every successful WorkspaceMutation call.
-                    if let Some(verify_cmd) = extract_verify_command(envelope) {
-                        validate_verify_command(&verify_cmd, &policy, &project_root)?;
-                        let mut verify_cancel = ctx.cancellation.clone();
-                        match run_verify(&verify_cmd, &project_root, &policy, &mut verify_cancel)
-                            .await
-                        {
-                            Ok(outcome) if !outcome.success => {
-                                ctx.events
-                                    .emit(
-                                        "cep.verify_failed",
-                                        json!({
-                                            "method": method,
-                                            "envelope_id": &record.envelope_id,
-                                            "verify_exit_code": outcome.exit_code,
-                                            "diff_retained": true,
-                                        }),
-                                    )
-                                    .await;
-                                return Err(verify_failed_error(&verify_cmd, &outcome));
-                            }
-                            Ok(_) => {
-                                ctx.record_effect(ObservedEffect {
-                                    kind: ImpactKind::CommandExecution,
-                                    scope: ObservedScope::Root(project_root.clone()),
-                                    required_capability: RequiredCapability::RunCommand,
-                                    source: EffectSource::Verify,
-                                });
-                            }
-                            Err(err) => {
-                                ctx.events
-                                    .emit(
-                                        "cep.verify_failed",
-                                        json!({
-                                            "method": method,
-                                            "envelope_id": &record.envelope_id,
-                                            "verify_exit_code": -1,
-                                            "diff_retained": true,
-                                        }),
-                                    )
-                                    .await;
-                                return Err(err);
-                            }
+                // Run verify after every successful WorkspaceMutation call.
+                if let Some(verify_cmd) = extract_verify_command(envelope) {
+                    validate_verify_command(&verify_cmd, &policy, &project_root)?;
+                    let mut verify_cancel = ctx.cancellation.clone();
+                    match run_verify(&verify_cmd, &project_root, &policy, &mut verify_cancel).await
+                    {
+                        Ok(outcome) if !outcome.success => {
+                            ctx.events
+                                .emit(
+                                    "cep.verify_failed",
+                                    json!({
+                                        "method": method,
+                                        "envelope_id": &record.envelope_id,
+                                        "verify_exit_code": outcome.exit_code,
+                                        "diff_retained": true,
+                                    }),
+                                )
+                                .await;
+                            return Err(verify_failed_error(&verify_cmd, &outcome));
+                        }
+                        Ok(_) => {
+                            ctx.record_effect(ObservedEffect {
+                                kind: ImpactKind::CommandExecution,
+                                scope: ObservedScope::Root(project_root.clone()),
+                                required_capability: RequiredCapability::RunCommand,
+                                source: EffectSource::Verify,
+                            });
+                        }
+                        Err(err) => {
+                            ctx.events
+                                .emit(
+                                    "cep.verify_failed",
+                                    json!({
+                                        "method": method,
+                                        "envelope_id": &record.envelope_id,
+                                        "verify_exit_code": -1,
+                                        "diff_retained": true,
+                                    }),
+                                )
+                                .await;
+                            return Err(err);
                         }
                     }
                 }
@@ -664,13 +662,13 @@ async fn handle_run_as(
 
             emit_denial_metadata(&ctx, "execution_error", failure.backend_invoked, method).await;
 
-            if let Some(diff) = diff {
-                if !diff.out_of_scope_paths.is_empty() {
-                    return Err(out_of_scope_changed_paths_error(
-                        diff.out_of_scope_paths,
-                        method,
-                    ));
-                }
+            if let Some(diff) = diff
+                && !diff.out_of_scope_paths.is_empty()
+            {
+                return Err(out_of_scope_changed_paths_error(
+                    diff.out_of_scope_paths,
+                    method,
+                ));
             }
 
             Err(failure.error)

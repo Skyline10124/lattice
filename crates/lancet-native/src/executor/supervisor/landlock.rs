@@ -363,9 +363,11 @@ mod tests {
         assert!(rule_paths.contains(&&PathBuf::from("/scratch/build")));
         assert!(rule_paths.contains(&&PathBuf::from("/proc")));
         assert!(rule_paths.contains(&&PathBuf::from("/dev/null")));
-        assert!(!rule_paths
-            .iter()
-            .any(|path| path == &&root || path == &&temp.path().join("project")));
+        assert!(
+            !rule_paths
+                .iter()
+                .any(|path| path == &&root || path == &&temp.path().join("project"))
+        );
 
         let toolchain_rule = refinement
             .rules

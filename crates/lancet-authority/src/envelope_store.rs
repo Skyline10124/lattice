@@ -247,18 +247,18 @@ fn validate_envelope(envelope: &ExecutionEnvelope) -> Result<(), CepError> {
     }
 
     // Validate verify command if present
-    if let Some(verify) = &envelope.verify {
-        if verify.command.is_empty() {
-            return Err(CepError::new(
-                CepErrorCode::SchemaMismatch,
-                "verify command must not be empty",
-                CepErrorData::Validation(ValidationErrorData {
-                    field: "verify.command".into(),
-                    reason: "must not be empty".into(),
-                }),
-                Retriability::Permanent,
-            ));
-        }
+    if let Some(verify) = &envelope.verify
+        && verify.command.is_empty()
+    {
+        return Err(CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "verify command must not be empty",
+            CepErrorData::Validation(ValidationErrorData {
+                field: "verify.command".into(),
+                reason: "must not be empty".into(),
+            }),
+            Retriability::Permanent,
+        ));
     }
 
     Ok(())

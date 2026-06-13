@@ -180,7 +180,7 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
         _ => {
             return Err(LlmError::Config {
                 message: "base_url has scheme but no host".to_string(),
-            })
+            });
         }
     };
 
@@ -198,12 +198,12 @@ pub fn validate_base_url(url: &str) -> Result<(), LlmError> {
 
     // Reject IP literals that are private/reserved regardless of scheme.
     let host_clean = host_str.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = host_clean.parse::<IpAddr>() {
-        if is_private_or_reserved(ip) {
-            return Err(LlmError::Config {
-                message: format!("base_url targets private/reserved IP {}", ip),
-            });
-        }
+    if let Ok(ip) = host_clean.parse::<IpAddr>()
+        && is_private_or_reserved(ip)
+    {
+        return Err(LlmError::Config {
+            message: format!("base_url targets private/reserved IP {}", ip),
+        });
     }
 
     if host_is_dns_rebinding_domain(host_str) {

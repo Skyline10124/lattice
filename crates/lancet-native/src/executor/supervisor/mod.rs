@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 
 use landlock::LandlockApplicationReport;
 
-pub(crate) use plan::{default_executable_view_paths, SupervisorPlan};
+pub(crate) use plan::{SupervisorPlan, default_executable_view_paths};
 
 /// Ordered setup stages for the command supervisor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

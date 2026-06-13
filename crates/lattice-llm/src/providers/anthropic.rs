@@ -81,22 +81,18 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
                     "content": content_val,
                 });
                 // Merge consecutive tool results into one user message
-                if let Some(last) = messages.last_mut() {
-                    if last["role"] == "user" {
-                        if let Some(content_arr) =
-                            last.get_mut("content").and_then(|c| c.as_array_mut())
-                        {
-                            if content_arr
-                                .first()
-                                .and_then(|b| b.get("type"))
-                                .and_then(|t| t.as_str())
-                                == Some("tool_result")
-                            {
-                                content_arr.push(tool_result);
-                                continue;
-                            }
-                        }
-                    }
+                if let Some(last) = messages.last_mut()
+                    && last["role"] == "user"
+                    && let Some(content_arr) =
+                        last.get_mut("content").and_then(|c| c.as_array_mut())
+                    && content_arr
+                        .first()
+                        .and_then(|b| b.get("type"))
+                        .and_then(|t| t.as_str())
+                        == Some("tool_result")
+                {
+                    content_arr.push(tool_result);
+                    continue;
                 }
                 messages.push(serde_json::json!({"role": "user", "content": [tool_result]}));
             }

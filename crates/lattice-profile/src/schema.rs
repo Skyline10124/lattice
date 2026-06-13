@@ -4,7 +4,7 @@
 use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepMode;
 use lancet_protocol::ImpactKind;
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use std::collections::BTreeMap;
 use std::path::{Component, Path};
 

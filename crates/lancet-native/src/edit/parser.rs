@@ -164,14 +164,14 @@ impl Parser {
         operation_index: usize,
     ) -> Result<PatchOperation, PatchParseError> {
         let old_hash = self.parse_required_old_hash(&path, operation_index)?;
-        if let Some(line) = self.current() {
-            if !is_operation_or_end(line) {
-                return Err(self.error_with_operation(
-                    "delete file operation may only contain an old hash line",
-                    path.clone(),
-                    operation_index,
-                ));
-            }
+        if let Some(line) = self.current()
+            && !is_operation_or_end(line)
+        {
+            return Err(self.error_with_operation(
+                "delete file operation may only contain an old hash line",
+                path.clone(),
+                operation_index,
+            ));
         }
 
         Ok(PatchOperation::DeleteFile { path, old_hash })

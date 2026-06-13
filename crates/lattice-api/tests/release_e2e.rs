@@ -18,8 +18,8 @@ use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope, VerifyCommand,
 };
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
@@ -424,7 +424,7 @@ async fn release_e2e_criterion_8() {
     let edit_positions: Vec<usize> = methods
         .iter()
         .enumerate()
-        .filter(|(_, &m)| m == "mutate.edit")
+        .filter(|&(_, &m)| m == "mutate.edit")
         .map(|(i, _)| i)
         .collect();
 

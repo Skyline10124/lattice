@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{derive_commit_message, GraphMessage, TurnCommitInput};
+use lattice_session::{GraphMessage, TurnCommitInput, derive_commit_message};
 use sha2::{Digest, Sha256};
 
 use super::cep::build_production_turn_deps;
@@ -85,7 +85,11 @@ pub(super) fn build_profile_snapshot_metadata(
     })?;
     let mut hasher = Sha256::new();
     hasher.update(profile_snapshot_json.as_bytes());
-    let profile_snapshot_hash = format!("{:x}", hasher.finalize());
+    let profile_snapshot_hash = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
 
     Ok(ProfileSnapshotMetadata {
         agent_name: loaded.profile.agent.name.clone(),

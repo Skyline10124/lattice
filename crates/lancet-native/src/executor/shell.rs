@@ -11,13 +11,14 @@ use std::time::Duration;
 use tokio::process::Child;
 
 use crate::enforcement::isolation::CommandIsolationAttempt;
+use crate::executor::supervisor::SupervisorPlan;
 use crate::executor::supervisor::linux::{
     boundary_attempt_from_supervisor, run_linux_supervisor_attempt,
 };
 #[cfg(test)]
 use crate::executor::supervisor::overlay::CleanupFailureKind;
 use crate::executor::supervisor::overlay::{
-    cleanup_overlay, OverlayCleanupReport, OverlayDisposition, OverlayMode, OverlayPlan,
+    OverlayCleanupReport, OverlayDisposition, OverlayMode, OverlayPlan, cleanup_overlay,
 };
 #[cfg(unix)]
 use crate::executor::supervisor::process::{raw_write_all, spawn_live_supervisor_process};
@@ -27,7 +28,6 @@ use crate::executor::supervisor::setup_report::{
 use crate::executor::supervisor::syscall::LiveSupervisorSyscalls;
 #[cfg(test)]
 use crate::executor::supervisor::syscall::SupervisorSyscalls;
-use crate::executor::supervisor::SupervisorPlan;
 use crate::server::registry::Cancellation;
 use lancet_protocol::error::GuardErrorData;
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, ValidationErrorData};
@@ -337,8 +337,7 @@ pub(crate) struct SupervisedCommandError {
 /// DNS, discover files beyond precomputed paths, or dispatch through Rust trait
 /// objects. Setup-report pipe writes are bounded precomputed byte labels only.
 #[allow(dead_code)]
-pub(crate) const SUPERVISOR_PRE_EXEC_SAFETY_CHECKLIST: &str =
-    "precomputed data only; raw syscalls only; no allocation, locks, logging, \
+pub(crate) const SUPERVISOR_PRE_EXEC_SAFETY_CHECKLIST: &str = "precomputed data only; raw syscalls only; no allocation, locks, logging, \
      async runtime access, formatting, env lookup, DNS, filesystem discovery, \
      or trait-object dispatch after fork";
 
@@ -606,23 +605,23 @@ async fn execute_argv_inner(
     if let Some((mut pipe, fallback_attempt)) = setup_pipe {
         pipe.close_child_writer();
         setup_attempt = pipe.read_setup_attempt(fallback_attempt.as_ref());
-        if let Some(attempt) = setup_attempt.as_ref() {
-            if attempt.outcome.failed_closed {
-                let cleanup = kill_and_reap_child(&mut child).await;
-                let child_cleanup_succeeded = cleanup.is_ok();
-                let error = match cleanup {
-                    Ok(()) => supervisor_setup_failed_error(&argv[0], attempt),
-                    Err(err) => child_kill_failed(&argv[0], err),
-                };
-                return Err(ExecuteInnerError {
-                    error,
-                    setup_attempt,
-                    overlay_cleanup: cleanup_overlay_after_terminal(
-                        overlay_execution.as_ref(),
-                        child_cleanup_succeeded,
-                    ),
-                });
-            }
+        if let Some(attempt) = setup_attempt.as_ref()
+            && attempt.outcome.failed_closed
+        {
+            let cleanup = kill_and_reap_child(&mut child).await;
+            let child_cleanup_succeeded = cleanup.is_ok();
+            let error = match cleanup {
+                Ok(()) => supervisor_setup_failed_error(&argv[0], attempt),
+                Err(err) => child_kill_failed(&argv[0], err),
+            };
+            return Err(ExecuteInnerError {
+                error,
+                setup_attempt,
+                overlay_cleanup: cleanup_overlay_after_terminal(
+                    overlay_execution.as_ref(),
+                    child_cleanup_succeeded,
+                ),
+            });
         }
     }
 
@@ -1353,10 +1352,10 @@ fn supervisor_setup_failed_error(command: &str, attempt: &CommandIsolationAttemp
 
 async fn kill_and_reap_child(child: &mut Child) -> Result<(), std::io::Error> {
     #[cfg(unix)]
-    if let Err(err) = kill_child_process_group(child) {
-        if err.raw_os_error() != Some(libc::ESRCH) {
-            child.kill().await?;
-        }
+    if let Err(err) = kill_child_process_group(child)
+        && err.raw_os_error() != Some(libc::ESRCH)
+    {
+        child.kill().await?;
     }
 
     #[cfg(not(unix))]
@@ -1603,10 +1602,11 @@ mod tests {
 
         assert_eq!(err.error.code, CepErrorCode::GuardDenied);
         assert!(err.error.message.contains("project_bind"));
-        assert!(err
-            .setup_attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.outcome.failed_closed));
+        assert!(
+            err.setup_attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.outcome.failed_closed)
+        );
         assert!(
             !marker.exists(),
             "command argv must not run after setup failure"

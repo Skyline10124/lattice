@@ -8,19 +8,19 @@
 //! emits native events, records durable metadata, and enforces the decision.
 
 pub use lancet_authority::guard::{
-    build_effective_envelope_snapshot, check_write_scope, decision_to_guard_verdict,
-    evaluate_policy, extract_write_path_patterns, has_run_command_capability,
-    map_decision_to_cep_error, normalize_write_path_pattern, PolicyEvaluation, WritePathPattern,
+    PolicyEvaluation, WritePathPattern, build_effective_envelope_snapshot, check_write_scope,
+    decision_to_guard_verdict, evaluate_policy, extract_write_path_patterns,
+    has_run_command_capability, map_decision_to_cep_error, normalize_write_path_pattern,
 };
 
 use crate::enforcement::preflight::{
     approval_request_metadata, policy_denial_preflight_metadata, policy_metadata,
 };
 use crate::server::registry::HandlerContext;
+use lancet_protocol::CepError;
 use lancet_protocol::policy::{
     PolicyAuditContext, PolicyBudgetSnapshot, PolicyDecision, PolicyInput,
 };
-use lancet_protocol::CepError;
 use serde::Serialize;
 
 /// Build a `PolicyInput` from handler context, method name, and params.
@@ -151,8 +151,8 @@ mod tests {
     use super::*;
     use crate::audit::CepAuditContext;
     use crate::server::registry::{Cancellation, EventSink};
-    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::policy::CepTurnContext;
+    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::policy::{PolicyHook, PolicyReasonCode};
     use std::sync::Arc;

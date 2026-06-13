@@ -244,7 +244,9 @@ mod tests {
             .collect();
         assert_eq!(
             subcommands,
-            vec!["models", "resolve", "session", "doctor", "audit", "lancet", "tui"]
+            vec![
+                "models", "resolve", "session", "doctor", "audit", "lancet", "tui"
+            ]
         );
     }
 

@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use lancet_authority::policy::command::{build_allowed_params_env, CommandPolicy};
+use lancet_authority::policy::command::{CommandPolicy, build_allowed_params_env};
 use lancet_protocol::CepError;
 
 use super::SupervisorPlan;

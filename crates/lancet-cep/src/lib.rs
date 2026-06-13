@@ -14,33 +14,33 @@ mod tool;
 
 pub use authority::{BaseAuthorityError, BaseAuthorityPlan};
 pub use tool::{
-    project_tool_definitions, resolve_catalog_tool_definitions, resolve_enabled_tools,
-    ToolDefinition, ToolExposure, ToolExposureError,
+    ToolDefinition, ToolExposure, ToolExposureError, project_tool_definitions,
+    resolve_catalog_tool_definitions, resolve_enabled_tools,
 };
 
 pub use lancet_catalog::{
-    catalog, BaseAuthorityRequirement, CapabilityPatterns, CapabilityResolveError, CatalogMethod,
-    CepMethod, MethodDescriptor, RequiredCapability, CATALOG,
+    BaseAuthorityRequirement, CATALOG, CapabilityPatterns, CapabilityResolveError, CatalogMethod,
+    CepMethod, MethodDescriptor, RequiredCapability, catalog,
 };
 #[cfg(feature = "inspect-scaffold")]
-pub use lancet_catalog::{scaffold_catalog, SCAFFOLD_CATALOG};
+pub use lancet_catalog::{SCAFFOLD_CATALOG, scaffold_catalog};
 pub use lancet_dispatch::{
-    call_cancelled, duplicate_registration, wire_code_for_error, CallControl, Cancellation,
-    CepClient, CepServer, CepTransport, EventSink, MethodRegistry, ServerCall, ServerRuntime,
+    CallControl, Cancellation, CepClient, CepServer, CepTransport, EventSink, MethodRegistry,
+    ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    BaseExecutionEnvelope, BoundaryDimension, BoundaryPrimitive, Capability, CapabilitySource,
-    CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode, Constraints, EffectDecl,
-    EffectKindSet, EffectScopeKind, EffectiveBoundaryEntry, EffectiveBoundaryReport,
-    EffectiveBoundaryStatus, EffectiveEnvelopeSnapshot, ErrorObject, ExecutionEnvelope,
-    FailureSemantics, GuardVerdict, HostProbeEntry, HostProbeReport, HostProbeStatus, Id, Impact,
-    ImpactConfidence, ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Intent, Notification,
-    OnFailure, OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,
-    ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
-    Request, Response, Retriability, Scope, SourcedCapability, ToolCall, ToolError, ToolEvent,
-    ToolResult, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace, VerifyCommand,
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+    BaseExecutionEnvelope, BoundaryDimension, BoundaryPrimitive,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE, Capability, CapabilitySource, CepError, CepErrorCode,
+    CepErrorData, CepErrorFamily, CepMode, Constraints, EffectDecl, EffectKindSet, EffectScopeKind,
+    EffectiveBoundaryEntry, EffectiveBoundaryReport, EffectiveBoundaryStatus,
+    EffectiveEnvelopeSnapshot, ErrorObject, ExecutionEnvelope, FailureSemantics, GuardVerdict,
+    HostProbeEntry, HostProbeReport, HostProbeStatus, Id, Impact, ImpactConfidence, ImpactKind,
+    InTotoStatement, InTotoSubjectDescriptor, Intent, Notification, OnFailure, OverlayBehavior,
+    PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
+    PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment,
+    ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy, Request, Response,
+    Retriability, Scope, SourcedCapability, ToolCall, ToolError, ToolEvent, ToolResult,
+    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace, VerifyCommand,
 };
 
 pub mod methods {

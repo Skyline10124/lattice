@@ -7,14 +7,14 @@
 //! is executed if configured. Verify failure returns `VerifyFailed`, retains the
 //! diff, and leaves the envelope valid for same-turn repair.
 
-use crate::executor::shell::{execute_argv, ExecuteConfig};
+use crate::executor::shell::{ExecuteConfig, execute_argv};
 use crate::executor::supervisor::overlay::{
-    cleanup_verify_discard_layer, mount_overlay, CandidateArtifactView, VerifyDiscardPlan,
-    VerifyDiscardReport, VerifyLayerStatus,
+    CandidateArtifactView, VerifyDiscardPlan, VerifyDiscardReport, VerifyLayerStatus,
+    cleanup_verify_discard_layer, mount_overlay,
 };
 use crate::executor::supervisor::syscall::{LiveSupervisorSyscalls, SupervisorSyscalls};
 use crate::server::registry::Cancellation;
-use lancet_authority::policy::command::{classify_command, CommandPolicy, EffectiveImpact};
+use lancet_authority::policy::command::{CommandPolicy, EffectiveImpact, classify_command};
 use lancet_protocol::envelope::ExecutionEnvelope;
 use lancet_protocol::error::{
     CepErrorData, ExecutionErrorData, GuardErrorData, ValidationErrorData,
@@ -376,7 +376,7 @@ mod verify_tests {
     };
     use crate::executor::supervisor::landlock::{LandlockAbiProbe, LandlockApplicationReport};
     use crate::executor::supervisor::overlay::{
-        prepare_candidate_artifact_view, OverlayMode, OverlayPlan,
+        OverlayMode, OverlayPlan, prepare_candidate_artifact_view,
     };
     use crate::executor::supervisor::plan::ReadOnlyBindScope;
     use crate::executor::supervisor::syscall::SyscallError;
@@ -772,11 +772,13 @@ mod verify_tests {
         assert!(outcome.verify.success);
         assert_eq!(outcome.discard.verify_layer, VerifyLayerStatus::Discarded);
         assert_eq!(outcome.verify.stdout_summary.as_deref(), Some("candidate"));
-        assert!(!artifact_plan
-            .paths
-            .lower
-            .join("candidate-only.txt")
-            .exists());
+        assert!(
+            !artifact_plan
+                .paths
+                .lower
+                .join("candidate-only.txt")
+                .exists()
+        );
     }
 
     #[cfg(unix)]
@@ -811,9 +813,11 @@ mod verify_tests {
         assert_eq!(outcome.discard.verify_layer, VerifyLayerStatus::Discarded);
         assert_eq!(candidate.manifest, manifest_before);
         assert_eq!(candidate.manifest_paths(), vec!["accepted.txt"]);
-        assert!(!candidate
-            .manifest_paths()
-            .contains(&"verify-only.txt".to_string()));
+        assert!(
+            !candidate
+                .manifest_paths()
+                .contains(&"verify-only.txt".to_string())
+        );
         assert!(!artifact_plan.paths.lower.join("verify-only.txt").exists());
         assert!(!artifact_plan.paths.upper.join("verify-only.txt").exists());
         assert!(!candidate.root.join("verify-only.txt").exists());

@@ -3,18 +3,18 @@
 
 use std::sync::Arc;
 
+use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams, TodoWriteResult};
 use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::{
-    jsonrpc, CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData,
-    PermissionErrorData, StateErrorData, ValidationErrorData,
+    CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData, PermissionErrorData,
+    StateErrorData, ValidationErrorData, jsonrpc,
 };
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
@@ -197,7 +197,7 @@ async fn cep_executor_adapter_invalid_params_maps_to_32602() {
 }
 
 macro_rules! cep_family_test {
-    ($name:ident, $code:expr, $data:expr, $retriability:expr) => {
+    ($name:ident, $code:expr_2021, $data:expr_2021, $retriability:expr_2021) => {
         #[tokio::test]
         async fn $name() {
             let expected = CepError::new($code, "family error", $data, $retriability);
@@ -306,8 +306,8 @@ cep_family_test!(
 async fn turn_runtime_constructs_one_adapter_per_turn() {
     use tempfile::TempDir;
 
-    use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
+    use lattice_agent::testing::FakeStreamingLlmClient;
 
     use super::cep::build_production_turn_deps;
     use super::llm::RealLlmClient;
@@ -439,8 +439,8 @@ mod cep_native_registry {
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
         use lancet_catalog::methods::workspace::ReadFileParams;
-        use lattice_agent::testing::FakeStreamingLlmClient;
         use lattice_agent::LlmClient;
+        use lattice_agent::testing::FakeStreamingLlmClient;
 
         use crate::turn::cep::build_production_turn_deps;
 
@@ -504,12 +504,12 @@ mod attestation_and_dispatch {
     use lancet_protocol::envelope::{
         Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, ImpactScope, Intent, Scope,
     };
-    use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_agent::LlmClient;
+    use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
-    use crate::turn::cep::{build_production_turn_deps, CepExecutorAdapter};
+    use crate::turn::cep::{CepExecutorAdapter, build_production_turn_deps};
     use lancet_api::store_turn_attestation;
 
     #[tokio::test]
@@ -697,11 +697,12 @@ mod attestation_and_dispatch {
             .expect("read");
 
         deps.audit.await_pending().await;
-        assert!(deps
-            .audit
-            .attestation_for_turn(&turn_id)
-            .expect("lookup")
-            .is_none());
+        assert!(
+            deps.audit
+                .attestation_for_turn(&turn_id)
+                .expect("lookup")
+                .is_none()
+        );
 
         let replay = deps
             .cep_client

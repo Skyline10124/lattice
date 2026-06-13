@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
     "crates/lattice-llm",
     "crates/lattice-api",
@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 license = "Apache-2.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.88"
 authors = ["Ast Rin"]
 
@@ -54,38 +54,40 @@ chrono = "0.4"
 futures = "0.3"
 indexmap = "2"
 regex = "1"
-reqwest = { version = "0.12", features = ["stream", "rustls-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["charset", "http2", "json", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
-toml = "0.8"
+toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 url = "2"
-unicode-width = "0.1"
+unicode-width = "0.2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
-schemars = "0.8"
+schemars = "1.2"
+bytes = "1"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive", "env"] }
-crossterm = "0.28"
-dirs = "5"
-colored = "2"
+crossterm = "0.29"
+dirs = "6"
+colored = "3.1"
 anyhow = "1"
 base64 = "0.22"
 dotenvy = "0.15"
-toml_edit = "0.22"
-ratatui = "0.29"
+toml_edit = "0.25"
+ratatui = "0.30"
 
 # Dev dependencies
 tempfile = "3"
+proptest = "1"
 
 [profile.bench]
 lto = true

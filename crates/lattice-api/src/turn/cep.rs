@@ -32,11 +32,11 @@ use lancet_native::enforcement::isolation::{
     CommandIsolationUnsupportedHostBehavior,
 };
 use lancet_native::{
-    impact_kind_for_method, impact_kind_label, wire_code_for_error, CepAuditContext, CepAuditStore,
-    CepClient,
+    CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
+    wire_code_for_error,
 };
 use lancet_protocol::error::{
-    invalid_params, jsonrpc, method_not_found, parse_error, CepErrorData,
+    CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
 };
 use lancet_protocol::{CepError, Retriability, ToolEvent};
 use lattice_agent::{
@@ -47,8 +47,8 @@ use lattice_profile::{
     LancetIsolationMode, LancetLandlockBehavior, LancetNetworkSection, LancetObservationSection,
     LancetSection, LancetUnsupportedHostBehavior,
 };
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -475,41 +475,41 @@ pub(crate) fn load_policy_config(
         denied_effect_kinds: cep_context.denied_effect_kinds,
     };
 
-    if let Some(policy_section) = &lancet.policy {
-        if let Some(path) = &policy_section.path {
-            if path.contains('\0') {
-                return Err(ApiError::BadRequest(
-                    "lancet.policy.path must not contain NUL bytes".into(),
-                ));
-            }
-            if Path::new(path).is_absolute() {
-                return Err(ApiError::BadRequest(format!(
-                    "lancet.policy.path must be relative, got absolute path: '{path}'"
-                )));
-            }
-            if path.contains("..") {
-                return Err(ApiError::BadRequest(format!(
-                    "lancet.policy.path must not contain '..' components: '{path}'"
-                )));
-            }
-            let resolved = runtime_root.join(path);
-            let canonical = std::fs::canonicalize(&resolved).map_err(|err| {
-                ApiError::BadRequest(format!(
-                    "cannot canonicalize lancet.policy.path '{}': {err}",
-                    resolved.display()
-                ))
-            })?;
-            if !canonical.starts_with(&runtime_root) {
-                return Err(ApiError::BadRequest(format!(
-                    "lancet.policy.path '{}' resolves outside runtime project root",
-                    canonical.display()
-                )));
-            }
-            let external = load_external_policy(&canonical)?;
-            config
-                .merge_external(&external)
-                .map_err(ApiError::BadRequest)?;
+    if let Some(policy_section) = &lancet.policy
+        && let Some(path) = &policy_section.path
+    {
+        if path.contains('\0') {
+            return Err(ApiError::BadRequest(
+                "lancet.policy.path must not contain NUL bytes".into(),
+            ));
         }
+        if Path::new(path).is_absolute() {
+            return Err(ApiError::BadRequest(format!(
+                "lancet.policy.path must be relative, got absolute path: '{path}'"
+            )));
+        }
+        if path.contains("..") {
+            return Err(ApiError::BadRequest(format!(
+                "lancet.policy.path must not contain '..' components: '{path}'"
+            )));
+        }
+        let resolved = runtime_root.join(path);
+        let canonical = std::fs::canonicalize(&resolved).map_err(|err| {
+            ApiError::BadRequest(format!(
+                "cannot canonicalize lancet.policy.path '{}': {err}",
+                resolved.display()
+            ))
+        })?;
+        if !canonical.starts_with(&runtime_root) {
+            return Err(ApiError::BadRequest(format!(
+                "lancet.policy.path '{}' resolves outside runtime project root",
+                canonical.display()
+            )));
+        }
+        let external = load_external_policy(&canonical)?;
+        config
+            .merge_external(&external)
+            .map_err(ApiError::BadRequest)?;
     }
 
     Ok(config)
@@ -756,10 +756,10 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
 }
 
 fn adapter_wire_code(cep: &CepError) -> i32 {
-    if let CepErrorData::Validation(data) = &cep.data {
-        if data.reason == "invalid params" {
-            return jsonrpc::INVALID_PARAMS;
-        }
+    if let CepErrorData::Validation(data) = &cep.data
+        && data.reason == "invalid params"
+    {
+        return jsonrpc::INVALID_PARAMS;
     }
     wire_code_for_error(cep)
 }
@@ -790,12 +790,12 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
             return Some(rest[..end].to_string());
         }
     }
-    if let Some(start) = message.find("invalid type: ") {
-        if let Some(field_start) = message[..start].rfind('`') {
-            let prefix = &message[field_start + 1..];
-            if let Some(field_end) = prefix.find('`') {
-                return Some(prefix[..field_end].to_string());
-            }
+    if let Some(start) = message.find("invalid type: ")
+        && let Some(field_start) = message[..start].rfind('`')
+    {
+        let prefix = &message[field_start + 1..];
+        if let Some(field_end) = prefix.find('`') {
+            return Some(prefix[..field_end].to_string());
         }
     }
     None

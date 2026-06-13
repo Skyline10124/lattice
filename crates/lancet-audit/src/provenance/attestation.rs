@@ -5,8 +5,8 @@
 
 use crate::audit::AuditRow;
 use lancet_protocol::provenance::{
-    InTotoStatement, InTotoSubjectDescriptor, TurnAttestationPredicate,
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE, InTotoStatement, InTotoSubjectDescriptor,
+    TurnAttestationPredicate,
 };
 use serde_json::json;
 
@@ -118,7 +118,7 @@ pub fn build_in_toto_statement(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::{impact_kind_label, AuditRow};
+    use crate::audit::{AuditRow, impact_kind_label};
     use lancet_protocol::envelope::ImpactKind;
 
     fn row(audit_id: i64, method: &str, meta: &str) -> AuditRow {

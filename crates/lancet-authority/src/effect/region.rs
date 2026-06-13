@@ -39,13 +39,13 @@ pub fn normalize_write_region_path(pattern: &str, project_root: &Path) -> Option
         WritePathPattern::DirectoryGlob(path) => Some((project_root.join(path), true)),
     }
 }
-use lancet_protocol::policy::SourcedCapability;
 use lancet_protocol::CepError;
+use lancet_protocol::policy::SourcedCapability;
 
 use super::ledger::{ObservedEffect, ObservedScope};
-use crate::guard::{normalize_write_path_pattern, WritePathPattern};
-use crate::policy::command::EffectiveImpact;
+use crate::guard::{WritePathPattern, normalize_write_path_pattern};
 use crate::policy::CepPolicyConfig;
+use crate::policy::command::EffectiveImpact;
 
 /// Per-invocation materialized effect — the middle layer of the effect model.
 ///
@@ -427,9 +427,10 @@ mod tests {
         let result = EffectiveEffect::from_command_impact(&EffectiveImpact::HardDenied);
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err
-            .message
-            .contains("HardDenied must not reach effect materialization"));
+        assert!(
+            err.message
+                .contains("HardDenied must not reach effect materialization")
+        );
     }
 
     // ── AuthorizedEffectRegion::empty tests ────────────────────────────

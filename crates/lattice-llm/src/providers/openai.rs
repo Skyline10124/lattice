@@ -160,21 +160,21 @@ impl OpenAiSseParser {
                 let finish_reason = choice["finish_reason"].as_str();
 
                 // Reasoning content (streams before regular content)
-                if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str()) {
-                    if !reasoning.is_empty() {
-                        events.push(LlmEvent::Reasoning {
-                            content: reasoning.to_string(),
-                        });
-                    }
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(|r| r.as_str())
+                    && !reasoning.is_empty()
+                {
+                    events.push(LlmEvent::Reasoning {
+                        content: reasoning.to_string(),
+                    });
                 }
 
                 // Content tokens
-                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                    if !content.is_empty() {
-                        events.push(LlmEvent::Token {
-                            content: content.to_string(),
-                        });
-                    }
+                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
+                    && !content.is_empty()
+                {
+                    events.push(LlmEvent::Token {
+                        content: content.to_string(),
+                    });
                 }
 
                 // Tool calls
@@ -199,44 +199,42 @@ impl OpenAiSseParser {
                             .get("function")
                             .and_then(|f| f.get("arguments"))
                             .and_then(|a| a.as_str())
+                            && !args.is_empty()
+                            && let Some(id) = self.tool_call_ids.get(&idx).cloned()
                         {
-                            if !args.is_empty() {
-                                if let Some(id) = self.tool_call_ids.get(&idx).cloned() {
-                                    events.push(LlmEvent::ToolCallDelta {
-                                        id,
-                                        arguments_delta: args.to_string(),
-                                    });
-                                }
-                            }
+                            events.push(LlmEvent::ToolCallDelta {
+                                id,
+                                arguments_delta: args.to_string(),
+                            });
                         }
                     }
                 }
 
                 // Finish reason — emits ToolCallEnd for all tracked IDs, then Done
-                if let Some(reason) = finish_reason {
-                    if !reason.is_empty() {
-                        // BTreeMap iterates in key order, so ToolCallEnd is
-                        // emitted in tool-call-index order rather than the
-                        // arbitrary HashMap iteration order (L-03).
-                        let drained = std::mem::take(&mut self.tool_call_ids);
-                        for (_, id) in drained {
-                            events.push(LlmEvent::ToolCallEnd { id });
-                        }
-
-                        let usage = root.get("usage").map(|u| {
-                            super::token_usage_from_keys(
-                                u,
-                                "prompt_tokens",
-                                "completion_tokens",
-                                "total_tokens",
-                            )
-                        });
-
-                        events.push(LlmEvent::Done {
-                            finish_reason: reason.to_string(),
-                            usage,
-                        });
+                if let Some(reason) = finish_reason
+                    && !reason.is_empty()
+                {
+                    // BTreeMap iterates in key order, so ToolCallEnd is
+                    // emitted in tool-call-index order rather than the
+                    // arbitrary HashMap iteration order (L-03).
+                    let drained = std::mem::take(&mut self.tool_call_ids);
+                    for (_, id) in drained {
+                        events.push(LlmEvent::ToolCallEnd { id });
                     }
+
+                    let usage = root.get("usage").map(|u| {
+                        super::token_usage_from_keys(
+                            u,
+                            "prompt_tokens",
+                            "completion_tokens",
+                            "total_tokens",
+                        )
+                    });
+
+                    events.push(LlmEvent::Done {
+                        finish_reason: reason.to_string(),
+                        usage,
+                    });
                 }
             }
         }

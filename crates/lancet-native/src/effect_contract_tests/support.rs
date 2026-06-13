@@ -18,9 +18,9 @@
 use std::sync::{Arc, OnceLock};
 
 use lancet_catalog::CatalogMethod;
+use lancet_protocol::CepError;
 use lancet_protocol::envelope::BaseExecutionEnvelope;
 use lancet_protocol::policy::{PolicyHook, SourcedCapability};
-use lancet_protocol::CepError;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::runtime::Runtime;

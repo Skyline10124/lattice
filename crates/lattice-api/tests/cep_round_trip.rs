@@ -7,21 +7,21 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
-use lancet_catalog::CepMethod;
 use lancet_native::{
-    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
-    ServerRunConfig, SEMANTIC_STAGE_NATIVE,
+    CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
+    register_production_method_registry,
 };
 use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
 };
-use lancet_protocol::error::{jsonrpc, CepErrorData, ExecutionErrorData};
+use lancet_protocol::error::{CepErrorData, ExecutionErrorData, jsonrpc};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
 use lattice_api::CepExecutorAdapter;
@@ -176,10 +176,12 @@ async fn cep_round_trip_impact_matrix() {
             }),
             assert_result: |value| {
                 assert_eq!(value["exit_code"].as_i64(), Some(0));
-                assert!(value["stdout"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("cep-round-trip"));
+                assert!(
+                    value["stdout"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("cep-round-trip")
+                );
             },
         },
         ImpactRow {

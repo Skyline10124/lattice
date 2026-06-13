@@ -74,12 +74,12 @@ pub trait LlmClient: Send + Sync {
         let response = self.chat(request).await?;
         let mut events: Vec<lattice_llm::LlmEvent> = Vec::new();
 
-        if let Some(reasoning) = &response.reasoning_content {
-            if !reasoning.is_empty() {
-                events.push(lattice_llm::LlmEvent::Reasoning {
-                    content: reasoning.clone(),
-                });
-            }
+        if let Some(reasoning) = &response.reasoning_content
+            && !reasoning.is_empty()
+        {
+            events.push(lattice_llm::LlmEvent::Reasoning {
+                content: reasoning.clone(),
+            });
         }
 
         if !response.content.is_empty() {

@@ -16,9 +16,9 @@ mod schema;
 pub use defaults::{
     default_agent_template, default_dev_template, default_editor_template, default_reader_template,
 };
-pub use discovery::{resolve_agent_profile, DiscoveryPaths, ProfileSource};
+pub use discovery::{DiscoveryPaths, ProfileSource, resolve_agent_profile};
 pub use error::ProfileError;
-pub use load::{load_agent_profile, LoadedAgentProfile};
+pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
     AgentProfile, AgentSection, LancetCommandIsolationSection, LancetCommandSection,
     LancetIsolationMode, LancetIsolationSection, LancetLandlockBehavior, LancetNetworkSection,

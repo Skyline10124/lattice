@@ -4,15 +4,15 @@
 //! Host capability probes and boundary gate helpers.
 
 use lancet_authority::{
-    allowed_primitives_for, EffectiveBoundaryCredit, LandlockApplied, MinimalMountViewApplied,
-    MountNamespaceApplied, NetnsApplied,
+    EffectiveBoundaryCredit, LandlockApplied, MinimalMountViewApplied, MountNamespaceApplied,
+    NetnsApplied, allowed_primitives_for,
 };
 use lancet_protocol::{
     BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryEntry, EffectiveBoundaryReport,
     EffectiveBoundaryStatus, HostProbeStatus,
 };
 pub use lancet_protocol::{HostProbeEntry, HostProbeReport};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -660,12 +660,12 @@ pub fn evaluate_command_boundary_attempt(
 
     if config.mode == CommandIsolationMode::Enforce {
         for boundary in &config.required_boundaries {
-            if let Some(entry) = effective_boundary.status_for(*boundary) {
-                if entry.status != EffectiveBoundaryStatus::PhysicallyBounded {
-                    fail_reasons.push(entry.reason.clone().unwrap_or_else(|| {
-                        format!("{} boundary lacks applied evidence", boundary.label())
-                    }));
-                }
+            if let Some(entry) = effective_boundary.status_for(*boundary)
+                && entry.status != EffectiveBoundaryStatus::PhysicallyBounded
+            {
+                fail_reasons.push(entry.reason.clone().unwrap_or_else(|| {
+                    format!("{} boundary lacks applied evidence", boundary.label())
+                }));
             }
         }
     }
@@ -2060,10 +2060,12 @@ mod tests {
                     | HostProbeStatus::Disabled
                     | HostProbeStatus::Unknown
             ));
-            assert!(entry
-                .reason
-                .as_deref()
-                .is_some_and(|reason| !reason.is_empty()));
+            assert!(
+                entry
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
         }
     }
 }

@@ -194,12 +194,11 @@ pub fn validate_fetch_url(
                     .trim_start_matches('[')
                     .trim_end_matches(']')
                     .parse::<IpAddr>()
+                    && security::is_private_or_reserved_ip(ip)
                 {
-                    if security::is_private_or_reserved_ip(ip) {
-                        return Err(network_denied(format!(
-                            "URL not allowed: private or reserved IP {ip}"
-                        )));
-                    }
+                    return Err(network_denied(format!(
+                        "URL not allowed: private or reserved IP {ip}"
+                    )));
                 }
             }
             Ok(ValidatedFetchUrl {

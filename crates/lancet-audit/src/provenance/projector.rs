@@ -3,7 +3,7 @@
 
 //! Project flat [`AuditRow`] records into PROV-DM fragments.
 
-use crate::audit::{impact_kind_from_label, AuditRow};
+use crate::audit::{AuditRow, impact_kind_from_label};
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::provenance::{
     ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment, ProvUsed, ProvWasAssociatedWith,
@@ -268,7 +268,7 @@ fn chain_was_informed_by(rows: &[AuditRow], fragment: &mut ProvGraphFragment) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::{impact_kind_label, AuditRow};
+    use crate::audit::{AuditRow, impact_kind_label};
 
     fn fixture_row(audit_id: i64, method: &str, meta: &str) -> AuditRow {
         AuditRow {

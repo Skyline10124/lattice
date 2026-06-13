@@ -11,8 +11,8 @@ use lancet_catalog::methods::workspace::{
 use lancet_catalog::methods::*;
 use lancet_protocol::envelope::VerifyCommand;
 
-pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects(
-) -> Vec<RuntimeEffectScenario> {
+pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
+-> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()

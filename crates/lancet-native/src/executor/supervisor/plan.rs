@@ -630,8 +630,8 @@ fn plan_error(field: impl Into<String>, reason: impl Into<String>) -> CepError {
 mod tests {
     use super::*;
     use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
-    use crate::executor::supervisor::overlay::{OverlayMode, OverlayPlan};
     use crate::executor::supervisor::SupervisorStage;
+    use crate::executor::supervisor::overlay::{OverlayMode, OverlayPlan};
     use tempfile::TempDir;
 
     fn touch(path: &Path) {
@@ -702,10 +702,11 @@ mod tests {
 
         assert_eq!(plan.executable.source, ExecutableSource::Project);
         assert_eq!(plan.executable.view_path, Path::new("/project/bin/tool"));
-        assert!(plan
-            .generated_path_entries
-            .iter()
-            .any(|entry| entry == Path::new("/project/bin")));
+        assert!(
+            plan.generated_path_entries
+                .iter()
+                .any(|entry| entry == Path::new("/project/bin"))
+        );
     }
 
     #[test]
@@ -726,13 +727,15 @@ mod tests {
         assert_eq!(plan.executable.source, ExecutableSource::ReadOnlyToolchain);
         assert_eq!(plan.executable.view_path, toolchain.join("bin/cargo"));
         let toolchain_bin = toolchain.join("bin");
-        assert!(plan
-            .generated_path_entries
-            .iter()
-            .any(|entry| entry == &toolchain_bin));
-        assert!(plan
-            .read_only_toolchain_mounts()
-            .all(|mount| mount.read_only));
+        assert!(
+            plan.generated_path_entries
+                .iter()
+                .any(|entry| entry == &toolchain_bin)
+        );
+        assert!(
+            plan.read_only_toolchain_mounts()
+                .all(|mount| mount.read_only)
+        );
     }
 
     #[test]
@@ -775,11 +778,12 @@ mod tests {
         let plan = SupervisorPlan::build(temp.path(), None, &argv("run"), &config).unwrap();
 
         assert_eq!(plan.read_only_toolchain_mounts().count(), 0);
-        assert!(plan
-            .diagnostics
-            .iter()
-            .any(|diag| diag.key == "read_only_toolchain_paths.0"
-                && diag.value.starts_with("missing:")));
+        assert!(
+            plan.diagnostics
+                .iter()
+                .any(|diag| diag.key == "read_only_toolchain_paths.0"
+                    && diag.value.starts_with("missing:"))
+        );
     }
 
     #[test]
@@ -834,22 +838,27 @@ mod tests {
                 "{forbidden} appeared in plan"
             );
         }
-        assert!(!plan
-            .mounts
-            .iter()
-            .any(|mount| mount.target == Path::new("/dev")
-                && mount.source == Some(PathBuf::from("/dev"))));
-        assert!(!plan
-            .mounts
-            .iter()
-            .any(|mount| mount.target == Path::new("/proc")
-                && mount.source == Some(PathBuf::from("/proc"))));
-        assert!(plan
-            .mounts
-            .iter()
-            .any(|mount| mount.kind == MountKind::ProcFs
-                && mount.target == Path::new("/proc")
-                && mount.source.is_none()));
+        assert!(
+            !plan
+                .mounts
+                .iter()
+                .any(|mount| mount.target == Path::new("/dev")
+                    && mount.source == Some(PathBuf::from("/dev")))
+        );
+        assert!(
+            !plan
+                .mounts
+                .iter()
+                .any(|mount| mount.target == Path::new("/proc")
+                    && mount.source == Some(PathBuf::from("/proc")))
+        );
+        assert!(
+            plan.mounts
+                .iter()
+                .any(|mount| mount.kind == MountKind::ProcFs
+                    && mount.target == Path::new("/proc")
+                    && mount.source.is_none())
+        );
     }
 
     #[test]
@@ -885,12 +894,16 @@ mod tests {
             .iter()
             .filter(|mount| mount.kind == MountKind::ScratchTmpfs)
             .collect();
-        assert!(scratch
-            .iter()
-            .any(|mount| mount.target == Path::new("/tmp")));
-        assert!(scratch
-            .iter()
-            .any(|mount| mount.target == Path::new("/scratch/build")));
+        assert!(
+            scratch
+                .iter()
+                .any(|mount| mount.target == Path::new("/tmp"))
+        );
+        assert!(
+            scratch
+                .iter()
+                .any(|mount| mount.target == Path::new("/scratch/build"))
+        );
         assert!(scratch.iter().all(|mount| mount.source.is_none()));
     }
 

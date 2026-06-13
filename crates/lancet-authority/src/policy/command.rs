@@ -384,7 +384,7 @@ fn timeout_exceeded(requested: u64, max: u64) -> CepError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::shell_ast::{resolve_command_line, CommandLine};
+    use crate::policy::shell_ast::{CommandLine, resolve_command_line};
 
     fn default_policy() -> CommandPolicy {
         CommandPolicy::defaults()
@@ -800,9 +800,11 @@ mod tests {
         assert!(mismatch.message.contains("allowed_diagnostic_commands"));
         assert!(mismatch.message.contains("workspace_mutation"));
         // Must not advise asserting read-only via command_execution.
-        assert!(mismatch
-            .message
-            .contains("cannot be used to assert an unknown command is read-only"));
+        assert!(
+            mismatch
+                .message
+                .contains("cannot be used to assert an unknown command is read-only")
+        );
     }
 
     // --- EffectiveImpact variants ---

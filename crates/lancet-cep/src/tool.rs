@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 
-use lancet_catalog::{catalog, BaseAuthorityRequirement, MethodDescriptor};
+use lancet_catalog::{BaseAuthorityRequirement, MethodDescriptor, catalog};
 use serde::{Deserialize, Serialize};
 
 /// A CEP method projected as an LLM-facing tool definition.

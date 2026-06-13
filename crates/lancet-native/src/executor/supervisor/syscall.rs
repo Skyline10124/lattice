@@ -9,9 +9,9 @@ use std::os::fd::RawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use super::fd::{cleanup_inherited_fds, FdCleanupStatus, LiveFdCleanupBackend};
+use super::fd::{FdCleanupStatus, LiveFdCleanupBackend, cleanup_inherited_fds};
 use super::landlock::{
-    LandlockAbiProbe, LandlockApplicationReport, LandlockRefinementPlan, LANDLOCK_RULE_PATH_BENEATH,
+    LANDLOCK_RULE_PATH_BENEATH, LandlockAbiProbe, LandlockApplicationReport, LandlockRefinementPlan,
 };
 use super::plan::ReadOnlyBindScope;
 
@@ -66,7 +66,7 @@ pub(crate) trait SupervisorSyscalls {
     fn bind_mount(&mut self, source: &Path, target: &Path) -> Result<(), SyscallError>;
     fn remount_read_only(&mut self, target: &Path) -> Result<(), SyscallError>;
     fn record_read_only_bind_scope(&mut self, scope: ReadOnlyBindScope)
-        -> Result<(), SyscallError>;
+    -> Result<(), SyscallError>;
     fn mount_scratch_tmpfs(&mut self, target: &Path) -> Result<(), SyscallError>;
     fn mount_procfs(&mut self, target: &Path) -> Result<(), SyscallError>;
     fn mount_minimal_device(&mut self, source: &Path, target: &Path) -> Result<(), SyscallError>;
@@ -577,7 +577,7 @@ fn make_overlay_tree_removable(path: &Path) -> Result<(), SyscallError> {
             return Err(SyscallError::new(
                 "metadata(overlay cleanup)",
                 err.to_string(),
-            ))
+            ));
         }
     };
     if !metadata.file_type().is_dir() {
@@ -1258,8 +1258,7 @@ veth123:   4096      20    0    0    0     0          0         0     8192      
     const PROC_NET_ROUTE_NO_DEFAULT: &str =
         "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n";
 
-    const PROC_NET_ROUTE_WITH_DEFAULT: &str =
-        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
+    const PROC_NET_ROUTE_WITH_DEFAULT: &str = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n\
 eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
 
     #[test]
@@ -1360,18 +1359,22 @@ eth0\t00000000\t010012AC\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
 
     #[test]
     fn unprivileged_userns_sysctls_accept_enabled_values() {
-        assert!(assert_sysctl_enabled(
-            "kernel.unprivileged_userns_clone",
-            "/proc/sys/kernel/unprivileged_userns_clone",
-            "1\n"
-        )
-        .is_ok());
-        assert!(assert_sysctl_positive(
-            "user.max_user_namespaces",
-            "/proc/sys/user/max_user_namespaces",
-            "126726\n"
-        )
-        .is_ok());
+        assert!(
+            assert_sysctl_enabled(
+                "kernel.unprivileged_userns_clone",
+                "/proc/sys/kernel/unprivileged_userns_clone",
+                "1\n"
+            )
+            .is_ok()
+        );
+        assert!(
+            assert_sysctl_positive(
+                "user.max_user_namespaces",
+                "/proc/sys/user/max_user_namespaces",
+                "126726\n"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

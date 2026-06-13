@@ -9,15 +9,15 @@ use std::sync::Arc;
 use lancet_authority::policy::CepTurnContext;
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
 use lancet_native::{
-    register_production_method_registry, AuditQueryFilters, CepAuditStore, CepTransport,
-    MethodRegistry, ServerRunConfig,
+    AuditQueryFilters, CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
     ImpactKind, Intent, OnFailure, Scope,
 };
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};

@@ -4,7 +4,7 @@
 //! Typed method registry for CEP catalog dispatch.
 
 use lancet_catalog::CatalogMethod;
-use lancet_protocol::error::{invalid_params, method_not_found, to_jsonrpc_error, StateErrorData};
+use lancet_protocol::error::{StateErrorData, invalid_params, method_not_found, to_jsonrpc_error};
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability, ToolEvent};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -209,11 +209,11 @@ pub fn wire_code_for_error(err: &CepError) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lancet_catalog::CepMethod;
+    use lancet_catalog::methods::TodoWrite;
     use lancet_catalog::methods::session::{
         TodoItem, TodoStatus, TodoWriteParams, TodoWriteResult,
     };
-    use lancet_catalog::methods::TodoWrite;
-    use lancet_catalog::CepMethod;
     use lancet_protocol::error::jsonrpc;
 
     #[derive(Clone)]

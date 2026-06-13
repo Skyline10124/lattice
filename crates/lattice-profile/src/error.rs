@@ -22,7 +22,9 @@ pub enum ProfileError {
     #[error("invalid schema_version {found} at {path}: only schema_version = 1 is supported")]
     UnsupportedSchemaVersion { path: PathBuf, found: u64 },
 
-    #[error("forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools], [llm]")]
+    #[error(
+        "forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools], [llm]"
+    )]
     ForbiddenSection {
         path: PathBuf,
         section: String,
@@ -37,9 +39,7 @@ pub enum ProfileError {
         reason: String,
     },
 
-    #[error(
-        "invalid value `{value}` for `{field}` in [{section}] at {path}: {reason}. {expected}"
-    )]
+    #[error("invalid value `{value}` for `{field}` in [{section}] at {path}: {reason}. {expected}")]
     InvalidField {
         path: PathBuf,
         section: String,
@@ -67,7 +67,9 @@ pub enum ProfileError {
         resolved: PathBuf,
     },
 
-    #[error("prompt.system_path `{given}` at {profile_path} is an absolute path — must be relative to the agent.toml package directory")]
+    #[error(
+        "prompt.system_path `{given}` at {profile_path} is an absolute path — must be relative to the agent.toml package directory"
+    )]
     AbsoluteSystemPath {
         profile_path: PathBuf,
         given: String,
@@ -96,13 +98,17 @@ pub enum ProfileError {
         source: std::io::Error,
     },
 
-    #[error("agent profile '{name}' not found at project path {project_path} or global path {global_path}")]
+    #[error(
+        "agent profile '{name}' not found at project path {project_path} or global path {global_path}"
+    )]
     ProfileNotFound {
         name: String,
         project_path: PathBuf,
         global_path: PathBuf,
     },
 
-    #[error("no default agent profile found: create at {dir} with `lattice new agent default`, or specify an agent with `--agent <name>`")]
+    #[error(
+        "no default agent profile found: create at {dir} with `lattice new agent default`, or specify an agent with `--agent <name>`"
+    )]
     MissingDefault { dir: PathBuf, template: String },
 }

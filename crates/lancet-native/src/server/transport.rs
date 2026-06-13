@@ -7,20 +7,20 @@ use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{
-    impact_kind_for_method, impact_kind_label, merge_finalize_metadata, AuditOutcome, AuditStart,
-    CallAuditMetadata, CepAuditContext, CepAuditStore, SEMANTIC_STAGE_SCAFFOLD,
-    SEMANTIC_STAGE_UNROUTED,
+    AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
+    SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED, impact_kind_for_method, impact_kind_label,
+    merge_finalize_metadata,
 };
 use lancet_authority::envelope_store::ActiveEnvelopeStore;
-use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::policy::CepTurnContext;
+use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
-    envelope::{BaseExecutionEnvelope, CepMode},
     CepError, CepErrorCode, CepErrorData, Retriability,
+    envelope::{BaseExecutionEnvelope, CepMode},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -307,7 +307,7 @@ fn apply_effect_check(
                     authorized_effect: vec![],
                     observed_effects: observed_effects.iter().map(|e| e.kind.clone()).collect(),
                     violations: vec![
-                        "handler completed without setting authorized region".to_string()
+                        "handler completed without setting authorized region".to_string(),
                     ],
                 })),
                 Retriability::Permanent,
@@ -525,10 +525,10 @@ async fn emit_cep_call_finished(
         "guard_stage": metadata.guard_stage,
         "policy_enforced": metadata.policy_enforced,
     });
-    if let Some(code) = error_code {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("error_code".to_string(), Value::String(code.to_string()));
-        }
+    if let Some(code) = error_code
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("error_code".to_string(), Value::String(code.to_string()));
     }
     events.emit("cep.call_finished", payload).await;
 }

@@ -8,10 +8,10 @@
 //! All methods require an active `ExecutionEnvelope`; multi-file mutations
 //! perform all-or-nothing scope preflight before applying changes.
 
-use crate::edit::apply::{apply_parsed_patch, PatchApplyLimits};
+use crate::edit::apply::{PatchApplyLimits, apply_parsed_patch};
 use crate::edit::commit_baseline::{
-    commit_baseline_details_json, CommitBaselineFailureReason, CommitBaselineReport,
-    CommitBaselineValidation,
+    CommitBaselineFailureReason, CommitBaselineReport, CommitBaselineValidation,
+    commit_baseline_details_json,
 };
 use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
@@ -19,7 +19,7 @@ use crate::edit::parser::parse_patch_document;
 use crate::enforcement::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
-use crate::enforcement::preflight::{mutation_preflight_metadata, MutationPreflight};
+use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
 use crate::enforcement::verify::{
     extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
 };
@@ -27,12 +27,12 @@ use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{
     EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
 };
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
     Batch, BatchOperation, BatchParams, BatchResult, Create, CreateParams, CreateResult, Edit,
     EditOperation, EditParams, EditResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -856,10 +856,10 @@ async fn apply_compiled_patch(
     }
 
     if !result.ok {
-        if let Some(report) = result.commit_baseline_report.as_ref() {
-            if let CommitBaselineValidation::Failed(reason) = report.validation {
-                return Err(commit_baseline_replan_error(method, report, reason));
-            }
+        if let Some(report) = result.commit_baseline_report.as_ref()
+            && let CommitBaselineValidation::Failed(reason) = report.validation
+        {
+            return Err(commit_baseline_replan_error(method, report, reason));
         }
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,

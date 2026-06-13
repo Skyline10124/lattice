@@ -26,13 +26,13 @@ use lancet_protocol::error::{CepErrorData, ExecutionErrorData, ValidationErrorDa
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
 #[cfg(unix)]
+use super::SupervisorPlan;
+#[cfg(unix)]
 use super::linux::{boundary_attempt_from_supervisor, run_linux_supervisor_attempt};
 #[cfg(unix)]
 use super::setup_report::encode_setup_attempt_report;
 #[cfg(unix)]
 use super::syscall::{LiveSupervisorSyscalls, UsernsChildHandshake, UsernsMapStage};
-#[cfg(unix)]
-use super::SupervisorPlan;
 
 #[cfg(unix)]
 pub(crate) struct LiveSupervisorProcess {

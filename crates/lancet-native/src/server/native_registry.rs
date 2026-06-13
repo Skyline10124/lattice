@@ -67,14 +67,14 @@ mod cep_native_registry_tests {
     use crate::server::registry::{Cancellation, EventSink, HandlerContext};
     use crate::{CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
+    use lancet_catalog::CepMethod;
     use lancet_catalog::catalog;
     use lancet_catalog::methods::command::Run;
     use lancet_catalog::methods::workspace::{
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
-    use lancet_catalog::CepMethod;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
     use lancet_protocol::CepErrorCode;
+    use lancet_protocol::envelope::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};

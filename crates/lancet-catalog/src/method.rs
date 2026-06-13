@@ -5,8 +5,8 @@
 
 use lancet_protocol::{EffectDecl, ImpactKind};
 use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 pub use lancet_protocol::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
 

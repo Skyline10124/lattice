@@ -4,10 +4,10 @@
 //! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold stubs (OBS-05).
 
 use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_catalog::CepMethod;
 use lancet_catalog::methods::scaffold::{
     Inspect, InspectParams, Navigate, NavigateParams, ScaffoldStubResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::CepError;
 use serde_json::json;
 
@@ -70,16 +70,16 @@ mod scaffold_tests {
     use crate::server::registry::{Cancellation, EventSink};
     use crate::wire_code_for_error;
     use crate::{CepTransport, ServerRunConfig};
-    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::policy::CepTurnContext;
+    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_catalog::methods::scaffold::InspectParams;
+    use lancet_protocol::ToolEvent;
     use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::policy::PolicyHook;
-    use lancet_protocol::ToolEvent;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::{mpsc, watch, RwLock};
+    use tokio::sync::{RwLock, mpsc, watch};
 
     fn scaffold_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();

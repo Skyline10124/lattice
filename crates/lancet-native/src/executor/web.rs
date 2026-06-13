@@ -65,19 +65,19 @@ pub(crate) async fn fetch_url(
         .map(str::to_string);
 
     let limit = max_bytes;
-    if let Some(content_length) = response.content_length() {
-        if content_length > limit as u64 {
-            let body = read_body_capped(response, limit, Some(content_length as usize)).await?;
-            return Ok(WebFetchOutcome {
-                status,
-                body: body.body,
-                content_type,
-                bytes_returned: body.bytes_returned,
-                response_size: content_length as usize,
-                response_size_known: true,
-                truncated: true,
-            });
-        }
+    if let Some(content_length) = response.content_length()
+        && content_length > limit as u64
+    {
+        let body = read_body_capped(response, limit, Some(content_length as usize)).await?;
+        return Ok(WebFetchOutcome {
+            status,
+            body: body.body,
+            content_type,
+            bytes_returned: body.bytes_returned,
+            response_size: content_length as usize,
+            response_size_known: true,
+            truncated: true,
+        });
     }
 
     let body = read_body_capped(response, limit, None).await?;

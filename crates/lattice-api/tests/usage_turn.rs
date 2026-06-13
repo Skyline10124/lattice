@@ -15,8 +15,8 @@ use lancet_protocol::envelope::{
     Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
     OnFailure, Scope,
 };
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};

@@ -16,8 +16,8 @@ use colored::Colorize;
 #[cfg(test)]
 use lancet_api::collect_status_with_probe;
 use lancet_api::{
-    collect_status, run_doctor_checks, BoundaryDimension, HostProbeEntry, HostProbeReport,
-    HostProbeStatus, LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, LancetStatusOutput,
+    BoundaryDimension, HostProbeEntry, HostProbeReport, HostProbeStatus, LancetDoctorGate,
+    LancetDoctorOutput, LancetDoctorRequest, LancetStatusOutput, collect_status, run_doctor_checks,
 };
 
 const BOUNDARY_NON_CLAIM_NOTE: &str =
@@ -220,15 +220,14 @@ fn format_effective_boundary_observed_line(
 }
 
 fn effective_boundary_text_status(boundary: BoundaryDimension, entry: &serde_json::Value) -> &str {
-    if boundary == BoundaryDimension::Landlock {
-        if let Some(status) = entry
+    if boundary == BoundaryDimension::Landlock
+        && let Some(status) = entry
             .get("diagnostics")
             .and_then(|value| value.as_object())
             .and_then(|diagnostics| diagnostics.get("landlock_status"))
             .and_then(|value| value.as_str())
-        {
-            return status;
-        }
+    {
+        return status;
     }
     entry
         .get("status")

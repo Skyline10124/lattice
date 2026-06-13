@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::hash::{content_hash, line_hash};
 use super::types::{HashLine, PatchDocument, PatchHunkLine, PatchOperation};
@@ -124,10 +124,10 @@ pub(crate) fn validate_commit_baseline_evidence(
                 .map_or_else(|| content_hash(&[]), |content| content_hash(content));
             let summary = validate_hunk(hunk, current, baseline_hash);
 
-            if matches!(validation, CommitBaselineValidation::Passed) {
-                if let Some(reason) = failure_reason(summary.match_result) {
-                    validation = CommitBaselineValidation::Failed(reason);
-                }
+            if matches!(validation, CommitBaselineValidation::Passed)
+                && let Some(reason) = failure_reason(summary.match_result)
+            {
+                validation = CommitBaselineValidation::Failed(reason);
             }
 
             summary

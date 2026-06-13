@@ -379,13 +379,13 @@ fn canonicalize_target(target: &Path, project_root_canonical: &Path) -> Result<P
     // Try direct canonicalization (Case A: file exists)
     if let Ok(canonical) = std::fs::canonicalize(target) {
         // Check for symlink at target itself
-        if let Ok(meta) = std::fs::symlink_metadata(target) {
-            if meta.file_type().is_symlink() {
-                return Err(permission_denied(&format!(
-                    "target '{}' is a symlink",
-                    target.display()
-                )));
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(target)
+            && meta.file_type().is_symlink()
+        {
+            return Err(permission_denied(&format!(
+                "target '{}' is a symlink",
+                target.display()
+            )));
         }
         return Ok(canonical);
     }
@@ -436,10 +436,10 @@ fn canonicalize_pattern_path(
         if parent.as_os_str().is_empty() {
             return Ok(project_root_canonical.join(pattern));
         }
-        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
-            if let Some(filename) = pattern.file_name() {
-                return Ok(canonical_parent.join(filename));
-            }
+        if let Ok(canonical_parent) = std::fs::canonicalize(parent)
+            && let Some(filename) = pattern.file_name()
+        {
+            return Ok(canonical_parent.join(filename));
         }
     }
     Ok(project_root_canonical.join(
@@ -456,13 +456,13 @@ fn canonicalize_pattern_dir(
 ) -> Result<PathBuf, CepError> {
     if let Ok(canonical) = std::fs::canonicalize(dir) {
         // Check for symlink in pattern base
-        if let Ok(meta) = std::fs::symlink_metadata(dir) {
-            if meta.file_type().is_symlink() {
-                return Err(permission_denied(&format!(
-                    "WritePath pattern base '{}' is a symlink pointing outside root",
-                    dir.display()
-                )));
-            }
+        if let Ok(meta) = std::fs::symlink_metadata(dir)
+            && meta.file_type().is_symlink()
+        {
+            return Err(permission_denied(&format!(
+                "WritePath pattern base '{}' is a symlink pointing outside root",
+                dir.display()
+            )));
         }
         return Ok(canonical);
     }
@@ -771,11 +771,10 @@ mod guard_l1_tests {
         assert!(
             write_pattern_covers_relative("crates/lattice-agent", "crates/lattice-agent").unwrap()
         );
-        assert!(!write_pattern_covers_relative(
-            "crates/lattice-agent",
-            "crates/lattice-agent/src/x.rs"
-        )
-        .unwrap());
+        assert!(
+            !write_pattern_covers_relative("crates/lattice-agent", "crates/lattice-agent/src/x.rs")
+                .unwrap()
+        );
     }
 
     #[test]

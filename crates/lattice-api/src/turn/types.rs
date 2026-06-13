@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;

@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
 

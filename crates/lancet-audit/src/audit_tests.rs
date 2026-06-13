@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use lancet_catalog::CepMethod;
 use lancet_catalog::methods::{
     AuditObserve, Create, Fetch, ObserveWorkspace, TodoWrite as TodoWriteMethod,
 };
-use lancet_catalog::CepMethod;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -155,11 +155,12 @@ fn cep_audit_error_path_finalizes_ended_at() {
         .unwrap();
     let row = store.row_by_audit_id(start.audit_id).unwrap();
     assert!(row.ended_at.is_some());
-    assert!(row
-        .result_or_error
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("error:ExecutionFailed:"));
+    assert!(
+        row.result_or_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("error:ExecutionFailed:")
+    );
 }
 
 #[test]
@@ -668,11 +669,13 @@ fn query_rows_filters_by_verdict() {
         })
         .unwrap();
     assert_eq!(success_rows.len(), 1);
-    assert!(success_rows[0]
-        .result_or_error
-        .as_deref()
-        .unwrap_or_default()
-        .starts_with("success:"));
+    assert!(
+        success_rows[0]
+            .result_or_error
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("success:")
+    );
 
     let denied_rows = store
         .query_rows(&AuditQueryFilters {

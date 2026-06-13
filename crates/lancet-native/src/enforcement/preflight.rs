@@ -10,7 +10,7 @@ use lancet_protocol::envelope::{Capability, ImpactKind};
 use lancet_protocol::policy::{
     CapabilitySource, PolicyDecision, PolicyInput, PolicyReasonCode, SourcedCapability,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fmt::Debug;
 use std::path::Path;
 

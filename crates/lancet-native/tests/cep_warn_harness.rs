@@ -27,11 +27,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use lancet_authority::CepTurnContext;
 use lancet_authority::effect::{
     ledger::{EffectSource, ObservedEffect, ObservedScope},
     region::AuthorizedEffectRegion,
 };
-use lancet_authority::CepTurnContext;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
@@ -47,8 +47,8 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_catalog::{CatalogMethod, CepMethod};
 use lancet_native::{
-    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
-    ServerRunConfig,
+    CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact, ImpactKind,
@@ -83,13 +83,13 @@ async fn has_effect_warning(audit: Arc<CepAuditStore>, row_before: i64) -> bool 
     if count < expected_id {
         return false;
     }
-    if let Ok(row) = audit.row_by_audit_id(expected_id) {
-        row.metadata_json
+    match audit.row_by_audit_id(expected_id) {
+        Ok(row) => row
+            .metadata_json
             .as_deref()
             .unwrap_or("")
-            .contains("effect_warning")
-    } else {
-        false
+            .contains("effect_warning"),
+        Err(_) => false,
     }
 }
 

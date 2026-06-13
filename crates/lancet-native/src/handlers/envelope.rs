@@ -6,15 +6,15 @@
 //! Validates, stores, and manages active envelope lifecycle (declare, reject-double, supersede).
 
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
-use crate::enforcement::guard_l1::{normalize_write_path_pattern, WritePathPattern};
+use crate::enforcement::guard_l1::{WritePathPattern, normalize_write_path_pattern};
 use crate::enforcement::verify::{extract_verify_command, validate_verify_command};
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
+use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::envelope::{
     DeclareParams, DeclareResult, Envelope, EnvelopeParams, EnvelopeResult,
 };
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{Capability, ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};

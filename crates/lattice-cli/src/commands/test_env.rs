@@ -11,6 +11,17 @@ use std::sync::{LazyLock, Mutex};
 
 static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+fn set_env_var(key: &str, value: Option<&str>) {
+    // SAFETY: Every environment mutation in this test binary uses ENV_MUTEX,
+    // and each mutated key is only observed inside the protected closure.
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
 /// Call `f` with `key` set to `value` in the environment.
 ///
 /// The previous value of `key` is restored (or removed if it was unset)
@@ -19,12 +30,9 @@ static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 pub(crate) fn with_env_var(key: &str, value: &str, f: impl FnOnce()) {
     let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let prev = std::env::var(key).ok();
-    std::env::set_var(key, value);
+    set_env_var(key, Some(value));
     f();
-    match prev {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
+    set_env_var(key, prev.as_deref());
 }
 
 /// Call `f` with the given env vars removed from the environment.
@@ -39,15 +47,12 @@ pub(crate) fn without_env_vars(keys: &[&str], f: impl FnOnce()) {
         .collect();
 
     for key in keys {
-        std::env::remove_var(key);
+        set_env_var(key, None);
     }
 
     f();
 
     for (key, value) in previous {
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
+        set_env_var(key, value.as_deref());
     }
 }

@@ -22,12 +22,12 @@ pub use lattice_session::{
     GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
     TurnLogEntry,
 };
-pub use models::{init_logging, list_models, resolve_model, ModelInfo};
-pub use profile::{load_agent_profile_path, resolve_named_agent_profile, LoadedAgentProfile};
+pub use models::{ModelInfo, init_logging, list_models, resolve_model};
+pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
 pub use turn::{
-    collect_turn_result_from_events, run_turn, stream_turn, RunTurnRequest, RunTurnResult,
-    RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent, TurnEventStream, TurnUsageSummary,
+    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
+    TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn, stream_turn,
 };
 
 #[doc(hidden)]

@@ -17,8 +17,8 @@ use super::overlay::mount_overlay;
 use super::plan::{MountKind, PrivilegeStrategy, SupervisorPlan};
 use super::syscall::{SupervisorSyscalls, SyscallError};
 use super::{
-    run_supervisor_attempt, SupervisorAttempt, SupervisorBackend, SupervisorSetupError,
-    SupervisorStage,
+    SupervisorAttempt, SupervisorBackend, SupervisorSetupError, SupervisorStage,
+    run_supervisor_attempt,
 };
 
 pub(crate) struct LinuxSupervisorBackend<S> {
@@ -717,23 +717,27 @@ mod tests {
             .position(|call| call == "exec_handoff_ready")
             .unwrap();
         assert!(net < exec);
-        assert!(calls
-            .iter()
-            .any(|call| call == "assert_no_veth_or_default_route"));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == "assert_no_veth_or_default_route")
+        );
         assert!(!calls.iter().any(|call| call.contains("create_veth")));
         assert!(!calls.iter().any(|call| call.contains("add_default_route")));
-        assert!(!calls
-            .iter()
-            .any(|call| call.contains("join_host_namespace")));
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.contains("join_host_namespace"))
+        );
         assert_eq!(
             boundary.outcome.network_namespace_status,
             SupervisorSetupStatus::Applied
         );
-        assert!(boundary
-            .outcome
-            .evidence
-            .iter()
-            .any(|evidence| { matches!(evidence, AppliedBoundaryEvidence::NetworkNamespace(_)) }));
+        assert!(
+            boundary.outcome.evidence.iter().any(|evidence| {
+                matches!(evidence, AppliedBoundaryEvidence::NetworkNamespace(_))
+            })
+        );
     }
 
     #[test]
@@ -796,20 +800,24 @@ mod tests {
             attempt.outcome.report().failed_stage,
             Some(SupervisorStage::PrivilegeCheck)
         );
-        assert!(!backend
-            .syscalls
-            .calls
-            .iter()
-            .any(|call| call == "unshare_user_namespace"));
+        assert!(
+            !backend
+                .syscalls
+                .calls
+                .iter()
+                .any(|call| call == "unshare_user_namespace")
+        );
         assert_eq!(
             boundary.outcome.userns_status.as_deref(),
             Some("failed_closed")
         );
-        assert!(boundary
-            .outcome
-            .setup_failure_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("check_unprivileged_user_namespace")));
+        assert!(
+            boundary
+                .outcome
+                .setup_failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("check_unprivileged_user_namespace"))
+        );
     }
 
     #[test]
@@ -821,11 +829,13 @@ mod tests {
         let boundary = boundary_attempt_from_supervisor(&attempt);
 
         assert!(attempt.outcome.failed_closed());
-        assert!(!backend
-            .syscalls
-            .calls
-            .iter()
-            .any(|call| call == "exec_handoff_ready"));
+        assert!(
+            !backend
+                .syscalls
+                .calls
+                .iter()
+                .any(|call| call == "exec_handoff_ready")
+        );
         assert_eq!(
             boundary.outcome.gid_map_status.as_deref(),
             Some("failed_closed")
@@ -865,9 +875,11 @@ mod tests {
             MinimalMountViewStatus::FailedClosed
         );
         assert_eq!(filesystem.status, EffectiveBoundaryStatus::FailedClosed);
-        assert!(!filesystem
-            .source_primitives
-            .contains(&BoundaryPrimitive::MountNamespace));
+        assert!(
+            !filesystem
+                .source_primitives
+                .contains(&BoundaryPrimitive::MountNamespace)
+        );
     }
 
     #[test]
@@ -1003,11 +1015,13 @@ mod tests {
         );
         assert_eq!(boundary.outcome.landlock_abi_version, Some(3));
         assert!(boundary.outcome.landlock_rights_mask.is_some());
-        assert!(boundary
-            .outcome
-            .evidence
-            .iter()
-            .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::Landlock(_))));
+        assert!(
+            boundary
+                .outcome
+                .evidence
+                .iter()
+                .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::Landlock(_)))
+        );
 
         let config = CommandIsolationRuntimeConfig {
             mode: crate::enforcement::isolation::CommandIsolationMode::Enforce,
@@ -1050,11 +1064,13 @@ mod tests {
                 LandlockApplicationStatus::Unsupported | LandlockApplicationStatus::NotApplied
             ));
             assert_eq!(boundary.outcome.landlock_required, Some(true));
-            assert!(!backend
-                .syscalls
-                .calls
-                .iter()
-                .any(|call| call == "exec_handoff_ready"));
+            assert!(
+                !backend
+                    .syscalls
+                    .calls
+                    .iter()
+                    .any(|call| call == "exec_handoff_ready")
+            );
         }
     }
 
@@ -1072,16 +1088,20 @@ mod tests {
             LandlockApplicationStatus::NotApplied
         );
         assert_eq!(boundary.outcome.landlock_required, Some(false));
-        assert!(backend
-            .syscalls
-            .calls
-            .iter()
-            .any(|call| call == "exec_handoff_ready"));
-        assert!(!boundary
-            .outcome
-            .evidence
-            .iter()
-            .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::Landlock(_))));
+        assert!(
+            backend
+                .syscalls
+                .calls
+                .iter()
+                .any(|call| call == "exec_handoff_ready")
+        );
+        assert!(
+            !boundary
+                .outcome
+                .evidence
+                .iter()
+                .any(|evidence| matches!(evidence, AppliedBoundaryEvidence::Landlock(_)))
+        );
     }
 
     #[test]
@@ -1125,10 +1145,12 @@ mod tests {
         let attempt = run_supervisor_attempt(plan, &mut backend);
         let boundary = boundary_attempt_from_supervisor(&attempt);
 
-        assert!(!attempt
-            .outcome
-            .report()
-            .stage_applied(SupervisorStage::Landlock));
+        assert!(
+            !attempt
+                .outcome
+                .report()
+                .stage_applied(SupervisorStage::Landlock)
+        );
         assert_eq!(
             boundary.outcome.landlock_status,
             LandlockApplicationStatus::NotApplied
@@ -1137,11 +1159,13 @@ mod tests {
             boundary.outcome.landlock_ruleset_status.as_deref(),
             Some("disabled")
         );
-        assert!(!backend
-            .syscalls
-            .calls
-            .iter()
-            .any(|call| call == "landlock_abi_probe"));
+        assert!(
+            !backend
+                .syscalls
+                .calls
+                .iter()
+                .any(|call| call == "landlock_abi_probe")
+        );
     }
 
     #[test]
@@ -1156,11 +1180,13 @@ mod tests {
             attempt.outcome.report().failed_stage,
             Some(SupervisorStage::PrivilegeCheck)
         );
-        assert!(!backend
-            .syscalls
-            .calls
-            .iter()
-            .any(|call| call == "unshare_network_namespace"));
+        assert!(
+            !backend
+                .syscalls
+                .calls
+                .iter()
+                .any(|call| call == "unshare_network_namespace")
+        );
         assert_eq!(
             boundary.outcome.privilege_strategy.as_deref(),
             Some("direct_cap_sys_admin")

@@ -708,9 +708,11 @@ fn assert_overlay_matrix_metadata(
     assert_eq!(metadata["overlay_disposition"], "discarded");
     assert_eq!(metadata["cleanup_outcome"], cleanup_outcome);
     assert_eq!(metadata["lower_consistency"], lower_consistency);
-    assert!(metadata["effective_boundary"]
-        .get("overlay_status")
-        .is_none());
+    assert!(
+        metadata["effective_boundary"]
+            .get("overlay_status")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -772,9 +774,11 @@ async fn diagnostic_overlay_routing_mode_off_records_not_requested() {
     assert_eq!(metadata["overlay_mode"], "none");
     assert_eq!(metadata["cleanup_outcome"], "not_requested");
     assert!(metadata.get("effective_boundary").is_some());
-    assert!(metadata["effective_boundary"]
-        .get("overlay_status")
-        .is_none());
+    assert!(
+        metadata["effective_boundary"]
+            .get("overlay_status")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -829,9 +833,11 @@ async fn diagnostic_overlay_routing_audit_setup_failure_records_not_applied() {
     assert_eq!(metadata["overlay_disposition"], "not_applied");
     assert_eq!(metadata["cleanup_outcome"], "cleanup_succeeded");
     assert_eq!(metadata["backend_invoked"], true);
-    assert!(metadata["effective_boundary"]
-        .get("overlay_status")
-        .is_none());
+    assert!(
+        metadata["effective_boundary"]
+            .get("overlay_status")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1289,10 +1295,11 @@ async fn unsupported_artifact_kind_denies_manifest_and_records_rejected_kind() {
     assert_eq!(metadata["rejected_kinds"][0]["path"], "pipe");
     assert_eq!(metadata["rejected_kinds"][0]["kind"], "fifo");
 
-    assert!(!ledger
-        .snapshot()
-        .iter()
-        .any(|effect| { effect.source == lancet_authority::effect::ledger::EffectSource::Verify }));
+    assert!(
+        !ledger.snapshot().iter().any(|effect| {
+            effect.source == lancet_authority::effect::ledger::EffectSource::Verify
+        })
+    );
     let mut saw_verify_failed = false;
     while let Ok(event) = events.try_recv() {
         saw_verify_failed |= event.method == "cep.verify_failed";
@@ -1374,10 +1381,11 @@ async fn artifact_overlay_commit_flow_commits_accepted_entries_after_verify() {
         false
     );
     assert_eq!(metadata["applied_entries"].as_array().unwrap().len(), 4);
-    assert!(ledger
-        .snapshot()
-        .iter()
-        .any(|effect| { effect.source == lancet_authority::effect::ledger::EffectSource::Verify }));
+    assert!(
+        ledger.snapshot().iter().any(|effect| {
+            effect.source == lancet_authority::effect::ledger::EffectSource::Verify
+        })
+    );
 }
 
 #[tokio::test]
@@ -2995,11 +3003,13 @@ fn command_observation_metadata_is_derived_for_diagnostic() {
             "observed_effects".to_string()
         ]
     );
-    assert!(!metadata["observed_effects"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|effect| effect.as_str() == Some("workspace_mutation_diff")));
+    assert!(
+        !metadata["observed_effects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|effect| effect.as_str() == Some("workspace_mutation_diff"))
+    );
 }
 
 // ── Inline shell (AST-screened sh -c) integration ───────────────────────

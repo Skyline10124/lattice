@@ -170,10 +170,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(envelope
-            .inner
-            .capabilities
-            .contains(&Capability::MutateSessionState));
+        assert!(
+            envelope
+                .inner
+                .capabilities
+                .contains(&Capability::MutateSessionState)
+        );
         assert!(envelope.inner.capabilities.contains(&Capability::FetchUrl {
             host: "example.com".to_string()
         }));
@@ -201,10 +203,12 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(envelope
-            .inner
-            .capabilities
-            .contains(&Capability::MutateSessionState));
+        assert!(
+            envelope
+                .inner
+                .capabilities
+                .contains(&Capability::MutateSessionState)
+        );
         assert!(envelope.inner.capabilities.contains(&Capability::FetchUrl {
             host: "example.com".to_string()
         }));

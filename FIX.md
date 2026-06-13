@@ -508,3 +508,39 @@ Severity: LOW — display-only, no behavioral impact.
 | `lattice-cli/src/commands/run_tests.rs` | Updated test assertions from `"412B"`/`"120B"` to `"412 chars"`/`"120 chars"` |
 
 Verification: pending `cargo check`, `cargo clippy`, `cargo test` (blocked by stale overlay directory permissions).
+
+---
+
+## Maintenance: Rust 2024 edition and dependency refresh — 2026-06-13
+
+Severity: MAINTENANCE — workspace/toolchain compatibility and dependency currency.
+
+**Problem:** The workspace still targeted Rust 2021 with Cargo resolver 2 and
+several direct dependencies were pinned to older major versions.
+
+**Fix:**
+
+- Migrated all workspace crates to Rust 2024 and Cargo resolver 3 while keeping
+  the project MSRV at Rust 1.88 (required by the exact-pinned
+  `brush-parser 0.4.0`).
+- Applied the Rust 2024 compatibility migration, including match ergonomics,
+  macro fragment specifiers, environment mutation safety, and let-chain lint
+  updates.
+- Upgraded direct dependencies and regenerated `Cargo.lock`, including
+  `reqwest 0.13.4`, `rusqlite 0.40.1`, `schemars 1.2.1`, `sha2 0.11.0`,
+  `toml 1.1.2`, `unicode-width 0.2.2`, `colored 3.1.1`, and `dirs 6.0.0`.
+- Kept `brush-parser` exact-pinned after confirming 0.4.0 remains the latest
+  stable release, and configured reqwest 0.13 explicitly for rustls without
+  default proxy behavior.
+- Preserved canonical SHA-256 IDs by replacing the removed digest `LowerHex`
+  formatting path with explicit two-digit lowercase byte encoding.
+
+**Verification:**
+
+- `cargo check --workspace --all-targets` — passed.
+- `cargo clippy --workspace --all-targets -- -D warnings` — passed.
+- `cargo test --workspace` — passed.
+- `scripts/ci-local.sh` — passed (`fmt`, `clippy`, and workspace tests).
+
+**Changed files:** workspace/crate manifests, `Cargo.lock`, Rust 2024 migration
+sites across workspace crates, and this changelog.

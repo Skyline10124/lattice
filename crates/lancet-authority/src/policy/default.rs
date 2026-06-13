@@ -18,12 +18,12 @@ use lancet_protocol::policy::{
     PolicyActionRequired, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
 };
 
-use super::capability::{match_capability, CapabilityMatch, CapabilityMatchVerdict};
+use super::BudgetLimits;
+use super::capability::{CapabilityMatch, CapabilityMatchVerdict, match_capability};
 use super::command::{CommandPolicy, EffectiveImpact};
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
 use super::resolved::PolicyResolver;
-use super::BudgetLimits;
 use lancet_protocol::envelope::ImpactKind;
 
 // ── Config-friendly source class ───────────────────────────────────────
@@ -228,10 +228,10 @@ impl PolicyConfig {
                 self.budget.max_todo_ops = v;
             }
         }
-        if let Some(effects) = &external.effects {
-            if let Some(deny) = &effects.deny {
-                self.denied_effect_kinds = deny.iter().cloned().collect();
-            }
+        if let Some(effects) = &external.effects
+            && let Some(deny) = &effects.deny
+        {
+            self.denied_effect_kinds = deny.iter().cloned().collect();
         }
         if let Some(obs) = &external.observation {
             if let Some(v) = obs.max_single_read_bytes {
@@ -380,7 +380,7 @@ fn parse_source_classes(strings: &[String]) -> Result<Vec<CapabilitySourceClass>
                 return Err(format!(
                     "unknown source class '{}'; expected 'base' or 'declared'",
                     other
-                ))
+                ));
             }
         }
     }
@@ -618,53 +618,53 @@ impl DefaultPolicyHook {
                     },
                 };
             }
-            if let Some(cmd) = &resolved.resolved_command {
-                if cmd.effective_impact == EffectiveImpact::HardDenied {
-                    return RichPolicyOutcome {
-                        decision: PolicyDecision::Denied {
-                            reason_code: PolicyReasonCode::CommandDenied,
-                            message: format!("command denied by policy: {:?}", cmd.argv),
-                            action_required: Some(PolicyActionRequired::ChangeCommand),
-                        },
-                        evidence: PolicyEvidence {
-                            capability_match: Some(cap_match),
-                            command_classification: Some(cmd.effective_impact.clone()),
-                            ..Default::default()
-                        },
-                    };
-                }
+            if let Some(cmd) = &resolved.resolved_command
+                && cmd.effective_impact == EffectiveImpact::HardDenied
+            {
+                return RichPolicyOutcome {
+                    decision: PolicyDecision::Denied {
+                        reason_code: PolicyReasonCode::CommandDenied,
+                        message: format!("command denied by policy: {:?}", cmd.argv),
+                        action_required: Some(PolicyActionRequired::ChangeCommand),
+                    },
+                    evidence: PolicyEvidence {
+                        capability_match: Some(cap_match),
+                        command_classification: Some(cmd.effective_impact.clone()),
+                        ..Default::default()
+                    },
+                };
             }
         }
 
         // Step 3: Network policy
-        if resolved.method == "fetch.web" {
-            if let Some(net) = &resolved.resolved_network {
-                // Check against network policy: allowed_hosts
-                if !self.config.network.allowed_hosts.is_empty() {
-                    let host_lower = net.host.to_ascii_lowercase();
-                    let allowed = self.config.network.allowed_hosts.iter().any(|h| {
-                        let h = h.trim().to_ascii_lowercase();
-                        if h.starts_with('.') {
-                            let suffix = h.trim_start_matches('.').to_ascii_lowercase();
-                            host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
-                        } else {
-                            host_lower == h
-                        }
-                    });
-                    if !allowed {
-                        return RichPolicyOutcome {
-                            decision: PolicyDecision::Denied {
-                                reason_code: PolicyReasonCode::NetworkDenied,
-                                message: format!("host '{}' not in allowed_hosts", net.host),
-                                action_required: Some(PolicyActionRequired::ChangeUrl),
-                            },
-                            evidence: PolicyEvidence {
-                                capability_match: Some(cap_match),
-                                network_host: Some(net.host.clone()),
-                                ..Default::default()
-                            },
-                        };
+        if resolved.method == "fetch.web"
+            && let Some(net) = &resolved.resolved_network
+        {
+            // Check against network policy: allowed_hosts
+            if !self.config.network.allowed_hosts.is_empty() {
+                let host_lower = net.host.to_ascii_lowercase();
+                let allowed = self.config.network.allowed_hosts.iter().any(|h| {
+                    let h = h.trim().to_ascii_lowercase();
+                    if h.starts_with('.') {
+                        let suffix = h.trim_start_matches('.').to_ascii_lowercase();
+                        host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
+                    } else {
+                        host_lower == h
                     }
+                });
+                if !allowed {
+                    return RichPolicyOutcome {
+                        decision: PolicyDecision::Denied {
+                            reason_code: PolicyReasonCode::NetworkDenied,
+                            message: format!("host '{}' not in allowed_hosts", net.host),
+                            action_required: Some(PolicyActionRequired::ChangeUrl),
+                        },
+                        evidence: PolicyEvidence {
+                            capability_match: Some(cap_match),
+                            network_host: Some(net.host.clone()),
+                            ..Default::default()
+                        },
+                    };
                 }
             }
         }

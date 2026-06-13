@@ -757,9 +757,10 @@ mod tests {
             let (_temp, plan) = overlay_plan(mode);
 
             assert_eq!(plan.mode, mode);
-            assert!(plan
-                .session_root
-                .ends_with(format!("{}-turn-1", mode.label())));
+            assert!(
+                plan.session_root
+                    .ends_with(format!("{}-turn-1", mode.label()))
+            );
             for path in [&plan.paths.upper, &plan.paths.work, &plan.paths.merged] {
                 assert!(!path.starts_with(&plan.paths.lower), "{}", path.display());
                 assert!(path.parent().is_some(), "{}", path.display());

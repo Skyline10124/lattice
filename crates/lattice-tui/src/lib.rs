@@ -7,4 +7,4 @@ mod app;
 mod runtime;
 
 pub use app::{AppConfig, AppEvent};
-pub use runtime::{run, TuiOptions};
+pub use runtime::{TuiOptions, run};

@@ -272,10 +272,11 @@ mod tests {
                 data.observed_effects,
                 vec![ImpactKind::WorkspaceObservation]
             );
-            assert!(data
-                .violations
-                .iter()
-                .any(|violation| violation.contains("denied by effect-kind policy")));
+            assert!(
+                data.violations
+                    .iter()
+                    .any(|violation| violation.contains("denied by effect-kind policy"))
+            );
         } else {
             panic!("expected Effect error data");
         }
@@ -488,9 +489,10 @@ mod tests {
 
         if let CepErrorData::Effect(data) = &err.data {
             assert_eq!(data.method, "observe.workspace");
-            assert!(data
-                .declared_effect
-                .contains(&ImpactKind::WorkspaceObservation));
+            assert!(
+                data.declared_effect
+                    .contains(&ImpactKind::WorkspaceObservation)
+            );
             assert!(!data.observed_effects.is_empty());
             assert!(!data.violations.is_empty());
         } else {

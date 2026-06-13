@@ -4,8 +4,8 @@
 #![cfg(feature = "test-utils")]
 
 use futures::StreamExt;
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{
     ChatRequest, ChatResponse, FunctionCall, LlmEvent, ModelTarget, TokenUsage, ToolCall,
 };
@@ -163,9 +163,11 @@ async fn default_stream_chat_skips_tool_call_delta_when_arguments_empty() {
         ]
     );
     assert_eq!(events.len(), 3);
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, LlmEvent::ToolCallDelta { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, LlmEvent::ToolCallDelta { .. }))
+    );
 }
 
 #[tokio::test]

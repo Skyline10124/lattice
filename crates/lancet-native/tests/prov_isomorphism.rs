@@ -8,9 +8,9 @@
 //! `attestation_matches_replay_statement`, which compares stored vs replay-derived
 //! in-toto statements after a live turn.
 
+use lancet_catalog::CepMethod;
 use lancet_catalog::methods::command::Run;
 use lancet_catalog::methods::workspace::{Create, Edit, ObserveWorkspace};
-use lancet_catalog::CepMethod;
 use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
 use lancet_native::provenance::{canonicalize_prov_fragment, project_rows};
 

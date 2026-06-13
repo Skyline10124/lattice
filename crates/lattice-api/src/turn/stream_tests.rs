@@ -1,12 +1,12 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
-use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::LlmClient;
+use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_session::{SessionGraphStore, TurnCommitStatus};
 
@@ -269,18 +269,20 @@ async fn stream_turn_error_after_partial_commits_error() {
         assert_eq!(assistant.content, "partial output before error");
         let entry = last_log_entry(&fixture.store, session_id);
         assert_eq!(entry.status, TurnCommitStatus::Error);
-        assert!(entry
-            .terminal_reason
-            .as_ref()
-            .unwrap()
-            .contains("connection reset"));
+        assert!(
+            entry
+                .terminal_reason
+                .as_ref()
+                .unwrap()
+                .contains("connection reset")
+        );
     }
 }
 
 #[tokio::test]
 async fn stream_turn_emits_cep_lifecycle_events() {
-    use lancet_catalog::methods::TodoWrite;
     use lancet_catalog::CepMethod;
+    use lancet_catalog::methods::TodoWrite;
 
     let tool_events = vec![
         LlmEvent::ToolCallStart {

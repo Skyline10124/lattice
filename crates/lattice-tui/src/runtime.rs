@@ -10,7 +10,7 @@ use futures::StreamExt;
 use lattice_api::{
     CreateSessionRequest, OpenSessionRequest, RunTurnRequest, SessionApi, TurnEvent,
 };
-use std::io::{stdout, Write};
+use std::io::{Write, stdout};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug)]

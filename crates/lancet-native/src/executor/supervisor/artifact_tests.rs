@@ -9,7 +9,7 @@ use crate::edit::types::HashLine;
 use tempfile::TempDir;
 
 #[cfg(unix)]
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 fn empty_baseline() -> LowerBaseline {
     LowerBaseline {
@@ -1083,13 +1083,15 @@ fn artifact_commit_delete_refuses_symlink_parent_and_preserves_outside_file() {
     .unwrap_err();
 
     assert_eq!(failure.error.code, CepErrorCode::ExecutionFailed);
-    assert!(failure
-        .report
-        .failed_entry
-        .as_ref()
-        .expect("failed entry")
-        .error
-        .contains("refusing to write through symlink parent"));
+    assert!(
+        failure
+            .report
+            .failed_entry
+            .as_ref()
+            .expect("failed entry")
+            .error
+            .contains("refusing to write through symlink parent")
+    );
     assert_eq!(
         std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
         "outside"

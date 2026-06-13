@@ -207,10 +207,10 @@ fn normalize_effective_boundary_entry(boundary: BoundaryDimension, entry: &Value
             format!("unknown effective_boundary status `{status}`"),
         );
     }
-    if status == "physically_bounded" {
-        if let Err(reason) = validate_physically_bounded_attribution(boundary, object) {
-            return unknown_effective_boundary_entry(boundary, reason);
-        }
+    if status == "physically_bounded"
+        && let Err(reason) = validate_physically_bounded_attribution(boundary, object)
+    {
+        return unknown_effective_boundary_entry(boundary, reason);
     }
     let mut normalized = object.clone();
     normalized

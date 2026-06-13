@@ -17,12 +17,12 @@ use lancet_protocol::policy::{
     EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyBudgetSnapshot, PolicyInput,
 };
 
+use super::BudgetLimits;
 use super::capability::InvocationFacts;
-use super::command::{classify_command_line, CommandPolicy, EffectiveImpact};
+use super::command::{CommandPolicy, EffectiveImpact, classify_command_line};
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
-use super::shell_ast::{resolve_command_line, CommandLine};
-use super::BudgetLimits;
+use super::shell_ast::{CommandLine, resolve_command_line};
 
 // ── Resolved types (executor-owned, no Serialize/Deserialize) ───────────
 

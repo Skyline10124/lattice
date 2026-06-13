@@ -6,15 +6,15 @@ use std::path::PathBuf;
 
 use super::fixtures::*;
 use super::support::{assert_positive, build_test_context, effect_contract_harness, rt};
+use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::NetworkPolicyConfig;
+use lancet_catalog::CepMethod;
 use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::workspace::{
     CreateParams, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileParams,
 };
 use lancet_catalog::methods::*;
-use lancet_catalog::CepMethod;
 use lancet_protocol::envelope::{Capability, ImpactKind};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 

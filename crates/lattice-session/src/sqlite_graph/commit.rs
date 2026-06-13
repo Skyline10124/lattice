@@ -4,11 +4,11 @@
 //! Commit creation, log read, and head transcript reconstruction.
 
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 
 use crate::graph::{
-    canonical_message_id, canonical_turn_commit_id, canonical_turn_seed, GraphMessage,
-    HeadTranscript, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry, TurnUsage,
+    GraphMessage, HeadTranscript, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry,
+    TurnUsage, canonical_message_id, canonical_turn_commit_id, canonical_turn_seed,
 };
 use crate::{Result, SessionError};
 

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use lancet_api::{query_audit, tail_audit, AuditRequest};
+use lancet_api::{AuditRequest, query_audit, tail_audit};
 
 #[derive(Args, Debug, Clone)]
 pub struct AuditCmd {
@@ -147,8 +147,8 @@ fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_catalog::CepMethod;
+    use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
 

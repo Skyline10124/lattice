@@ -783,8 +783,10 @@ mod tests {
 
         assert!(!fingerprint.entries.contains_key(".git/config"));
         assert!(fingerprint.entries.contains_key(".git/hooks/pre-commit"));
-        assert!(!fingerprint
-            .entries
-            .contains_key(".git/hooks/pre-commit.sample"));
+        assert!(
+            !fingerprint
+                .entries
+                .contains_key(".git/hooks/pre-commit.sample")
+        );
     }
 }

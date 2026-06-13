@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnRequest, AgentTurnStatus, CepErrorPayload, LlmClient,

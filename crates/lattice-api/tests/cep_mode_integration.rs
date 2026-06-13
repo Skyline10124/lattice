@@ -33,15 +33,15 @@ use lancet_native::enforcement::isolation::{
     CommandIsolationUnsupportedHostBehavior, HostProbeEntry, HostProbeReport,
 };
 use lancet_native::{
-    register_production_method_registry, CepAuditStore, CepTransport, MethodRegistry,
-    ServerRunConfig,
+    CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
+    register_production_method_registry,
 };
+use lancet_protocol::BoundaryDimension;
+use lancet_protocol::CepErrorCode;
 use lancet_protocol::envelope::{
     BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope,
     Impact as EnvelopeImpact, ImpactConfidence, ImpactKind, Intent, Scope,
 };
-use lancet_protocol::BoundaryDimension;
-use lancet_protocol::CepErrorCode;
 use lattice_profile::LancetSection;
 use tempfile::TempDir;
 
@@ -516,8 +516,8 @@ async fn cep_mode_off_policy_deny_still_enforced() {
 
     // Set up a proper policy hook for the workspace root.
     {
-        use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
         use lancet_authority::CepTurnContext;
+        use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
         let policy_cfg = PolicyConfig::defaults_for_project_root(canonical.clone());
         let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
         config.policy_hook = hook.clone();
