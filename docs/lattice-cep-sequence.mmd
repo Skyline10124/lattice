@@ -1,0 +1,76 @@
+sequenceDiagram
+    participant H as Lattice Host<br/>(lower · middleware)
+    participant C as Sandbox Client<br/>(upper · agent)
+    participant N as NodeFile Graph<br/>(.uninode/ repo)
+    participant FS as Filesystem<br/>(project repo)
+
+    %% ── Phase 1: Setup ──
+    rect rgba(100, 130, 220, 0.08)
+    Note right of H: Setup — restore or cold boot
+    H ->> N: open .uninode/ repo
+    N ->> N: check HEAD alignment<br/>(project HEAD ↔ .uninode/ tracked commit)
+    alt graph stale or cold start
+        N ->> FS: scan project files
+        N ->> N: rebuild / incremental update
+        N ->> N: git commit (.uninode/)
+    end
+    N -->> H: lower graph ready
+
+    alt has good snapshot
+        H ->> C: restore from last good snapshot
+        Note over C: upper = snapshot(lower), near-zero cost
+    else cold start
+        H ->> FS: snapshot lower baseline
+        H ->> C: boot(base_image, env, egress_policy)
+        Note over C: upper = fresh fork(lower)
+    end
+    end
+
+    %% ── Phase 2: Execution ──
+    rect rgba(100, 200, 120, 0.08)
+    Note right of C: Execution — agent operates on NodeFiles
+    loop agent task loop
+        C ->> N: read NodeFile(path)
+        N ->> FS: materialize content
+        FS -->> N: raw content
+        N -->> C: NodeFile content
+
+        C ->> C: reason / plan
+
+        C ->> N: mutate NodeFile(path, new_content)
+        N ->> FS: persist to project file
+        activate N
+        N ->> N: create OperationNode
+        N ->> N: propagate effect ripples<br/>(file → symbol → import → test → build → review)
+        deactivate N
+
+        opt side-effect commands
+            C ->> N: exec(cmd)
+            N ->> FS: execute
+            FS -->> N: observe created / deleted / modified
+            N ->> N: batch OperationNodes + ripples
+        end
+    end
+    C -->> H: execution done
+    end
+
+    %% ── Phase 3: Promote ──
+    rect rgba(220, 110, 100, 0.08)
+    Note right of H: Promote — CEP validate + merge
+    H ->> N: collect ChangeSet
+    N -->> H: ChangeSet {ops, affected, ripples}
+
+    H ->> H: CEP boundary validate<br/>(context · authority · audit · lifecycle)
+
+    alt PASS
+        H ->> FS: git commit (project repo → lower)
+        H ->> N: git commit (.uninode/ → advance graph)
+        H ->> C: snapshot as new baseline
+        Note over C,N: project HEAD / .uninode/ HEAD / sandbox snapshot<br/>三者同步推进
+        H -->> C: ack(commit_sha)
+    else REJECT
+        H ->> C: discard → restore last good snapshot
+        H ->> N: git reset (.uninode/ → discard upper ops)
+        H -->> C: reject(violations[])
+    end
+    end
