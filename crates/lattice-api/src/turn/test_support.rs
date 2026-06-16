@@ -129,6 +129,7 @@ pub(super) fn make_loaded_profile_with_tools(
             },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
+            workspace: None,
         },
         system_prompt: system_prompt.to_string(),
     }

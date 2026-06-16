@@ -24,6 +24,93 @@ pub struct AgentProfile {
     pub llm: LlmSection,
     #[serde(default)]
     pub lancet: LancetSection,
+    /// Upper workspace execution environment configuration.
+    ///
+    /// Absent `[workspace]` means no Upper is requested; the field defaults to `None`.
+    /// Older profiles without `[workspace]` still parse (EGRESS-01 / CRED-01 profile layer).
+    #[serde(default)]
+    pub workspace: Option<WorkspaceSection>,
+}
+
+// ── Workspace schema types ────────────────────────────────────────────────────
+
+/// Egress network policy for the Upper VM (EGRESS-01 profile layer).
+///
+/// Controls which outbound traffic the Upper VM permits. Defaults to `open` when the
+/// `egress` field is absent from `[workspace]`.
+///
+/// - `open`      — full public internet access (SDK default)
+/// - `blocked`   — deny all outbound traffic
+/// - `allowlist` — deny all except `allowed_egress_targets` (domain names)
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EgressPolicyConfig {
+    /// Full public internet access (SDK default). Implicit when `egress` is absent.
+    #[default]
+    Open,
+    /// Deny all outbound traffic.
+    Blocked,
+    /// Deny all traffic except explicitly listed domains in `allowed_egress_targets`.
+    Allowlist,
+}
+
+/// Reference to a credential by its environment variable name (CRED-01 profile layer).
+///
+/// **Security invariant:** this type stores only the *name* of the environment variable.
+/// The resolved secret value is NEVER stored here — it is injected at turn time by the
+/// Upper provisioner (`lattice-workspace`). Snapshots and profile files must never
+/// contain actual secrets.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialRef {
+    /// Name of the environment variable that holds the secret at turn time
+    /// (e.g. `"OPENAI_API_KEY"`). The resolved value is never stored here.
+    pub env_var_name: String,
+}
+
+/// `[workspace]` — Upper VM execution environment configuration.
+///
+/// Controls egress policy, credential references, resource limits, and the OCI image
+/// (or pre-warmed template name) for the Upper workspace provisioned per turn.
+///
+/// All fields are `Option<T>` with `#[serde(default)]` so missing fields fall back to
+/// caller defaults. Older profiles without `[workspace]` still parse and produce
+/// `AgentProfile.workspace = None`.
+///
+/// **Security invariant (T-33-04):** credentials are turn-time injection only.
+/// This section stores only references (`CredentialRef`); resolved values are never
+/// present in profile or session snapshot data.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSection {
+    /// Egress policy for the Upper VM. Defaults to `open` when absent.
+    #[serde(default)]
+    pub egress: Option<EgressPolicyConfig>,
+    /// Credential references injected into the Upper at turn time.
+    ///
+    /// Each entry names an environment variable; the resolved value is fetched at
+    /// provisioning time, never stored in the profile.
+    #[serde(default)]
+    pub credentials: Vec<CredentialRef>,
+    /// OCI image reference or pre-warmed template name for the Upper VM.
+    ///
+    /// Use a fully-qualified OCI ref (e.g. `"docker.io/library/python:3.12-slim"`)
+    /// or a template name stored under `~/.microsandbox/snapshots/`. When absent,
+    /// the provisioner applies its own default.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Number of virtual CPUs to allocate to the Upper VM. Defaults to provisioner default.
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    /// Memory in MiB to allocate to the Upper VM. Defaults to provisioner default.
+    #[serde(default)]
+    pub memory_mb: Option<u32>,
+    /// Domain names permitted when `egress = "allowlist"`.
+    ///
+    /// Entries are domain name strings (e.g. `"api.openai.com"`). Ignored when
+    /// `egress` is `open` or `blocked`.
+    #[serde(default)]
+    pub allowed_egress_targets: Vec<String>,
 }
 
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
@@ -1481,6 +1568,147 @@ max_delay_ms = 2
         assert_eq!(profile.llm.retry.max_retries, 0);
         assert_eq!(profile.llm.retry.initial_delay_ms, 1);
         assert_eq!(profile.llm.retry.max_delay_ms, 2);
+    }
+
+    // ── WorkspaceSection / EgressPolicyConfig / CredentialRef ─────────────────
+
+    #[test]
+    fn workspace_section_missing_parses() {
+        // Older profiles without [workspace] still parse; workspace field is None.
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(
+            profile.workspace.is_none(),
+            "workspace must be None when [workspace] is absent"
+        );
+    }
+
+    #[test]
+    fn workspace_egress_blocked_parses() {
+        // [workspace] egress = "blocked" deserializes to EgressPolicyConfig::Blocked.
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "blocked"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.egress, Some(EgressPolicyConfig::Blocked));
+        assert!(ws.credentials.is_empty());
+        assert!(ws.allowed_egress_targets.is_empty());
+    }
+
+    #[test]
+    fn workspace_egress_allowlist_with_targets() {
+        // egress = "allowlist" + allowed_egress_targets list parses correctly.
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "allowlist"
+allowed_egress_targets = ["api.openai.com", "pypi.org"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
+        assert_eq!(
+            ws.allowed_egress_targets,
+            vec!["api.openai.com", "pypi.org"]
+        );
+    }
+
+    #[test]
+    fn workspace_credentials_name_only() {
+        // credentials = [{ env_var_name = "OPENAI_API_KEY" }] parses;
+        // CredentialRef has no value field — compile-time structural guarantee.
+        let toml = format!(
+            r#"{prefix}
+
+[[workspace.credentials]]
+env_var_name = "OPENAI_API_KEY"
+
+[[workspace.credentials]]
+env_var_name = "ANTHROPIC_API_KEY"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.credentials.len(), 2);
+        assert_eq!(ws.credentials[0].env_var_name, "OPENAI_API_KEY");
+        assert_eq!(ws.credentials[1].env_var_name, "ANTHROPIC_API_KEY");
+
+        // Structural check: CredentialRef has only env_var_name; no value field exists.
+        // Serializing must not produce any secret value in output.
+        let serialized = toml::to_string(&profile).unwrap();
+        let fake_secret = "sk-super-secret-value";
+        assert!(
+            !serialized.contains(fake_secret),
+            "CredentialRef serialized form must not contain secret values; got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn workspace_unknown_field_rejected() {
+        // Extra key in [workspace] fails deny_unknown_fields.
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "open"
+unexpected_key = "bad"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("unexpected_key") || err.to_string().contains("unknown field"),
+            "unknown workspace field must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_roundtrip() {
+        // Serialize AgentProfile with workspace section and deserialize back equals.
+        let toml_input = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "allowlist"
+image = "docker.io/library/python:3.12-slim"
+cpus = 2
+memory_mb = 1024
+allowed_egress_targets = ["pypi.org", "files.pythonhosted.org"]
+
+[[workspace.credentials]]
+env_var_name = "PYPI_TOKEN"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+
+        let profile: AgentProfile = parse(&toml_input).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.egress, Some(EgressPolicyConfig::Allowlist));
+        assert_eq!(
+            ws.image.as_deref(),
+            Some("docker.io/library/python:3.12-slim")
+        );
+        assert_eq!(ws.cpus, Some(2));
+        assert_eq!(ws.memory_mb, Some(1024));
+        assert_eq!(
+            ws.allowed_egress_targets,
+            vec!["pypi.org", "files.pythonhosted.org"]
+        );
+        assert_eq!(ws.credentials[0].env_var_name, "PYPI_TOKEN");
+
+        // Roundtrip: serialize and parse back; result must equal original.
+        let serialized = toml::to_string(&profile).unwrap();
+        let profile2: AgentProfile = toml::from_str(&serialized).unwrap();
+        assert_eq!(profile, profile2, "workspace roundtrip must be lossless");
     }
 
     /// Guard: no legacy symbols in production source.

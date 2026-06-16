@@ -20,8 +20,9 @@ pub use discovery::{DiscoveryPaths, ProfileSource, resolve_agent_profile};
 pub use error::ProfileError;
 pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
-    AgentProfile, AgentSection, LancetCommandIsolationSection, LancetCommandSection,
-    LancetIsolationMode, LancetIsolationSection, LancetLandlockBehavior, LancetNetworkSection,
-    LancetObservationSection, LancetPolicySection, LancetProjectRootSection, LancetSection,
-    LancetUnsupportedHostBehavior, LlmRetrySection, LlmSection, PromptSection, ToolsSection,
+    AgentProfile, AgentSection, CredentialRef, EgressPolicyConfig, LancetCommandIsolationSection,
+    LancetCommandSection, LancetIsolationMode, LancetIsolationSection, LancetLandlockBehavior,
+    LancetNetworkSection, LancetObservationSection, LancetPolicySection, LancetProjectRootSection,
+    LancetSection, LancetUnsupportedHostBehavior, LlmRetrySection, LlmSection, PromptSection,
+    ToolsSection, WorkspaceSection,
 };

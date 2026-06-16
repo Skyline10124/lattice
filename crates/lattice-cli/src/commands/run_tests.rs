@@ -64,6 +64,7 @@ fn loaded_profile(model: &str) -> lattice_profile::LoadedAgentProfile {
             tools: lattice_profile::ToolsSection { enabled: vec![] },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
+            workspace: None,
         },
         system_prompt: String::new(),
     }
@@ -268,6 +269,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 },
                 llm: lattice_profile::LlmSection::default(),
                 lancet: lattice_profile::LancetSection::default(),
+                workspace: None,
             },
             system_prompt: String::new(),
         }),

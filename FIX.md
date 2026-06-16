@@ -4,6 +4,72 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## M-33-05: git-ready warm template replaces per-Upper apt-get install git — 2026-06-14
+
+Severity: MEDIUM (performance + correctness; gap-closure Plan 33-06).
+
+**Problem:** `MicrosandboxWorkspace::deliver_baseline` ran `apt-get install git`
+inside every Upper because the base image (`python:3.12-slim`) lacks git. Two
+consequences blocked WS-04 closure: (1) every Upper boot paid the apt-get cost,
+making the production contract suite `test_microsandbox_contract_suite` time out
+at >595s; (2) apt-get needs network, so under `EgressPolicy::Blocked` (EGRESS-01)
+git could not be installed and the git-init sequence was silently skipped,
+leaving Blocked-egress Uppers without a `/workspace` `.git` root.
+
+**Fix:**
+
+- Added `MicrosandboxWorkspace::build_git_ready_template(&self, base_image, name)`:
+  bakes git into a reusable per-project snapshot once (create → `apt-get` via the
+  fixed `APT_GET_GIT` literal through an `exec_with` argv slice → verify
+  `git --version` → `stop()` →
+  `Snapshot::builder(name).destination(SnapshotDestination::Name(name)).create()`).
+  T-33-04: never calls `.env()` or `inject_file_credentials`, so no resolved
+  secret is baked into the template. T-33-05: the apt-get command is a
+  compile-time constant, never `sandbox.shell()`.
+- Hardened `deliver_baseline`: `ImageOrTemplate::Template` + missing git now
+  returns an error (`git-ready template is missing git; rebuild with
+  build_git_ready_template`) instead of silently producing a git-less Upper.
+  `ImageOrTemplate::Image` + Open/Allowlist still installs git once via apt-get
+  (then errors if absent); `ImageOrTemplate::Image` + Blocked delivers files only
+  (exec-only Upper). Removed the old unconditional swallow-apt-get-failure skip.
+- Added `WarmTemplate::git_ready_snapshot_name_for_project` naming helper.
+- Refactored the contract suite into `run_suite_with<W, F>(ws, make_spec)` +
+  `minimal_upper_spec_with(...)`; `run_suite` stays a wrapper so the deterministic
+  lane is unchanged. Rewrote `test_microsandbox_contract_suite` to build a
+  git-ready template and run the suite from `ImageOrTemplate::Template` under
+  `EgressPolicy::Blocked`; added `test_git_ready_template_has_git_under_blocked_egress`.
+
+Scope note (D-33-02, Phase 34): automatic per-project template selection on the
+`create_upper` `Image` path is still not wired — callers must pass
+`ImageOrTemplate::Template` explicitly. WS-04 is satisfied for the explicit
+git-ready-template path; auto-selection remains deferred.
+
+Verification: `cargo check -p lattice-workspace` exits 0; `cargo test -p
+lattice-workspace` (deterministic lane, no KVM, 23 tests) exits 0; `cargo clippy
+-p lattice-workspace --features=integration_tests --all-targets -- -D warnings`
+compiles + lints the KVM integration tests clean. KVM execution command (run on a
+KVM host): `cargo test -p lattice-workspace --features=integration_tests
+test_microsandbox_contract_suite test_git_ready_template_has_git_under_blocked_egress`.
+
+Live KVM verification (2026-06-14, libkrun host) — both integration tests PASS:
+`test_microsandbox_contract_suite` 222s (down from the prior >595s timeout; one
+template build + 6 reuses, zero per-Upper apt-get). `test_git_ready_template_has_git_under_blocked_egress`
+188s; `git rev-parse --show-toplevel` exits 0 under `EgressPolicy::Blocked` with
+git sourced from the template (apt-get never runs). Verification found and fixed
+one test-wiring bug (`6e96505`): the standalone test used `restore_upper` (a raw
+CoW restore that delivers no baseline → leaves the Upper without `/workspace`,
+making `exec_with(...).cwd("/workspace")` spawn ENOENT); changed to
+`create_upper(ImageOrTemplate::Template)` (from_snapshot + deliver_baseline), the
+correct per-turn path for a git-ready base template, matching the contract suite.
+
+Files: `crates/lattice-workspace/src/microsandbox.rs`,
+`crates/lattice-workspace/src/template.rs`,
+`crates/lattice-workspace/src/testing/contract_tests.rs`,
+`crates/lattice-workspace/tests/integration_microsandbox.rs`, `FINDINGS.md`,
+`.planning/phases/33-workspace-adapter-production-hardening/33-VERIFICATION.md`.
+
+---
+
 ## LANCET preflight/evidence audit metadata — 2026-06-07
 
 Verified: `cargo test -p lancet-native guard_l1` ✓, `cargo test -p lancet-native command` ✓, `cargo test -p lancet-native mutation` ✓, `cargo test -p lancet-native audit_` ✓, `cargo test -p lancet-audit preflight_and_policy_metadata_project_to_activity_attributes` ✓, `cargo test -p lancet-authority effect` ✓, `scripts/lancet-boundary-check.sh` ✓, `scripts/release-gate-v1.4.sh` ✓ (`release-gate-v1.4.sh PASSED`).

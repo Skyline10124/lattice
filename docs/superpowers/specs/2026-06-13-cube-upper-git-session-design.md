@@ -1,5 +1,20 @@
 # Cube Upper Workspace and Git Session Backend Design
 
+> **⚠️ Superseded in part (2026-06-14): the execution adapter changed.**
+> This document's concrete execution backend — **CubeSandbox** (`CubeWorkspace`,
+> CubeCoW, CubeVS, the E2B-compatible service, `lattice doctor` Cube detection) —
+> was **not** adopted. The production Upper adapter is **microsandbox (libkrun)**
+> via the `microsandbox` Rust SDK, with an in-process **deterministic** test
+> adapter for CI; the `CubeWorkspace` adapter has been **removed from the
+> codebase** (Phase 33 code-review cleanup). The **architecture** described below
+> still holds — the Upper/Lower split, baseline-commit Upper provisioning, Git
+> promotion to a clean Lower, Profile-configured egress, credential-by-reference,
+> and the Git session backend — so read every "Cube\*" reference as "the Upper
+> execution adapter" (now microsandbox). Notable deltas: libkrun snapshots are
+> **disk-only** (no live-memory/CubeCoW resume), and egress is enforced via the
+> SDK's `NetworkPolicy`, not CubeVS/eBPF. Current state: `.planning/ROADMAP.md`
+> (Phase 33) and the `lattice-workspace` crate.
+
 Date: 2026-06-13
 
 Status: Accepted in design discussion; revised 2026-06-13 after written-spec
