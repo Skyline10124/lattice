@@ -74,7 +74,10 @@ NodeKind 不是固定枚举，是 **bundle 注册表**。每个 bundle 注册一
 | **File** | 内容/状态（任意类型：代码、文档、图片、配置、网页缓存） | Petri net place |
 | **Operation** | 变换/动作（agent mutate、bash exec、web fetch） | Petri net transition |
 
-File + Operation 构成完备的最小状态空间（Petri net place + transition）。
+File + Operation 构成完备的最小状态空间（Petri net place + transition）。这套
+state/transition 二分不是新发明：对应 **W3C PROV** 的 Entity / Activity（边
+Read/Create/Modify 对应 PROV 的 used / wasGeneratedBy），也对应 Petri net 的
+place / transition。可直接拿 PROV 当理论锚点。详见 [prior-art 调研](./uninode-prior-art.md)。
 
 Web 资源不需要独立 kind：fetch 动作 = `Operation { op_type: Fetch }`，
 抓下来的内容 = `File { mime: "text/html", origin_url: "..." }`。
@@ -196,6 +199,11 @@ Operation { op_type: Exec, command: "cargo build" }
 
 四种 EdgeKind 全部通过 fanotify 实时事件流捕获。
 fanotify daemon 运行在 sandbox 内，事件流式回传到 host，host 实时构建 Operation 节点和边。
+
+> 用 OS 级文件事件自动发现依赖是成熟技术，不是本设计独创：forward build system
+> （rattle + fsatrace, OOPSLA'20）、eBPF build provenance、Bazel sandbox 都这么做。
+> 新组合在于把这条事件流**喂进上下文编译 + CEP 审计**，而非用于构建增量。底层做法
+> 应直接借现成经验（伪依赖判定、virtiofs 上的可靠性）。详见 [prior-art 调研](./uninode-prior-art.md)。
 
 ```
 Sandbox                              Host
@@ -370,12 +378,12 @@ host 视图双向同步：edit 主动下推、exec 改动经 fanotify 上送。
 
 ### CEP 四边界
 
-| 边界 | 校验问题 |
-|------|---------|
-| context | 改动是否在声明范围内 |
-| authority | agent 是否有权做这些操作 |
-| audit | 一切是否可追溯（有果必有因） |
-| lifecycle | 状态转换是否合法 |
+| 边界 | 校验问题 | prior-art 支撑 |
+|------|---------|---------------|
+| context | 改动是否在声明范围内 | **真机制**——information flow control（Denning 1976） |
+| authority | agent 是否有权做这些操作 | **真机制**——capability security（CHERI 等） |
+| audit | 一切是否可追溯（有果必有因） | 类比——借 ECC 直觉，非同款 |
+| lifecycle | 状态转换是否合法 | 类比——借缓存一致性直觉，非同款 |
 
 ### REJECT 分类
 
