@@ -6,6 +6,8 @@
 //! Proves `run_turn` is equivalent to collecting a `stream_turn` event stream
 //! via [`collect_turn_result_from_events`], with durable session-store anchors.
 
+mod support;
+
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -95,6 +97,7 @@ fn setup_workspace(enabled_tools: &[&str]) -> Workspace {
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+    support::init_git_repo(&root);
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -107,8 +110,9 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = {enabled:?}
-"#
+enabled = {enabled:?}{workspace}
+"#,
+        workspace = support::workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 
@@ -145,15 +149,25 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    RunTurnRequest {
-        input: input.to_string(),
-        session_id: session_id.to_string(),
-        loaded_profile: Some(ws.loaded.clone()),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        test_persist_audit: None,
-    }
+    support::attach_upper_fixture(
+        RunTurnRequest {
+            input: input.to_string(),
+            session_id: session_id.to_string(),
+            loaded_profile: Some(ws.loaded.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm),
+            test_project_root: Some(ws.root.to_string_lossy().to_string()),
+            test_persist_audit: None,
+            workspace_override: None,
+        },
+        &ws.loaded
+            .profile
+            .tools
+            .enabled
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn llm_with_events(llm_events: Vec<LlmEvent>) -> Arc<dyn LlmClient> {

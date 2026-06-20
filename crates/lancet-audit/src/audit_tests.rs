@@ -832,3 +832,199 @@ async fn cep_audit_await_pending_waits_for_finalization() {
     finalize.await.unwrap();
     assert_eq!(store.pending.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn rejection_stage_serializes_stable_snake_case_labels() {
+    let stages = [
+        RejectionStage::SchemaValidation,
+        RejectionStage::PolicyGate,
+        RejectionStage::LegacyEnvelopeGate,
+        RejectionStage::AdapterPreflight,
+        RejectionStage::BackendExecution,
+        RejectionStage::VerificationFailure,
+        RejectionStage::AuthorityModeRejection,
+    ];
+    for stage in stages {
+        let label = serde_json::to_string(&stage).unwrap();
+        let parsed: RejectionStage = serde_json::from_str(&label).unwrap();
+        assert_eq!(parsed, stage);
+        assert_eq!(label.trim_matches('"'), stage.as_str());
+    }
+}
+
+#[test]
+fn rejection_stage_filters_rows_by_metadata_json() {
+    let store = CepAuditStore::in_memory().unwrap();
+    let ctx = test_context();
+
+    let policy_start = store
+        .start_call(
+            &ctx,
+            1,
+            ObserveWorkspace::NAME,
+            &CallAuditMetadata::native_policy_enforced(Some("started")),
+        )
+        .unwrap();
+    store
+        .finalize_call(
+            policy_start,
+            AuditOutcome::Error {
+                code: "PolicyDenied".into(),
+                summary: "denied".into(),
+            },
+            Some("native_handler_denied"),
+            Some(r#"{"rejection_stage":"policy_gate","denial_source":"cep_policy"}"#),
+        )
+        .unwrap();
+
+    let legacy_start = store
+        .start_call(
+            &ctx,
+            2,
+            Create::NAME,
+            &CallAuditMetadata::native_policy_enforced(Some("started")),
+        )
+        .unwrap();
+    store
+        .finalize_call(
+            legacy_start,
+            AuditOutcome::Error {
+                code: "EnvelopeDenied".into(),
+                summary: "legacy".into(),
+            },
+            Some("native_handler_denied"),
+            Some(r#"{"rejection_stage":"legacy_envelope_gate","denial_source":"cep_envelope"}"#),
+        )
+        .unwrap();
+
+    let policy_rows = store
+        .query_rows(&AuditQueryFilters {
+            rejection_stage: Some(RejectionStage::PolicyGate),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(policy_rows.len(), 1);
+    assert_eq!(policy_rows[0].method, ObserveWorkspace::NAME);
+
+    let legacy_rows = store
+        .query_rows(&AuditQueryFilters {
+            rejection_stage: Some(RejectionStage::LegacyEnvelopeGate),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(legacy_rows.len(), 1);
+    assert_eq!(legacy_rows[0].method, Create::NAME);
+}
+
+fn write_legacy_audit_fixture(path: &std::path::Path) {
+    let legacy = CepAuditStore::open(path).expect("legacy fixture");
+    let ctx = CepAuditContext {
+        turn_id: "legacy-turn".into(),
+        session_id: "legacy-session".into(),
+        model_id: "legacy-model".into(),
+        runtime_version: "legacy-runtime".into(),
+    };
+    let start = legacy
+        .start_call(
+            &ctx,
+            42,
+            ObserveWorkspace::NAME,
+            &CallAuditMetadata::native_policy_enforced(Some("started")),
+        )
+        .unwrap();
+    legacy
+        .finalize_call(
+            start,
+            AuditOutcome::Success {
+                summary: "legacy ok".into(),
+            },
+            Some("native_handler"),
+            Some(r#"{"envelope_id":"env-legacy"}"#),
+        )
+        .unwrap();
+    legacy
+        .insert_attestation(&AttestationRecord {
+            turn_id: "legacy-turn".into(),
+            session_id: "legacy-session".into(),
+            statement_json: r#"{"_type":"https://in-toto.io/Statement/v1"}"#.into(),
+            predicate_type: "https://lattice.dev/attestations/cep-turn/v1".into(),
+            generated_at: "1".into(),
+            source_audit_range_or_hash: "1-1".into(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn import_legacy_read_only_if_empty_copies_both_tables() {
+    let root = unique_test_dir("import-legacy");
+    let legacy_path = root.join("legacy.db");
+    let dest_path = root.join("dest.db");
+    write_legacy_audit_fixture(&legacy_path);
+
+    let source_meta_before = std::fs::metadata(&legacy_path).unwrap();
+    let source_bytes_before = std::fs::read(&legacy_path).unwrap();
+
+    let dest = CepAuditStore::open(&dest_path).unwrap();
+    dest.import_legacy_read_only_if_empty(&legacy_path).unwrap();
+
+    assert_eq!(dest.row_count().unwrap(), 1);
+    let row = dest.row_by_audit_id(1).unwrap();
+    assert_eq!(row.turn_id, "legacy-turn");
+    assert_eq!(
+        dest.attestation_for_turn("legacy-turn")
+            .unwrap()
+            .expect("attestation")
+            .session_id,
+        "legacy-session"
+    );
+
+    let source_meta_after = std::fs::metadata(&legacy_path).unwrap();
+    let source_bytes_after = std::fs::read(&legacy_path).unwrap();
+    assert_eq!(source_bytes_before, source_bytes_after);
+    assert_eq!(source_meta_before.len(), source_meta_after.len());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(source_meta_before.mtime(), source_meta_after.mtime());
+    }
+
+    dest.import_legacy_read_only_if_empty(&legacy_path).unwrap();
+    assert_eq!(dest.row_count().unwrap(), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn import_legacy_read_only_if_empty_is_noop_when_destination_has_rows() {
+    let root = unique_test_dir("import-noop");
+    let legacy_path = root.join("legacy.db");
+    let dest_path = root.join("dest.db");
+    write_legacy_audit_fixture(&legacy_path);
+
+    let dest = CepAuditStore::open(&dest_path).unwrap();
+    let start = dest
+        .start_call(
+            &test_context(),
+            1,
+            TodoWriteMethod::NAME,
+            &CallAuditMetadata::native_policy_enforced(Some("started")),
+        )
+        .unwrap();
+    dest.finalize_call(
+        start,
+        AuditOutcome::Success {
+            summary: "live".into(),
+        },
+        None,
+        None,
+    )
+    .unwrap();
+
+    dest.import_legacy_read_only_if_empty(&legacy_path).unwrap();
+    assert_eq!(dest.row_count().unwrap(), 1);
+    let row = dest.row_by_audit_id(1).unwrap();
+    assert_eq!(row.turn_id, "turn-1");
+    assert!(dest.attestation_for_turn("legacy-turn").unwrap().is_none());
+
+    let _ = std::fs::remove_dir_all(&root);
+}

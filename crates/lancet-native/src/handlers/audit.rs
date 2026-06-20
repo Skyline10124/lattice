@@ -263,6 +263,7 @@ fn audit_query_filters_from_params(
         envelope_id: params.envelope_id.clone(),
         started_after: None,
         started_before: None,
+        rejection_stage: None,
         exclude_method_prefix: None,
         limit: None,
     }

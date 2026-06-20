@@ -13,7 +13,7 @@
 //! `observed ⊆ static EffectDecl`.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use lancet_protocol::envelope::{EffectKindSet, ImpactKind};
 
@@ -318,32 +318,29 @@ impl AuthorizedEffectRegion {
 
         // Scope must be within the authorized region for this kind
         match (&observed.kind, &observed.scope) {
-            (ImpactKind::WorkspaceObservation, ObservedScope::Path(path)) => {
-                // Check read_paths (ReadPath capability)
-                self.read_paths.iter().any(|rp| path.starts_with(rp))
-            }
+            (ImpactKind::WorkspaceObservation, ObservedScope::Path(path)) => self
+                .read_paths
+                .iter()
+                .any(|rp| relative_path_within_prefix(path, rp)),
             (ImpactKind::WorkspaceObservation, ObservedScope::Root(root)) => {
-                // Path-component-aware check (not string prefix — "/project-evil" must NOT match "/project")
-                let root_path = std::path::Path::new(root);
+                let root_path = Path::new(root);
                 self.observation_roots
                     .iter()
-                    .any(|r| root_path.starts_with(r))
+                    .any(|r| relative_observation_root_within(root_path, r))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Path(path)) => {
-                // Exact-file WritePath grants authorize only the exact path. Directory-glob
-                // WritePath grants authorize descendants under the normalized prefix.
                 self.write_paths.iter().any(|wp| path == wp)
                     || self
                         .write_path_prefixes
                         .iter()
-                        .any(|wp| path.starts_with(wp))
+                        .any(|wp| relative_path_within_prefix(path, wp))
             }
             (ImpactKind::WorkspaceMutation, ObservedScope::Lines { path, .. }) => {
                 self.write_paths.iter().any(|wp| path == wp)
                     || self
                         .write_path_prefixes
                         .iter()
-                        .any(|wp| path.starts_with(wp))
+                        .any(|wp| relative_path_within_prefix(path, wp))
             }
             (ImpactKind::CommandExecution, ObservedScope::Root(_)) => {
                 // Command execution authorized at the project root level
@@ -363,6 +360,43 @@ impl AuthorizedEffectRegion {
             _ => false,
         }
     }
+}
+
+pub(crate) fn is_relative_workspace_root(path: &Path) -> bool {
+    path == Path::new(".")
+}
+
+fn relative_path_has_parent_traversal(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
+pub(crate) fn relative_path_within_prefix(observed: &Path, prefix: &Path) -> bool {
+    if is_relative_workspace_root(prefix) {
+        return observed.is_relative() && !relative_path_has_parent_traversal(observed);
+    }
+    if observed.is_relative() && prefix.is_relative() {
+        return observed == prefix || observed.starts_with(prefix);
+    }
+    observed.starts_with(prefix)
+}
+
+fn relative_observation_root_within(observed: &Path, authorized_root: &Path) -> bool {
+    if observed.is_absolute() && authorized_root.is_absolute() {
+        return observed.starts_with(authorized_root);
+    }
+    if is_relative_workspace_root(authorized_root) {
+        return observed.is_relative()
+            && !observed.components().any(|c| {
+                matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            });
+    }
+    if observed.is_relative() && authorized_root.is_relative() {
+        return observed.starts_with(authorized_root);
+    }
+    false
 }
 
 // Cross-type conversion (review concern 10) is in lancet-protocol:

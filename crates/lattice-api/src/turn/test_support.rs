@@ -8,10 +8,64 @@ use std::sync::{Arc, Mutex};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
+use lattice_profile::WorkspaceSection;
 use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_workspace::testing::DeterministicWorkspace;
 
 use super::types::RunTurnRequest;
+use super::upper::upper_backed_tools_enabled;
 use crate::session::SessionApi;
+
+pub(super) fn make_test_run_turn_request(
+    llm: Arc<dyn LlmClient>,
+    in_memory_audit: bool,
+    workspace_override: Option<Arc<dyn lattice_workspace::Workspace>>,
+    enabled_tools: &[String],
+) -> RunTurnRequest {
+    RunTurnRequest {
+        input: "test".to_string(),
+        session_id: TEST_SESSION_ID.to_string(),
+        loaded_profile: Some(make_loaded_profile_with_tools(
+            "sonnet",
+            "System from profile.",
+            &enabled_tools.iter().cloned().collect::<Vec<_>>(),
+        )),
+        cancel_flag: None,
+        test_llm: Some(llm),
+        test_project_root: None,
+        test_persist_audit: if in_memory_audit { None } else { Some(false) },
+        workspace_override,
+    }
+}
+
+pub(super) async fn build_test_production_deps(
+    project_root: &str,
+    enabled_tools: &[String],
+    llm: Arc<dyn LlmClient>,
+    in_memory_audit: bool,
+    lancet: Option<&lattice_profile::LancetSection>,
+    workspace_override: Option<Arc<dyn lattice_workspace::Workspace>>,
+) -> super::cep::ProductionTurnDeps {
+    let request = make_test_run_turn_request(
+        llm.clone(),
+        in_memory_audit,
+        workspace_override,
+        enabled_tools,
+    );
+    let loaded = request.loaded_profile.as_ref().unwrap();
+    super::cep::build_production_turn_deps(
+        &request,
+        project_root,
+        enabled_tools,
+        llm,
+        lancet,
+        "test-model",
+        "0.0.0-test",
+        loaded,
+    )
+    .await
+    .expect("production deps")
+}
 
 pub(super) const TEST_SESSION_ID: &str = "test-session";
 
@@ -46,6 +100,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let root = dir.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+    init_test_git_repo(&root);
 
     let sessions_path = root.join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
@@ -83,6 +138,7 @@ pub(super) fn make_request(input: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     }
 }
 
@@ -95,6 +151,7 @@ pub(super) fn make_request_with_session(input: &str, session_id: &str) -> RunTur
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     }
 }
 
@@ -110,6 +167,14 @@ pub(super) fn make_loaded_profile_with_tools(
     system_prompt: &str,
     enabled_tools: &[String],
 ) -> lattice_profile::LoadedAgentProfile {
+    let workspace = upper_backed_tools_enabled(enabled_tools).then(|| WorkspaceSection {
+        egress: None,
+        credentials: vec![],
+        image: Some("test-template".to_string()),
+        cpus: None,
+        memory_mb: None,
+        allowed_egress_targets: vec![],
+    });
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),
         package_dir: std::env::current_dir().unwrap_or_else(|_| "/tmp".into()),
@@ -129,10 +194,42 @@ pub(super) fn make_loaded_profile_with_tools(
             },
             llm: lattice_profile::LlmSection::default(),
             lancet: lattice_profile::LancetSection::default(),
-            workspace: None,
+            workspace,
         },
         system_prompt: system_prompt.to_string(),
     }
+}
+
+fn init_test_git_repo(root: &std::path::Path) {
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .expect("git init for test fixture");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@lattice.local"])
+        .current_dir(root)
+        .status()
+        .expect("git user.email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "lattice-test"])
+        .current_dir(root)
+        .status()
+        .expect("git user.name");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(root)
+        .status()
+        .expect("git commit");
+}
+
+fn test_workspace_override() -> Arc<dyn lattice_workspace::Workspace> {
+    Arc::new(DeterministicWorkspace::new().expect("deterministic workspace for upper-backed tests"))
 }
 
 pub(super) fn with_test_llm(
@@ -149,6 +246,9 @@ pub(super) fn with_test_llm(
             "System from profile.",
             enabled_tools,
         ));
+    }
+    if upper_backed_tools_enabled(enabled_tools) && request.workspace_override.is_none() {
+        request.workspace_override = Some(test_workspace_override());
     }
     request
 }

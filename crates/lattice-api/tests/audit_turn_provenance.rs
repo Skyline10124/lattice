@@ -6,6 +6,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use lancet_api::audit_db_path_for_project_in;
 use lancet_authority::policy::CepTurnContext;
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
 use lancet_native::{
@@ -21,6 +22,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
+use lattice_workspace::testing::DeterministicWorkspace;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -56,15 +58,21 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct Workspace {
     _dir: TempDir,
+    _state: TempDir,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
 }
 
 fn setup_workspace() -> Workspace {
+    let state = TempDir::new().unwrap();
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", state.path());
+    }
     let ws = TempDir::new().unwrap();
     let root = ws.path().to_path_buf();
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn answer() -> i32 { 1 }").unwrap();
+    init_git_repo(&root);
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -83,6 +91,8 @@ model = "sonnet"
 system = "test"
 [tools]
 enabled = {enabled:?}
+[workspace]
+image = "test-template"
 "#
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
@@ -97,9 +107,38 @@ enabled = {enabled:?}
 
     Workspace {
         _dir: ws,
+        _state: state,
         root,
         loaded,
     }
+}
+
+fn init_git_repo(root: &std::path::Path) {
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@lattice.local"])
+        .current_dir(root)
+        .status()
+        .expect("git user.email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "lattice-test"])
+        .current_dir(root)
+        .status()
+        .expect("git user.name");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(root)
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(root)
+        .status()
+        .expect("git commit");
 }
 
 fn metadata_has_capability(meta: Option<&str>) -> bool {
@@ -202,6 +241,9 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             test_llm: Some(fake_llm),
             test_project_root: Some(ws.root.to_string_lossy().to_string()),
             test_persist_audit: Some(false),
+            workspace_override: Some(Arc::new(
+                DeterministicWorkspace::new().expect("deterministic workspace"),
+            )),
         },
     )
     .await
@@ -209,7 +251,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
 
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let audit_path = ws.root.join(".lattice").join("cep_audit.db");
+    let audit_path = audit_db_path_for_project_in(ws._state.path(), &ws.root).expect("audit path");
     assert!(audit_path.exists(), "audit db must be persisted on disk");
 
     let audit = CepAuditStore::open(&audit_path).expect("open audit");
@@ -252,9 +294,18 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             "mutate.create" | "mutate.edit" | "mutate.batch"
         ) {
             let parsed: Value = serde_json::from_str(meta.unwrap_or("{}")).unwrap_or(Value::Null);
+            let has_envelope = parsed
+                .get("envelope_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| !id.is_empty());
+            let has_direct_routing = parsed
+                .get("authority_mode")
+                .and_then(|v| v.as_str())
+                .is_some_and(|mode| mode == "direct")
+                || parsed.get("routing_upper_workspace_id").is_some();
             assert!(
-                parsed.get("envelope_id").is_some(),
-                "mutation row should include envelope_id"
+                has_envelope || has_direct_routing,
+                "mutation row should include envelope_id or Direct routing metadata"
             );
         }
     }

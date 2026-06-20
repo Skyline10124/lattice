@@ -8,9 +8,11 @@
 //! honesty without provider keys or uncontrolled network access. It does not
 //! claim live artifact isolation when the local host reports no overlay path.
 
-use std::collections::BTreeSet;
+mod support;
+
 use std::sync::Arc;
 
+use lancet_api::audit_db_path_for_project_in;
 use lancet_authority::CepTurnContext;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
@@ -18,10 +20,7 @@ use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, CepTransport, MethodRegistry,
     ServerRunConfig, register_production_method_registry,
 };
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
-    ImpactKind, Intent, Scope,
-};
+use lancet_protocol::envelope::{BaseExecutionEnvelope, ImpactKind};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -70,6 +69,7 @@ fn final_response_events(text: &str) -> Vec<LlmEvent> {
 
 struct V14Workspace {
     _dir: tempfile::TempDir,
+    _state: tempfile::TempDir,
     _global_agents: tempfile::TempDir,
     root: std::path::PathBuf,
     canonical_root: std::path::PathBuf,
@@ -77,6 +77,10 @@ struct V14Workspace {
 }
 
 fn setup_v1_4_workspace() -> V14Workspace {
+    let state = tempfile::tempdir().expect("state dir");
+    unsafe {
+        std::env::set_var("XDG_STATE_HOME", state.path());
+    }
     let ws = tempfile::tempdir().expect("temp workspace");
     let root = ws.path().to_path_buf();
 
@@ -91,6 +95,7 @@ fn setup_v1_4_workspace() -> V14Workspace {
         "v1.4 artifact produced by local command\n",
     )
     .expect("artifact template");
+    support::init_git_repo(&root);
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).expect("profile dir");
@@ -101,11 +106,11 @@ model = "offline-fake"
 [prompt]
 system = "You are a deterministic v1.4-alpha dogfood agent."
 [tools]
-enabled = ["session.envelope", "exec.command_run", "observe.audit_replay"]
-[lancet.isolation.command]
-mode = "audit"
-required_boundaries = ["filesystem"]
-unsupported_host = "allow_unbounded"
+enabled = ["exec.command_run"]
+[workspace]
+image = "test-template"
+[lancet.workspace]
+allowed_write_paths = ["src/**"]
 "#;
     std::fs::write(profile_dir.join("agent.toml"), profile).expect("profile");
 
@@ -120,6 +125,7 @@ unsupported_host = "allow_unbounded"
 
     V14Workspace {
         _dir: ws,
+        _state: state,
         _global_agents: global_agents,
         root,
         canonical_root,
@@ -133,15 +139,19 @@ fn make_v1_4_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    RunTurnRequest {
-        input: "Create the v1.4-alpha artifact through the production API turn.".to_string(),
-        session_id: session_id.to_string(),
-        loaded_profile: Some(ws.loaded.clone()),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        test_persist_audit: Some(false),
-    }
+    support::attach_upper_fixture(
+        RunTurnRequest {
+            input: "Create the v1.4-alpha artifact through the production API turn.".to_string(),
+            session_id: session_id.to_string(),
+            loaded_profile: Some(ws.loaded.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm),
+            test_project_root: Some(ws.root.to_string_lossy().to_string()),
+            test_persist_audit: Some(false),
+            workspace_override: None,
+        },
+        &["exec.command_run"],
+    )
 }
 
 #[tokio::test]
@@ -157,37 +167,6 @@ async fn v1_4_command_artifact_dogfood() {
         .expect("create session")
         .session_id;
 
-    let envelope = ExecutionEnvelope {
-        intent: Intent {
-            description: "v1.4-alpha no-key command artifact dogfood".into(),
-        },
-        capabilities: BTreeSet::from([
-            Capability::RunCommand {
-                argv_allowlist: vec!["cp v1_4-template.txt src/v1_4-artifact.txt".into()],
-            },
-            Capability::WritePath {
-                path_pattern: "src/**".into(),
-            },
-        ]),
-        scope: Scope::default(),
-        impact: vec![Impact {
-            kind: ImpactKind::WorkspaceMutation,
-            target: "src/v1_4-artifact.txt".into(),
-            scope: None,
-            confidence: ImpactConfidence::Conservative,
-            unknowns: vec![],
-        }],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: None,
-        extensions: serde_json::Map::new(),
-    };
-    let declare_args = serde_json::json!({
-        "mode": "declare",
-        "envelope": envelope,
-        "supersede": false,
-        "reason": "v1.4-alpha dogfood artifact scope"
-    });
     let run_args = serde_json::json!({
         "argv": [
             "cp",
@@ -202,11 +181,6 @@ async fn v1_4_command_artifact_dogfood() {
         FakeStreamingLlmClient::builder()
             .push_events(tool_call_events(
                 "call_0",
-                "session.envelope",
-                &declare_args.to_string(),
-            ))
-            .push_events(tool_call_events(
-                "call_1",
                 "exec.command_run",
                 &run_args.to_string(),
             ))
@@ -237,16 +211,6 @@ async fn v1_4_command_artifact_dogfood() {
         result.assistant_output
     );
 
-    let declare_result = result
-        .tool_results
-        .iter()
-        .find(|tool| tool.name == "session.envelope")
-        .expect("session.envelope tool result");
-    assert!(
-        declare_result.ok,
-        "session.envelope must succeed before command: {:?}",
-        declare_result.error_summary
-    );
     let command_result = result
         .tool_results
         .iter()
@@ -259,13 +223,13 @@ async fn v1_4_command_artifact_dogfood() {
     );
 
     let artifact = ws.root.join("src/v1_4-artifact.txt");
-    let artifact_body = std::fs::read_to_string(&artifact).expect("artifact file");
-    assert_eq!(
-        artifact_body, "v1.4 artifact produced by local command\n",
-        "artifact must be written by local process execution"
+    assert!(
+        !artifact.exists(),
+        "workspace-mutating cp must not write artifact to Lower host tree under Direct Upper routing"
     );
 
-    let audit_path = ws.canonical_root.join(".lattice").join("cep_audit.db");
+    let audit_path =
+        audit_db_path_for_project_in(ws._state.path(), &ws.canonical_root).expect("audit path");
     assert!(
         audit_path.exists(),
         "persisted audit DB must exist at {audit_path:?}"
@@ -279,17 +243,9 @@ async fn v1_4_command_artifact_dogfood() {
         })
         .expect("query turn audit rows");
     let methods: Vec<&str> = rows.iter().map(|row| row.method.as_str()).collect();
-    let declare_pos = methods
-        .iter()
-        .position(|method| *method == "session.envelope")
-        .expect("session.envelope audit row");
-    let command_pos = methods
-        .iter()
-        .position(|method| *method == "exec.command_run")
-        .expect("exec.command_run audit row");
     assert!(
-        declare_pos < command_pos,
-        "session.envelope must precede exec.command_run in audit order: {methods:?}"
+        methods.iter().any(|method| *method == "exec.command_run"),
+        "exec.command_run must appear in audit rows: {methods:?}"
     );
 
     let command_row = rows
@@ -307,67 +263,42 @@ async fn v1_4_command_artifact_dogfood() {
             .expect("command metadata_json"),
     )
     .expect("command metadata JSON");
-    assert!(
-        command_meta.get("effective_boundary").is_some(),
-        "command metadata must include effective_boundary: {command_meta}"
-    );
-    assert!(
-        command_meta.get("overlay_status").is_some(),
-        "command metadata must include overlay_status: {command_meta}"
-    );
-    assert!(
-        command_meta.get("artifact_adjudication").is_some(),
-        "command metadata must include artifact_adjudication: {command_meta}"
+    assert_eq!(
+        command_meta["authority_mode"].as_str(),
+        Some("direct"),
+        "command metadata must record Direct authority mode: {command_meta}"
     );
     assert_eq!(
         command_meta["classification"].as_str(),
         Some("workspace_mutation"),
         "command metadata must record the effective declared workspace mutation"
     );
+    assert_eq!(
+        command_meta["exit_code"].as_i64(),
+        Some(0),
+        "cp must succeed in Upper: {command_meta}"
+    );
     assert!(
-        !command_meta.to_string().contains(&artifact_body),
+        command_meta.get("upper_workspace_id").is_some(),
+        "command metadata must include upper_workspace_id: {command_meta}"
+    );
+    assert_eq!(
+        command_meta["execution_backend"].as_str(),
+        Some("deterministic"),
+        "command metadata must record the Upper execution backend: {command_meta}"
+    );
+    assert!(
+        command_meta["backend_invoked"].as_bool().unwrap_or(false),
+        "command metadata must record backend invocation: {command_meta}"
+    );
+    assert!(
+        command_meta["policy_enforced"].as_bool().unwrap_or(false),
+        "command metadata must record policy enforcement: {command_meta}"
+    );
+    assert!(
+        !command_meta.to_string().contains("v1.4 artifact produced by local command"),
         "command metadata must not leak artifact body"
     );
-
-    let overlay_status = command_meta["overlay_status"].as_str().unwrap_or("");
-    let artifact_adjudication = command_meta["artifact_adjudication"].as_str().unwrap_or("");
-    let commit_outcome = command_meta["commit_outcome"].as_str().unwrap_or("");
-    assert!(
-        matches!(
-            overlay_status,
-            "applied" | "not_applied" | "not_requested" | "setup_failed"
-        ),
-        "unexpected overlay_status={overlay_status:?}"
-    );
-    if overlay_status == "applied" {
-        assert_eq!(
-            artifact_adjudication, "accepted",
-            "applied dogfood path must adjudicate the artifact as accepted: {command_meta}"
-        );
-        assert_eq!(
-            commit_outcome, "committed",
-            "applied dogfood path must commit through the artifact pipeline: {command_meta}"
-        );
-    } else {
-        assert_eq!(
-            artifact_adjudication, "skipped_no_overlay",
-            "fallback dogfood path must label artifact adjudication honestly: {command_meta}"
-        );
-        assert_eq!(
-            commit_outcome, "not_started",
-            "fallback dogfood path must not imply artifact commit happened: {command_meta}"
-        );
-        let boundary = command_meta["effective_boundary"]
-            .as_object()
-            .expect("effective_boundary object");
-        for (dimension, entry) in boundary {
-            assert_ne!(
-                entry["status"].as_str(),
-                Some("physically_bounded"),
-                "no-overlay or unsupported dogfood path must not claim physical proof for {dimension}: {entry}"
-            );
-        }
-    }
 
     let replay = replay_turn(&ws, Arc::clone(&audit), &result.session_id, &turn_id).await;
     let command_activity = replay
@@ -383,19 +314,13 @@ async fn v1_4_command_artifact_dogfood() {
         "replay must preserve the catalog command activity impact"
     );
     assert!(
-        command_activity
-            .attributes
-            .contains_key("effective_boundary"),
-        "replay command activity must preserve effective_boundary attributes"
+        command_activity.attributes.contains_key("cep_policy"),
+        "replay command activity must preserve cep_policy attributes: {:?}",
+        command_activity.attributes
     );
     assert!(
-        replay
-            .trace
-            .fragment
-            .was_informed_by
-            .iter()
-            .any(|edge| edge.informed_activity_id != edge.informing_activity_id),
-        "replay must include non-self provenance ordering edges"
+        !replay.trace.fragment.activities.is_empty(),
+        "replay must include command activity entries"
     );
     let statement = replay.statement.expect("replay statement");
     let statement_json = serde_json::to_value(statement).expect("statement JSON");
@@ -404,7 +329,7 @@ async fn v1_4_command_artifact_dogfood() {
         "replay statement materials must include command activity"
     );
     assert!(
-        !statement_json.to_string().contains(&artifact_body),
+        !statement_json.to_string().contains("v1.4 artifact produced by local command"),
         "replay statement must not leak artifact body"
     );
 }

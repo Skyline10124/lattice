@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use lancet_api::{AuditBacking, LancetError, LancetRuntime, LancetRuntimeConfig};
-use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig};
+use lancet_authority::policy::default::{ExternalPolicyFile, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{
     BudgetLimits, CepPolicyConfig, CommandPolicy, NetworkPolicyConfig, ObservationPolicyConfig,
 };
@@ -32,12 +32,13 @@ use lancet_native::enforcement::isolation::{
     CommandIsolationUnsupportedHostBehavior,
 };
 use lancet_native::{
-    CepAuditContext, CepAuditStore, CepClient, impact_kind_for_method, impact_kind_label,
-    wire_code_for_error,
+    CepAuditContext, CepAuditStore, CepClient, DirectVerifyConfig, ExecutionRouting, WorkspacePath,
+    impact_kind_for_method, impact_kind_label, wire_code_for_error,
 };
 use lancet_protocol::error::{
     CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
 };
+use lancet_protocol::policy::AuthorityMode;
 use lancet_protocol::{CepError, Retriability, ToolEvent};
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
@@ -45,7 +46,8 @@ use lattice_agent::{
 use lattice_llm::ToolCall;
 use lattice_profile::{
     LancetIsolationMode, LancetLandlockBehavior, LancetNetworkSection, LancetObservationSection,
-    LancetSection, LancetUnsupportedHostBehavior,
+    LancetSection, LancetUnsupportedHostBehavior, LancetVerifySection,
+    LancetWorkspacePolicySection, LoadedAgentProfile,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -53,6 +55,8 @@ use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::session::ApiError;
+use crate::turn::types::RunTurnRequest;
+use crate::turn::upper::{UpperLease, UpperPrepareError, prepare_upper, resolve_upper_config};
 
 /// Map a [`LancetError`] from the runtime layer onto the API error vocabulary.
 fn map_lancet_err(err: LancetError) -> ApiError {
@@ -182,6 +186,7 @@ pub(crate) struct ProductionTurnDeps {
     pub cep_client: CepClient,
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
+    pub upper_lease: Option<UpperLease>,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
 }
@@ -244,6 +249,49 @@ pub(crate) fn cep_policy_from_profile(
             .map(|effects| effects.deny.iter().cloned().collect())
             .unwrap_or_default(),
     })
+}
+
+fn workspace_policy_from_lancet(lancet: &LancetSection) -> Result<WorkspacePolicy, ApiError> {
+    let mut workspace = WorkspacePolicy::default();
+    if let Some(section) = lancet.workspace.as_ref() {
+        workspace.allowed_write_paths = section.allowed_write_paths.clone();
+    }
+    workspace.validate().map_err(|err| {
+        ApiError::BadRequest(format!("lancet.workspace.allowed_write_paths: {err}"))
+    })?;
+    Ok(workspace)
+}
+
+/// Lower `[lancet.verify]` into immutable Direct verify configuration.
+pub(crate) fn direct_verify_from_profile(
+    lancet: &LancetSection,
+    _runtime_project_root: &Path,
+) -> Result<Option<DirectVerifyConfig>, ApiError> {
+    let Some(section) = lancet.verify.as_ref() else {
+        return Ok(None);
+    };
+    if section.argv.is_empty() {
+        return Err(ApiError::BadRequest(
+            "lancet.verify.argv must not be empty when the section is present".into(),
+        ));
+    }
+    if section.timeout_ms == Some(0) {
+        return Err(ApiError::BadRequest(
+            "lancet.verify.timeout_ms must be positive when set".into(),
+        ));
+    }
+    let cwd = match section.cwd.as_deref() {
+        Some(path) => WorkspacePath::parse(path).map_err(|_| {
+            ApiError::BadRequest(format!("lancet.verify.cwd: invalid relative path '{path}'"))
+        })?,
+        None => WorkspacePath::project_root(),
+    };
+    Ok(Some(DirectVerifyConfig {
+        argv: section.argv.clone(),
+        cwd,
+        timeout_ms: section.timeout_ms,
+        expected_exit_code: section.expected_exit_code.unwrap_or(0),
+    }))
 }
 
 fn apply_observation_profile(
@@ -471,6 +519,7 @@ pub(crate) fn load_policy_config(
         network: cep_context.network,
         budget: cep_context.budget,
         observation: cep_context.observation,
+        workspace: workspace_policy_from_lancet(lancet)?,
         project_root: cep_context.project_root,
         denied_effect_kinds: cep_context.denied_effect_kinds,
     };
@@ -595,14 +644,15 @@ fn resolve_lancet_policy(
 ///
 /// Translation of the profile into policy happens here; runtime composition is
 /// delegated to [`lancet_api::LancetRuntime::build`].
-pub(crate) fn build_production_turn_deps(
+pub(crate) async fn build_production_turn_deps(
+    request: &RunTurnRequest,
     project_root: &str,
     enabled_tools: &[String],
     llm: Arc<dyn lattice_agent::LlmClient>,
-    in_memory_audit: bool,
     lancet: Option<&LancetSection>,
     model_id: &str,
     runtime_version: &str,
+    loaded_profile: &LoadedAgentProfile,
 ) -> Result<ProductionTurnDeps, ApiError> {
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
@@ -616,13 +666,42 @@ pub(crate) fn build_production_turn_deps(
     let cep_mode = lancet
         .map(|c| c.mode.clone())
         .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
+    let in_memory_audit = request.test_llm.is_some() && request.test_persist_audit != Some(false);
     let audit = if in_memory_audit {
         AuditBacking::InMemory
     } else {
-        AuditBacking::default_under(project_root)
+        AuditBacking::external_for_project(Path::new(project_root))
+            .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
-    let runtime = LancetRuntime::build(LancetRuntimeConfig {
+    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), enabled_tools)
+        .map_err(|err| match err {
+            UpperPrepareError::MissingWorkspaceSection
+            | UpperPrepareError::MissingWorkspaceSource => {
+                ApiError::BadRequest(
+                    "Upper-backed tools require an explicit [workspace] section with a real image or template source".into(),
+                )
+            }
+            other => ApiError::BadRequest(other.to_string()),
+        })?;
+    let mut upper_lease: Option<UpperLease> = None;
+    let execution = if upper_config.requires_upper {
+        match prepare_upper(&upper_config, request.workspace_override.clone()).await {
+            Ok(prepared) => {
+                let upper_context = prepared.backend.upper_context().clone();
+                upper_lease = Some(prepared.lease);
+                Some(ExecutionRouting {
+                    backend: Arc::new(prepared.backend),
+                    upper: upper_context,
+                })
+            }
+            Err(err) => return Err(ApiError::BadRequest(err.to_string())),
+        }
+    } else {
+        None
+    };
+
+    let runtime_result = LancetRuntime::build(LancetRuntimeConfig {
         project_root: PathBuf::from(project_root),
         enabled_tools: enabled_tools.to_vec(),
         policy,
@@ -631,8 +710,24 @@ pub(crate) fn build_production_turn_deps(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
+        authority_mode: AuthorityMode::Direct,
+        execution,
+        direct_verify: lancet
+            .map(|section| direct_verify_from_profile(section, Path::new(project_root)))
+            .transpose()?
+            .flatten(),
     })
-    .map_err(map_lancet_err)?;
+    .map_err(map_lancet_err);
+
+    let runtime = match runtime_result {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            if let Some(mut lease) = upper_lease.take() {
+                let _ = lease.destroy().await;
+            }
+            return Err(err);
+        }
+    };
 
     let parts = runtime.into_parts();
 
@@ -659,8 +754,76 @@ pub(crate) fn build_production_turn_deps(
         cep_client: parts.client,
         audit: parts.audit,
         audit_context: parts.audit_context,
-        // Production builds compose exactly one adapter over one transport pair.
+        upper_lease,
         #[cfg(test)]
+        build_metrics: CepRuntimeBuildMetrics {
+            adapter_instances: 1,
+            transport_pairs: 1,
+        },
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn build_envelope_turn_deps_for_test(
+    project_root: &str,
+    enabled_tools: &[String],
+    llm: Arc<dyn lattice_agent::LlmClient>,
+    in_memory_audit: bool,
+    lancet: Option<&LancetSection>,
+    model_id: &str,
+    runtime_version: &str,
+) -> Result<ProductionTurnDeps, ApiError> {
+    let canonical_root = std::fs::canonicalize(project_root)
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned));
+    let project_root = canonical_root.as_deref().unwrap_or(project_root);
+    let (policy, command_isolation) = resolve_lancet_policy(lancet, project_root)?;
+    let cep_mode = lancet
+        .map(|c| c.mode.clone())
+        .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
+    let audit = if in_memory_audit {
+        AuditBacking::InMemory
+    } else {
+        AuditBacking::default_under(project_root)
+    };
+    let runtime = LancetRuntime::build(LancetRuntimeConfig {
+        project_root: PathBuf::from(project_root),
+        enabled_tools: enabled_tools.to_vec(),
+        policy,
+        command_isolation,
+        cep_mode,
+        audit,
+        model_id: model_id.to_string(),
+        runtime_version: runtime_version.to_string(),
+        authority_mode: AuthorityMode::Envelope,
+        execution: None,
+        direct_verify: None,
+    })
+    .map_err(map_lancet_err)?;
+    let parts = runtime.into_parts();
+    let enabled_names: HashSet<String> = parts
+        .tool_definitions
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    let tool_definitions = parts
+        .tool_definitions
+        .into_iter()
+        .map(to_llm_tool_definition)
+        .collect();
+    let adapter = Arc::new(CepExecutorAdapter::new(parts.client.clone(), enabled_names));
+    let agent_loop = Arc::new(AgentLoop::new(AgentLoopConfig {
+        llm,
+        tool_executor: adapter,
+    }));
+    Ok(ProductionTurnDeps {
+        agent_loop,
+        tool_definitions,
+        runtime: parts.lifecycle,
+        cep_client: parts.client,
+        audit: parts.audit,
+        audit_context: parts.audit_context,
+        upper_lease: None,
         build_metrics: CepRuntimeBuildMetrics {
             adapter_instances: 1,
             transport_pairs: 1,
@@ -812,7 +975,12 @@ mod cep_context_profile_policy {
     use lancet_protocol::envelope::{
         Capability, CepMode, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
     };
+    use lancet_protocol::policy::{
+        PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
+        PolicyInput,
+    };
     use lattice_profile::LancetSection;
+    use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use tempfile::TempDir;
 
@@ -1087,7 +1255,7 @@ allowed_diagnostic_commands = [["echo"]]
         };
         let enabled = vec![Run::NAME.to_string(), Envelope::NAME.to_string()];
         let fake_llm = Arc::new(lattice_agent::testing::FakeStreamingLlmClient::builder().build());
-        let mut deps = build_production_turn_deps(
+        let mut deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
             &enabled,
             fake_llm,
@@ -1096,6 +1264,7 @@ allowed_diagnostic_commands = [["echo"]]
             "test-model",
             "test-runtime",
         )
+        .await
         .expect("turn deps");
 
         deps.cep_client
@@ -1143,5 +1312,276 @@ allowed_diagnostic_commands = [["echo"]]
         );
 
         deps.runtime.shutdown().await;
+    }
+
+    #[test]
+    fn workspace_policy_from_profile_lowers_allowed_write_paths() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            workspace: Some(LancetWorkspacePolicySection {
+                allowed_write_paths: vec!["src/**".into()],
+            }),
+            ..Default::default()
+        };
+        let config = load_policy_config(&cep, dir.path()).expect("policy config");
+        assert_eq!(config.workspace.allowed_write_paths, vec!["src/**"]);
+    }
+
+    #[test]
+    fn workspace_policy_from_profile_rejects_git_paths() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            workspace: Some(LancetWorkspacePolicySection {
+                allowed_write_paths: vec![".git/config".into()],
+            }),
+            ..Default::default()
+        };
+        let err = load_policy_config(&cep, dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("lancet.workspace.allowed_write_paths"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn direct_verify_from_profile_lowers_typed_argv() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            verify: Some(LancetVerifySection {
+                argv: vec!["cargo".into(), "test".into()],
+                cwd: Some("crates/foo".into()),
+                timeout_ms: Some(30_000),
+                expected_exit_code: Some(0),
+            }),
+            ..Default::default()
+        };
+        let verify = direct_verify_from_profile(&cep, dir.path())
+            .expect("verify")
+            .expect("present");
+        assert_eq!(verify.argv, vec!["cargo", "test"]);
+        assert_eq!(verify.cwd.as_str(), "crates/foo");
+        assert!(verify.validate().is_ok());
+    }
+
+    #[test]
+    fn workspace_policy_from_profile_absent_defaults_empty() {
+        let dir = TempDir::new().unwrap();
+        let config = load_policy_config(&LancetSection::default(), dir.path()).expect("policy");
+        assert!(config.workspace.allowed_write_paths.is_empty());
+    }
+
+    #[test]
+    fn workspace_policy_shared_by_mutate_and_command_in_policy_config() {
+        let dir = TempDir::new().unwrap();
+        let cep = LancetSection {
+            workspace: Some(LancetWorkspacePolicySection {
+                allowed_write_paths: vec!["src/**".into()],
+            }),
+            ..Default::default()
+        };
+        let config = load_policy_config(&cep, dir.path()).expect("policy");
+        let hook = lancet_authority::policy::default::DefaultPolicyHook::new(config);
+        let mutate = PolicyInput {
+            method: "mutate.create".into(),
+            params: json!({"path": "src/new.rs", "content": "x"}),
+            authority: PolicyAuthorityInput::Direct,
+            audit_context: PolicyAuditContext {
+                turn_id: "t".into(),
+                session_id: "s".into(),
+                call_id: Some(1),
+                budget_snapshot: PolicyBudgetSnapshot {
+                    turn_observation_bytes_used: 0,
+                    turn_observation_bytes_limit: 65536,
+                    todo_ops_used: 0,
+                    todo_ops_limit: 10,
+                },
+            },
+        };
+        assert_eq!(hook.decide(&mutate), PolicyDecision::Allowed);
+        let region = hook.config().workspace.authorized_region_for(
+            "mutate.create",
+            None,
+            &hook.config().to_cep_policy_config(),
+        );
+        let command_region = hook.config().workspace.authorized_region_for(
+            "exec.command_run",
+            Some(&lancet_authority::policy::command::EffectiveImpact::WorkspaceMutation),
+            &hook.config().to_cep_policy_config(),
+        );
+        assert_eq!(
+            region.write_path_prefixes,
+            command_region.write_path_prefixes
+        );
+    }
+}
+
+#[cfg(test)]
+mod phase34_turn_wiring {
+    use super::*;
+    use lancet_api::audit_db_path_for_project_in;
+    use lancet_audit::{AuditOutcome, CallAuditMetadata};
+    use lancet_catalog::methods::session::TodoWrite;
+    use lancet_cep::ToolExposure;
+    use lattice_agent::testing::FakeStreamingLlmClient;
+    use lattice_profile::{
+        AgentProfile, AgentSection, LancetSection, LlmSection, LoadedAgentProfile, PromptSection,
+        ToolsSection,
+    };
+    use tempfile::TempDir;
+
+    fn host_only_profile(enabled: Vec<String>) -> LoadedAgentProfile {
+        LoadedAgentProfile {
+            path: PathBuf::from("/tmp/agent.toml"),
+            package_dir: PathBuf::from("/tmp"),
+            profile: AgentProfile {
+                schema_version: 1,
+                agent: AgentSection {
+                    name: "t".into(),
+                    model: "m".into(),
+                    description: None,
+                },
+                prompt: PromptSection {
+                    system: Some("sys".into()),
+                    system_path: None,
+                },
+                tools: ToolsSection { enabled },
+                llm: LlmSection::default(),
+                lancet: LancetSection::default(),
+                workspace: None,
+            },
+            system_prompt: "sys".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn phase34_external_audit_preserves_lower() {
+        let state = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("XDG_STATE_HOME", state.path());
+        }
+        let project = TempDir::new().unwrap();
+        let legacy_dir = project.path().join(".lattice");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_path = legacy_dir.join("cep_audit.db");
+        let legacy_store = CepAuditStore::open(&legacy_path).unwrap();
+        let ctx = CepAuditContext {
+            turn_id: "legacy".into(),
+            session_id: "legacy".into(),
+            ..Default::default()
+        };
+        let start = legacy_store
+            .start_call(
+                &ctx,
+                1,
+                TodoWrite::NAME,
+                &CallAuditMetadata::native_policy_enforced(Some("started")),
+            )
+            .unwrap();
+        legacy_store
+            .finalize_call(
+                start,
+                AuditOutcome::Success {
+                    summary: "legacy".into(),
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        let before = std::fs::read(&legacy_path).unwrap();
+
+        let llm: Arc<dyn lattice_agent::LlmClient> =
+            Arc::new(FakeStreamingLlmClient::builder().build());
+        let profile = host_only_profile(vec![TodoWrite::NAME.to_string()]);
+        let request = RunTurnRequest {
+            input: "hi".into(),
+            session_id: "s".into(),
+            loaded_profile: Some(profile.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm.clone()),
+            test_project_root: Some(project.path().to_string_lossy().into()),
+            test_persist_audit: Some(false),
+            workspace_override: None,
+        };
+        let deps = build_production_turn_deps(
+            &request,
+            project.path().to_str().unwrap(),
+            &[TodoWrite::NAME.to_string()],
+            llm,
+            None,
+            "m",
+            "v",
+            &profile,
+        )
+        .await
+        .expect("direct deps");
+
+        deps.cep_client
+            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
+                todos: vec![lancet_catalog::methods::session::TodoItem {
+                    content: "direct".into(),
+                    status: lancet_catalog::methods::session::TodoStatus::Pending,
+                }],
+            })
+            .await
+            .expect("todo write");
+
+        let external_path = audit_db_path_for_project_in(state.path(), project.path()).unwrap();
+        let external = CepAuditStore::open(&external_path).unwrap();
+        assert!(external.row_count().unwrap() >= 2);
+
+        let after = std::fs::read(&legacy_path).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn phase34_upper_lifecycle_host_only_has_no_lease() {
+        let dir = TempDir::new().unwrap();
+        let llm: Arc<dyn lattice_agent::LlmClient> =
+            Arc::new(FakeStreamingLlmClient::builder().build());
+        let profile = host_only_profile(vec![TodoWrite::NAME.to_string()]);
+        let request = RunTurnRequest {
+            input: "hi".into(),
+            session_id: "s".into(),
+            loaded_profile: Some(profile.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm.clone()),
+            test_project_root: None,
+            test_persist_audit: None,
+            workspace_override: None,
+        };
+        let deps = build_production_turn_deps(
+            &request,
+            dir.path().to_str().unwrap(),
+            &[TodoWrite::NAME.to_string()],
+            llm,
+            None,
+            "m",
+            "v",
+            &profile,
+        )
+        .await
+        .expect("host-only direct deps");
+        assert!(deps.upper_lease.is_none());
+        assert!(
+            !deps
+                .tool_definitions
+                .iter()
+                .any(|tool| tool.name == Envelope::NAME)
+        );
+    }
+
+    #[test]
+    fn direct_mode_definitions_omit_session_envelope() {
+        let exposure = ToolExposure::from_catalog_enabled_for_authority_mode(
+            &[
+                ObserveWorkspace::NAME.to_string(),
+                Envelope::NAME.to_string(),
+            ],
+            AuthorityMode::Direct,
+        )
+        .expect("catalog");
+        assert!(!exposure.contains(Envelope::NAME));
+        assert!(exposure.contains(ObserveWorkspace::NAME));
     }
 }

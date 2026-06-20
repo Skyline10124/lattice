@@ -68,6 +68,8 @@ async fn stream_turn_live_with_agent(
         audit_context: Arc::new(tokio::sync::RwLock::new(
             lancet_native::CepAuditContext::default(),
         )),
+        upper_lease: None,
+        #[cfg(test)]
         build_metrics: super::cep::CepRuntimeBuildMetrics {
             adapter_instances: 0,
             transport_pairs: 0,
@@ -86,6 +88,7 @@ fn make_request(input: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     }
 }
 
@@ -98,6 +101,7 @@ fn make_request_with_session(input: &str, session_id: &str) -> RunTurnRequest {
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     }
 }
 

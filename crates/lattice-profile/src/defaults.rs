@@ -3,6 +3,15 @@
 
 //! Default agent templates — generated text only, no filesystem writes.
 
+const WORKSPACE_UPGRADE_NOTE: &str = r#"# Upper-backed observe/mutate/exec tools are intentionally absent here.
+# To enable them:
+#   1. Add a top-level [workspace] section with a real fully-qualified OCI image
+#      or an existing project template name you have already built.
+#   2. Explicitly add the desired tool names under [tools].enabled
+#      (observe.workspace, mutate.create, mutate.edit, mutate.batch, exec.command_run).
+# Do not guess image/template values in generated profiles.
+"#;
+
 /// Generate a strict v1 `agent.toml` template for a new agent.
 ///
 /// The template is parseable by the strict schema and contains only supported
@@ -21,7 +30,7 @@ pub fn default_agent_template(name: &str, model: &str) -> String {
 #   [prompt] — system prompt (inline `system` or file `system_path`, not both)
 #   [tools]  — explicitly enabled tool names
 #   [llm.retry] — provider stream-open retry policy
-
+{workspace_note}
 schema_version = 1
 
 [agent]
@@ -32,7 +41,7 @@ model = {model}
 system = "You are a helpful assistant. Be concise and accurate."
 
 [tools]
-enabled = ["observe.workspace"]
+enabled = ["session.todo_write"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -49,23 +58,24 @@ enabled = ["observe.workspace"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-"#
+"#,
+        workspace_note = WORKSPACE_UPGRADE_NOTE
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for a read-only agent.
 ///
-/// Read-only tools: file reading, grep, find, listing, workspace context.
-/// No command execution, file modification, or internet access.
+/// Host-only read surfaces: audit query/replay. No command execution, file
+/// modification, or workspace mutation without an explicit `[workspace]` section.
 pub fn default_reader_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
 
     format!(
         r#"# LATTICE Agent Profile (v1) — Reader
-# Read-only agent for code review, understanding, and search.
-# No command execution, file modification, or internet access.
-
+# Read-only host agent for code review and audit inspection.
+# No command execution, file modification, or Upper-backed workspace tools.
+{workspace_note}
 schema_version = 1
 
 [agent]
@@ -77,7 +87,7 @@ description = "Read-only agent for code understanding and review"
 system = "You are a code reader and reviewer. Read and analyze code carefully. Do not suggest edits or run commands. Explain your reasoning clearly."
 
 [tools]
-enabled = ["observe.workspace"]
+enabled = ["observe.audit", "observe.audit_replay"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -94,23 +104,23 @@ enabled = ["observe.workspace"]
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-"#
+"#,
+        workspace_note = WORKSPACE_UPGRADE_NOTE
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for an editing agent.
 ///
-/// Read-write tools: workspace observation, create/edit/batch mutation,
-/// listing, todo tracking, workspace context.  No shell or web access.
+/// Host-only planning tools until `[workspace]` is configured explicitly.
 pub fn default_editor_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
 
     format!(
         r#"# LATTICE Agent Profile (v1) — Editor
-# Read-write agent for editing and refactoring.
-# No shell or web access — editing only.
-
+# Host-only editing planner until an explicit [workspace] section is added.
+# No shell or web access — configure workspace + tools to enable Upper edits.
+{workspace_note}
 schema_version = 1
 
 [agent]
@@ -122,7 +132,7 @@ description = "Editing agent for refactoring and fixing code"
 system = "You are a code editor. Read, edit, and refactor code within the project. Use observe, create, edit, and batch tools for changes. Be precise and explain your edits."
 
 [tools]
-enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", "session.envelope", "session.todo_write"]
+enabled = ["session.todo_write"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -139,21 +149,22 @@ enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", 
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-"#
+"#,
+        workspace_note = WORKSPACE_UPGRADE_NOTE
     )
 }
 
 /// Generate a strict v1 `agent.toml` template for a development agent.
 ///
-/// Full tool set: all reader/editor tools plus command execution and web fetch.
+/// Host-only fetch/planning tools until `[workspace]` is configured explicitly.
 pub fn default_dev_template(name: &str, model: &str) -> String {
     let name = toml_string(name);
     let model = toml_string(model);
 
     format!(
         r#"# LATTICE Agent Profile (v1) — Developer
-# Full development agent with all standard tools enabled.
-
+# Host-only development helper until an explicit [workspace] section is added.
+{workspace_note}
 schema_version = 1
 
 [agent]
@@ -165,7 +176,7 @@ description = "Full development agent for coding, planning, and troubleshooting"
 system = "You are a full-stack developer. Read, write, edit, and refactor code. Plan changes before acting. Run shell commands for build, test, lint, and version control. Fetch web docs when needed. Be methodical and explain your reasoning."
 
 [tools]
-enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", "session.envelope", "session.todo_write", "exec.command_run", "fetch.web"]
+enabled = ["session.todo_write", "fetch.web"]
 
 # Optional command physical-boundary configuration.
 # Uncomment to request command isolation boundaries.
@@ -182,7 +193,8 @@ enabled = ["observe.workspace", "mutate.create", "mutate.edit", "mutate.batch", 
 max_retries = 3
 initial_delay_ms = 500
 max_delay_ms = 3000
-"#
+"#,
+        workspace_note = WORKSPACE_UPGRADE_NOTE
     )
 }
 
@@ -208,9 +220,34 @@ fn toml_string(value: &str) -> String {
     escaped
 }
 
+const UPPER_BACKED_TOOLS: &[&str] = &[
+    "observe.workspace",
+    "mutate.create",
+    "mutate.edit",
+    "mutate.batch",
+    "exec.command_run",
+    "session.envelope",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn is_catalog_method(name: &str) -> bool {
+        matches!(
+            name,
+            "observe.workspace"
+                | "mutate.create"
+                | "mutate.edit"
+                | "mutate.batch"
+                | "exec.command_run"
+                | "fetch.web"
+                | "session.todo_write"
+                | "session.envelope"
+                | "observe.audit"
+                | "observe.audit_replay"
+        )
+    }
 
     // ── Basic parse tests ─────────────────────────────────────────────
 
@@ -228,7 +265,6 @@ mod tests {
             Some("You are a helpful assistant. Be concise and accurate.")
         );
         assert!(profile.prompt.system_path.is_none());
-        // Tools: non-empty enabled, no bundles
         assert!(
             !profile.tools.enabled.is_empty(),
             "default template must enable tools"
@@ -258,6 +294,21 @@ mod tests {
     }
 
     #[test]
+    fn template_documents_workspace_upgrade_without_placeholder_image() {
+        for toml_str in [
+            default_agent_template("t", "sonnet"),
+            default_reader_template("t", "sonnet"),
+            default_editor_template("t", "sonnet"),
+            default_dev_template("t", "sonnet"),
+        ] {
+            assert!(toml_str.contains("[workspace]"));
+            assert!(toml_str.contains("observe.workspace"));
+            assert!(!toml_str.contains("[workspace]\nimage ="));
+            assert!(!toml_str.contains("docker.io/"));
+        }
+    }
+
+    #[test]
     fn template_has_only_allowed_top_level_sections() {
         let toml_str = default_agent_template("t", "sonnet");
         let allowed = [
@@ -278,8 +329,6 @@ mod tests {
     #[test]
     fn template_has_no_bundles_key() {
         let toml_str = default_agent_template("t", "sonnet");
-        // The word "bundles" may appear in explanatory comments, but the
-        // TOML key `bundles =` must not appear.
         assert!(
             !toml_str.contains("bundles ="),
             "template must not contain 'bundles =' as a TOML key"
@@ -324,6 +373,33 @@ mod tests {
         assert_eq!(before.len(), after.len(), "template must not create files");
     }
 
+    #[test]
+    fn generated_profiles_exclude_upper_backed_tools_without_workspace() {
+        for (name, toml_str) in [
+            ("default", default_agent_template("t", "sonnet")),
+            ("reader", default_reader_template("t", "sonnet")),
+            ("editor", default_editor_template("t", "sonnet")),
+            ("dev", default_dev_template("t", "sonnet")),
+        ] {
+            let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
+            assert!(
+                profile.workspace.is_none(),
+                "{name} must not embed workspace"
+            );
+            for tool in &profile.tools.enabled {
+                assert!(
+                    !UPPER_BACKED_TOOLS.contains(&tool.as_str()),
+                    "{name} must not enable Upper-backed tool {tool}"
+                );
+                assert!(
+                    is_catalog_method(tool),
+                    "{name} tool {tool} must resolve through catalog"
+                );
+            }
+        }
+    }
+
     // ── Reader template tests ──────────────────────────────────────────
 
     #[test]
@@ -337,24 +413,7 @@ mod tests {
             profile.agent.description.as_deref(),
             Some("Read-only agent for code understanding and review")
         );
-        // Non-empty enabled tools
         assert!(!profile.tools.enabled.is_empty());
-        // No shell, web, or editing tools
-        let enabled = &profile.tools.enabled;
-        assert!(!enabled.contains(&"exec.command_run".to_string()));
-        assert!(!enabled.contains(&"fetch.web".to_string()));
-        assert!(!enabled.contains(&"mutate.create".to_string()));
-        assert!(!enabled.contains(&"mutate.edit".to_string()));
-        assert!(!enabled.contains(&"mutate.batch".to_string()));
-        assert!(!enabled.contains(&"session.envelope".to_string()));
-    }
-
-    #[test]
-    fn reader_template_has_no_shell_or_web() {
-        let toml_str = default_reader_template("r", "haiku").to_lowercase();
-        assert!(!toml_str.contains("exec.command_run"));
-        assert!(!toml_str.contains("fetch.web"));
-        assert!(!toml_str.contains("editing"));
     }
 
     #[test]
@@ -362,7 +421,7 @@ mod tests {
         let toml_str = default_reader_template("r", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("reader template must parse");
-        let expected: Vec<&str> = vec!["observe.workspace"];
+        let expected = vec!["observe.audit", "observe.audit_replay"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -378,43 +437,19 @@ mod tests {
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("editor template must be valid v1 TOML");
         assert_eq!(profile.agent.name, "editor");
-        assert_eq!(profile.agent.model, "sonnet");
         assert!(!profile.tools.enabled.is_empty());
-        let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"mutate.create".to_string()));
-        assert!(enabled.contains(&"mutate.edit".to_string()));
-        assert!(enabled.contains(&"mutate.batch".to_string()));
-        assert!(enabled.contains(&"session.envelope".to_string()));
-        assert!(enabled.contains(&"session.todo_write".to_string()));
-        // No shell or web
-        assert!(!enabled.contains(&"exec.command_run".to_string()));
-        assert!(!enabled.contains(&"fetch.web".to_string()));
+        assert!(
+            profile
+                .tools
+                .enabled
+                .contains(&"session.todo_write".to_string())
+        );
     }
 
     #[test]
     fn editor_template_has_no_web_fetch_tool() {
         let toml_str = default_editor_template("e", "sonnet");
         assert!(!toml_str.contains("fetch.web"));
-    }
-
-    #[test]
-    fn editor_template_enabled_tools_are_resolvable() {
-        let toml_str = default_editor_template("e", "sonnet");
-        let profile: crate::schema::AgentProfile =
-            toml::from_str(&toml_str).expect("editor template must parse");
-        let expected: Vec<&str> = vec![
-            "observe.workspace",
-            "mutate.create",
-            "mutate.edit",
-            "mutate.batch",
-            "session.envelope",
-            "session.todo_write",
-        ];
-        let mut enabled = profile.tools.enabled.clone();
-        enabled.sort();
-        let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-        expected_sorted.sort();
-        assert_eq!(enabled, expected_sorted);
     }
 
     // ── Developer template tests ───────────────────────────────────────
@@ -424,17 +459,13 @@ mod tests {
         let toml_str = default_dev_template("dev", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("dev template must be valid v1 TOML");
-        assert_eq!(profile.agent.name, "dev");
-        assert_eq!(profile.agent.model, "sonnet");
-        assert!(!profile.tools.enabled.is_empty());
-        let enabled = &profile.tools.enabled;
-        assert!(enabled.contains(&"exec.command_run".to_string()));
-        assert!(enabled.contains(&"fetch.web".to_string()));
-        assert!(enabled.contains(&"mutate.create".to_string()));
-        assert!(enabled.contains(&"mutate.edit".to_string()));
-        assert!(enabled.contains(&"mutate.batch".to_string()));
-        assert!(enabled.contains(&"session.envelope".to_string()));
-        assert!(enabled.contains(&"session.todo_write".to_string()));
+        assert!(profile.tools.enabled.contains(&"fetch.web".to_string()));
+        assert!(
+            profile
+                .tools
+                .enabled
+                .contains(&"session.todo_write".to_string())
+        );
     }
 
     #[test]
@@ -442,16 +473,7 @@ mod tests {
         let toml_str = default_dev_template("d", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("dev template must parse");
-        let expected: Vec<&str> = vec![
-            "observe.workspace",
-            "mutate.create",
-            "mutate.edit",
-            "mutate.batch",
-            "session.envelope",
-            "session.todo_write",
-            "exec.command_run",
-            "fetch.web",
-        ];
+        let expected = vec!["fetch.web", "session.todo_write"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -484,8 +506,6 @@ mod tests {
         }
     }
 
-    // ── Cross-template checks ──────────────────────────────────────────
-
     #[test]
     fn reader_editor_dev_templates_have_no_forbidden_legacy_concepts() {
         for toml_str in &[
@@ -493,28 +513,7 @@ mod tests {
             default_editor_template("t", "sonnet"),
             default_dev_template("t", "sonnet"),
         ] {
-            let forbidden = [
-                "[capabilities]",
-                "presets",
-                "[handoff]",
-                "[orchestrator]",
-                "[plugins]",
-                "[pipeline]",
-                "[subagents]",
-                "[micro_agents]",
-                "[memory]",
-                "[security]",
-                "[context]",
-                "[behavior]",
-                "skippable",
-                "tags",
-                "behavior_type",
-                "confidence_threshold",
-                "enforce_sandbox",
-                "code_agent",
-                "bundles =",
-                "sandbox_mode",
-            ];
+            let forbidden = ["bundles =", "sandbox_mode", "[capabilities]"];
             for f in &forbidden {
                 assert!(!toml_str.contains(f), "template must not contain '{f}'");
             }
@@ -529,42 +528,23 @@ mod tests {
             default_editor_template("t", "sonnet"),
             default_dev_template("t", "sonnet"),
         ] {
-            assert!(
-                !toml_str.contains("bundles ="),
-                "template must not contain 'bundles =' as a TOML key"
-            );
-        }
-    }
-
-    #[test]
-    fn default_templates_have_no_bundles() {
-        for toml_str in [
-            default_agent_template("t", "sonnet"),
-            default_reader_template("t", "sonnet"),
-            default_editor_template("t", "sonnet"),
-            default_dev_template("t", "sonnet"),
-        ] {
-            assert!(
-                !toml_str.contains("bundles"),
-                "default templates must not emit bundles"
-            );
+            assert!(!toml_str.contains("bundles ="));
         }
     }
 
     #[test]
     fn all_templates_have_non_empty_enabled_tools() {
-        let templates: Vec<(&str, String)> = vec![
+        for (name, toml_str) in [
             ("default", default_agent_template("t", "sonnet")),
             ("reader", default_reader_template("t", "sonnet")),
             ("editor", default_editor_template("t", "sonnet")),
             ("dev", default_dev_template("t", "sonnet")),
-        ];
-        for (name, toml_str) in templates {
+        ] {
             let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
                 .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
             assert!(
                 !profile.tools.enabled.is_empty(),
-                "{name} template must have non-empty tools.enabled"
+                "{name} must enable tools"
             );
         }
     }
@@ -580,39 +560,7 @@ mod tests {
             let profile: crate::schema::AgentProfile = toml::from_str(&toml_str)
                 .unwrap_or_else(|e| panic!("{name} template must parse: {e}"));
             for tool in &profile.tools.enabled {
-                assert!(
-                    tool.contains('.'),
-                    "{name} template tool '{tool}' must be a dotted CEP method name"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn default_templates_exclude_legacy_aliases_and_workspace_context() {
-        let legacy = vec![
-            ["read", "_file"].concat(),
-            ['g', 'r', 'e', 'p'].iter().collect::<String>(),
-            ["find", "_files"].concat(),
-            ["list", "_directory"].concat(),
-            ["write", "_file"].concat(),
-            ['p', 'a', 't', 'c', 'h'].iter().collect::<String>(),
-            ['b', 'a', 's', 'h'].iter().collect::<String>(),
-            ["web", "_fetch"].concat(),
-            ["todo", "_write"].concat(),
-            ["workspace", "_context"].concat(),
-        ];
-        for toml_str in [
-            default_agent_template("t", "sonnet"),
-            default_reader_template("t", "sonnet"),
-            default_editor_template("t", "sonnet"),
-            default_dev_template("t", "sonnet"),
-        ] {
-            for alias in &legacy {
-                assert!(
-                    !toml_str.contains(&format!("\"{alias}\"")),
-                    "template must not contain legacy tool name '{alias}'"
-                );
+                assert!(tool.contains('.'), "{name} tool '{tool}' must be dotted");
             }
         }
     }

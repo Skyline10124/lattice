@@ -610,3 +610,110 @@ several direct dependencies were pinned to older major versions.
 
 **Changed files:** workspace/crate manifests, `Cargo.lock`, Rust 2024 migration
 sites across workspace crates, and this changelog.
+
+---
+
+## 34-07: Direct command write-scope enforcement (CR-01/02/03, WR-01) — 2026-06-20
+
+Severity: CRITICAL (gap-closure Plan 34-07; 34-REVIEW CR-01, CR-02, CR-03, WR-01).
+
+**Problem:** Direct `exec.command_run` for workspace-mutating commands passed
+`AuthorizedEffectRegion::empty()` into cwd and verify preflight, skipped
+post-execution changed-path scope checks, and recorded `WorkspaceMutation` effects
+as `ObservedScope::Root` — which `AuthorizedEffectRegion::contains` rejects under
+default `CepMode::Enforce`. Together these allowed commands outside
+`allowed_write_paths` with no replan gate and broke the effect ledger in production.
+
+**Fix:**
+
+- Pass `ctx.authorized_region` into `validate_direct_command_cwd` and
+  `run_verify_with_backend`; exempt workspace-root cwd (`"."`) at preflight
+  (actual write scope enforced post-exec).
+- Add `ExecutionBackend::changed_paths()` with `WorkspaceExecutionBackend`
+  implementation via `git status --porcelain` parsing.
+- After Direct workspace-mutating exec, diff changed paths against
+  `authorized_region`, record per-path `ObservedScope::Path` effects, and deny
+  out-of-scope paths with `ReplanRequired` before verify.
+- Remove blanket `WorkspaceMutation` + `ObservedScope::Root` effect from
+  `record_direct_command_effects`.
+
+**Verification:**
+
+- `cargo test -p lancet-native phase34_direct --lib` — 24 passed
+- `cargo test -p lancet-native phase34_direct_command --lib` — 14 passed
+- `cargo test -p lattice-api --lib workspace_execution_backend` — 4 passed
+
+**Changed files:** `crates/lancet-native/src/handlers/command.rs`,
+`crates/lancet-native/src/enforcement/verify.rs`,
+`crates/lancet-native/src/execution_backend.rs`,
+`crates/lancet-native/src/handlers/command_tests.rs`,
+`crates/lattice-api/src/turn/workspace_backend.rs`, spy backends in
+`mutation.rs`, `observation.rs`, `registry.rs`, `verify.rs`.
+
+---
+
+## 34-08: CLI audit path unification (D-08 gap closure) — 2026-06-20
+
+Severity: HIGH (gap-closure Plan 34-08; 34-VERIFICATION Gap 2, D-08).
+
+**Problem:** `lancet-api` production readers (`collect_status`, `query_audit`,
+`tail_audit`) resolve the external project-keyed audit path via
+`audit_db_path_for_project`, but `lattice-cli` audit and lancet status tests
+still seeded the legacy `.lattice/cep_audit.db` path. Seeded rows landed in the
+wrong database, causing 14 CLI test failures and split-brain audit visibility.
+
+**Fix:**
+
+- Replace legacy test helpers in `audit.rs` and `lancet.rs` with
+  `lancet_api::audit_db_path_for_project`.
+- Add `ScopedXdgStateHome` in `test_env.rs` to set isolated `XDG_STATE_HOME`
+  under the crate-wide env mutex for parallel-safe test execution.
+- Update module doc comments to reference the external audit path.
+- Align `tool_executor_uses_workspace_root_not_profile_package_dir` with Direct
+  Upper routing (workspace section, git baseline, `DeterministicWorkspace`
+  override).
+
+**Verification:**
+
+- `cargo test -p lattice-cli audit -- --nocapture` — passed
+- `cargo test -p lattice-cli` — 149 passed, 0 failed
+- `grep -rn '\.lattice.*cep_audit' crates/lattice-cli/src/commands/` — no matches
+
+**Changed files:** `crates/lattice-cli/src/commands/audit.rs`,
+`crates/lattice-cli/src/commands/lancet.rs`,
+`crates/lattice-cli/src/commands/test_env.rs`,
+`crates/lattice-cli/src/commands/run_tests.rs`,
+`crates/lattice-cli/Cargo.toml`, `Cargo.lock`.
+
+---
+
+## 34-09: Direct-mode release E2E gap closure (34-VERIFICATION Gap 3) — 2026-06-20
+
+Severity: HIGH (gap-closure Plan 34-09; EXEC-02, EXEC-03).
+
+**Problem:** `release_e2e_criterion_8` and `v1_4_command_artifact_dogfood` were
+`#[ignore]`d because they targeted envelope-centric declare → exec flows. Under
+Direct Upper routing (D-07), `session.envelope` is rejected and release gates
+lacked Direct-mode integration evidence.
+
+**Fix:**
+
+- Rewrote `release_e2e_criterion_8` for Direct mode: removed envelope dead
+  code and `#[ignore]`, chained `expected_hash` across sequential Upper edits,
+  kept external audit assertions via `audit_db_path_for_project_in`.
+- Rewrote `v1_4_command_artifact_dogfood` for Direct mode: exec-only LLM
+  script, `[lancet.workspace] allowed_write_paths`, `XDG_STATE_HOME` isolation,
+  external audit path, Direct metadata assertions, no Lower host artifact leak.
+- Fixed Direct `exec.command_run` project-root cwd preflight when adapter
+  reports normalized path `"."` but guard expects `""`.
+
+**Verification:**
+
+- `cargo test -p lattice-api --test release_e2e` — 1 passed, 0 ignored
+- `cargo test -p lattice-api --test v1_4_command_artifact_dogfood` — 1 passed, 0 ignored
+- `cargo test -p lattice-api --test phase34_upper_routing` — 6 passed
+- `grep '#\[ignore' crates/lattice-api/tests/release_e2e.rs crates/lattice-api/tests/v1_4_command_artifact_dogfood.rs` — no matches
+
+**Changed files:** `crates/lattice-api/tests/release_e2e.rs`,
+`crates/lattice-api/tests/v1_4_command_artifact_dogfood.rs`,
+`crates/lancet-native/src/handlers/command.rs`.

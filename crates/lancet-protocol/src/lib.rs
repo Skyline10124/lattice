@@ -38,9 +38,9 @@ pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriabili
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
-    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyActionRequired, PolicyAuditContext,
-    PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
-    SourcedCapability,
+    AuthorityMode, CapabilitySource, EffectiveEnvelopeSnapshot, PolicyActionRequired,
+    PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
+    PolicyInput, PolicyReasonCode, SourcedCapability,
 };
 pub use provenance::{
     CEP_TURN_ATTESTATION_PREDICATE_TYPE, InTotoStatement, InTotoSubjectDescriptor, ProvActivity,

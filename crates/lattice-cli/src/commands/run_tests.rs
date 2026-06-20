@@ -161,6 +161,7 @@ async fn run_integration_commits_existing_session() {
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
         test_persist_audit: None,
+        workspace_override: None,
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -192,6 +193,7 @@ async fn run_integration_missing_session_returns_not_found() {
         test_llm: Some(llm),
         test_project_root: Some(temp.path().to_string_lossy().to_string()),
         test_persist_audit: None,
+        workspace_override: None,
     };
 
     let result = lattice_api::run_turn(session_api, request).await;
@@ -207,12 +209,41 @@ async fn run_integration_missing_session_returns_not_found() {
 
 #[tokio::test]
 async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
+    use lattice_profile::WorkspaceSection;
+    use lattice_workspace::testing::DeterministicWorkspace;
+    use std::sync::Arc;
+
     let workspace = tempfile::tempdir().unwrap();
     let ws = workspace.path();
     std::env::set_current_dir(ws).unwrap();
 
     std::fs::create_dir_all(ws.join("src")).unwrap();
     std::fs::write(ws.join("src/lib.rs"), "fn main() {}").unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(ws)
+        .status()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args(["config", "user.email", "test@lattice.local"])
+        .current_dir(ws)
+        .status()
+        .expect("git user.email");
+    std::process::Command::new("git")
+        .args(["config", "user.name", "lattice-test"])
+        .current_dir(ws)
+        .status()
+        .expect("git user.name");
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(ws)
+        .status()
+        .expect("git add");
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "init"])
+        .current_dir(ws)
+        .status()
+        .expect("git commit");
 
     let profile_dir = ws.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -269,7 +300,10 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
                 },
                 llm: lattice_profile::LlmSection::default(),
                 lancet: lattice_profile::LancetSection::default(),
-                workspace: None,
+                workspace: Some(WorkspaceSection {
+                    image: Some("docker.io/library/alpine:3.19".into()),
+                    ..Default::default()
+                }),
             },
             system_prompt: String::new(),
         }),
@@ -277,6 +311,9 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         test_llm: Some(llm),
         test_project_root: Some(ws.to_string_lossy().to_string()),
         test_persist_audit: None,
+        workspace_override: Some(Arc::new(
+            DeterministicWorkspace::new().expect("deterministic workspace for upper-backed test"),
+        )),
     };
 
     let result = lattice_api::run_turn(session_api, request)

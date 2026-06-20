@@ -32,3 +32,4 @@ pub use turn::{
 
 #[doc(hidden)]
 pub use turn::CepExecutorAdapter;
+pub use turn::workspace_backend::WorkspaceExecutionBackend;

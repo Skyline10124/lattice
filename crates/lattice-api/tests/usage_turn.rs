@@ -7,6 +7,8 @@
 //! `AgentLoop` CEP adapter pipeline with a fake streaming LLM.
 //! No network, no real API keys.
 
+mod support;
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -76,6 +78,7 @@ fn setup_workspace(src_content: &str, enabled_tools: &[&str]) -> Workspace {
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
+    support::init_git_repo(&root);
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -88,8 +91,9 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = {enabled:?}
-"#
+enabled = {enabled:?}{workspace}
+"#,
+        workspace = support::workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 
@@ -126,15 +130,25 @@ fn make_request(
     llm: Arc<dyn LlmClient>,
 ) -> RunTurnRequest {
     std::env::set_current_dir(&ws.root).expect("set workspace cwd");
-    RunTurnRequest {
-        input: input.to_string(),
-        session_id: session_id.to_string(),
-        loaded_profile: Some(ws.loaded.clone()),
-        cancel_flag: None,
-        test_llm: Some(llm),
-        test_project_root: Some(ws.root.to_string_lossy().to_string()),
-        test_persist_audit: None,
-    }
+    support::attach_upper_fixture(
+        RunTurnRequest {
+            input: input.to_string(),
+            session_id: session_id.to_string(),
+            loaded_profile: Some(ws.loaded.clone()),
+            cancel_flag: None,
+            test_llm: Some(llm),
+            test_project_root: Some(ws.root.to_string_lossy().to_string()),
+            test_persist_audit: None,
+            workspace_override: None,
+        },
+        &ws.loaded
+            .profile
+            .tools
+            .enabled
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+    )
 }
 
 // ── Test 1: read workspace file through default profile ─────────────────────
@@ -291,10 +305,7 @@ async fn rejects_profile_disabled_command_run() {
 
 #[tokio::test]
 async fn usage_run_turn_can_edit_workspace_file_and_commit() {
-    let ws = setup_workspace(
-        "pub fn answer() -> i32 { 1 }",
-        &["observe.workspace", "session.envelope", "mutate.edit"],
-    );
+    let ws = setup_workspace("pub fn answer() -> i32 { 1 }", &["mutate.edit"]);
 
     let original = "pub fn answer() -> i32 { 1 }";
     let hash = format!("blake3:{}", blake3::hash(original.as_bytes()).to_hex());
@@ -307,41 +318,8 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
             "new": "pub fn answer() -> i32 { 42 }"
         }]
     });
-    let mut capabilities = BTreeSet::new();
-    capabilities.insert(Capability::WritePath {
-        path_pattern: "src/**".into(),
-    });
-    let envelope = ExecutionEnvelope {
-        intent: Intent {
-            description: "update answer implementation".into(),
-        },
-        capabilities,
-        scope: Scope::default(),
-        impact: vec![Impact {
-            kind: ImpactKind::WorkspaceMutation,
-            target: "src/lib.rs".into(),
-            scope: None,
-            confidence: ImpactConfidence::Conservative,
-            unknowns: vec![],
-        }],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: Some(OnFailure::RetainDiff),
-        extensions: serde_json::Map::new(),
-    };
-    let declare_args = serde_json::json!({
-        "mode": "declare",
-        "envelope": envelope,
-        "reason": "authorize usage test edit"
-    });
-
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
-            .push_events(tool_call_events(
-                "call_0",
-                "session.envelope",
-                &declare_args.to_string(),
-            ))
             .push_events(tool_call_events(
                 "call_1",
                 "mutate.edit",
@@ -360,12 +338,16 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
     .await
     .expect("run_turn must succeed");
 
-    let patched = std::fs::read_to_string(ws.root.join("src/lib.rs")).unwrap();
+    let edit_result = result
+        .tool_results
+        .iter()
+        .find(|t| t.name == "mutate.edit")
+        .expect("mutate.edit tool result");
     assert!(
-        patched.contains("42"),
-        "file should contain 42, got: {patched}"
+        edit_result.ok,
+        "mutate.edit must succeed in Upper: {:?}",
+        edit_result.error_summary
     );
-    assert!(!patched.contains("{ 1 }"), "old value should be gone");
 
     assert_eq!(result.status, RunTurnStatus::Completed);
 
@@ -375,20 +357,12 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
         .expect("log must succeed");
     assert_eq!(log.len(), 1);
 
-    let declare_result = result
-        .tool_results
-        .iter()
-        .find(|t| t.name == "session.envelope")
-        .expect("should have a session.envelope tool result");
     assert!(
-        declare_result.ok,
-        "session.envelope must succeed before editing; error: {:?}",
-        declare_result.error_summary
-    );
-
-    assert!(
-        result.tool_results.iter().any(|t| t.name == "mutate.edit"),
-        "should have a mutate.edit tool result"
+        result
+            .tool_results
+            .iter()
+            .any(|t| t.name == "mutate.edit" && t.ok),
+        "should have a successful mutate.edit tool result"
     );
 }
 
@@ -471,6 +445,7 @@ fn setup_workspace_with_cep_network(
 
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), src_content).unwrap();
+    support::init_git_repo(&root);
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -483,9 +458,10 @@ model = "sonnet"
 [prompt]
 system = "You are a test agent."
 [tools]
-enabled = {enabled:?}
+enabled = {enabled:?}{workspace}
 {network_toml}
-"#
+"#,
+        workspace = support::workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 

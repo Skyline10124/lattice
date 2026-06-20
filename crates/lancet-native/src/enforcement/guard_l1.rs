@@ -19,7 +19,7 @@ use crate::enforcement::preflight::{
 use crate::server::registry::HandlerContext;
 use lancet_protocol::CepError;
 use lancet_protocol::policy::{
-    PolicyAuditContext, PolicyBudgetSnapshot, PolicyDecision, PolicyInput,
+    PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyInput,
 };
 use serde::Serialize;
 
@@ -32,9 +32,15 @@ pub async fn build_policy_input(
     method: &str,
     params: &impl Serialize,
 ) -> Result<PolicyInput, CepError> {
-    let active_record = ctx.active_envelope.active_record().await;
-    let envelope_snapshot =
-        build_effective_envelope_snapshot(&ctx.base_envelope, active_record.as_ref());
+    let authority = match ctx.authority_mode {
+        lancet_protocol::policy::AuthorityMode::Envelope => {
+            let active_record = ctx.active_envelope.active_record().await;
+            let envelope_snapshot =
+                build_effective_envelope_snapshot(&ctx.base_envelope, active_record.as_ref());
+            PolicyAuthorityInput::Envelope { envelope_snapshot }
+        }
+        lancet_protocol::policy::AuthorityMode::Direct => PolicyAuthorityInput::Direct,
+    };
 
     let audit_snapshot = ctx.audit_context.read().await;
     let budget = ctx.cep_context.budget.snapshot();
@@ -57,7 +63,7 @@ pub async fn build_policy_input(
         params: serde_json::to_value(params).map_err(|e| {
             CepError::internal_error(format!("failed to serialize policy input params: {e}"))
         })?,
-        envelope_snapshot,
+        authority,
         audit_context,
     })
 }
@@ -89,15 +95,29 @@ pub async fn evaluate_and_enforce_policy(
         PolicyDecision::Allowed => {
             let mut authorized_region = None;
             if let Some(evidence) = &evaluation.evidence {
-                let matched_cap = evidence
-                    .capability_match
-                    .as_ref()
-                    .and_then(|cm| cm.matched.as_ref());
-                let region =
-                    lancet_authority::effect::region::AuthorizedEffectRegion::from_matched_capability(
-                        matched_cap,
-                        &ctx.cep_context.policy,
-                    );
+                let region = match ctx.authority_mode {
+                    lancet_protocol::policy::AuthorityMode::Envelope => {
+                        let matched_cap = evidence
+                            .capability_match
+                            .as_ref()
+                            .and_then(|cm| cm.matched.as_ref());
+                        lancet_authority::effect::region::AuthorizedEffectRegion::from_matched_capability(
+                            matched_cap,
+                            &ctx.cep_context.policy,
+                        )
+                    }
+                    lancet_protocol::policy::AuthorityMode::Direct => {
+                        let command_impact = evidence.command_classification.as_ref();
+                        let hook = ctx.default_policy_hook.as_ref().ok_or_else(|| {
+                            CepError::internal_error("missing default policy hook")
+                        })?;
+                        hook.config().workspace.authorized_region_for(
+                            method,
+                            command_impact,
+                            &ctx.cep_context.policy,
+                        )
+                    }
+                };
                 ctx.authorized_region.set(region);
                 authorized_region = ctx.authorized_region.get();
             }
@@ -109,6 +129,15 @@ pub async fn evaluate_and_enforce_policy(
         }
         PolicyDecision::Denied { reason_code, .. } => {
             ctx.record_durable_metadata(policy_metadata(method, &evaluation, None));
+            if ctx.authority_mode == lancet_protocol::policy::AuthorityMode::Direct {
+                use lancet_audit::RejectionRecord;
+                use lancet_audit::RejectionStage;
+                ctx.record_rejection(RejectionRecord {
+                    rejection_stage: RejectionStage::PolicyGate,
+                    denial_source: "cep_policy".into(),
+                });
+                ctx.record_routing_metadata();
+            }
             if let Some(metadata) = policy_denial_preflight_metadata(method, &input, &evaluation) {
                 ctx.record_durable_metadata(metadata);
             }
@@ -193,6 +222,10 @@ mod tests {
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )

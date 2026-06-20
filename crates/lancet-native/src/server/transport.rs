@@ -4,8 +4,9 @@
 //! Native CEP server lifecycle layered on dispatch transport.
 
 use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
+use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting};
 use crate::server::call_durable_metadata::CallDurableMetadata;
-use crate::server::registry::{HandlerContext, MethodRegistry};
+use crate::server::registry::{HandlerContext, MethodRegistry, build_routing_metadata};
 use lancet_audit::{
     AuditOutcome, AuditStart, CallAuditMetadata, CepAuditContext, CepAuditStore,
     SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED, impact_kind_for_method, impact_kind_label,
@@ -19,6 +20,7 @@ use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     CepError, CepErrorCode, CepErrorData, Retriability,
     envelope::{BaseExecutionEnvelope, CepMode},
+    policy::AuthorityMode,
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -43,6 +45,12 @@ pub struct ServerRunConfig {
     pub cep_mode: CepMode,
     /// Independent command physical-boundary runtime configuration.
     pub command_isolation: CommandIsolationRuntimeConfig,
+    /// How authority is sourced for this turn — never inferred from backend presence.
+    pub authority_mode: AuthorityMode,
+    /// Optional Upper execution routing; `None` for host-only or Envelope compatibility.
+    pub execution: Option<ExecutionRouting>,
+    /// Immutable Direct-mode verify configuration from runtime setup.
+    pub direct_verify: Option<DirectVerifyConfig>,
 }
 
 impl ServerRunConfig {
@@ -67,6 +75,9 @@ impl ServerRunConfig {
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
             command_isolation: CommandIsolationRuntimeConfig::default(),
+            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+            execution: None,
+            direct_verify: None,
         }
     }
 }
@@ -121,6 +132,9 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         default_policy_hook,
         cep_mode,
         command_isolation,
+        authority_mode,
+        execution,
+        direct_verify,
     } = config;
 
     let id = call.id();
@@ -143,9 +157,17 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     emit_cep_call_started(&events, &method, audit_start.audit_id, &call_audit_metadata).await;
 
     let durable_metadata = CallDurableMetadata::default();
+    let routing_invocation = crate::execution_backend::RoutingInvocationState::default();
     let effect_ledger = lancet_authority::effect::ledger::EffectLedger::new();
     let authorized_region_slot = lancet_authority::effect::ledger::AuthorizedRegionSlot::new();
     let turn_id = ctx_snapshot.turn_id.clone();
+
+    durable_metadata.record(build_routing_metadata(
+        authority_mode,
+        execution.as_ref(),
+        &routing_invocation,
+    ));
+
     let ctx = HandlerContext {
         call_id: id,
         events: events.clone(),
@@ -163,10 +185,20 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit: Arc::clone(&audit),
         cep_mode: cep_mode.clone(),
         command_isolation,
+        authority_mode,
+        execution: execution.clone(),
+        direct_verify: direct_verify.clone(),
+        routing_invocation: routing_invocation.clone(),
     };
 
     let dispatch_result = registry.dispatch(&method, params, ctx).await;
     let observed_effects = effect_ledger.snapshot();
+
+    durable_metadata.record(build_routing_metadata(
+        authority_mode,
+        execution.as_ref(),
+        &routing_invocation,
+    ));
 
     let final_result = apply_effect_check(
         &method,

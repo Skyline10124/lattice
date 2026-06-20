@@ -483,6 +483,7 @@ async fn run_inner(
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     };
 
     // D-A1: drive stream_turn; lattice-api owns Cep runtime construction

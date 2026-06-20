@@ -232,6 +232,7 @@ mod tests {
             network: cep_context.policy.network.clone(),
             budget: cep_context.policy.budget.clone(),
             observation: cep_context.policy.observation.clone(),
+            workspace: Default::default(),
             project_root: cep_context.policy.project_root.clone(),
             denied_effect_kinds: Default::default(),
         };
@@ -265,6 +266,10 @@ mod tests {
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )

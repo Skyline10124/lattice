@@ -69,6 +69,10 @@ fn test_ctx(
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+            execution: None,
+            direct_verify: None,
+            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         },
         event_rx,
         cancel_tx,
@@ -646,6 +650,10 @@ async fn test_ctx_with_artifact_caps(
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+            execution: None,
+            direct_verify: None,
+            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         },
         event_rx,
         cancel_tx,
@@ -1768,6 +1776,10 @@ async fn test_ctx_with_run_command(
             cep_mode: lancet_protocol::envelope::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+            execution: None,
+            direct_verify: None,
+            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         },
         event_rx,
         cancel_tx,
@@ -1920,6 +1932,11 @@ async fn workspace_mutation_with_envelope_succeeds() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2001,6 +2018,11 @@ async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2085,6 +2107,11 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
     let durable = ctx.durable_metadata.clone();
 
@@ -2186,6 +2213,11 @@ async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_req
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2303,6 +2335,11 @@ async fn workspace_mutation_timeout_checks_out_of_scope_changes() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2404,6 +2441,11 @@ async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2691,6 +2733,11 @@ async fn command_cancel_returns_execution_failed() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let registry = native_command_registry(root);
@@ -2796,6 +2843,11 @@ async fn workspace_mutation_inside_scope_succeeds() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -2881,6 +2933,11 @@ async fn workspace_mutation_verify_failure_records_backend_invoked() {
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     let params = RunParams {
@@ -3141,4 +3198,764 @@ async fn inline_shell_disabled_default_policy_still_hard_denies_carrier() {
         "unexpected message: {}",
         err.message
     );
+}
+
+mod phase34_direct_command {
+    use super::*;
+    use crate::execution_backend::{
+        DirectVerifyConfig, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+        ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts,
+        PathIntent, UpperContext, WorkspacePath,
+    };
+    use lancet_protocol::policy::AuthorityMode;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CommandSpyBackend {
+        resolve_calls: Mutex<Vec<(String, PathIntent)>>,
+        exec_calls: Mutex<Vec<ExecRequest>>,
+        resolve_result: Mutex<Option<Result<PathFacts, ExecutionBackendError>>>,
+        exec_result: Mutex<Option<Result<ExecOutput, ExecutionBackendError>>>,
+        changed_paths_result: Mutex<Option<Result<Vec<WorkspacePath>, ExecutionBackendError>>>,
+    }
+
+    impl CommandSpyBackend {
+        fn cwd_facts(path: &str) -> PathFacts {
+            let normalized_path = if path == "." {
+                String::new()
+            } else {
+                path.to_string()
+            };
+            PathFacts {
+                normalized_path,
+                exists: true,
+                kind: Some(crate::execution_backend::PathKind::Directory),
+                parent_exists: true,
+                parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace: true,
+            }
+        }
+    }
+
+    impl ExecutionBackend for CommandSpyBackend {
+        fn backend_name(&self) -> &str {
+            "command-spy"
+        }
+
+        fn resolve_path(
+            &self,
+            path: &WorkspacePath,
+            intent: PathIntent,
+        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+        {
+            self.resolve_calls
+                .lock()
+                .unwrap()
+                .push((path.as_str().to_string(), intent));
+            let result = self
+                .resolve_result
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Ok(Self::cwd_facts(path.as_str())));
+            Box::pin(async move { result })
+        }
+
+        fn read_file(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn write_file(
+            &self,
+            _path: &WorkspacePath,
+            _content: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn remove_file(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>> {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn list_dir(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_,
+            >,
+        > {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn grep(
+            &self,
+            _request: &GrepRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn find_files(
+            &self,
+            _request: &FindRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "not used".into(),
+                })
+            })
+        }
+
+        fn exec(
+            &self,
+            request: &ExecRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
+        {
+            self.exec_calls.lock().unwrap().push(request.clone());
+            let result = self
+                .exec_result
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(Ok(ExecOutput {
+                    exit_code: 0,
+                    stdout: "ok".into(),
+                    stderr: String::new(),
+                }));
+            Box::pin(async move { result })
+        }
+
+        fn changed_paths(
+            &self,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>,
+        > {
+            let result = self
+                .changed_paths_result
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(Ok(Vec::new()));
+            Box::pin(async move { result })
+        }
+    }
+
+    fn routing_with_spy() -> (ExecutionRouting, Arc<CommandSpyBackend>) {
+        let spy = Arc::new(CommandSpyBackend::default());
+        let routing = ExecutionRouting {
+            backend: spy.clone(),
+            upper: UpperContext {
+                execution_backend: "command-spy".into(),
+                upper_workspace_id: "upper-command".into(),
+            },
+        };
+        (routing, spy)
+    }
+
+    fn direct_policy_config(
+        root: &std::path::Path,
+    ) -> lancet_authority::policy::default::PolicyConfig {
+        let mut config = lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+            root.to_path_buf(),
+        );
+        config.workspace.allowed_write_paths.push("src/**".into());
+        config
+            .command
+            .allowed_diagnostic_commands
+            .push(vec!["echo".into()]);
+        config
+    }
+
+    fn direct_ctx_with_policy(root: &str, routing: ExecutionRouting) -> HandlerContext {
+        direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Off)
+    }
+
+    fn direct_ctx_with_policy_mode(
+        root: &str,
+        routing: ExecutionRouting,
+        cep_mode: lancet_protocol::envelope::CepMode,
+    ) -> HandlerContext {
+        let (mut ctx, _, _) = test_ctx(root);
+        ctx.authority_mode = AuthorityMode::Direct;
+        ctx.execution = Some(routing);
+        ctx.cep_mode = cep_mode;
+        let config = direct_policy_config(std::path::Path::new(root));
+        let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            config.clone(),
+        ));
+        ctx.policy_hook = hook.clone();
+        ctx.default_policy_hook = Some(hook);
+        ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
+        ctx
+    }
+
+    fn set_spy_changed_paths(
+        spy: &CommandSpyBackend,
+        paths: Vec<&str>,
+    ) {
+        let parsed: Vec<WorkspacePath> = paths
+            .into_iter()
+            .map(|p| WorkspacePath::parse(p).unwrap())
+            .collect();
+        *spy.changed_paths_result.lock().unwrap() = Some(Ok(parsed));
+    }
+
+    async fn dispatch_direct(
+        registry: &MethodRegistry,
+        ctx: HandlerContext,
+        params: RunParams,
+    ) -> Result<serde_json::Value, CepError> {
+        registry
+            .dispatch(Run::NAME, serde_json::to_value(&params).unwrap(), ctx)
+            .await
+    }
+
+    fn routing_metadata(
+        durable: &crate::server::call_durable_metadata::CallDurableMetadata,
+    ) -> serde_json::Value {
+        serde_json::from_str(&durable.take_json().expect("metadata json")).unwrap()
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_routes_backend_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let result = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "upper".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::CommandExecution),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["adapter_preflight_invoked"], true);
+        assert_eq!(meta["backend_invoked"], true);
+        assert_eq!(meta["authority_mode"], "direct");
+        assert!(meta.get("rejection_stage").is_none());
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_preserves_argv() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy(root, routing);
+        let token = "spaces and; metacharacters".to_string();
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), token.clone()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::CommandExecution),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spy.exec_calls.lock().unwrap()[0].argv[1], token);
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_policy_denial_precedes_adapter() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["sh".into(), "-c".into(), "echo bad".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::CommandExecution),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(spy.resolve_calls.lock().unwrap().is_empty());
+        assert!(spy.exec_calls.lock().unwrap().is_empty());
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["adapter_preflight_invoked"], false);
+        assert_eq!(meta["backend_invoked"], false);
+        assert_eq!(meta["rejection_stage"], "policy_gate");
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_cwd_denial_preflight_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        *spy.resolve_result.lock().unwrap() = Some(Ok(PathFacts {
+            normalized_path: ".git".into(),
+            exists: true,
+            kind: Some(crate::execution_backend::PathKind::Directory),
+            parent_exists: true,
+            parent_kind: Some(crate::execution_backend::PathKind::Directory),
+            byte_size: None,
+            canonical_under_workspace: true,
+        }));
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "cwd-deny".into()],
+                cwd: Some(".git".into()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::CommandExecution),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(spy.exec_calls.lock().unwrap().is_empty());
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["adapter_preflight_invoked"], true);
+        assert_eq!(meta["backend_invoked"], false);
+        assert_eq!(meta["rejection_stage"], "adapter_preflight");
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_backend_failure_no_fallback() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let sentinel = dir.path().join("lower-sentinel.txt");
+        std::fs::write(&sentinel, "unchanged").unwrap();
+        let before = std::fs::metadata(&sentinel).unwrap().modified().unwrap();
+
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        *spy.exec_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
+            message: "adapter blew up".into(),
+        }));
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "fail".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::CommandExecution),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        let after = std::fs::metadata(&sentinel).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["adapter_preflight_invoked"], true);
+        assert_eq!(meta["backend_invoked"], true);
+        assert_eq!(meta["rejection_stage"], "backend_execution");
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_root_cwd_passes_write_scope_preflight() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy(root, routing);
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "root-cwd".into()],
+                cwd: Some(".".into()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_cwd_outside_write_region_denied() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "outside-scope".into()],
+                cwd: Some("tests".into()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::GuardDenied);
+        assert!(spy.exec_calls.lock().unwrap().is_empty());
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["adapter_preflight_invoked"], true);
+        assert_eq!(meta["backend_invoked"], false);
+        assert_eq!(meta["rejection_stage"], "adapter_preflight");
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_verify_root_cwd_passes_write_scope_preflight() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+
+        let mut config = direct_policy_config(std::path::Path::new(root));
+        let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            config.clone(),
+        ));
+        let mut ctx = direct_ctx_with_policy(root, routing);
+        ctx.policy_hook = hook.clone();
+        ctx.default_policy_hook = Some(hook);
+        ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
+        ctx.direct_verify = Some(DirectVerifyConfig {
+            argv: vec!["echo".into(), "verify-root".into()],
+            cwd: WorkspacePath::project_root(),
+            timeout_ms: None,
+            expected_exit_code: 0,
+        });
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate-root".into()],
+                cwd: Some(".".into()),
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        let exec_calls = spy.exec_calls.lock().unwrap();
+        assert_eq!(exec_calls.len(), 2);
+        assert_eq!(exec_calls[0].argv, vec!["echo", "mutate-root"]);
+        assert_eq!(exec_calls[1].argv, vec!["echo", "verify-root"]);
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_verify_uses_same_backend() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+
+        let mut config = direct_policy_config(std::path::Path::new(root));
+        let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+            config.clone(),
+        ));
+        let mut ctx = direct_ctx_with_policy(root, routing);
+        ctx.policy_hook = hook.clone();
+        ctx.default_policy_hook = Some(hook);
+        ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
+        ctx.direct_verify = Some(DirectVerifyConfig {
+            argv: vec!["echo".into(), "verify-ok".into()],
+            cwd: WorkspacePath::project_root(),
+            timeout_ms: None,
+            expected_exit_code: 0,
+        });
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        let exec_calls = spy.exec_calls.lock().unwrap();
+        assert_eq!(exec_calls.len(), 2);
+        assert_eq!(exec_calls[0].argv, vec!["echo", "mutate"]);
+        assert_eq!(exec_calls[1].argv, vec!["echo", "verify-ok"]);
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_out_of_scope_denied() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        set_spy_changed_paths(&spy, vec!["tests/out.rs"]);
+        let mut ctx = direct_ctx_with_policy_mode(
+            root,
+            routing,
+            lancet_protocol::envelope::CepMode::Enforce,
+        );
+        ctx.direct_verify = Some(DirectVerifyConfig {
+            argv: vec!["echo".into(), "verify-should-not-run".into()],
+            cwd: WorkspacePath::project_root(),
+            timeout_ms: None,
+            expected_exit_code: 0,
+        });
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate-outside".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ReplanRequired);
+        assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
+        let meta = routing_metadata(&durable);
+        assert!(meta["out_of_scope_paths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("tests/out.rs")));
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_in_scope_proceeds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
+        let mut ctx = direct_ctx_with_policy_mode(
+            root,
+            routing,
+            lancet_protocol::envelope::CepMode::Enforce,
+        );
+        ctx.direct_verify = Some(DirectVerifyConfig {
+            argv: vec!["echo".into(), "verify-ok".into()],
+            cwd: WorkspacePath::project_root(),
+            timeout_ms: None,
+            expected_exit_code: 0,
+        });
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate-in-scope".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spy.exec_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_enforce_per_path_effects_pass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
+        let ctx = direct_ctx_with_policy_mode(
+            root,
+            routing,
+            lancet_protocol::envelope::CepMode::Enforce,
+        );
+        let ledger = ctx.effect_ledger.clone();
+        let authorized = ctx.authorized_region.clone();
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate-effects".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        let region = authorized.get().expect("authorized region after dispatch");
+        let observed = ledger.snapshot();
+        let mutation_effects: Vec<_> = observed
+            .iter()
+            .filter(|e| e.kind == ImpactKind::WorkspaceMutation)
+            .collect();
+        assert_eq!(mutation_effects.len(), 1);
+        assert!(matches!(
+            &mutation_effects[0].scope,
+            lancet_authority::effect::ledger::ObservedScope::Path(path)
+                if path.to_string_lossy() == "src/lib.rs"
+        ));
+        for effect in &observed {
+            assert!(region.contains(effect), "effect must be authorized: {effect:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_no_changed_paths_records_command_only() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, _spy) = routing_with_spy();
+        let ctx = direct_ctx_with_policy_mode(
+            root,
+            routing,
+            lancet_protocol::envelope::CepMode::Enforce,
+        );
+        let ledger = ctx.effect_ledger.clone();
+
+        dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "no-diff".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap();
+
+        let observed = ledger.snapshot();
+        assert!(
+            observed
+                .iter()
+                .any(|e| e.kind == ImpactKind::CommandExecution),
+            "must record CommandExecution"
+        );
+        assert!(
+            !observed
+                .iter()
+                .any(|e| e.kind == ImpactKind::WorkspaceMutation),
+            "empty changed_paths must not record WorkspaceMutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase34_direct_command_changed_paths_error_denies() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let registry = native_command_registry(root);
+        let (routing, spy) = routing_with_spy();
+        *spy.changed_paths_result.lock().unwrap() = Some(Err(
+            ExecutionBackendError::ExecutionFailed {
+                message: "git status failed".into(),
+            },
+        ));
+        let ctx = direct_ctx_with_policy(root, routing);
+        let durable = ctx.durable_metadata.clone();
+
+        let err = dispatch_direct(
+            &registry,
+            ctx,
+            RunParams {
+                argv: vec!["echo".into(), "mutate-fail-diff".into()],
+                cwd: None,
+                env: BTreeMap::new(),
+                timeout_ms: None,
+                declared_impact: Some(ImpactKind::WorkspaceMutation),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+        let meta = routing_metadata(&durable);
+        assert_eq!(meta["rejection_stage"], "backend_execution");
+    }
 }

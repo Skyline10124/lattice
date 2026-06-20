@@ -130,6 +130,9 @@ impl LancetRuntime {
             audit,
             model_id,
             runtime_version,
+            authority_mode,
+            execution,
+            direct_verify,
         } = config;
 
         let project_root_str = project_root
@@ -144,7 +147,7 @@ impl LancetRuntime {
             .and_then(|p| p.to_str().map(str::to_owned))
             .unwrap_or(project_root_str);
 
-        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
+        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools, authority_mode)?;
         let tool_definitions = tool_exposure.definitions().to_vec();
 
         let cep_policy = cep_policy_from_policy_config(&policy);
@@ -156,10 +159,19 @@ impl LancetRuntime {
                 CepAuditStore::in_memory()
                     .map_err(|err| LancetError::Internal(format!("audit store setup: {err}")))?,
             ),
-            AuditBacking::File(path) => Arc::new(
-                CepAuditStore::open(&path)
-                    .map_err(|err| LancetError::Internal(format!("audit store setup: {err}")))?,
-            ),
+            AuditBacking::File(path) => {
+                let store = CepAuditStore::open(&path)
+                    .map_err(|err| LancetError::Internal(format!("audit store setup: {err}")))?;
+                let legacy_path = project_root.join(".lattice").join("cep_audit.db");
+                if legacy_path.exists() {
+                    store
+                        .import_legacy_read_only_if_empty(&legacy_path)
+                        .map_err(|err| {
+                            LancetError::Internal(format!("legacy audit import: {err}"))
+                        })?;
+                }
+                Arc::new(store)
+            }
         };
 
         let audit_context = Arc::new(RwLock::new(CepAuditContext {
@@ -181,6 +193,9 @@ impl LancetRuntime {
             default_policy_hook: Some(default_hook),
             cep_mode,
             command_isolation,
+            authority_mode,
+            execution,
+            direct_verify,
         };
 
         let (client, lifecycle) = LancetServer::spawn(server_config, DEFAULT_CHANNEL_CAPACITY)?;
@@ -253,7 +268,10 @@ pub fn base_observation_envelope(
     enabled_tools: &[String],
     policy: &CepPolicyConfig,
 ) -> Result<BaseExecutionEnvelope, LancetError> {
-    let exposure = resolve_catalog_tool_exposure(enabled_tools)?;
+    let exposure = resolve_catalog_tool_exposure(
+        enabled_tools,
+        lancet_protocol::policy::AuthorityMode::Envelope,
+    )?;
     base_observation_envelope_from_exposure(project_root, &exposure, policy)
 }
 
@@ -270,8 +288,12 @@ fn base_observation_envelope_from_exposure(
         .map_err(|err| LancetError::Internal(format!("invalid base envelope: {err}")))
 }
 
-fn resolve_catalog_tool_exposure(enabled: &[String]) -> Result<ToolExposure, LancetError> {
-    ToolExposure::from_catalog_enabled(enabled).map_err(map_tool_exposure_err)
+fn resolve_catalog_tool_exposure(
+    enabled: &[String],
+    mode: lancet_protocol::policy::AuthorityMode,
+) -> Result<ToolExposure, LancetError> {
+    ToolExposure::from_catalog_enabled_for_authority_mode(enabled, mode)
+        .map_err(map_tool_exposure_err)
 }
 
 fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
@@ -287,6 +309,17 @@ mod tests {
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::{AuditObserve, Fetch, ObserveWorkspace, TodoWrite};
     use lancet_protocol::Capability;
+
+    #[test]
+    fn runtime_config_authority_mode_defaults_to_envelope() {
+        let config = LancetRuntimeConfig::new(".");
+        assert_eq!(
+            config.authority_mode,
+            lancet_protocol::policy::AuthorityMode::Envelope
+        );
+        assert!(config.execution.is_none());
+        assert!(config.direct_verify.is_none());
+    }
 
     #[test]
     fn base_envelope_uses_catalog_descriptor_requirements() {

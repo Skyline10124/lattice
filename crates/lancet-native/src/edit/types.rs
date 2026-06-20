@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+
+use crate::execution_backend::WorkspacePath;
 
 use super::commit_baseline::{CommitBaselineReport, HunkAnchorEvidence};
 
@@ -203,7 +204,7 @@ pub struct ApplyPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedFileChange {
     pub path: String,
-    pub target_path: PathBuf,
+    pub target_path: WorkspacePath,
     pub operation_index: usize,
     pub operation: FileOperationKind,
     pub bytes_before: Option<Vec<u8>>,

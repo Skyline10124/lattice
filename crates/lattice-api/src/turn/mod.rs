@@ -16,6 +16,8 @@ mod live;
 mod llm;
 mod mapping;
 mod types;
+mod upper;
+pub mod workspace_backend;
 
 #[cfg(test)]
 mod test_support;

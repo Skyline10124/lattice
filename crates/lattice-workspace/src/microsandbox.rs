@@ -37,8 +37,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use microsandbox::{NetworkPolicy, Sandbox, Snapshot, SnapshotDestination};
 
 use crate::{
-    Backend, CredentialSpec, EgressPolicy, ExecOutput, GitStatus, NetPlan, Result, UpperHandle,
-    UpperSpec, Workspace, WorkspaceError, plan_egress, validate_baseline_oid,
+    Backend, CredentialSpec, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest,
+    GitStatus, GrepMatch, GrepRequest, MAX_WORKSPACE_WRITE_BYTES, NetPlan, PathFacts, PathIntent,
+    PathKind, Result, UpperHandle, UpperSpec, Workspace, WorkspaceError, WorkspacePath,
+    plan_egress, validate_baseline_oid,
 };
 
 /// Fixed shell command that installs `git` inside a Debian/Ubuntu-based Upper.
@@ -499,6 +501,346 @@ impl MicrosandboxWorkspace {
         }
         Ok(())
     }
+
+    fn guest_relative(path: &WorkspacePath, allow_root: bool) -> Result<&str> {
+        if path.is_project_root() {
+            if allow_root {
+                Ok(".")
+            } else {
+                Err(WorkspaceError::InvalidPath(
+                    "project root sentinel is not valid for file intents".into(),
+                ))
+            }
+        } else {
+            Ok(path.as_str())
+        }
+    }
+
+    async fn clone_sandbox(&self, handle: &UpperHandle) -> Result<Sandbox> {
+        let sandboxes = self.sandboxes.read().unwrap_or_else(|e| e.into_inner());
+        sandboxes
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| WorkspaceError::Sdk(format!("no live sandbox for id={}", handle.id)))
+    }
+
+    async fn exec_in_workspace(
+        &self,
+        sandbox: &Sandbox,
+        prog: &str,
+        args: &[&str],
+    ) -> Result<ExecOutput> {
+        let out = sandbox
+            .exec_with(prog, |e| e.args(args.iter().copied()).cwd("/workspace"))
+            .await
+            .map_err(Self::sdk_err)?;
+        Ok(ExecOutput {
+            exit_code: out.status().code,
+            stdout: out
+                .stdout()
+                .map_err(|e| WorkspaceError::Sdk(format!("stdout decode: {e}")))?,
+            stderr: out
+                .stderr()
+                .map_err(|e| WorkspaceError::Sdk(format!("stderr decode: {e}")))?,
+        })
+    }
+
+    async fn resolve_path_guest(
+        &self,
+        sandbox: &Sandbox,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts> {
+        let rel = Self::guest_relative(
+            path,
+            matches!(intent, PathIntent::ListDirectory | PathIntent::ExecCwd),
+        )?;
+        let out = self
+            .exec_in_workspace(
+                sandbox,
+                "sh",
+                &[
+                    "-c",
+                    r#"p="$1"; if [ "$p" = "." ]; then target="/workspace"; else target="/workspace/$p"; fi; if [ ! -e "$target" ]; then echo missing; exit 0; fi; if [ -L "$target" ]; then echo symlink; elif [ -d "$target" ]; then echo directory; elif [ -f "$target" ]; then echo file; else echo other; fi"#,
+                    "sh",
+                    rel,
+                ],
+            )
+            .await?;
+        let line = out.stdout.trim();
+        let (exists, kind) = match line {
+            "missing" => (false, None),
+            "file" => (true, Some(PathKind::File)),
+            "directory" => (true, Some(PathKind::Directory)),
+            "symlink" => (true, Some(PathKind::Symlink)),
+            _ => (true, Some(PathKind::File)),
+        };
+        let byte_size = if kind == Some(PathKind::File) {
+            let stat = self
+                .exec_in_workspace(
+                    sandbox,
+                    "sh",
+                    &[
+                        "-c",
+                        r#"p="$1"; if [ "$p" = "." ]; then target="/workspace"; else target="/workspace/$p"; fi; wc -c < "$target""#,
+                        "sh",
+                        rel,
+                    ],
+                )
+                .await?;
+            stat.stdout.trim().parse::<u64>().ok()
+        } else {
+            None
+        };
+        let parent_rel = if path.is_project_root() {
+            ".".to_string()
+        } else {
+            crate::paths::parent_relative(path.as_str())
+        };
+        let parent_path = WorkspacePath::parse(&parent_rel)
+            .map_err(|e| WorkspaceError::InvalidPath(format!("invalid parent path: {e}")))?;
+        let parent_facts = if parent_path.is_project_root() && path.is_project_root() {
+            PathFacts {
+                normalized_path: ".".to_string(),
+                exists: true,
+                kind: kind.or(Some(PathKind::Directory)),
+                parent_exists: true,
+                parent_kind: Some(PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace: true,
+            }
+        } else {
+            Box::pin(self.resolve_path_guest(sandbox, &parent_path, PathIntent::ListDirectory))
+                .await?
+        };
+        Ok(PathFacts {
+            normalized_path: path.as_str().to_string(),
+            exists,
+            kind,
+            parent_exists: parent_facts.exists,
+            parent_kind: parent_facts.kind,
+            byte_size,
+            canonical_under_workspace: exists || path.is_project_root(),
+        })
+    }
+
+    async fn read_file_guest(&self, sandbox: &Sandbox, path: &WorkspacePath) -> Result<Vec<u8>> {
+        let rel = Self::guest_relative(path, false)?;
+        let out = self.exec_in_workspace(sandbox, "cat", &[rel]).await?;
+        if out.exit_code != 0 {
+            return Err(WorkspaceError::NotFound {
+                path: path.as_str().to_string(),
+            });
+        }
+        Ok(out.stdout.into_bytes())
+    }
+
+    async fn write_file_guest(
+        &self,
+        sandbox: &Sandbox,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<()> {
+        let rel = Self::guest_relative(path, false)?;
+        if content.len() > MAX_WORKSPACE_WRITE_BYTES {
+            return Err(WorkspaceError::ContentTooLarge {
+                actual: content.len(),
+                max: MAX_WORKSPACE_WRITE_BYTES,
+            });
+        }
+        let b64 = STANDARD.encode(content);
+        if let Some(parent) = std::path::Path::new(rel).parent().and_then(|p| p.to_str()) {
+            if !parent.is_empty() {
+                sandbox
+                    .exec_with("mkdir", |e| e.args(["-p", parent]).cwd("/workspace"))
+                    .await
+                    .map_err(Self::sdk_err)?;
+            }
+        }
+        sandbox
+            .exec_with("sh", |e| {
+                e.args([
+                    "-c",
+                    "printf '%s' \"$1\" | base64 -d > \"$2\"",
+                    "sh",
+                    &b64,
+                    rel,
+                ])
+                .cwd("/workspace")
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+        Ok(())
+    }
+
+    async fn remove_file_guest(&self, sandbox: &Sandbox, path: &WorkspacePath) -> Result<()> {
+        let rel = Self::guest_relative(path, false)?;
+        let out = self.exec_in_workspace(sandbox, "rm", &["-f", rel]).await?;
+        if out.exit_code != 0 {
+            return Err(WorkspaceError::NotFound {
+                path: path.as_str().to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn list_dir_guest(
+        &self,
+        sandbox: &Sandbox,
+        path: &WorkspacePath,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let rel = Self::guest_relative(path, true)?;
+        let out = self
+            .exec_in_workspace(
+                sandbox,
+                "sh",
+                &[
+                    "-c",
+                    r#"p="$1"; if [ "$p" = "." ]; then target="/workspace"; else target="/workspace/$p"; fi; for entry in "$target"/* "$target"/.[!.]*; do [ -e "$entry" ] || continue; name="${entry##*/}"; if [ -L "$entry" ]; then echo "symlink $name"; elif [ -d "$entry" ]; then echo "directory $name"; elif [ -f "$entry" ]; then echo "file $name"; fi; done"#,
+                    "sh",
+                    rel,
+                ],
+            )
+            .await?;
+        if out.exit_code != 0 {
+            return Err(WorkspaceError::WrongKind {
+                path: path.as_str().to_string(),
+                expected: "directory".into(),
+            });
+        }
+        let mut entries = Vec::new();
+        for line in out.stdout.lines() {
+            let mut parts = line.splitn(2, ' ');
+            let kind = match parts.next() {
+                Some("file") => PathKind::File,
+                Some("directory") => PathKind::Directory,
+                Some("symlink") => PathKind::Symlink,
+                _ => continue,
+            };
+            if let Some(name) = parts.next() {
+                entries.push(DirectoryEntry {
+                    name: name.to_string(),
+                    kind,
+                });
+            }
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    async fn grep_guest(&self, sandbox: &Sandbox, request: &GrepRequest) -> Result<Vec<GrepMatch>> {
+        let rel = Self::guest_relative(&request.path, true)?;
+        let out = self
+            .exec_in_workspace(
+                sandbox,
+                "sh",
+                &[
+                    "-c",
+                    r#"pat="$1"; root="$2"; max="$3"; grep -R -n -E "$pat" "$root" 2>/dev/null | head -n "$max""#,
+                    "sh",
+                    &request.pattern,
+                    rel,
+                    &request.max_results.to_string(),
+                ],
+            )
+            .await?;
+        let mut matches = Vec::new();
+        for line in out.stdout.lines() {
+            if matches.len() >= request.max_results {
+                break;
+            }
+            let Some((path_part, rest)) = line.split_once(':') else {
+                continue;
+            };
+            let Some((line_no, content)) = rest.split_once(':') else {
+                continue;
+            };
+            let normalized = path_part.strip_prefix("./").unwrap_or(path_part);
+            let normalized = normalized.strip_prefix("/workspace/").unwrap_or(normalized);
+            let wp = if normalized == "/workspace" || normalized.is_empty() {
+                WorkspacePath::project_root()
+            } else {
+                WorkspacePath::parse(normalized)
+                    .map_err(|e| WorkspaceError::InvalidPath(format!("grep result path: {e}")))?
+            };
+            matches.push(GrepMatch {
+                path: wp,
+                line_number: line_no.parse::<u64>().unwrap_or(0),
+                line: content.to_string(),
+            });
+        }
+        Ok(matches)
+    }
+
+    async fn find_files_guest(
+        &self,
+        sandbox: &Sandbox,
+        request: &FindRequest,
+    ) -> Result<Vec<WorkspacePath>> {
+        let rel = Self::guest_relative(&request.path, true)?;
+        let out = self
+            .exec_in_workspace(
+                sandbox,
+                "sh",
+                &[
+                    "-c",
+                    r#"root="$1"; pat="$2"; max="$3"; find "$root" -name "$pat" 2>/dev/null | head -n "$max""#,
+                    "sh",
+                    rel,
+                    &request.pattern,
+                    &request.max_results.to_string(),
+                ],
+            )
+            .await?;
+        let mut found = Vec::new();
+        for line in out.stdout.lines() {
+            if found.len() >= request.max_results {
+                break;
+            }
+            let normalized = line.strip_prefix("./").unwrap_or(line);
+            let normalized = normalized.strip_prefix("/workspace/").unwrap_or(normalized);
+            if normalized.is_empty() || normalized == "/workspace" {
+                found.push(WorkspacePath::project_root());
+            } else {
+                found.push(
+                    WorkspacePath::parse(normalized).map_err(|e| {
+                        WorkspaceError::InvalidPath(format!("find result path: {e}"))
+                    })?,
+                );
+            }
+        }
+        Ok(found)
+    }
+
+    async fn exec_guest(&self, sandbox: &Sandbox, request: &ExecRequest) -> Result<ExecOutput> {
+        let cwd = if request.cwd.is_project_root() {
+            "/workspace".to_string()
+        } else {
+            format!("/workspace/{}", request.cwd.as_str())
+        };
+        let args: Vec<&str> = request.argv.iter().map(String::as_str).collect();
+        let prog = args[0];
+        let prog_args = &args[1..];
+        let out = sandbox
+            .exec_with(prog, |e| {
+                let mut builder = e.args(prog_args.iter().copied()).cwd(&cwd);
+                for (k, v) in &request.env {
+                    builder = builder.env(k, v);
+                }
+                builder
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+        Ok(ExecOutput {
+            exit_code: out.status().code,
+            stdout: out
+                .stdout()
+                .map_err(|e| WorkspaceError::Sdk(format!("stdout decode: {e}")))?,
+            stderr: out
+                .stderr()
+                .map_err(|e| WorkspaceError::Sdk(format!("stderr decode: {e}")))?,
+        })
+    }
 }
 
 #[async_trait]
@@ -706,6 +1048,70 @@ impl Workspace for MicrosandboxWorkspace {
             id: new_name.to_string(),
             backend: Backend::Microsandbox,
         })
+    }
+
+    async fn resolve_path(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.resolve_path_guest(&sandbox, path, intent).await
+    }
+
+    async fn read_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<Vec<u8>> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.read_file_guest(&sandbox, path).await
+    }
+
+    async fn write_file(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<()> {
+        if content.len() > MAX_WORKSPACE_WRITE_BYTES {
+            return Err(WorkspaceError::ContentTooLarge {
+                actual: content.len(),
+                max: MAX_WORKSPACE_WRITE_BYTES,
+            });
+        }
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.write_file_guest(&sandbox, path, content).await
+    }
+
+    async fn remove_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<()> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.remove_file_guest(&sandbox, path).await
+    }
+
+    async fn list_dir(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.list_dir_guest(&sandbox, path).await
+    }
+
+    async fn grep(&self, handle: &UpperHandle, request: &GrepRequest) -> Result<Vec<GrepMatch>> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.grep_guest(&sandbox, request).await
+    }
+
+    async fn find_files(
+        &self,
+        handle: &UpperHandle,
+        request: &FindRequest,
+    ) -> Result<Vec<WorkspacePath>> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.find_files_guest(&sandbox, request).await
+    }
+
+    async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {
+        let sandbox = self.clone_sandbox(handle).await?;
+        self.exec_guest(&sandbox, request).await
     }
 
     /// Destroy an Upper. Idempotent.

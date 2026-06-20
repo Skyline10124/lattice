@@ -18,6 +18,7 @@ use lancet_protocol::provenance::ProvGraphFragment;
 use serde_json::Value;
 use tokio::sync::RwLock;
 
+use crate::config::audit_db_path_for_project;
 use crate::error::{LancetError, LancetResult};
 use crate::runtime::LancetServer;
 
@@ -184,10 +185,6 @@ pub async fn tail_audit(request: AuditRequest) -> LancetResult<AuditTailOutput> 
     .await
 }
 
-fn audit_db_path(project_root: &Path) -> PathBuf {
-    project_root.join(".lattice").join("cep_audit.db")
-}
-
 async fn with_audit_client<T, F, Fut>(
     project_root: &Path,
     session_id: &str,
@@ -197,7 +194,8 @@ where
     F: FnOnce(CepClient) -> Fut,
     Fut: std::future::Future<Output = LancetResult<T>>,
 {
-    let audit_path = audit_db_path(project_root);
+    let audit_path = audit_db_path_for_project(project_root)
+        .map_err(|err| LancetError::Config(format!("resolve external audit path: {err}")))?;
     if !audit_path.exists() {
         return Err(LancetError::Config(format!(
             "audit database not found at {}; run an agent turn in this project first",

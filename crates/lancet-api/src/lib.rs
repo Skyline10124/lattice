@@ -49,7 +49,10 @@ pub use audit::{
     AUDIT_TAIL_MAX_BATCHES, AuditQueryOutput, AuditRequest, AuditTailOutput, query_audit,
     tail_audit,
 };
-pub use config::{AuditBacking, LancetRuntimeConfig};
+pub use config::{
+    AuditBacking, ExternalAuditPathError, LancetRuntimeConfig, audit_db_path_for_project,
+    audit_db_path_for_project_in, audit_state_root, project_storage_key,
+};
 pub use doctor::{
     LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
     run_envelope_declare_smoke_for_project_root,
@@ -73,10 +76,11 @@ pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
 pub use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 pub use lancet_native::{
-    AuditQueryFilters, CepAuditContext, CepAuditStore, MethodRegistry, MissingRequiredBoundary,
-    ServerRunConfig, register_production_method_registry,
+    AuditQueryFilters, CepAuditContext, CepAuditStore, DirectVerifyConfig, ExecutionRouting,
+    MethodRegistry, MissingRequiredBoundary, ServerRunConfig, register_production_method_registry,
 };
 pub use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
+pub use lancet_protocol::policy::AuthorityMode;
 pub use lancet_protocol::{
     BoundaryDimension, BoundaryPrimitive, CepError, EffectiveBoundaryStatus, HostProbeEntry,
     HostProbeReport, HostProbeStatus,

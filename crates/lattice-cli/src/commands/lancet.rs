@@ -3,8 +3,9 @@
 
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
-//! - `lancet status`: reads `.lattice/cep_audit.db` directly (no CEP server) and shows
-//!   the latest session.envelope fields, recent calls, and last guard verdict.
+//! - `lancet status`: reads the external project-keyed audit store via
+//!   `audit_db_path_for_project` (no CEP server) and shows the latest
+//!   session.envelope fields, recent calls, and last guard verdict.
 //! - `lancet doctor`: catalog count, transport smoke, invariant-card parse, and an
 //!   isolated explicit `session.envelope` declaration smoke.
 
@@ -441,6 +442,7 @@ fn doctor_json_value(output: &LancetDoctorOutput) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_env::ScopedXdgStateHome;
     use clap::Parser;
     use lancet_native::audit::{AuditOutcome, CallAuditMetadata};
     use lancet_native::{CepAuditContext, CepAuditStore};
@@ -508,7 +510,8 @@ mod tests {
     // -- Status tests --
 
     fn seed_audit_db(dir: &Path) {
-        let db_path = dir.join(".lattice").join("cep_audit.db");
+        let db_path =
+            lancet_api::audit_db_path_for_project(dir).expect("resolve external audit path");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let audit = CepAuditStore::open(&db_path).expect("open audit db");
         let ctx = CepAuditContext {
@@ -559,6 +562,7 @@ mod tests {
 
     #[test]
     fn cep_status_missing_db_returns_empty_state() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         let output = collect_status(dir.path()).unwrap();
         assert!(output.no_active_envelope_observed);
@@ -569,6 +573,7 @@ mod tests {
 
     #[test]
     fn cep_status_seeded_audit_json() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_audit_db(dir.path());
 
@@ -695,7 +700,8 @@ mod tests {
     }
 
     fn seed_command_boundary_audit_db(dir: &Path, method: &str, metadata_json: Option<&str>) {
-        let db_path = dir.join(".lattice").join("cep_audit.db");
+        let db_path =
+            lancet_api::audit_db_path_for_project(dir).expect("resolve external audit path");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let audit = CepAuditStore::open(&db_path).expect("open audit db");
         let ctx = CepAuditContext {
@@ -754,6 +760,7 @@ mod tests {
 
     #[test]
     fn lancet_status_json_includes_host_probe_and_command_effective_boundary() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -822,6 +829,7 @@ mod tests {
 
     #[test]
     fn lancet_status_text_distinguishes_probe_from_effective_boundary() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -853,6 +861,7 @@ mod tests {
 
     #[test]
     fn observed_non_claim() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -947,6 +956,7 @@ mod tests {
 
     #[test]
     fn lancet_status_ignores_effective_boundary_on_non_command_rows() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -966,6 +976,7 @@ mod tests {
 
     #[test]
     fn lancet_status_reports_malformed_command_boundary_metadata_as_unknown() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -994,6 +1005,7 @@ mod tests {
 
     #[test]
     fn lancet_status_rejects_network_credit_from_non_netns_source() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -1043,6 +1055,7 @@ mod tests {
 
     #[test]
     fn lancet_status_preserves_phase29_applied_boundary_diagnostics() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -1147,6 +1160,7 @@ mod tests {
 
     #[test]
     fn lancet_status_preserves_all_landlock_status_diagnostics() {
+        let _xdg = ScopedXdgStateHome::new();
         for (status, expected_boundary_status) in [
             ("unsupported", "unsupported"),
             ("not_applied", "unbounded"),
@@ -1203,6 +1217,7 @@ mod tests {
 
     #[test]
     fn lancet_status_preserves_landlock_applied_with_mount_view_failure() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(
             dir.path(),
@@ -1261,6 +1276,7 @@ mod tests {
 
     #[test]
     fn lancet_status_accepts_only_netns_for_network_physical_credit() {
+        let _xdg = ScopedXdgStateHome::new();
         let invalid_cases = [
             (
                 "landlock",

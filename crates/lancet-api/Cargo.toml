@@ -14,6 +14,8 @@ lancet-cep = { workspace = true }
 lancet-audit = { workspace = true }
 lancet-authority = { workspace = true }
 lancet-native = { workspace = true }
+dirs = { workspace = true }
+sha2 = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

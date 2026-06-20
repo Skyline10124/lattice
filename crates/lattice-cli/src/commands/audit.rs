@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `lattice audit` — query and tail the CEP audit store.
+//!
+//! Audit readers resolve the external project-keyed path via
+//! `audit_db_path_for_project` (XDG state: `lattice/projects/<key>/cep_audit.db`).
 
 use std::path::Path;
 
@@ -78,11 +81,6 @@ async fn run_async(cmd: AuditCmd, json: bool, project_root: &Path) -> Result<()>
     }
 }
 
-#[cfg(test)]
-fn audit_db_path(project_root: &Path) -> std::path::PathBuf {
-    project_root.join(".lattice").join("cep_audit.db")
-}
-
 fn render_query_output(output: &lancet_api::AuditQueryOutput, json: bool) -> Result<()> {
     if json {
         println!(
@@ -147,13 +145,15 @@ fn render_tail_output(output: &lancet_api::AuditTailOutput, json: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_env::ScopedXdgStateHome;
+    use lancet_api::audit_db_path_for_project;
     use lancet_catalog::CepMethod;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
     use lancet_native::audit::{CallAuditMetadata, CepAuditContext, CepAuditStore};
     use tempfile::TempDir;
 
     fn seed_audit_db(dir: &Path, session_id: &str) {
-        let db_path = audit_db_path(dir);
+        let db_path = audit_db_path_for_project(dir).expect("resolve external audit path");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let audit = CepAuditStore::open(&db_path).expect("open audit db");
         let ctx = CepAuditContext {
@@ -184,6 +184,7 @@ mod tests {
 
     #[test]
     fn audit_query_prints_fragment_for_seeded_db() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         let session = "sess-cli-query";
         seed_audit_db(dir.path(), session);
@@ -204,6 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn audit_tail_streams_rows_for_seeded_db() {
+        let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         let session = "sess-cli-tail";
         seed_audit_db(dir.path(), session);

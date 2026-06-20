@@ -7,7 +7,9 @@
 //! that saves and restores the environment, so tests that manipulate
 //! env vars can run concurrently without clobbering each other.
 
-use std::sync::{LazyLock, Mutex};
+use std::path::Path;
+use std::sync::{LazyLock, Mutex, MutexGuard};
+use tempfile::TempDir;
 
 static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -54,5 +56,33 @@ pub(crate) fn without_env_vars(keys: &[&str], f: impl FnOnce()) {
 
     for (key, value) in previous {
         set_env_var(key, value.as_deref());
+    }
+}
+
+/// Hold the global env lock with an isolated `XDG_STATE_HOME` temp directory.
+///
+/// Audit/status CLI tests seed and read the external project-keyed audit store
+/// through `audit_db_path_for_project`, which resolves via `XDG_STATE_HOME`.
+pub(crate) struct ScopedXdgStateHome {
+    _lock: MutexGuard<'static, ()>,
+    _state: TempDir,
+}
+
+impl ScopedXdgStateHome {
+    pub(crate) fn new() -> Self {
+        let guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let state = tempfile::tempdir().expect("xdg state tempdir");
+        set_env_var(
+            "XDG_STATE_HOME",
+            Some(state.path().to_str().expect("utf8 xdg state path")),
+        );
+        Self {
+            _lock: guard,
+            _state: state,
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self._state.path()
     }
 }

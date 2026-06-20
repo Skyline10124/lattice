@@ -21,6 +21,7 @@ git2 = { workspace = true }
 base64 = { workspace = true }
 # tempdir for git_archive_to_tempdir (production helper, not dev-only)
 tempfile = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 
@@ -31,3 +32,8 @@ test-utils = []
 # Gates live-KVM integration tests (require KVM + libkrunfw.so + reachable image registry).
 # Implies test-utils so the contract suite (run_suite) is available in the integration lane.
 integration_tests = ["test-utils"]
+
+[[test]]
+name = "phase34_primitives"
+path = "tests/phase34_primitives.rs"
+required-features = ["test-utils"]

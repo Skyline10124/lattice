@@ -798,6 +798,11 @@ async fn live_command_ctx(
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: live_overlay_isolation_config(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
 
     Ok((ctx, durable_metadata))

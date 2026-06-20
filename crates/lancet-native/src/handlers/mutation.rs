@@ -16,17 +16,24 @@ use crate::edit::commit_baseline::{
 use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
+use crate::edit::storage::EditStorage;
 use crate::enforcement::guard_l1::{
     check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
 };
 use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
 use crate::enforcement::verify::{
-    extract_verify_command, run_verify, validate_verify_command, verify_failed_error,
+    VerifyCommandSpec, extract_verify_command, run_verify, run_verify_with_backend,
+    validate_verify_command, verify_failed_error,
 };
+use crate::execution_backend::{ExecutionRouting, PathIntent, WorkspacePath};
 use crate::server::registry::{HandlerContext, MethodRegistry};
+use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{
     EffectSource, ObservedEffect, ObservedLineChange, ObservedLineChangeKind, ObservedScope,
 };
+use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_authority::guard::validate_direct_path_facts;
+use lancet_authority::guard::{DirectPathFacts, DirectPathKind};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -35,6 +42,7 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_protocol::envelope::{ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
+use lancet_protocol::policy::AuthorityMode;
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::HashSet;
@@ -49,9 +57,51 @@ pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), Ce
 }
 
 struct MutationAuthorization {
-    envelope_id: String,
-    envelope: ExecutionEnvelope,
-    project_root: String,
+    envelope_id: Option<String>,
+    envelope: Option<ExecutionEnvelope>,
+    project_root: Option<String>,
+    direct: Option<DirectMutationAuth>,
+}
+
+struct DirectMutationAuth {
+    execution: ExecutionRouting,
+    authorized_region: AuthorizedEffectRegion,
+}
+
+impl MutationAuthorization {
+    fn envelope_id(&self) -> &str {
+        self.envelope_id
+            .as_deref()
+            .expect("envelope_id required in Envelope mode")
+    }
+
+    fn envelope(&self) -> &ExecutionEnvelope {
+        self.envelope
+            .as_ref()
+            .expect("envelope required in Envelope mode")
+    }
+
+    fn project_root(&self) -> &str {
+        self.project_root
+            .as_deref()
+            .expect("project_root required in Envelope mode")
+    }
+
+    fn edit_storage(&self) -> EditStorage {
+        if let Some(direct) = &self.direct {
+            EditStorage::direct(direct.execution.clone(), direct.authorized_region.clone())
+        } else {
+            EditStorage::envelope_host(self.project_root())
+        }
+    }
+
+    fn is_direct(&self) -> bool {
+        self.direct.is_some()
+    }
+
+    fn direct(&self) -> &DirectMutationAuth {
+        self.direct.as_ref().expect("direct auth required")
+    }
 }
 
 async fn handle_create(
@@ -81,26 +131,35 @@ async fn handle_create_as(
         authorize_workspace_mutation(&ctx, method, &params, std::slice::from_ref(&params.path))
             .await?;
 
-    let create = preflight_create_file(&auth.project_root, &params, method)?;
+    let create = if auth.is_direct() {
+        preflight_direct_create(&auth, &params, method).await?
+    } else {
+        preflight_create_file(auth.project_root(), &params, method)?
+    };
 
-    write_preflighted_create(&auth.project_root, &create).await?;
+    if auth.is_direct() {
+        write_direct_create(&ctx, &auth, &create).await?;
+    } else {
+        write_preflighted_create(auth.project_root(), &create).await?;
+    }
 
-    record_created_dir_effects(&ctx, &auth.project_root, &create);
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceMutation,
-        scope: ObservedScope::Path(create.full_path.clone()),
-        required_capability: RequiredCapability::WritePath,
-        source: EffectSource::HandlerBackend,
-    });
+    if auth.is_direct() {
+        record_direct_created_dir_effects(&ctx, &create);
+    } else {
+        record_created_dir_effects(&ctx, auth.project_root(), &create);
+    }
+    ctx.record_effect(direct_mutation_path_effect(
+        &auth,
+        &create.path,
+        &create.full_path,
+    ));
 
-    // 7. Run verify if configured
     run_mutation_verify_if_configured(&ctx, method, &auth).await?;
 
-    // 8. Record metadata
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
         "method": method,
-        "envelope_id": auth.envelope_id,
+        "envelope_id": auth.envelope_id.as_deref(),
         "bytes_written": create.bytes_written,
         "content_hash": written_hash,
         "created_dirs": create.created_dirs.clone(),
@@ -123,7 +182,7 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
         std::slice::from_ref(&params.path),
     )
     .await?;
-    let patch = match compile_edit_patch(&auth.project_root, &params) {
+    let patch = match compile_edit_patch(&auth, &params).await {
         Ok(patch) => patch,
         Err(err) => {
             record_mutation_replan_metadata(
@@ -142,7 +201,7 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
 
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
-        "envelope_id": auth.envelope_id,
+        "envelope_id": auth.envelope_id.as_deref(),
         "compiled_patch_backend": "hashline_patch",
         "changed_files": result.changed_files.clone(),
         "backend_invoked": true,
@@ -175,11 +234,11 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
                     content: content.clone(),
                     create_parents: *create_parents,
                 };
-                create_inputs.push(preflight_create_file(
-                    &auth.project_root,
-                    &params,
-                    Batch::NAME,
-                )?);
+                create_inputs.push(if auth.is_direct() {
+                    preflight_direct_create(&auth, &params, Batch::NAME).await?
+                } else {
+                    preflight_create_file(auth.project_root(), &params, Batch::NAME)?
+                });
             }
             BatchOperation::EditFile {
                 path,
@@ -200,7 +259,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     let patch = if edit_inputs.is_empty() {
         None
     } else {
-        match compile_batch_edit_patch(&auth.project_root, &edit_inputs) {
+        match compile_batch_edit_patch(&auth, &edit_inputs).await {
             Ok(patch) => Some(patch),
             Err(err) => {
                 record_mutation_replan_metadata(
@@ -227,19 +286,30 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
     let mut created_dirs = Vec::new();
     let mut seen_created_dirs = HashSet::new();
     for create in &create_inputs {
-        write_preflighted_create(&auth.project_root, create).await?;
-        for dir in &create.created_dirs {
-            if seen_created_dirs.insert(dir.clone()) {
-                record_created_dir_effect(&ctx, &auth.project_root, dir);
-                created_dirs.push(dir.clone());
+        if auth.is_direct() {
+            write_direct_create(&ctx, &auth, create).await?;
+            record_direct_created_dir_effects(&ctx, create);
+        } else {
+            write_preflighted_create(auth.project_root(), create).await?;
+            for dir in &create.created_dirs {
+                if seen_created_dirs.insert(dir.clone()) {
+                    record_created_dir_effect(&ctx, auth.project_root(), dir);
+                    created_dirs.push(dir.clone());
+                }
             }
         }
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::WorkspaceMutation,
-            scope: ObservedScope::Path(create.full_path.clone()),
-            required_capability: RequiredCapability::WritePath,
-            source: EffectSource::HandlerBackend,
-        });
+        if auth.is_direct() {
+            for dir in &create.created_dirs {
+                if seen_created_dirs.insert(dir.clone()) {
+                    created_dirs.push(dir.clone());
+                }
+            }
+        }
+        ctx.record_effect(direct_mutation_path_effect(
+            &auth,
+            &create.path,
+            &create.full_path,
+        ));
         created_files.push(create.path.clone());
     }
 
@@ -250,7 +320,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
 
     ctx.record_durable_metadata(json!({
         "method": Batch::NAME,
-        "envelope_id": auth.envelope_id,
+        "envelope_id": auth.envelope_id.as_deref(),
         "compiled_patch_backend": "hashline_patch",
         "created_files": created_files.clone(),
         "edited_files": edited_files.clone(),
@@ -286,6 +356,10 @@ async fn authorize_workspace_mutation(
     changed_paths: &[String],
 ) -> Result<MutationAuthorization, CepError> {
     let _evaluation = evaluate_and_enforce_policy(ctx, method, params).await?;
+
+    if ctx.authority_mode == AuthorityMode::Direct {
+        return authorize_direct_mutation(ctx, method, changed_paths).await;
+    }
 
     let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
         Some((id, env)) => (id, env),
@@ -361,10 +435,121 @@ async fn authorize_workspace_mutation(
     );
 
     Ok(MutationAuthorization {
-        envelope_id,
-        envelope,
-        project_root,
+        envelope_id: Some(envelope_id),
+        envelope: Some(envelope),
+        project_root: Some(project_root),
+        direct: None,
     })
+}
+
+async fn authorize_direct_mutation(
+    ctx: &HandlerContext,
+    method: &str,
+    changed_paths: &[String],
+) -> Result<MutationAuthorization, CepError> {
+    let execution = ctx.execution.clone().ok_or_else(|| {
+        CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "Direct mutation requires an Upper execution backend",
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                command: method.into(),
+                exit_code: None,
+                stderr: Some("missing execution backend".into()),
+            }),
+            Retriability::Permanent,
+        )
+    })?;
+    let authorized_region = ctx
+        .authorized_region
+        .get()
+        .unwrap_or_else(AuthorizedEffectRegion::empty);
+
+    let mut seen = HashSet::new();
+    for path in changed_paths {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let ws_path = WorkspacePath::parse(path).map_err(|err| {
+            CepError::new(
+                CepErrorCode::PathContainment,
+                format!("mutation path rejected: {err}"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: "path".into(),
+                    reason: err.to_string(),
+                }),
+                Retriability::Permanent,
+            )
+        })?;
+        ctx.mark_adapter_preflight_invoked();
+        let intent = if method == Create::NAME {
+            PathIntent::Create
+        } else {
+            PathIntent::Overwrite
+        };
+        let facts = execution
+            .backend
+            .resolve_path(&ws_path, intent)
+            .await
+            .map_err(|err| {
+                ctx.record_rejection(RejectionRecord {
+                    rejection_stage: RejectionStage::AdapterPreflight,
+                    denial_source: "adapter_preflight".into(),
+                });
+                direct_mutation_backend_error(method)(err)
+            })?;
+        let guard_path = if ws_path.is_project_root() { "" } else { ws_path.as_str() };
+        let direct_facts = DirectPathFacts {
+            normalized_path: facts.normalized_path.clone(),
+            exists: facts.exists,
+            kind: facts.kind.map(direct_path_kind),
+            parent_exists: facts.parent_exists,
+            parent_kind: facts.parent_kind.map(direct_path_kind),
+            canonical_under_workspace: facts.canonical_under_workspace,
+        };
+        if let Err(err) = validate_direct_path_facts(guard_path, &direct_facts, &authorized_region)
+        {
+            ctx.record_rejection(RejectionRecord {
+                rejection_stage: RejectionStage::AdapterPreflight,
+                denial_source: "guard_l1".into(),
+            });
+            return Err(err);
+        }
+    }
+
+    Ok(MutationAuthorization {
+        envelope_id: None,
+        envelope: None,
+        project_root: None,
+        direct: Some(DirectMutationAuth {
+            execution,
+            authorized_region,
+        }),
+    })
+}
+
+fn direct_path_kind(kind: crate::execution_backend::PathKind) -> DirectPathKind {
+    match kind {
+        crate::execution_backend::PathKind::File => DirectPathKind::File,
+        crate::execution_backend::PathKind::Directory => DirectPathKind::Directory,
+        crate::execution_backend::PathKind::Symlink => DirectPathKind::Symlink,
+    }
+}
+
+fn direct_mutation_backend_error(
+    method: &str,
+) -> impl FnOnce(crate::execution_backend::ExecutionBackendError) -> CepError {
+    move |err| {
+        CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!("{method} backend preflight failed: {err}"),
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                command: method.into(),
+                exit_code: None,
+                stderr: Some(err.to_string()),
+            }),
+            Retriability::Permanent,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -401,16 +586,16 @@ fn record_mutation_replan_metadata(
     expected_hash_status: Option<&str>,
     replan_reason: Option<&str>,
 ) {
-    let patterns = extract_write_path_patterns(&auth.envelope.capabilities);
+    let patterns = extract_write_path_patterns(&auth.envelope().capabilities);
     record_mutation_preflight(
         ctx,
         method,
-        &auth.envelope_id,
+        auth.envelope_id(),
         changed_paths,
         &patterns,
         &[],
         expected_hash_status,
-        extract_verify_command(&auth.envelope).is_some(),
+        extract_verify_command(auth.envelope()).is_some(),
         replan_reason,
         false,
     );
@@ -447,31 +632,74 @@ async fn run_mutation_verify_if_configured(
     method: &str,
     auth: &MutationAuthorization,
 ) -> Result<(), CepError> {
-    let Some(verify_cmd) = extract_verify_command(&auth.envelope) else {
-        return Ok(());
-    };
-
-    let policy = &ctx.cep_context.policy.command;
-    validate_verify_command(&verify_cmd, policy, &auth.project_root)?;
-
-    let mut cancellation = ctx.cancellation.clone();
-    match run_verify(&verify_cmd, &auth.project_root, policy, &mut cancellation).await {
-        Ok(outcome) if !outcome.success => {
-            emit_verify_failed(ctx, method, &auth.envelope_id, outcome.exit_code).await;
-            Err(verify_failed_error(&verify_cmd, &outcome))
+    if auth.is_direct() {
+        let Some(verify_config) = ctx.direct_verify.as_ref() else {
+            return Ok(());
+        };
+        let policy = &ctx.cep_context.policy.command;
+        let mut cancellation = ctx.cancellation.clone();
+        let direct = auth.direct();
+        ctx.mark_backend_invoked();
+        match run_verify_with_backend(
+            verify_config,
+            &direct.execution,
+            policy,
+            &mut cancellation,
+            &ctx.routing_invocation,
+            &direct.authorized_region,
+        )
+        .await
+        {
+            Ok(outcome) if !outcome.success => {
+                ctx.record_rejection(RejectionRecord {
+                    rejection_stage: RejectionStage::VerificationFailure,
+                    denial_source: "direct_verify".into(),
+                });
+                emit_verify_failed(ctx, method, "", outcome.exit_code).await;
+                let spec = direct_verify_spec(verify_config);
+                return Err(verify_failed_error(&spec, &outcome));
+            }
+            Ok(_) => {
+                ctx.record_effect(ObservedEffect {
+                    kind: ImpactKind::CommandExecution,
+                    scope: ObservedScope::Root(String::new()),
+                    required_capability: RequiredCapability::RunCommand,
+                    source: EffectSource::Verify,
+                });
+                Ok(())
+            }
+            Err(err) => {
+                emit_verify_failed(ctx, method, "", -1).await;
+                Err(err)
+            }
         }
-        Ok(_) => {
-            ctx.record_effect(ObservedEffect {
-                kind: ImpactKind::CommandExecution,
-                scope: ObservedScope::Root(auth.project_root.clone()),
-                required_capability: RequiredCapability::RunCommand,
-                source: EffectSource::Verify,
-            });
-            Ok(())
-        }
-        Err(err) => {
-            emit_verify_failed(ctx, method, &auth.envelope_id, -1).await;
-            Err(err)
+    } else {
+        let Some(verify_cmd) = extract_verify_command(auth.envelope()) else {
+            return Ok(());
+        };
+
+        let policy = &ctx.cep_context.policy.command;
+        validate_verify_command(&verify_cmd, policy, auth.project_root())?;
+
+        let mut cancellation = ctx.cancellation.clone();
+        match run_verify(&verify_cmd, auth.project_root(), policy, &mut cancellation).await {
+            Ok(outcome) if !outcome.success => {
+                emit_verify_failed(ctx, method, auth.envelope_id(), outcome.exit_code).await;
+                Err(verify_failed_error(&verify_cmd, &outcome))
+            }
+            Ok(_) => {
+                ctx.record_effect(ObservedEffect {
+                    kind: ImpactKind::CommandExecution,
+                    scope: ObservedScope::Root(auth.project_root().to_string()),
+                    required_capability: RequiredCapability::RunCommand,
+                    source: EffectSource::Verify,
+                });
+                Ok(())
+            }
+            Err(err) => {
+                emit_verify_failed(ctx, method, auth.envelope_id(), -1).await;
+                Err(err)
+            }
         }
     }
 }
@@ -531,6 +759,222 @@ async fn write_preflighted_create(
     create_file_secure(project_root, &create.path, &create.content).await
 }
 
+async fn preflight_direct_create(
+    auth: &MutationAuthorization,
+    params: &CreateParams,
+    method: &str,
+) -> Result<PreflightCreate, CepError> {
+    let storage = auth.edit_storage();
+    storage
+        .preflight_create(&params.path)
+        .await
+        .map_err(|diag| {
+            CepError::new(
+                CepErrorCode::ExecutionFailed,
+                diag.message.clone(),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: "path".into(),
+                    reason: diag.message,
+                }),
+                Retriability::Permanent,
+            )
+        })?;
+    let created_dirs = if params.create_parents {
+        missing_parent_dirs_direct(auth, &params.path).await?
+    } else {
+        let parent = Path::new(&params.path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .filter(|p| !p.is_empty());
+        if let Some(parent_path) = parent
+            && !parent_exists_direct(auth, parent_path).await?
+        {
+            return Err(CepError::new(
+                CepErrorCode::ExecutionFailed,
+                format!(
+                    "parent directory for '{}' does not exist; set create_parents=true on {method} to create missing parent directories",
+                    params.path
+                ),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: "create_parents".into(),
+                    reason: "missing parent directories require create_parents=true".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+        Vec::new()
+    };
+    Ok(PreflightCreate {
+        path: params.path.clone(),
+        content: params.content.clone(),
+        full_path: PathBuf::from(&params.path),
+        bytes_written: params.content.len() as u64,
+        created_dirs,
+    })
+}
+
+async fn parent_exists_direct(auth: &MutationAuthorization, path: &str) -> Result<bool, CepError> {
+    let ws_path =
+        WorkspacePath::parse(path).map_err(|err| validation_error("path", err.to_string()))?;
+    let direct = auth.direct();
+    let facts = direct
+        .execution
+        .backend
+        .resolve_path(&ws_path, PathIntent::ListDirectory)
+        .await
+        .map_err(direct_mutation_backend_error("mutate.create"))?;
+    Ok(facts.exists)
+}
+
+/// Walk ancestor directories of `relative_path` via the Upper backend, returning
+/// the list of missing ancestors.  All filesystem probing goes through
+/// `ExecutionBackend::resolve_path` — never the host filesystem (D-02).
+async fn missing_parent_dirs_direct(
+    auth: &MutationAuthorization,
+    relative_path: &str,
+) -> Result<Vec<String>, CepError> {
+    let ws_path = WorkspacePath::parse(relative_path)
+        .map_err(|err| validation_error("path", err.to_string()))?;
+
+    // Root-level files (no parent directory) have no missing parents.
+    let normalized = ws_path.as_str();
+    if !normalized.contains('/') {
+        return Ok(Vec::new());
+    }
+
+    // Walk ancestor directories from root to the file's parent.
+    let components: Vec<&str> = normalized.split('/').collect();
+    let direct = auth.direct();
+    let mut missing = Vec::new();
+    let mut current = String::new();
+
+    // All components except the last (the file itself).
+    for (i, component) in components.iter().enumerate() {
+        if i == 0 {
+            current = component.to_string();
+        } else {
+            current = format!("{current}/{component}");
+        }
+
+        // Skip the last component (the file itself).
+        if i == components.len() - 1 {
+            break;
+        }
+
+        let ancestor = WorkspacePath::parse(&current)
+            .map_err(|err| validation_error("path", err.to_string()))?;
+        let facts = direct
+            .execution
+            .backend
+            .resolve_path(&ancestor, PathIntent::ListDirectory)
+            .await
+            .map_err(direct_mutation_backend_error("mutate.create"))?;
+
+        if !facts.exists {
+            missing.push(current.clone());
+            continue;
+        }
+
+        if matches!(
+            facts.kind,
+            Some(crate::execution_backend::PathKind::Symlink)
+        ) {
+            return Err(CepError::new(
+                CepErrorCode::PathContainment,
+                format!("parent directory '{current}' is a symlink"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: "path".into(),
+                    reason: "parent directory is a symlink".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+
+        if !matches!(
+            facts.kind,
+            Some(crate::execution_backend::PathKind::Directory)
+        ) {
+            return Err(CepError::new(
+                CepErrorCode::ExecutionFailed,
+                format!("parent path '{current}' is not a directory"),
+                CepErrorData::Validation(lancet_protocol::error::ValidationErrorData {
+                    field: "path".into(),
+                    reason: "parent path is not a directory".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+    }
+
+    Ok(missing)
+}
+
+async fn write_direct_create(
+    ctx: &HandlerContext,
+    auth: &MutationAuthorization,
+    create: &PreflightCreate,
+) -> Result<(), CepError> {
+    let storage = auth.edit_storage();
+    let ws_path = WorkspacePath::parse(&create.path)
+        .map_err(|err| validation_error("path", err.to_string()))?;
+    ctx.mark_backend_invoked();
+    storage
+        .write_edit_target(&create.path, &ws_path, create.content.as_bytes(), 0)
+        .await
+        .map_err(patch_diag_to_cep)
+}
+
+fn patch_diag_to_cep(diag: crate::edit::types::PatchDiagnostic) -> CepError {
+    CepError::new(
+        CepErrorCode::ExecutionFailed,
+        diag.message.clone(),
+        CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+            command: "mutate.create".into(),
+            exit_code: Some(1),
+            stderr: Some(diag.message),
+        }),
+        Retriability::Permanent,
+    )
+}
+
+fn direct_mutation_path_effect(
+    auth: &MutationAuthorization,
+    path: &str,
+    full_path: &Path,
+) -> ObservedEffect {
+    let scope = if auth.is_direct() {
+        ObservedScope::Path(PathBuf::from(path))
+    } else {
+        ObservedScope::Path(full_path.to_path_buf())
+    };
+    ObservedEffect {
+        kind: ImpactKind::WorkspaceMutation,
+        scope,
+        required_capability: RequiredCapability::WritePath,
+        source: EffectSource::HandlerBackend,
+    }
+}
+
+fn record_direct_created_dir_effects(ctx: &HandlerContext, create: &PreflightCreate) {
+    for dir in &create.created_dirs {
+        ctx.record_effect(ObservedEffect {
+            kind: ImpactKind::WorkspaceMutation,
+            scope: ObservedScope::Path(PathBuf::from(dir)),
+            required_capability: RequiredCapability::WritePath,
+            source: EffectSource::HandlerBackend,
+        });
+    }
+}
+
+fn direct_verify_spec(config: &crate::execution_backend::DirectVerifyConfig) -> VerifyCommandSpec {
+    VerifyCommandSpec {
+        argv: config.argv.clone(),
+        cwd: Some(config.cwd.as_str().to_string()),
+        timeout_ms: config.timeout_ms,
+        expected_exit_code: Some(config.expected_exit_code),
+    }
+}
+
 fn record_created_dir_effects(ctx: &HandlerContext, project_root: &str, create: &PreflightCreate) {
     for dir in &create.created_dirs {
         record_created_dir_effect(ctx, project_root, dir);
@@ -576,18 +1020,89 @@ fn reject_duplicate_batch_path(seen: &mut HashSet<String>, path: &str) -> Result
     }
 }
 
-fn compile_edit_patch(project_root: &str, params: &EditParams) -> Result<String, CepError> {
-    let fragment = compile_edit_operation_fragment(project_root, params)?;
+async fn compile_edit_patch(
+    auth: &MutationAuthorization,
+    params: &EditParams,
+) -> Result<String, CepError> {
+    let fragment = if auth.is_direct() {
+        compile_edit_operation_fragment_direct(&auth.edit_storage(), params).await?
+    } else {
+        compile_edit_operation_fragment(auth.project_root(), params)?
+    };
     Ok(format!("*** Begin Patch\n{fragment}*** End Patch\n"))
 }
 
-fn compile_batch_edit_patch(project_root: &str, edits: &[EditParams]) -> Result<String, CepError> {
+async fn compile_batch_edit_patch(
+    auth: &MutationAuthorization,
+    edits: &[EditParams],
+) -> Result<String, CepError> {
     let mut patch = String::from("*** Begin Patch\n");
     for edit in edits {
-        patch.push_str(&compile_edit_operation_fragment(project_root, edit)?);
+        let fragment = if auth.is_direct() {
+            compile_edit_operation_fragment_direct(&auth.edit_storage(), edit).await?
+        } else {
+            compile_edit_operation_fragment(auth.project_root(), edit)?
+        };
+        patch.push_str(&fragment);
     }
     patch.push_str("*** End Patch\n");
     Ok(patch)
+}
+
+async fn compile_edit_operation_fragment_direct(
+    storage: &EditStorage,
+    params: &EditParams,
+) -> Result<String, CepError> {
+    if params.edits.is_empty() {
+        return Err(validation_error(
+            "edits",
+            "mutate.edit requires at least one edit operation",
+        ));
+    }
+    if params.path.contains('\n') || params.path.contains('\r') {
+        return Err(validation_error(
+            "path",
+            "path must not contain newline characters",
+        ));
+    }
+
+    let before = storage
+        .read_for_compile(&params.path)
+        .await
+        .map_err(|diag| {
+            CepError::new(
+                CepErrorCode::ExecutionFailed,
+                format!(
+                    "cannot read edit target '{}': {}",
+                    params.path, diag.message
+                ),
+                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                    command: "mutate.edit.compile".into(),
+                    exit_code: Some(1),
+                    stderr: Some(diag.message),
+                }),
+                Retriability::Permanent,
+            )
+        })?;
+
+    let current_hash = content_hash(before.as_bytes());
+    if current_hash != params.expected_hash {
+        return Err(CepError::new(
+            CepErrorCode::ReplanRequired,
+            format!(
+                "expected_hash for '{}' is stale: expected {}, current {}; observe.workspace read_file again",
+                params.path, params.expected_hash, current_hash
+            ),
+            CepErrorData::Guard(GuardErrorData {
+                method: Edit::NAME.into(),
+                reason: "ReplanRequired: stale expected_hash".into(),
+            }),
+            Retriability::RequiresReplan,
+        ));
+    }
+
+    let after = apply_semantic_edit_operations(&before, &params.edits)?;
+    compile_update_fragment(&params.path, &params.expected_hash, &before, &after)
 }
 
 fn compile_edit_operation_fragment(
@@ -848,7 +1363,8 @@ async fn apply_compiled_patch(
     })?;
 
     let limits = PatchApplyLimits::default();
-    let result = apply_parsed_patch(Path::new(&auth.project_root), &limits, document).await;
+    let storage = auth.edit_storage();
+    let result = apply_parsed_patch(&storage, &limits, document).await;
 
     if let Some(report) = result.commit_baseline_report.as_ref() {
         let metadata = commit_baseline_metadata_json(report);
@@ -887,8 +1403,10 @@ async fn apply_compiled_patch(
         .collect::<Vec<_>>();
 
     for changed_path in &changed_files {
-        let abs_path = if Path::new(changed_path).is_relative() {
-            PathBuf::from(&auth.project_root).join(changed_path)
+        let abs_path = if auth.is_direct() {
+            PathBuf::from(changed_path)
+        } else if Path::new(changed_path).is_relative() {
+            PathBuf::from(auth.project_root()).join(changed_path)
         } else {
             PathBuf::from(changed_path)
         };
@@ -1386,6 +1904,10 @@ mod create_tests {
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )
@@ -1437,6 +1959,10 @@ mod create_tests {
                 cep_mode,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )
@@ -1855,6 +2381,10 @@ mod edit_tests {
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )
@@ -2115,5 +2645,253 @@ mod edit_tests {
             std::fs::read_to_string(dir.path().join("crates/lattice-tui/src/main.rs")).unwrap(),
             "fn main() {}\n"
         );
+    }
+
+    mod phase34_direct_mutation {
+        use super::*;
+        use crate::execution_backend::{
+            DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+            GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+        };
+        use lancet_authority::policy::CepTurnContext;
+        use lancet_authority::policy::default::WorkspacePolicy;
+        use lancet_protocol::policy::AuthorityMode;
+        use std::collections::BTreeMap;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct MutSpyBackend {
+            files: Mutex<BTreeMap<String, Vec<u8>>>,
+            writes: Mutex<Vec<String>>,
+        }
+
+        impl MutSpyBackend {
+            fn file_facts(
+                path: &str,
+                exists: bool,
+                kind: crate::execution_backend::PathKind,
+            ) -> PathFacts {
+                PathFacts {
+                    normalized_path: path.to_string(),
+                    exists,
+                    kind: Some(kind),
+                    parent_exists: true,
+                    parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                    byte_size: None,
+                    canonical_under_workspace: true,
+                }
+            }
+        }
+
+        impl ExecutionBackend for MutSpyBackend {
+            fn backend_name(&self) -> &str {
+                "mut-spy"
+            }
+
+            fn resolve_path(
+                &self,
+                path: &WorkspacePath,
+                intent: PathIntent,
+            ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+            {
+                let path_str = path.as_str().to_string();
+                let files = self.files.lock().unwrap();
+                let exists = files.contains_key(&path_str);
+                let kind = if exists {
+                    crate::execution_backend::PathKind::File
+                } else {
+                    crate::execution_backend::PathKind::Directory
+                };
+                let facts = match intent {
+                    PathIntent::Create => Self::file_facts(&path_str, false, kind),
+                    _ => Self::file_facts(&path_str, exists, kind),
+                };
+                Box::pin(async move { Ok(facts) })
+            }
+
+            fn read_file(
+                &self,
+                path: &WorkspacePath,
+            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+            {
+                let files = self.files.lock().unwrap();
+                let bytes = files.get(path.as_str()).cloned().unwrap_or_default();
+                Box::pin(async move { Ok(bytes) })
+            }
+
+            fn write_file(
+                &self,
+                path: &WorkspacePath,
+                content: &[u8],
+            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+            {
+                self.writes.lock().unwrap().push(path.as_str().to_string());
+                self.files
+                    .lock()
+                    .unwrap()
+                    .insert(path.as_str().to_string(), content.to_vec());
+                Box::pin(async { Ok(()) })
+            }
+
+            fn remove_file(
+                &self,
+                _path: &WorkspacePath,
+            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+            {
+                Box::pin(async { Ok(()) })
+            }
+
+            fn list_dir(
+                &self,
+                _path: &WorkspacePath,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn grep(
+                &self,
+                _request: &GrepRequest,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
+            > {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn find_files(
+                &self,
+                _request: &FindRequest,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn exec(
+                &self,
+                _request: &crate::execution_backend::ExecRequest,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                crate::execution_backend::ExecOutput,
+                                ExecutionBackendError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    Ok(crate::execution_backend::ExecOutput {
+                        exit_code: 0,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    })
+                })
+            }
+
+            fn changed_paths(
+                &self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+        }
+
+        fn direct_mut_ctx(root: &str, backend: Arc<MutSpyBackend>) -> HandlerContext {
+            let (event_tx, _rx) = mpsc::channel(8);
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            let mut policy_cfg =
+                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
+                    PathBuf::from(root),
+                );
+            policy_cfg.workspace = WorkspacePolicy {
+                allowed_write_paths: vec![".".into()],
+            };
+            let cep_context = Arc::new(CepTurnContext::from_policy(
+                lancet_authority::policy::CepPolicyConfig::defaults_for_project_root(root),
+            ));
+            let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
+                policy_cfg,
+            ));
+            HandlerContext {
+                call_id: 1,
+                events: EventSink::new(event_tx, 1),
+                cancellation: Cancellation::new(cancel_rx),
+                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "phase34 mut"),
+                cep_context,
+                active_envelope: Arc::new(
+                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
+                ),
+                turn_id: "test-turn".into(),
+                durable_metadata:
+                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                    ..Default::default()
+                })),
+                audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
+                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                command_isolation:
+                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: AuthorityMode::Direct,
+                execution: Some(ExecutionRouting {
+                    backend,
+                    upper: UpperContext {
+                        execution_backend: "mut-spy".into(),
+                        upper_workspace_id: "upper-1".into(),
+                    },
+                }),
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
+            }
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_mutation_create_uses_backend_only() {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path().to_str().unwrap();
+            let registry = mutation_registry();
+            let backend = Arc::new(MutSpyBackend::default());
+            let ctx = direct_mut_ctx(root, Arc::clone(&backend));
+            let params = CreateParams {
+                path: "new.txt".into(),
+                content: "created-on-upper".into(),
+                create_parents: false,
+            };
+            registry
+                .dispatch(Create::NAME, serde_json::to_value(&params).unwrap(), ctx)
+                .await
+                .unwrap();
+            assert!(
+                backend
+                    .writes
+                    .lock()
+                    .unwrap()
+                    .contains(&"new.txt".to_string())
+            );
+            assert!(!dir.path().join("new.txt").exists());
+        }
     }
 }

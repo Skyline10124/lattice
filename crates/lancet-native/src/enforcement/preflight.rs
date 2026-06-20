@@ -8,11 +8,21 @@ use lancet_authority::guard::PolicyEvaluation;
 use lancet_authority::policy::command::EffectiveImpact;
 use lancet_protocol::envelope::{Capability, ImpactKind};
 use lancet_protocol::policy::{
-    CapabilitySource, PolicyDecision, PolicyInput, PolicyReasonCode, SourcedCapability,
+    CapabilitySource, PolicyAuthorityInput, PolicyDecision, PolicyInput, PolicyReasonCode,
+    SourcedCapability,
 };
 use serde_json::{Value, json};
 use std::fmt::Debug;
 use std::path::Path;
+
+fn declared_envelope_id(input: &PolicyInput) -> Option<String> {
+    match &input.authority {
+        PolicyAuthorityInput::Envelope { envelope_snapshot } => {
+            envelope_snapshot.declared_envelope_id.clone()
+        }
+        PolicyAuthorityInput::Direct => None,
+    }
+}
 
 /// Build durable policy metadata shared by all native handlers.
 pub(crate) fn policy_metadata(
@@ -78,7 +88,7 @@ pub(crate) fn approval_request_metadata(
         "reason_code": debug_label(reason_code),
         "message": message,
         "required_capability": capability,
-        "active_envelope_id": input.envelope_snapshot.declared_envelope_id,
+        "active_envelope_id": declared_envelope_id(input),
         "retry_hint": "obtain_human_approval_or_replan",
     }))
 }
@@ -110,7 +120,7 @@ pub(crate) fn policy_denial_preflight_metadata(
             "kind": "workspace_mutation",
             "effective_effect": ["workspace_mutation"],
             "requires_active_envelope": true,
-            "active_envelope_id": input.envelope_snapshot.declared_envelope_id,
+            "active_envelope_id": declared_envelope_id(input),
             "changed_paths": paths,
             "write_patterns": [],
             "out_of_scope_paths": paths,

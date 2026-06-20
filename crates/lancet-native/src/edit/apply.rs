@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
 use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
@@ -14,11 +15,13 @@ use super::commit_baseline::{
 use super::hash::{content_hash, line_hash};
 #[cfg(test)]
 use super::parser::parse_patch_document;
+use super::storage::EditStorage;
 use super::types::{
     ApplyPlan, AttemptedOperation, ChangedFile, FileOperationKind, HashLine, LineChange,
     LineChangeKind, PatchDiagnostic, PatchDocument, PatchErrorCode, PatchHunk, PatchHunkLine,
     PatchOperation, PatchResultEnvelope, PlannedFileChange,
 };
+use crate::execution_backend::WorkspacePath;
 use crate::executor::error::ToolError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,11 +54,11 @@ async fn apply_patch(
         }
     };
 
-    apply_parsed_patch(project_root, limits, document).await
+    apply_parsed_patch(&EditStorage::envelope_host(project_root), limits, document).await
 }
 
 pub(crate) async fn apply_parsed_patch(
-    project_root: &Path,
+    storage: &EditStorage,
     limits: &PatchApplyLimits,
     document: PatchDocument,
 ) -> PatchResultEnvelope {
@@ -66,7 +69,7 @@ pub(crate) async fn apply_parsed_patch(
         .map(|(index, operation)| AttemptedOperation::from_operation(index, operation))
         .collect::<Vec<_>>();
 
-    let plan = match build_apply_plan(project_root, limits, &document, attempted_operations).await {
+    let plan = match build_apply_plan(storage, limits, &document, attempted_operations).await {
         Ok(plan) => plan,
         Err((diagnostics, attempted_operations)) => {
             return failure_envelope(
@@ -77,7 +80,7 @@ pub(crate) async fn apply_parsed_patch(
         }
     };
 
-    match commit_apply_plan(&plan).await {
+    match commit_apply_plan(storage, &plan).await {
         Ok(commit_baseline_report) => {
             let changed_files = plan
                 .changes
@@ -107,28 +110,11 @@ pub(crate) async fn apply_parsed_patch(
 }
 
 async fn build_apply_plan(
-    project_root: &Path,
+    storage: &EditStorage,
     limits: &PatchApplyLimits,
     document: &PatchDocument,
     attempted_operations: Vec<AttemptedOperation>,
 ) -> Result<ApplyPlan, (Vec<PatchDiagnostic>, Vec<AttemptedOperation>)> {
-    let root = match tokio::fs::canonicalize(project_root).await {
-        Ok(root) => root,
-        Err(error) => {
-            return Err((
-                vec![PatchDiagnostic::new(
-                    PatchErrorCode::IoError,
-                    ToolError::IoError {
-                        path: project_root.display().to_string(),
-                        error,
-                    }
-                    .to_string(),
-                )],
-                attempted_operations,
-            ));
-        }
-    };
-
     let mut diagnostics = Vec::new();
     let mut seen_paths = HashSet::new();
     let mut changes = Vec::new();
@@ -148,8 +134,8 @@ async fn build_apply_plan(
             continue;
         }
 
-        let resolved = match resolve_target(&root, operation, operation_index).await {
-            Ok(resolved) => resolved,
+        let target_path = match storage.resolve_update_target(&path, operation_index).await {
+            Ok(target_path) => target_path,
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
                 continue;
@@ -163,17 +149,18 @@ async fn build_apply_plan(
                 hunks,
             } => {
                 plan_update_file(
+                    storage,
                     path,
                     old_hash,
                     hunks,
-                    &resolved.target_path,
+                    &target_path,
                     operation_index,
                     limits,
                 )
                 .await
             }
             PatchOperation::DeleteFile { path, old_hash } => {
-                plan_delete_file(path, old_hash, &resolved.target_path, operation_index).await
+                plan_delete_file(storage, path, old_hash, &target_path, operation_index).await
             }
         };
 
@@ -194,75 +181,18 @@ async fn build_apply_plan(
     }
 }
 
-struct ResolvedTarget {
-    target_path: PathBuf,
-}
-
-async fn resolve_target(
-    root: &Path,
-    operation: &PatchOperation,
-    operation_index: usize,
-) -> Result<ResolvedTarget, PatchDiagnostic> {
-    let path = operation.path();
-    let relative = Path::new(path);
-
-    if relative.is_absolute() || has_disallowed_component(relative) {
-        return Err(PatchDiagnostic::new(
-            PatchErrorCode::BoundaryDenied,
-            format!("patch path '{path}' must be relative and stay under the project root"),
-        )
-        .with_path(path.to_string())
-        .with_operation_index(operation_index));
-    }
-
-    let requested = root.join(relative);
-    let target_path = match operation {
-        PatchOperation::UpdateFile { .. } | PatchOperation::DeleteFile { .. } => {
-            let canonical = tokio::fs::canonicalize(&requested).await.map_err(|error| {
-                PatchDiagnostic::new(
-                    PatchErrorCode::MissingFile,
-                    ToolError::IoError {
-                        path: requested.display().to_string(),
-                        error,
-                    }
-                    .to_string(),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index)
-            })?;
-            if !canonical.starts_with(root) {
-                return Err(PatchDiagnostic::new(
-                    PatchErrorCode::BoundaryDenied,
-                    format!("patch path '{path}' resolves outside the project root"),
-                )
-                .with_path(path.to_string())
-                .with_operation_index(operation_index));
-            }
-            canonical
-        }
-    };
-
-    Ok(ResolvedTarget { target_path })
-}
-
-fn has_disallowed_component(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    })
-}
-
 async fn plan_update_file(
+    storage: &EditStorage,
     path: &str,
     old_hash: &str,
     hunks: &[PatchHunk],
-    target_path: &Path,
+    target_path: &WorkspacePath,
     operation_index: usize,
     limits: &PatchApplyLimits,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
-    let before = read_file_bytes(path, target_path, operation_index).await?;
+    let before = storage
+        .read_edit_target(path, target_path, operation_index)
+        .await?;
     validate_old_hash(path, old_hash, &before, operation_index)?;
     let before_text = String::from_utf8(before.clone()).map_err(|error| {
         PatchDiagnostic::new(
@@ -291,7 +221,7 @@ async fn plan_update_file(
 
     Ok(PlannedFileChange {
         path: path.to_string(),
-        target_path: target_path.to_path_buf(),
+        target_path: target_path.clone(),
         operation_index,
         operation: FileOperationKind::Update,
         bytes_before: Some(before.clone()),
@@ -307,17 +237,20 @@ async fn plan_update_file(
 }
 
 async fn plan_delete_file(
+    storage: &EditStorage,
     path: &str,
     old_hash: &str,
-    target_path: &Path,
+    target_path: &WorkspacePath,
     operation_index: usize,
 ) -> Result<PlannedFileChange, PatchDiagnostic> {
-    let before = read_file_bytes(path, target_path, operation_index).await?;
+    let before = storage
+        .read_edit_target(path, target_path, operation_index)
+        .await?;
     validate_old_hash(path, old_hash, &before, operation_index)?;
 
     Ok(PlannedFileChange {
         path: path.to_string(),
-        target_path: target_path.to_path_buf(),
+        target_path: target_path.clone(),
         operation_index,
         operation: FileOperationKind::Delete,
         bytes_before: Some(before.clone()),
@@ -329,25 +262,6 @@ async fn plan_delete_file(
             None,
             delete_line_changes(&before),
         ),
-    })
-}
-
-async fn read_file_bytes(
-    path: &str,
-    target_path: &Path,
-    operation_index: usize,
-) -> Result<Vec<u8>, PatchDiagnostic> {
-    tokio::fs::read(target_path).await.map_err(|error| {
-        PatchDiagnostic::new(
-            PatchErrorCode::IoError,
-            ToolError::IoError {
-                path: target_path.display().to_string(),
-                error,
-            }
-            .to_string(),
-        )
-        .with_path(path.to_string())
-        .with_operation_index(operation_index)
     })
 }
 
@@ -564,11 +478,14 @@ enum PatchCommitError {
     Write(Vec<PatchDiagnostic>),
 }
 
-async fn commit_apply_plan(plan: &ApplyPlan) -> Result<CommitBaselineReport, PatchCommitError> {
+async fn commit_apply_plan(
+    storage: &EditStorage,
+    plan: &ApplyPlan,
+) -> Result<CommitBaselineReport, PatchCommitError> {
     let _guard = patch_commit_lock().lock().await;
     run_before_patch_commit_hook(plan);
 
-    let baseline_files = read_commit_baseline_files(plan).await;
+    let baseline_files = read_commit_baseline_files(storage, plan).await;
     let mut report =
         validate_commit_baseline_evidence(&plan.commit_baseline_evidence, &baseline_files);
     if !matches!(report.validation, CommitBaselineValidation::Passed) {
@@ -583,7 +500,7 @@ async fn commit_apply_plan(plan: &ApplyPlan) -> Result<CommitBaselineReport, Pat
         return Err(PatchCommitError::Baseline(report));
     }
 
-    write_apply_plan(plan)
+    write_apply_plan(storage, plan)
         .await
         .map_err(PatchCommitError::Write)?;
     Ok(report)
@@ -594,10 +511,16 @@ fn patch_commit_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-async fn read_commit_baseline_files(plan: &ApplyPlan) -> BTreeMap<String, Vec<u8>> {
+async fn read_commit_baseline_files(
+    storage: &EditStorage,
+    plan: &ApplyPlan,
+) -> BTreeMap<String, Vec<u8>> {
     let mut files = BTreeMap::new();
     for change in &plan.changes {
-        if let Ok(bytes) = tokio::fs::read(&change.target_path).await {
+        if let Ok(bytes) = storage
+            .read_edit_target(&change.path, &change.target_path, change.operation_index)
+            .await
+        {
             files.insert(change.path.clone(), bytes);
         }
     }
@@ -615,15 +538,29 @@ fn lower_drift_paths(plan: &ApplyPlan, baseline_files: &BTreeMap<String, Vec<u8>
         .collect()
 }
 
-async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> {
+async fn write_apply_plan(
+    storage: &EditStorage,
+    plan: &ApplyPlan,
+) -> Result<(), Vec<PatchDiagnostic>> {
     let mut backups = Vec::new();
 
     for change in &plan.changes {
         let write_result = match (&change.operation, &change.bytes_after) {
             (FileOperationKind::Update, Some(after)) => {
-                tokio::fs::write(&change.target_path, after).await
+                storage
+                    .write_edit_target(
+                        &change.path,
+                        &change.target_path,
+                        after,
+                        change.operation_index,
+                    )
+                    .await
             }
-            (FileOperationKind::Delete, None) => tokio::fs::remove_file(&change.target_path).await,
+            (FileOperationKind::Delete, None) => {
+                storage
+                    .remove_edit_target(&change.path, &change.target_path, change.operation_index)
+                    .await
+            }
             _ => unreachable!("invalid planned patch change"),
         };
 
@@ -635,20 +572,9 @@ async fn write_apply_plan(plan: &ApplyPlan) -> Result<(), Vec<PatchDiagnostic>> 
                 operation: change.operation,
                 previous_bytes: change.bytes_before.clone(),
             }),
-            Err(error) => {
-                let mut diagnostics = vec![
-                    PatchDiagnostic::new(
-                        PatchErrorCode::IoError,
-                        ToolError::IoError {
-                            path: change.target_path.display().to_string(),
-                            error,
-                        }
-                        .to_string(),
-                    )
-                    .with_path(change.path.clone())
-                    .with_operation_index(change.operation_index),
-                ];
-                diagnostics.extend(rollback_failed(&backups).await);
+            Err(diagnostic) => {
+                let mut diagnostics = vec![diagnostic];
+                diagnostics.extend(rollback_failed(storage, &backups).await);
                 return Err(diagnostics);
             }
         }
@@ -719,34 +645,34 @@ fn run_before_patch_commit_hook(_plan: &ApplyPlan) {}
 
 struct CompletedWrite {
     path: String,
-    target_path: PathBuf,
+    target_path: WorkspacePath,
     operation_index: usize,
     operation: FileOperationKind,
     previous_bytes: Option<Vec<u8>>,
 }
 
-async fn rollback_failed(backups: &[CompletedWrite]) -> Vec<PatchDiagnostic> {
+async fn rollback_failed(
+    storage: &EditStorage,
+    backups: &[CompletedWrite],
+) -> Vec<PatchDiagnostic> {
     let mut diagnostics = Vec::new();
 
     for backup in backups.iter().rev() {
-        let rollback_result = match (&backup.operation, &backup.previous_bytes) {
-            (FileOperationKind::Update, Some(bytes)) | (FileOperationKind::Delete, Some(bytes)) => {
-                tokio::fs::write(&backup.target_path, bytes).await
-            }
-            _ => Ok(()),
-        };
+        let rollback_result = storage
+            .rollback_edit_target(
+                &backup.path,
+                &backup.target_path,
+                backup.previous_bytes.as_deref(),
+                backup.operation,
+                backup.operation_index,
+            )
+            .await;
 
-        if let Err(error) = rollback_result {
+        if let Err(diagnostic) = rollback_result {
             diagnostics.push(
                 PatchDiagnostic::new(
                     PatchErrorCode::RollbackFailed,
-                    format!(
-                        "rollback_failed: {}",
-                        ToolError::IoError {
-                            path: backup.target_path.display().to_string(),
-                            error,
-                        }
-                    ),
+                    format!("rollback_failed: {}", diagnostic.message),
                 )
                 .with_path(backup.path.clone())
                 .with_operation_index(backup.operation_index),
@@ -1136,7 +1062,7 @@ mod tests {
             .collect();
 
         let plan = build_apply_plan(
-            dir.path(),
+            &EditStorage::envelope_host(dir.path()),
             &PatchApplyLimits::default(),
             &document,
             attempted_operations,

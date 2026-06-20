@@ -12,7 +12,7 @@
 //! - Policy is data-driven (TOML configuration), not hard-coded if/else.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lancet_protocol::policy::{
     PolicyActionRequired, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
@@ -78,6 +78,115 @@ pub struct MethodPolicy {
     pub max_todo_ops: Option<usize>,
 }
 
+// ── Workspace write policy (Direct mode) ───────────────────────────────
+
+/// Immutable workspace write-region policy for Direct authority.
+///
+/// Shared by `mutate.*` and workspace-mutating `exec.command_run` decisions.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct WorkspacePolicy {
+    pub allowed_write_paths: Vec<String>,
+}
+
+impl WorkspacePolicy {
+    /// Validate every configured write pattern using Guard L1 write-pattern rules.
+    pub fn validate(&self) -> Result<(), String> {
+        use crate::guard::normalize_write_path_pattern;
+        for pattern in &self.allowed_write_paths {
+            if pattern.is_empty() {
+                return Err("allowed_write_paths entry must not be empty".into());
+            }
+            if pattern.contains('\0') {
+                return Err("allowed_write_paths entry must not contain NUL bytes".into());
+            }
+            if pattern.contains("..") {
+                return Err("allowed_write_paths entry must not contain '..' traversal".into());
+            }
+            if Path::new(pattern).is_absolute() {
+                return Err("allowed_write_paths entry must be project-root-relative".into());
+            }
+            if is_git_write_pattern(pattern) {
+                return Err("allowed_write_paths must not include .git paths".into());
+            }
+            normalize_write_path_pattern(pattern).map_err(|e| e.message)?;
+        }
+        Ok(())
+    }
+
+    /// Build the post-policy authorized region for a Direct method decision.
+    pub fn authorized_region_for(
+        &self,
+        method: &str,
+        command_impact: Option<&EffectiveImpact>,
+        policy: &super::CepPolicyConfig,
+    ) -> crate::effect::region::AuthorizedEffectRegion {
+        use crate::effect::region::AuthorizedEffectRegion;
+        use lancet_protocol::envelope::ImpactKind;
+
+        let mut region = AuthorizedEffectRegion::empty();
+        match method {
+            "observe.workspace" => {
+                region.kinds.insert(ImpactKind::WorkspaceObservation);
+                // Direct observation effects are Upper-relative; authorize the workspace root sentinel.
+                region.observation_roots = vec![PathBuf::from(".")];
+            }
+            "fetch.web" => {
+                region.kinds.insert(ImpactKind::ExternalObservation);
+                region.hosts = policy.network.allowed_hosts.clone();
+            }
+            "mutate.create" | "mutate.edit" | "mutate.batch" => {
+                region.kinds.insert(ImpactKind::WorkspaceMutation);
+                apply_workspace_write_paths(
+                    &mut region,
+                    &self.allowed_write_paths,
+                    &policy.project_root,
+                );
+            }
+            "exec.command_run" => {
+                region.kinds.insert(ImpactKind::CommandExecution);
+                region.command_allowed = true;
+                if matches!(command_impact, Some(EffectiveImpact::WorkspaceMutation)) {
+                    region.kinds.insert(ImpactKind::WorkspaceMutation);
+                    apply_workspace_write_paths(
+                        &mut region,
+                        &self.allowed_write_paths,
+                        &policy.project_root,
+                    );
+                }
+            }
+            "session.todo_write" | "session.envelope" => {
+                region.kinds.insert(ImpactKind::SessionStateMutation);
+                region.session_state_allowed = true;
+            }
+            "observe.audit" | "observe.audit_replay" => {
+                region.kinds.insert(ImpactKind::AuditObservation);
+            }
+            _ => {}
+        }
+        region
+    }
+}
+
+fn apply_workspace_write_paths(
+    region: &mut crate::effect::region::AuthorizedEffectRegion,
+    patterns: &[String],
+    _project_root: &Path,
+) {
+    use crate::guard::{WritePathPattern, normalize_write_path_pattern};
+    for pattern in patterns {
+        if let Ok(parsed) = normalize_write_path_pattern(pattern) {
+            match parsed {
+                WritePathPattern::ExactFile(path) => region.write_paths.push(path),
+                WritePathPattern::DirectoryGlob(path) => region.write_path_prefixes.push(path),
+            }
+        }
+    }
+}
+
+fn is_git_write_pattern(pattern: &str) -> bool {
+    pattern == ".git" || pattern.starts_with(".git/") || pattern.contains("/.git/")
+}
+
 // ── Unified policy config ──────────────────────────────────────────────
 
 /// Unified, data-driven policy configuration.
@@ -92,6 +201,7 @@ pub struct PolicyConfig {
     pub network: NetworkPolicyConfig,
     pub budget: BudgetLimits,
     pub observation: ObservationPolicyConfig,
+    pub workspace: WorkspacePolicy,
     pub project_root: PathBuf,
     pub denied_effect_kinds: BTreeSet<ImpactKind>,
 }
@@ -115,6 +225,7 @@ impl PolicyConfig {
             network: NetworkPolicyConfig::safe_defaults(),
             budget,
             observation,
+            workspace: WorkspacePolicy::default(),
             project_root,
             denied_effect_kinds: BTreeSet::new(),
         }
@@ -233,6 +344,12 @@ impl PolicyConfig {
         {
             self.denied_effect_kinds = deny.iter().cloned().collect();
         }
+        if let Some(workspace) = &external.workspace {
+            if let Some(paths) = &workspace.allowed_write_paths {
+                self.workspace.allowed_write_paths = paths.clone();
+            }
+            self.workspace.validate()?;
+        }
         if let Some(obs) = &external.observation {
             if let Some(v) = obs.max_single_read_bytes {
                 self.observation.max_single_read_bytes = v;
@@ -264,6 +381,7 @@ impl PolicyConfig {
             network: self.network.clone(),
             command: self.command.clone(),
             budget: self.budget.clone(),
+            workspace: self.workspace.clone(),
         }
     }
 
@@ -294,6 +412,13 @@ pub struct ExternalPolicyFile {
     pub budget: Option<ExternalBudgetPolicy>,
     pub observation: Option<ExternalObservationPolicy>,
     pub effects: Option<ExternalEffectsPolicy>,
+    pub workspace: Option<ExternalWorkspacePolicy>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalWorkspacePolicy {
+    pub allowed_write_paths: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -476,6 +601,11 @@ impl DefaultPolicyHook {
         Self { config, resolver }
     }
 
+    /// Immutable policy configuration backing this hook.
+    pub fn config(&self) -> &PolicyConfig {
+        &self.config
+    }
+
     /// Executor-owned helper: returns `RichPolicyOutcome` with evidence for audit.
     ///
     /// This is not part of the public `PolicyHook` trait.
@@ -495,10 +625,137 @@ impl DefaultPolicyHook {
 
     /// Pure decision function on resolved facts.
     ///
-    /// Combines facts in order: capability → command → network → budget.
+    /// Envelope mode: capability → command → network → budget.
+    /// Direct mode: enabled-method → command → network → budget → workspace write region.
     fn decide_resolved(
         &self,
         resolved: &super::resolved::ResolvedPolicyInput,
+    ) -> RichPolicyOutcome {
+        use super::resolved::ResolvedAuthorityInput;
+        match &resolved.authority {
+            ResolvedAuthorityInput::Direct => self.decide_resolved_direct(resolved),
+            ResolvedAuthorityInput::Envelope {
+                required_capability,
+                envelope_snapshot,
+            } => self.decide_resolved_envelope(resolved, *required_capability, envelope_snapshot),
+        }
+    }
+
+    fn decide_resolved_direct(
+        &self,
+        resolved: &super::resolved::ResolvedPolicyInput,
+    ) -> RichPolicyOutcome {
+        let method_policy = self.config.methods.get(&resolved.method);
+        if let Some(mp) = method_policy
+            && mp.enabled == Some(false)
+        {
+            return RichPolicyOutcome {
+                decision: PolicyDecision::Denied {
+                    reason_code: PolicyReasonCode::PolicyConfigInvalid,
+                    message: format!("method '{}' disabled by policy config", resolved.method),
+                    action_required: None,
+                },
+                evidence: PolicyEvidence::default(),
+            };
+        }
+
+        if self
+            .config
+            .denied_effect_kinds
+            .contains(&resolved.impact_kind)
+        {
+            return RichPolicyOutcome {
+                decision: PolicyDecision::Denied {
+                    reason_code: PolicyReasonCode::PolicyConfigInvalid,
+                    message: format!(
+                        "impact kind '{:?}' denied by policy config",
+                        resolved.impact_kind
+                    ),
+                    action_required: None,
+                },
+                evidence: PolicyEvidence::default(),
+            };
+        }
+
+        if resolved.method == "exec.command_run" {
+            if let Some(cmd_err) = &resolved.command_error {
+                return RichPolicyOutcome {
+                    decision: PolicyDecision::Denied {
+                        reason_code: PolicyReasonCode::CommandDenied,
+                        message: cmd_err.message.clone(),
+                        action_required: Some(PolicyActionRequired::ChangeCommand),
+                    },
+                    evidence: PolicyEvidence {
+                        command_classification: resolved
+                            .resolved_command
+                            .as_ref()
+                            .map(|c| c.effective_impact.clone()),
+                        ..Default::default()
+                    },
+                };
+            }
+            if let Some(cmd) = &resolved.resolved_command
+                && cmd.effective_impact == EffectiveImpact::HardDenied
+            {
+                return RichPolicyOutcome {
+                    decision: PolicyDecision::Denied {
+                        reason_code: PolicyReasonCode::CommandDenied,
+                        message: format!("command denied by policy: {:?}", cmd.argv),
+                        action_required: Some(PolicyActionRequired::ChangeCommand),
+                    },
+                    evidence: PolicyEvidence {
+                        command_classification: Some(cmd.effective_impact.clone()),
+                        ..Default::default()
+                    },
+                };
+            }
+            if let Some(cmd) = &resolved.resolved_command
+                && cmd.effective_impact == EffectiveImpact::WorkspaceMutation
+                && self.config.workspace.allowed_write_paths.is_empty()
+            {
+                return RichPolicyOutcome {
+                    decision: PolicyDecision::Denied {
+                        reason_code: PolicyReasonCode::PathOutsideScope,
+                        message:
+                            "workspace-mutating command denied: no allowed_write_paths configured"
+                                .into(),
+                        action_required: None,
+                    },
+                    evidence: PolicyEvidence {
+                        command_classification: Some(cmd.effective_impact.clone()),
+                        ..Default::default()
+                    },
+                };
+            }
+        }
+
+        if matches!(
+            resolved.method.as_str(),
+            "mutate.create" | "mutate.edit" | "mutate.batch"
+        ) && self.config.workspace.allowed_write_paths.is_empty()
+        {
+            return RichPolicyOutcome {
+                decision: PolicyDecision::Denied {
+                    reason_code: PolicyReasonCode::PathOutsideScope,
+                    message: "workspace mutation denied: no allowed_write_paths configured".into(),
+                    action_required: None,
+                },
+                evidence: PolicyEvidence::default(),
+            };
+        }
+
+        if let Some(denied) = self.check_network_and_budget(resolved, method_policy, None) {
+            return denied;
+        }
+
+        self.allowed_outcome_direct(resolved)
+    }
+
+    fn decide_resolved_envelope(
+        &self,
+        resolved: &super::resolved::ResolvedPolicyInput,
+        required_capability: lancet_catalog::method::RequiredCapability,
+        envelope_snapshot: &lancet_protocol::policy::EffectiveEnvelopeSnapshot,
     ) -> RichPolicyOutcome {
         // Step 0: Method policy overrides.
         let method_policy = self.config.methods.get(&resolved.method);
@@ -514,8 +771,7 @@ impl DefaultPolicyHook {
                 };
             }
             if let Some(req_cap) = mp.required_capability {
-                let has_matching_cap = resolved
-                    .envelope_snapshot
+                let has_matching_cap = envelope_snapshot
                     .capabilities
                     .iter()
                     .any(|sc| capability_kind_matches(&sc.capability, req_cap));
@@ -558,9 +814,9 @@ impl DefaultPolicyHook {
 
         // Step 1: Capability match.
         let cap_match = match_capability(
-            resolved.required_capability,
+            required_capability,
             &resolved.invocation_facts,
-            &resolved.envelope_snapshot.capabilities,
+            &envelope_snapshot.capabilities,
             &resolved.method,
             &effective_source_policy,
         );
@@ -613,7 +869,7 @@ impl DefaultPolicyHook {
                         action_required: Some(PolicyActionRequired::ChangeCommand),
                     },
                     evidence: PolicyEvidence {
-                        capability_match: Some(cap_match),
+                        capability_match: Some(cap_match.clone()),
                         ..Default::default()
                     },
                 };
@@ -628,7 +884,7 @@ impl DefaultPolicyHook {
                         action_required: Some(PolicyActionRequired::ChangeCommand),
                     },
                     evidence: PolicyEvidence {
-                        capability_match: Some(cap_match),
+                        capability_match: Some(cap_match.clone()),
                         command_classification: Some(cmd.effective_impact.clone()),
                         ..Default::default()
                     },
@@ -636,53 +892,64 @@ impl DefaultPolicyHook {
             }
         }
 
-        // Step 3: Network policy
+        if let Some(denied) =
+            self.check_network_and_budget(resolved, method_policy, Some(&cap_match))
+        {
+            return denied;
+        }
+
+        self.allowed_outcome_envelope(resolved, cap_match)
+    }
+
+    fn check_network_and_budget(
+        &self,
+        resolved: &super::resolved::ResolvedPolicyInput,
+        method_policy: Option<&MethodPolicy>,
+        cap_match: Option<&CapabilityMatch>,
+    ) -> Option<RichPolicyOutcome> {
         if resolved.method == "fetch.web"
             && let Some(net) = &resolved.resolved_network
+            && !self.config.network.allowed_hosts.is_empty()
         {
-            // Check against network policy: allowed_hosts
-            if !self.config.network.allowed_hosts.is_empty() {
-                let host_lower = net.host.to_ascii_lowercase();
-                let allowed = self.config.network.allowed_hosts.iter().any(|h| {
-                    let h = h.trim().to_ascii_lowercase();
-                    if h.starts_with('.') {
-                        let suffix = h.trim_start_matches('.').to_ascii_lowercase();
-                        host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
-                    } else {
-                        host_lower == h
-                    }
-                });
-                if !allowed {
-                    return RichPolicyOutcome {
-                        decision: PolicyDecision::Denied {
-                            reason_code: PolicyReasonCode::NetworkDenied,
-                            message: format!("host '{}' not in allowed_hosts", net.host),
-                            action_required: Some(PolicyActionRequired::ChangeUrl),
-                        },
-                        evidence: PolicyEvidence {
-                            capability_match: Some(cap_match),
-                            network_host: Some(net.host.clone()),
-                            ..Default::default()
-                        },
-                    };
+            let host_lower = net.host.to_ascii_lowercase();
+            let allowed = self.config.network.allowed_hosts.iter().any(|h| {
+                let h = h.trim().to_ascii_lowercase();
+                if h.starts_with('.') {
+                    let suffix = h.trim_start_matches('.').to_ascii_lowercase();
+                    host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
+                } else {
+                    host_lower == h
                 }
+            });
+            if !allowed {
+                return Some(RichPolicyOutcome {
+                    decision: PolicyDecision::Denied {
+                        reason_code: PolicyReasonCode::NetworkDenied,
+                        message: format!("host '{}' not in allowed_hosts", net.host),
+                        action_required: Some(PolicyActionRequired::ChangeUrl),
+                    },
+                    evidence: PolicyEvidence {
+                        capability_match: cap_match.cloned(),
+                        network_host: Some(net.host.clone()),
+                        ..Default::default()
+                    },
+                });
             }
         }
 
-        // Step 4: Budget policy (scoped to method family)
         let budget = &resolved.budget_snapshot;
         let is_observation = matches!(resolved.method.as_str(), "observe.workspace" | "fetch.web");
         if is_observation
             && budget.turn_observation_bytes_used >= budget.turn_observation_bytes_limit
         {
-            return RichPolicyOutcome {
+            return Some(RichPolicyOutcome {
                 decision: PolicyDecision::Denied {
                     reason_code: PolicyReasonCode::BudgetExceeded,
                     message: "turn observation budget exhausted".into(),
                     action_required: Some(PolicyActionRequired::ReduceReadSize),
                 },
                 evidence: PolicyEvidence {
-                    capability_match: Some(cap_match),
+                    capability_match: cap_match.cloned(),
                     budget_remaining: Some(
                         budget
                             .turn_observation_bytes_limit
@@ -690,30 +957,72 @@ impl DefaultPolicyHook {
                     ),
                     ..Default::default()
                 },
-            };
+            });
         }
         let effective_todo_limit = method_policy
             .and_then(|mp| mp.max_todo_ops)
             .map(|mp_limit| (mp_limit as u64).min(budget.todo_ops_limit))
             .unwrap_or(budget.todo_ops_limit);
         if resolved.method == "session.todo_write" && budget.todo_ops_used >= effective_todo_limit {
-            return RichPolicyOutcome {
+            return Some(RichPolicyOutcome {
                 decision: PolicyDecision::Denied {
                     reason_code: PolicyReasonCode::BudgetExceeded,
                     message: "todo ops budget exhausted".into(),
                     action_required: Some(PolicyActionRequired::ReduceReadSize),
                 },
                 evidence: PolicyEvidence {
-                    capability_match: Some(cap_match),
+                    capability_match: cap_match.cloned(),
                     budget_remaining: Some(
                         effective_todo_limit.saturating_sub(budget.todo_ops_used),
                     ),
                     ..Default::default()
                 },
-            };
+            });
         }
+        None
+    }
 
-        // All checks passed
+    fn allowed_outcome_direct(
+        &self,
+        resolved: &super::resolved::ResolvedPolicyInput,
+    ) -> RichPolicyOutcome {
+        let budget = &resolved.budget_snapshot;
+        let mut resolved_paths = Vec::new();
+        if !resolved.invocation_facts.all_patch_targets.is_empty() {
+            resolved_paths.extend(resolved.invocation_facts.all_patch_targets.iter().cloned());
+        } else if let Some(target) = &resolved.resolved_target {
+            resolved_paths.push(target.request_path.clone());
+        }
+        RichPolicyOutcome {
+            decision: PolicyDecision::Allowed,
+            evidence: PolicyEvidence {
+                command_classification: resolved
+                    .resolved_command
+                    .as_ref()
+                    .map(|c| c.effective_impact.clone()),
+                network_host: resolved.resolved_network.as_ref().map(|n| n.host.clone()),
+                budget_remaining: Some(
+                    budget
+                        .turn_observation_bytes_limit
+                        .saturating_sub(budget.turn_observation_bytes_used),
+                ),
+                resolved_paths,
+                shell_expansion: resolved
+                    .resolved_command
+                    .as_ref()
+                    .filter(|c| !c.sub_argvs.is_empty())
+                    .map(|c| c.sub_argvs.clone()),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn allowed_outcome_envelope(
+        &self,
+        resolved: &super::resolved::ResolvedPolicyInput,
+        cap_match: CapabilityMatch,
+    ) -> RichPolicyOutcome {
+        let budget = &resolved.budget_snapshot;
         let mut resolved_paths = Vec::new();
         if !resolved.invocation_facts.all_patch_targets.is_empty() {
             resolved_paths.extend(resolved.invocation_facts.all_patch_targets.iter().cloned());
@@ -808,8 +1117,8 @@ mod tests {
     use super::*;
     use lancet_protocol::envelope::Capability;
     use lancet_protocol::policy::{
-        CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyBudgetSnapshot,
-        SourcedCapability,
+        CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
+        PolicyBudgetSnapshot, SourcedCapability,
     };
     use serde_json::json;
 
@@ -843,6 +1152,12 @@ mod tests {
         }
     }
 
+    fn envelope_input(snapshot: EffectiveEnvelopeSnapshot) -> PolicyAuthorityInput {
+        PolicyAuthorityInput::Envelope {
+            envelope_snapshot: snapshot,
+        }
+    }
+
     fn audit_ctx(budget: PolicyBudgetSnapshot) -> PolicyAuditContext {
         PolicyAuditContext {
             turn_id: "turn-1".into(),
@@ -869,12 +1184,12 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
                 },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -890,7 +1205,7 @@ mod tests {
         let input = PolicyInput {
             method: "mutate.create".into(),
             params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-            envelope_snapshot: empty_envelope(),
+            authority: envelope_input(empty_envelope()),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -914,12 +1229,12 @@ mod tests {
                 "argv": ["sh", "-c", "rm -rf /"],
                 "declared_impact": "workspace_mutation"
             }),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::RunCommand {
                     argv_allowlist: vec!["sh -c".into()],
                 },
                 source: declared_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -943,10 +1258,10 @@ mod tests {
         let input = PolicyInput {
             method: "fetch.web".into(),
             params: json!({"url": "https://evil.example.com/page"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::FetchUrl { host: "*".into() },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -967,12 +1282,12 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
                 },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(PolicyBudgetSnapshot {
                 turn_observation_bytes_used: 65536,
                 turn_observation_bytes_limit: 65536,
@@ -998,7 +1313,7 @@ mod tests {
         let input = PolicyInput {
             method: "unknown.method".into(),
             params: json!({}),
-            envelope_snapshot: empty_envelope(),
+            authority: envelope_input(empty_envelope()),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -1058,12 +1373,12 @@ allow_public_https = false
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
                 },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome1 = hook.decide_with_evidence(&input);
@@ -1083,12 +1398,12 @@ allow_public_https = false
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
                 },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let outcome = hook.decide_with_evidence(&input);
@@ -1108,12 +1423,12 @@ allow_public_https = false
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+            authority: envelope_input(envelope_with_caps(vec![SourcedCapability {
                 capability: Capability::ReadPath {
                     path_pattern: "src/**".into(),
                 },
                 source: base_source(),
-            }]),
+            }])),
             audit_context: audit_ctx(default_budget()),
         };
         let decision = hook.decide(&input);

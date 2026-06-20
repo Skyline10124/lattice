@@ -46,6 +46,13 @@
 - **影响**: 低。孤儿曾经会让全树遍历 `EACCES`（`capture_workspace_snapshot` 在受控命令预检时硬失败，"连 `ls` 都过不去"）。该症状已由 `is_snapshot_skipped_path` 跳过 `.lattice-overlays` 缓解（2026-06-11，含复现 000 陷阱的回归测试）；剩余仅为磁盘累积与对"消费方记得跳过"的依赖。
 - **计划**: executor 启动时清扫 `.lattice-overlays` 下的陈旧 session（按 mtime / pid 存活判定）；次要：`is_snapshot_skipped_path` 的内部 scratch 名（`target` / `.git` / `.lattice-overlays`）为散落字面量，可收拢为集中常量集。
 
+### L-34-02: Direct-mode `changed_paths()` porcelain enforcement weaker than Envelope snapshot diff — `security` / `defense-in-depth`
+- **位置**: `crates/lattice-api/src/turn/workspace_backend.rs:380-391`（`changed_paths` via `git status --porcelain=v1`）；`crates/lancet-native/src/handlers/command.rs:2438-2470`（post-exec scope check）。
+- **问题**: Direct-mode post-execution write-scope enforcement uses `git status --porcelain=v1`, which omits all gitignored paths. Envelope-mode uses filesystem snapshot diff (`capture_workspace_snapshot` / `compute_changed_paths`) that only skips `target/`, `.lattice-overlays/`, `.git/`. A Direct workspace-mutating command can write to gitignored paths outside `allowed_write_paths` (e.g. `.env`, `build/`) and pass the gate because porcelain omits ignored paths. Additionally, a TOCTOU exists: a background process spawned by the command can write after `exec` returns but before `changed_paths()` runs.
+- **当前状态**: ACCEPTED RESIDUAL. The Upper workspace is per-turn (created in `build_production_turn_deps`, destroyed when `ProductionTurnDeps` dropped). Session graph, audit trail, and credential store all live in the Lower (host) and cannot be affected by Upper writes. The LLM already has `RunCommand` capability, so writing to gitignored paths within a turn doesn't expand its attack surface. The porcelain gap weakens the `allowed_write_paths` defense-in-depth policy *within* the Upper, but creates no host-impact path.
+- **升级条件**: If the Upper ever becomes per-session (gitignored writes persist across turns) → escalate to REQUIRES FIX. If Upper→Lower write-back is added (e.g., artifact commit) → escalate. If Upper gains network egress → TOCTOU becomes exploitable for exfiltration.
+- **计划**: Optional future work: switch `changed_paths()` to filesystem snapshot diff for parity with Envelope mode. Do NOT use `--porcelain --ignored` (false positives on `target/` build artifacts).
+
 ### L-20: `SqliteSessionGraphStore` 单连接 `Mutex` 应用层串行化 — `performance` / `architecture`
 - **位置**: `crates/lattice-session/src/sqlite_graph/mod.rs`
 - **问题**: 虽启用 WAL，但全进程共享一个 `Connection` + `Mutex`，读写均独占；多会话/多任务并行时 DB 成为串行瓶颈。

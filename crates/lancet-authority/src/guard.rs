@@ -15,9 +15,10 @@ use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability, GuardVerdict}
 use lancet_protocol::error::{
     CepErrorData, GuardErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
 };
+#[allow(unused_imports)]
 use lancet_protocol::policy::{
-    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyDecision, PolicyHook, PolicyInput,
-    PolicyReasonCode, SourcedCapability,
+    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, SourcedCapability,
 };
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use std::collections::{BTreeSet, HashSet};
@@ -512,6 +513,86 @@ fn replan_required(target: &str, patterns: &[String]) -> CepError {
         }),
         Retriability::RequiresReplan,
     )
+}
+
+/// Adapter-reported filesystem facts validated in Direct mode (no host paths).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectPathFacts {
+    pub normalized_path: String,
+    pub exists: bool,
+    pub kind: Option<DirectPathKind>,
+    pub parent_exists: bool,
+    pub parent_kind: Option<DirectPathKind>,
+    pub canonical_under_workspace: bool,
+}
+
+/// Kind of filesystem object observed by the execution adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectPathKind {
+    File,
+    Directory,
+    Symlink,
+}
+
+/// Validate adapter-reported path facts against a policy-produced authorized region.
+///
+/// Policy already decided whether the write is authorized; this function only
+/// checks that returned facts match the request and stay within the region.
+pub fn validate_direct_path_facts(
+    path: &str,
+    facts: &DirectPathFacts,
+    authorized_region: &crate::effect::region::AuthorizedEffectRegion,
+) -> Result<(), CepError> {
+    if path.contains('\0') || path.contains("..") || Path::new(path).is_absolute() {
+        return Err(permission_denied("path is malformed"));
+    }
+
+    let normalized = normalize_lexical(path)?;
+    let request = normalized.to_string_lossy();
+    if facts.normalized_path != request {
+        return Err(permission_denied("path facts do not match requested path"));
+    }
+
+    if !facts.canonical_under_workspace {
+        return Err(permission_denied("path escapes workspace containment"));
+    }
+
+    if is_denied_direct_path(&facts.normalized_path) {
+        return Err(permission_denied("path targets forbidden metadata"));
+    }
+
+    if !authorized_region.write_paths.is_empty()
+        || !authorized_region.write_path_prefixes.is_empty()
+    {
+        let normalized_path = Path::new(&facts.normalized_path);
+        let covered = authorized_region
+            .write_paths
+            .iter()
+            .any(|p| p.as_os_str() == facts.normalized_path.as_str())
+            || authorized_region.write_path_prefixes.iter().any(|prefix| {
+                crate::effect::region::relative_path_within_prefix(normalized_path, prefix)
+            });
+        if !covered {
+            return Err(permission_denied(
+                "path is outside the policy-authorized write region",
+            ));
+        }
+    }
+
+    let _ = facts.exists;
+    let _ = facts.kind;
+    let _ = facts.parent_exists;
+    let _ = facts.parent_kind;
+    Ok(())
+}
+
+fn is_denied_direct_path(path: &str) -> bool {
+    path == ".git"
+        || path.starts_with(".git/")
+        || path.contains("/.git/")
+        || path == ".lattice"
+        || path.starts_with(".lattice/")
+        || path.contains("/.lattice/")
 }
 
 /// Build a layered effective envelope snapshot from base + declared envelopes.
@@ -1098,10 +1179,12 @@ mod policy_tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: serde_json::json!({"mode": "read_file", "path": "src/lib.rs"}),
-            envelope_snapshot: EffectiveEnvelopeSnapshot {
-                base_envelope_id: "base".into(),
-                declared_envelope_id: None,
-                capabilities: vec![],
+            authority: PolicyAuthorityInput::Envelope {
+                envelope_snapshot: EffectiveEnvelopeSnapshot {
+                    base_envelope_id: "base".into(),
+                    declared_envelope_id: None,
+                    capabilities: vec![],
+                },
             },
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
@@ -1134,10 +1217,12 @@ mod policy_tests {
         let input = PolicyInput {
             method: "test".into(),
             params: serde_json::json!({}),
-            envelope_snapshot: EffectiveEnvelopeSnapshot {
-                base_envelope_id: "base".into(),
-                declared_envelope_id: None,
-                capabilities: vec![],
+            authority: PolicyAuthorityInput::Envelope {
+                envelope_snapshot: EffectiveEnvelopeSnapshot {
+                    base_envelope_id: "base".into(),
+                    declared_envelope_id: None,
+                    capabilities: vec![],
+                },
             },
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
@@ -1267,6 +1352,51 @@ mod policy_tests {
         };
         let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
         assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+    }
+
+    #[test]
+    fn direct_path_facts_rejects_mismatched_path() {
+        use crate::effect::region::AuthorizedEffectRegion;
+        let region = AuthorizedEffectRegion::empty();
+        let facts = DirectPathFacts {
+            normalized_path: "src/other.rs".into(),
+            exists: true,
+            kind: Some(DirectPathKind::File),
+            parent_exists: true,
+            parent_kind: Some(DirectPathKind::Directory),
+            canonical_under_workspace: true,
+        };
+        assert!(validate_direct_path_facts("src/main.rs", &facts, &region).is_err());
+    }
+
+    #[test]
+    fn direct_path_facts_rejects_non_canonical_containment() {
+        use crate::effect::region::AuthorizedEffectRegion;
+        let region = AuthorizedEffectRegion::empty();
+        let facts = DirectPathFacts {
+            normalized_path: "src/main.rs".into(),
+            exists: true,
+            kind: Some(DirectPathKind::File),
+            parent_exists: true,
+            parent_kind: Some(DirectPathKind::Directory),
+            canonical_under_workspace: false,
+        };
+        assert!(validate_direct_path_facts("src/main.rs", &facts, &region).is_err());
+    }
+
+    #[test]
+    fn direct_path_facts_rejects_git_targets() {
+        use crate::effect::region::AuthorizedEffectRegion;
+        let region = AuthorizedEffectRegion::empty();
+        let facts = DirectPathFacts {
+            normalized_path: ".git/config".into(),
+            exists: true,
+            kind: Some(DirectPathKind::File),
+            parent_exists: true,
+            parent_kind: Some(DirectPathKind::Directory),
+            canonical_under_workspace: true,
+        };
+        assert!(validate_direct_path_facts(".git/config", &facts, &region).is_err());
     }
 
     #[test]

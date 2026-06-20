@@ -30,6 +30,23 @@ async fn handle_envelope(
     params: EnvelopeParams,
     ctx: HandlerContext,
 ) -> Result<EnvelopeResult, CepError> {
+    if ctx.authority_mode == lancet_protocol::policy::AuthorityMode::Direct {
+        use lancet_audit::{RejectionRecord, RejectionStage};
+        ctx.record_rejection(RejectionRecord {
+            rejection_stage: RejectionStage::AuthorityModeRejection,
+            denial_source: "authority_mode_unavailable".into(),
+        });
+        return Err(CepError::new(
+            CepErrorCode::GuardDenied,
+            "session.envelope is unavailable in Direct authority mode",
+            CepErrorData::Guard(GuardErrorData {
+                method: "session.envelope".into(),
+                reason: "authority_mode_unavailable".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
     match params {
         EnvelopeParams::Declare(params) => handle_declare(params, ctx)
             .await
@@ -304,6 +321,10 @@ mod tests {
                 cep_mode: lancet_protocol::envelope::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+                execution: None,
+                direct_verify: None,
+                routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
             event_rx,
         )
@@ -578,5 +599,27 @@ mod tests {
         };
         let parsed = dispatch_declare(&registry, params, ctx).await.unwrap();
         assert!(parsed.accepted);
+    }
+
+    #[tokio::test]
+    async fn direct_mode_envelope_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_str().unwrap();
+        let store = Arc::new(ActiveEnvelopeStore::new());
+        let registry = test_registry();
+        let (mut ctx, _events) = test_ctx_with_store(root, store.clone());
+        ctx.authority_mode = lancet_protocol::policy::AuthorityMode::Direct;
+
+        let params = DeclareParams {
+            envelope: sample_envelope("direct bypass"),
+            supersede: false,
+            reason: None,
+        };
+        let err = dispatch_declare(&registry, params, ctx).await.unwrap_err();
+        assert_eq!(err.code, lancet_protocol::CepErrorCode::GuardDenied);
+        assert!(
+            store.active_envelope_id().await.is_none(),
+            "Direct envelope call must not mutate the active envelope store"
+        );
     }
 }

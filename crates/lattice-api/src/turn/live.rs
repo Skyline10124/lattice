@@ -26,6 +26,7 @@ use super::execute::{
 };
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
+use super::upper::{UpperLease, UpperPrepareError};
 use crate::session::{OpenSessionRequest, Result, SessionApi};
 
 /// Bounded channel capacity for the turn event stream.
@@ -62,7 +63,10 @@ pub(crate) struct PreparedTurn {
 /// Resolves model/provider, opens the required session, reads the HEAD
 /// transcript, snapshots the active profile, and extracts branch information.
 /// Any failure here is returned as `Result::Err` before the stream is created.
-fn prepare_live_turn(session: &SessionApi, request: &RunTurnRequest) -> Result<PreparedTurn> {
+pub(crate) fn prepare_live_turn(
+    session: &SessionApi,
+    request: &RunTurnRequest,
+) -> Result<PreparedTurn> {
     let (model, system_prompt, provider) = resolve_model_and_prompt(request);
 
     let s = session.open_session(OpenSessionRequest {
@@ -225,8 +229,11 @@ async fn run_live_turn_task(
         cep_client,
         audit,
         audit_context,
+        upper_lease,
         ..
     } = &mut deps;
+
+    let mut upper_lease = upper_lease.take();
 
     let turn_id = format!(
         "{}:{}",
@@ -284,7 +291,7 @@ async fn run_live_turn_task(
 
     // 5. Concurrent drain loop. Forwarding uses non-blocking / bounded-wait
     // observer emission so a slow consumer cannot stall agent_rx drain.
-    let agent_result: AgentTurnResult = loop {
+    let mut agent_result: AgentTurnResult = loop {
         tokio::select! {
             maybe_event = agent_rx.recv() => {
                 if let Some(event) = maybe_event {
@@ -315,6 +322,12 @@ async fn run_live_turn_task(
 
     runtime.shutdown().await;
     audit.await_pending().await;
+
+    if let Some(mut lease) = upper_lease.take() {
+        if let Err(err) = lease.destroy().await {
+            agent_result = fold_upper_destroy_error(agent_result, err);
+        }
+    }
 
     {
         let ctx = audit_context.read().await;
@@ -369,14 +382,28 @@ async fn run_live_turn_task(
     // Sender drops here, closing the stream.
 }
 
-/// Execute a turn and return its events as a live stream.
-pub(super) async fn stream_turn_live(
+fn fold_upper_destroy_error(
+    mut result: AgentTurnResult,
+    err: UpperPrepareError,
+) -> AgentTurnResult {
+    if matches!(result.status, lattice_agent::AgentTurnStatus::Completed) {
+        result.status = lattice_agent::AgentTurnStatus::Error;
+        result.terminal_reason = Some(format!("Upper teardown failed: {err}"));
+    } else if let Some(reason) = result.terminal_reason.as_mut() {
+        reason.push_str(&format!("; Upper teardown failed: {err}"));
+    } else {
+        result.terminal_reason = Some(format!("Upper teardown failed: {err}"));
+    }
+    result
+}
+
+/// Execute a turn with an already-prepared session snapshot and return a live stream.
+pub(super) async fn stream_turn_live_prepared(
     session: SessionApi,
+    prepared: PreparedTurn,
     request: RunTurnRequest,
     deps: ProductionTurnDeps,
 ) -> Result<TurnEventStream> {
-    let prepared = prepare_live_turn(&session, &request)?;
-
     let (tx, rx) = mpsc::channel::<TurnEvent>(TURN_EVENT_CHANNEL_CAPACITY);
 
     tokio::spawn(async move {
@@ -384,6 +411,16 @@ pub(super) async fn stream_turn_live(
     });
 
     Ok(Box::pin(ReceiverStream::new(rx)))
+}
+
+/// Execute a turn and return its events as a live stream.
+pub(super) async fn stream_turn_live(
+    session: SessionApi,
+    request: RunTurnRequest,
+    deps: ProductionTurnDeps,
+) -> Result<TurnEventStream> {
+    let prepared = prepare_live_turn(&session, &request)?;
+    stream_turn_live_prepared(session, prepared, request, deps).await
 }
 
 #[cfg(test)]

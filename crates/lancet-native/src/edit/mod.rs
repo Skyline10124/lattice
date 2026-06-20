@@ -11,6 +11,7 @@ pub mod commit_baseline;
 pub mod diagnostics;
 pub mod hash;
 pub mod parser;
+pub(crate) mod storage;
 pub mod types;
 
 pub use hash::content_hash;

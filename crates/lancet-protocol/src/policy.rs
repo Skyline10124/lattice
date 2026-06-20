@@ -22,6 +22,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::envelope::Capability;
 
+/// How CEP authority is sourced for a turn — independent of backend presence.
+///
+/// [`AuthorityMode::Envelope`] preserves compatibility with envelope-scoped
+/// authority. [`AuthorityMode::Direct`] uses immutable Direct policy semantics
+/// without deriving mode from whether an [`ExecutionRouting`] backend is wired.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorityMode {
+    /// Turn uses declared/base envelope authority (compatibility default).
+    #[default]
+    Envelope,
+    /// Turn uses Direct immutable authority; envelope lifecycle is unavailable.
+    Direct,
+}
+
 /// Source provenance for a capability in the effective envelope snapshot.
 ///
 /// The base envelope is the turn-level observation floor; a declared envelope
@@ -100,9 +115,27 @@ pub struct PolicyAuditContext {
     pub budget_snapshot: PolicyBudgetSnapshot,
 }
 
+/// Discriminator for how policy authority is sourced for a call.
+///
+/// [`PolicyAuthorityInput::Envelope`] carries the layered effective envelope
+/// snapshot used by compatibility mode. [`PolicyAuthorityInput::Direct`] carries
+/// no capability, envelope, scope, source, or grant data — Direct decisions are
+/// derived from immutable profile policy only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "authority_mode")]
+pub enum PolicyAuthorityInput {
+    /// Compatibility envelope-scoped authority (base + optional declared envelope).
+    Envelope {
+        /// Layered effective envelope snapshot with capability source provenance.
+        envelope_snapshot: EffectiveEnvelopeSnapshot,
+    },
+    /// Immutable Direct authority with no envelope or capability snapshot.
+    Direct,
+}
+
 /// The public policy input contract.
 ///
-/// Carries `method`, method `params` as opaque JSON, an envelope snapshot,
+/// Carries `method`, method `params` as opaque JSON, an authority input branch,
 /// and audit context. Must NOT expose executor-owned normalized paths,
 /// argv facts, host facts, handler AST, or budget tracker internals.
 /// Budget information enters only through `PolicyBudgetSnapshot`.
@@ -113,8 +146,8 @@ pub struct PolicyInput {
     /// Method parameters as opaque JSON — policy hook sees the shape
     /// but the executor owns any normalized/derived facts.
     pub params: serde_json::Value,
-    /// Layered effective envelope snapshot with capability source provenance.
-    pub envelope_snapshot: EffectiveEnvelopeSnapshot,
+    /// How authority is sourced for this call (envelope snapshot or Direct).
+    pub authority: PolicyAuthorityInput,
     /// Audit context for traceability.
     pub audit_context: PolicyAuditContext,
 }
@@ -215,6 +248,37 @@ pub trait PolicyHook: Send + Sync {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ── AuthorityMode ────────────────────────────────────────────────
+
+    #[test]
+    fn authority_mode_envelope_and_direct_round_trip() {
+        for mode in [AuthorityMode::Envelope, AuthorityMode::Direct] {
+            let serialized = serde_json::to_string(&mode).unwrap();
+            let deserialized: AuthorityMode = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(deserialized, mode);
+        }
+        assert_eq!(
+            serde_json::to_string(&AuthorityMode::Envelope).unwrap(),
+            "\"envelope\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthorityMode::Direct).unwrap(),
+            "\"direct\""
+        );
+    }
+
+    #[test]
+    fn authority_mode_defaults_to_envelope() {
+        assert_eq!(AuthorityMode::default(), AuthorityMode::Envelope);
+    }
+
+    #[test]
+    fn unknown_authority_mode_fails_deserialization() {
+        let bad = json!("hybrid");
+        let result: Result<AuthorityMode, _> = serde_json::from_value(bad);
+        assert!(result.is_err());
+    }
 
     // ── PolicyDecision round-trip tests ──────────────────────────────
 
@@ -340,15 +404,17 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "/home/user/project/src/main.rs"}),
-            envelope_snapshot: EffectiveEnvelopeSnapshot {
-                base_envelope_id: "base-001".into(),
-                declared_envelope_id: None,
-                capabilities: vec![SourcedCapability {
-                    capability: Capability::ReadPath {
-                        path_pattern: "/home/user/project".into(),
-                    },
-                    source: CapabilitySource::Base,
-                }],
+            authority: PolicyAuthorityInput::Envelope {
+                envelope_snapshot: EffectiveEnvelopeSnapshot {
+                    base_envelope_id: "base-001".into(),
+                    declared_envelope_id: None,
+                    capabilities: vec![SourcedCapability {
+                        capability: Capability::ReadPath {
+                            path_pattern: "/home/user/project".into(),
+                        },
+                        source: CapabilitySource::Base,
+                    }],
+                },
             },
             audit_context: PolicyAuditContext {
                 turn_id: "turn-abc".into(),
@@ -372,10 +438,12 @@ mod tests {
         let input = PolicyInput {
             method: "session.todo_write".into(),
             params: json!({}),
-            envelope_snapshot: EffectiveEnvelopeSnapshot {
-                base_envelope_id: "base-001".into(),
-                declared_envelope_id: None,
-                capabilities: vec![],
+            authority: PolicyAuthorityInput::Envelope {
+                envelope_snapshot: EffectiveEnvelopeSnapshot {
+                    base_envelope_id: "base-001".into(),
+                    declared_envelope_id: None,
+                    capabilities: vec![],
+                },
             },
             audit_context: PolicyAuditContext {
                 turn_id: "turn-1".into(),
@@ -509,10 +577,12 @@ mod tests {
         let input = PolicyInput {
             method: "test".into(),
             params: json!({}),
-            envelope_snapshot: EffectiveEnvelopeSnapshot {
-                base_envelope_id: "base".into(),
-                declared_envelope_id: None,
-                capabilities: vec![],
+            authority: PolicyAuthorityInput::Envelope {
+                envelope_snapshot: EffectiveEnvelopeSnapshot {
+                    base_envelope_id: "base".into(),
+                    declared_envelope_id: None,
+                    capabilities: vec![],
+                },
             },
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),

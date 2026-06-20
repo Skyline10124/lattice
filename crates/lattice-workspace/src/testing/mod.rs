@@ -27,8 +27,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::{
-    Backend, EgressPolicy, ExecOutput, GitStatus, Result, UpperHandle, UpperSpec, Workspace,
-    WorkspaceError,
+    Backend, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest, GitStatus,
+    GrepMatch, GrepRequest, PathFacts, PathIntent, Result, UpperHandle, UpperSpec, Workspace,
+    WorkspaceError, WorkspacePath,
 };
 
 pub mod contract_tests;
@@ -65,6 +66,15 @@ impl DeterministicWorkspace {
 
     fn git_err(e: impl std::fmt::Display) -> WorkspaceError {
         WorkspaceError::Git(e.to_string())
+    }
+
+    fn handle_dir(&self, handle: &UpperHandle) -> Result<PathBuf> {
+        self.handles
+            .read()
+            .unwrap()
+            .get(&handle.id)
+            .cloned()
+            .ok_or_else(|| WorkspaceError::Sdk(format!("det handle not found: {}", handle.id)))
     }
 }
 
@@ -228,6 +238,64 @@ impl Workspace for DeterministicWorkspace {
             .unwrap_or_else(|e| e.into_inner())
             .remove(&handle.id);
         Ok(())
+    }
+
+    async fn resolve_path(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::resolve_path_facts(&dir, path, intent)
+    }
+
+    async fn read_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<Vec<u8>> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::read_file_bytes(&dir, path)
+    }
+
+    async fn write_file(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<()> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::write_file_bytes(&dir, path, content)
+    }
+
+    async fn remove_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<()> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::remove_file_path(&dir, path)
+    }
+
+    async fn list_dir(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::list_dir_entries(&dir, path)
+    }
+
+    async fn grep(&self, handle: &UpperHandle, request: &GrepRequest) -> Result<Vec<GrepMatch>> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::grep_tree(&dir, request)
+    }
+
+    async fn find_files(
+        &self,
+        handle: &UpperHandle,
+        request: &FindRequest,
+    ) -> Result<Vec<WorkspacePath>> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::find_files_tree(&dir, request)
+    }
+
+    async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {
+        let dir = self.handle_dir(handle)?;
+        crate::primitives::exec_on_host(&dir, request)
     }
 }
 

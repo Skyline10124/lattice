@@ -34,6 +34,15 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 
 pub mod microsandbox;
+mod paths;
+#[cfg(any(test, feature = "test-utils"))]
+mod primitives;
+
+pub use paths::{
+    DEFAULT_FIND_MAX_RESULTS, DEFAULT_GREP_MAX_RESULTS, DirectoryEntry, ExecRequest,
+    ExecRequestError, FindRequest, GrepMatch, GrepRequest, MAX_WORKSPACE_WRITE_BYTES, PathFacts,
+    PathIntent, PathKind, WorkspacePath, WorkspacePathError,
+};
 
 // Shared git2 helpers used by both MicrosandboxWorkspace and DeterministicWorkspace.
 // Exposed as pub so downstream crates (33-04 DeterministicWorkspace) can call them.
@@ -261,6 +270,18 @@ pub enum WorkspaceError {
     /// The provided OID string is not a valid 40-character hex SHA-1.
     #[error("invalid baseline OID `{0}`: must be 40 hex characters")]
     InvalidOid(String),
+    #[error("invalid workspace path: {0}")]
+    InvalidPath(String),
+    #[error("path not found: {path}")]
+    NotFound { path: String },
+    #[error("wrong path kind for {path}: expected {expected}")]
+    WrongKind { path: String, expected: String },
+    #[error("path escapes workspace root: {path}")]
+    PathEscape { path: String },
+    #[error("content too large: {actual} bytes exceeds limit of {max}")]
+    ContentTooLarge { actual: usize, max: usize },
+    #[error("adapter unavailable: {0}")]
+    Unavailable(String),
 }
 
 pub type Result<T> = std::result::Result<T, WorkspaceError>;
@@ -386,6 +407,93 @@ pub trait Workspace: Send + Sync {
 
     /// Destroy an Upper. Idempotent.
     async fn destroy_upper(&self, handle: &UpperHandle) -> Result<()>;
+
+    /// Resolve normalized path facts for the given intent.
+    async fn resolve_path(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        intent: PathIntent,
+    ) -> Result<PathFacts> {
+        let _ = (handle, path, intent);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "resolve_path".into(),
+        ))
+    }
+
+    async fn read_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<Vec<u8>> {
+        let _ = (handle, path);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "read_file".into(),
+        ))
+    }
+
+    async fn write_file(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Result<()> {
+        let _ = (handle, path, content);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "write_file".into(),
+        ))
+    }
+
+    async fn remove_file(&self, handle: &UpperHandle, path: &WorkspacePath) -> Result<()> {
+        let _ = (handle, path);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "remove_file".into(),
+        ))
+    }
+
+    async fn list_dir(
+        &self,
+        handle: &UpperHandle,
+        path: &WorkspacePath,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let _ = (handle, path);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "list_dir".into(),
+        ))
+    }
+
+    async fn grep(&self, handle: &UpperHandle, request: &GrepRequest) -> Result<Vec<GrepMatch>> {
+        let _ = (handle, request);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "grep".into(),
+        ))
+    }
+
+    async fn find_files(
+        &self,
+        handle: &UpperHandle,
+        request: &FindRequest,
+    ) -> Result<Vec<WorkspacePath>> {
+        let _ = (handle, request);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "find_files".into(),
+        ))
+    }
+
+    /// Typed argv execution; default delegates to [`exec_upper`].
+    async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {
+        let prog = request
+            .argv
+            .first()
+            .map(String::as_str)
+            .ok_or_else(|| WorkspaceError::InvalidPath("empty exec argv".into()))?;
+        let args: Vec<&str> = request.argv[1..].iter().map(String::as_str).collect();
+        let _ = (&request.env, request.timeout_ms, &request.cwd);
+        self.exec_upper(handle, prog, &args).await
+    }
 }
 
 // ── Det-tier egress tests (V-06 / V-07) ──────────────────────────────────────

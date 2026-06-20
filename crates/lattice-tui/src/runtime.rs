@@ -135,6 +135,7 @@ async fn execute_turn(
         test_llm: None,
         test_project_root: None,
         test_persist_audit: None,
+        workspace_override: None,
     };
 
     let mut stream = lattice_api::stream_turn(session_api, request).await?;

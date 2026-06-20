@@ -309,8 +309,8 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
 
-    use super::cep::build_production_turn_deps;
     use super::llm::RealLlmClient;
+    use super::test_support::build_test_production_deps;
 
     let dir = TempDir::new().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -324,30 +324,21 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
             .build(),
     );
 
-    let deps = build_production_turn_deps(
-        dir.path().to_str().unwrap(),
-        &[],
-        llm,
-        true,
-        None,
-        "test-model",
-        "0.0.0-test",
-    )
-    .expect("production runtime should build");
+    let deps =
+        build_test_production_deps(dir.path().to_str().unwrap(), &[], llm, true, None, None).await;
 
     assert_eq!(deps.build_metrics.adapter_instances, 1);
     assert_eq!(deps.build_metrics.transport_pairs, 1);
 
-    let deps2 = build_production_turn_deps(
+    let deps2 = build_test_production_deps(
         dir.path().to_str().unwrap(),
-        &[ObserveWorkspace::NAME.to_string()],
+        &["session.todo_write".to_string()],
         Arc::new(RealLlmClient),
         false,
         None,
-        "test-model",
-        "0.0.0-test",
+        None,
     )
-    .expect("second runtime build");
+    .await;
     assert_eq!(deps2.build_metrics.adapter_instances, 1);
     assert_eq!(deps2.build_metrics.transport_pairs, 1);
 }
@@ -442,7 +433,9 @@ mod cep_native_registry {
         use lattice_agent::LlmClient;
         use lattice_agent::testing::FakeStreamingLlmClient;
 
-        use crate::turn::cep::build_production_turn_deps;
+        use crate::turn::cep::build_envelope_turn_deps_for_test;
+        use crate::turn::test_support::build_test_production_deps;
+        use lancet_catalog::methods::session::TodoWrite;
 
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "native audit").unwrap();
@@ -456,39 +449,32 @@ mod cep_native_registry {
                 .build(),
         );
 
-        let deps = build_production_turn_deps(
+        let deps = build_test_production_deps(
             dir.path().to_str().unwrap(),
-            &[
-                ObserveWorkspace::NAME.to_string(),
-                AuditReplay::NAME.to_string(),
-            ],
+            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
             llm,
             true,
             None,
-            "sonnet-test",
-            env!("CARGO_PKG_VERSION"),
+            None,
         )
-        .expect("production deps");
+        .await;
 
         deps.cep_client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "hello.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
+            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
+                todos: vec![lancet_catalog::methods::session::TodoItem {
+                    content: "native audit".into(),
+                    status: lancet_catalog::methods::session::TodoStatus::Pending,
+                }],
+            })
             .await
-            .expect("native observe.workspace read_file");
+            .expect("native session.todo_write");
 
         let row = deps.audit.row_by_audit_id(1).unwrap();
         assert_eq!(row.semantic_stage, SEMANTIC_STAGE_NATIVE);
         assert!(row.policy_enforced);
-        assert_eq!(row.impact_kind, "workspace_observation");
-        assert_eq!(row.model_id.as_deref(), Some("sonnet-test"));
-        assert_eq!(
-            row.runtime_version.as_deref(),
-            Some(env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(row.impact_kind, "session_state_mutation");
+        assert_eq!(row.model_id.as_deref(), Some("test-model"));
+        assert_eq!(row.runtime_version.as_deref(), Some("0.0.0-test"));
     }
 }
 
@@ -497,9 +483,7 @@ mod attestation_and_dispatch {
     use super::*;
     use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
     use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
-    use lancet_catalog::methods::workspace::{
-        ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
-    };
+    use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
     use lancet_protocol::envelope::{
         Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, ImpactScope, Intent, Scope,
@@ -509,7 +493,7 @@ mod attestation_and_dispatch {
     use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
-    use crate::turn::cep::{CepExecutorAdapter, build_production_turn_deps};
+    use crate::turn::cep::{CepExecutorAdapter, build_envelope_turn_deps_for_test};
     use lancet_api::store_turn_attestation;
 
     #[tokio::test]
@@ -523,7 +507,7 @@ mod attestation_and_dispatch {
                 }])
                 .build(),
         );
-        let deps = build_production_turn_deps(
+        let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
             &[Envelope::NAME.to_string()],
             llm,
@@ -532,6 +516,7 @@ mod attestation_and_dispatch {
             "test-model",
             "0.0.0-test",
         )
+        .await
         .expect("deps");
 
         let adapter =
@@ -593,19 +578,17 @@ mod attestation_and_dispatch {
                 }])
                 .build(),
         );
-        let deps = build_production_turn_deps(
+        let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[
-                ObserveWorkspace::NAME.to_string(),
-                AuditReplay::NAME.to_string(),
-            ],
+            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
             llm,
             true,
             None,
             "sonnet-attest",
             env!("CARGO_PKG_VERSION"),
         )
-        .expect("deps");
+        .await
+        .expect("envelope turn deps");
 
         let turn_id = "sess-1:root".to_string();
         {
@@ -617,14 +600,14 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "hello.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
+            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
+                todos: vec![lancet_catalog::methods::session::TodoItem {
+                    content: "attest".into(),
+                    status: lancet_catalog::methods::session::TodoStatus::Pending,
+                }],
+            })
             .await
-            .expect("read");
+            .expect("todo write");
 
         deps.audit.await_pending().await;
         let ctx = deps.audit_context.read().await;
@@ -665,19 +648,17 @@ mod attestation_and_dispatch {
                 }])
                 .build(),
         );
-        let deps = build_production_turn_deps(
+        let deps = build_envelope_turn_deps_for_test(
             dir.path().to_str().unwrap(),
-            &[
-                ObserveWorkspace::NAME.to_string(),
-                AuditReplay::NAME.to_string(),
-            ],
+            &[TodoWrite::NAME.to_string(), AuditReplay::NAME.to_string()],
             llm,
             true,
             None,
-            "m",
-            "v",
+            "sonnet-attest",
+            env!("CARGO_PKG_VERSION"),
         )
-        .expect("deps");
+        .await
+        .expect("envelope turn deps");
 
         let turn_id = "sess-2:root".to_string();
         {
@@ -687,14 +668,14 @@ mod attestation_and_dispatch {
         }
 
         deps.cep_client
-            .call::<ObserveWorkspace>(ObserveWorkspaceParams::ReadFile(ReadFileParams {
-                path: "a.txt".into(),
-                offset: None,
-                limit: None,
-                line_numbers: None,
-            }))
+            .call::<TodoWrite>(lancet_catalog::methods::session::TodoWriteParams {
+                todos: vec![lancet_catalog::methods::session::TodoItem {
+                    content: "x".into(),
+                    status: lancet_catalog::methods::session::TodoStatus::Pending,
+                }],
+            })
             .await
-            .expect("read");
+            .expect("todo write");
 
         deps.audit.await_pending().await;
         assert!(

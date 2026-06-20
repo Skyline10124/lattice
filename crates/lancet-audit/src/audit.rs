@@ -5,7 +5,8 @@
 
 use lancet_catalog::{RequiredCapability, catalog};
 use lancet_protocol::envelope::ImpactKind;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -130,6 +131,41 @@ pub struct CepAuditContext {
     pub runtime_version: String,
 }
 
+/// Stable rejection stage labels persisted in `metadata_json.rejection_stage`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionStage {
+    SchemaValidation,
+    PolicyGate,
+    LegacyEnvelopeGate,
+    AdapterPreflight,
+    BackendExecution,
+    VerificationFailure,
+    AuthorityModeRejection,
+}
+
+impl RejectionStage {
+    /// Snake-case wire label for JSON metadata and SQL filters.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SchemaValidation => "schema_validation",
+            Self::PolicyGate => "policy_gate",
+            Self::LegacyEnvelopeGate => "legacy_envelope_gate",
+            Self::AdapterPreflight => "adapter_preflight",
+            Self::BackendExecution => "backend_execution",
+            Self::VerificationFailure => "verification_failure",
+            Self::AuthorityModeRejection => "authority_mode_rejection",
+        }
+    }
+}
+
+/// Typed rejection evidence merged into durable call metadata.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectionRecord {
+    pub rejection_stage: RejectionStage,
+    pub denial_source: String,
+}
+
 /// Filters for [`CepAuditStore::query_rows`] — mirrors `observe.audit` query mode.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditQueryFilters {
@@ -144,6 +180,8 @@ pub struct AuditQueryFilters {
     pub envelope_id: Option<String>,
     pub started_after: Option<String>,
     pub started_before: Option<String>,
+    /// Filter by `metadata_json.rejection_stage` (no schema migration).
+    pub rejection_stage: Option<RejectionStage>,
     /// Exclude methods with this prefix before applying any row limit.
     pub exclude_method_prefix: Option<String>,
     /// Database-level row cap for this query, clamped to [`AUDIT_QUERY_MAX_ROWS`].
@@ -509,6 +547,10 @@ impl CepAuditStore {
             sql.push_str(" AND json_extract(metadata_json, '$.envelope_id') = ?");
             bind.push(Box::new(envelope_id.clone()));
         }
+        if let Some(stage) = filters.rejection_stage {
+            sql.push_str(" AND json_extract(metadata_json, '$.rejection_stage') = ?");
+            bind.push(Box::new(stage.as_str().to_string()));
+        }
         if let Some(exclude_prefix) = &filters.exclude_method_prefix {
             sql.push_str(" AND method NOT LIKE ?");
             bind.push(Box::new(format!("{exclude_prefix}%")));
@@ -649,6 +691,170 @@ impl CepAuditStore {
             })?;
         Ok(count as usize)
     }
+
+    /// Import historical audit rows from `source_path` when this store is empty.
+    ///
+    /// Opens the source read-only, copies `cep_audit_entries` and `attestation_records`
+    /// into the destination in one transaction, preserves row ids and metadata, and
+    /// never writes to or mutates the source database or its WAL/SHM sidecars.
+    /// Idempotent: no-op when the destination already has audit rows.
+    pub fn import_legacy_read_only_if_empty(
+        &self,
+        source_path: impl AsRef<Path>,
+    ) -> Result<(), AuditError> {
+        if self.row_count()? > 0 {
+            return Ok(());
+        }
+
+        let source_path = source_path.as_ref().to_path_buf();
+        reject_symlink_path(&source_path)?;
+
+        let source = Connection::open_with_flags(&source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|source| AuditError::Database {
+                path: source_path.clone(),
+                source,
+            })?;
+
+        let dest = self.conn.lock().expect("audit mutex poisoned");
+        dest.execute("BEGIN IMMEDIATE", [])
+            .map_err(|source| AuditError::Database {
+                path: self.path.clone(),
+                source,
+            })?;
+
+        let import_result = import_legacy_tables(&source, &dest, &self.path);
+        match import_result {
+            Ok(()) => {
+                dest.execute("COMMIT", [])
+                    .map_err(|source| AuditError::Database {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+            }
+            Err(err) => {
+                let _ = dest.execute("ROLLBACK", []);
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn import_legacy_tables(
+    source: &Connection,
+    dest: &Connection,
+    dest_path: &Path,
+) -> Result<(), AuditError> {
+    let mut audit_stmt = source
+        .prepare(
+            "SELECT audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
+                    turn_id, session_id, semantic_stage, semantic_status, guard_stage,
+                    policy_enforced, metadata_json, model_id, runtime_version
+             FROM cep_audit_entries ORDER BY audit_id ASC",
+        )
+        .map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+    let audit_rows =
+        audit_stmt
+            .query_map([], map_audit_row)
+            .map_err(|source| AuditError::Database {
+                path: dest_path.to_path_buf(),
+                source,
+            })?;
+    for row in audit_rows {
+        let row = row.map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+        dest.execute(
+            "INSERT INTO cep_audit_entries (
+                audit_id, call_id, method, started_at, ended_at, result_or_error, impact_kind,
+                turn_id, session_id, semantic_stage, semantic_status, guard_stage,
+                policy_enforced, metadata_json, model_id, runtime_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                row.audit_id,
+                row.call_id as i64,
+                row.method,
+                row.started_at,
+                row.ended_at,
+                row.result_or_error,
+                row.impact_kind,
+                row.turn_id,
+                row.session_id,
+                row.semantic_stage,
+                row.semantic_status,
+                row.guard_stage,
+                if row.policy_enforced { 1 } else { 0 },
+                row.metadata_json,
+                row.model_id,
+                row.runtime_version,
+            ],
+        )
+        .map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let mut attestation_stmt = source
+        .prepare(
+            "SELECT turn_id, session_id, statement_json, predicate_type, generated_at,
+                    source_audit_range_or_hash
+             FROM attestation_records",
+        )
+        .map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+    let attestation_rows = attestation_stmt
+        .query_map([], |row| {
+            Ok(AttestationRecord {
+                turn_id: row.get(0)?,
+                session_id: row.get(1)?,
+                statement_json: row.get(2)?,
+                predicate_type: row.get(3)?,
+                generated_at: row.get(4)?,
+                source_audit_range_or_hash: row.get(5)?,
+            })
+        })
+        .map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+    for row in attestation_rows {
+        let record = row.map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+        dest.execute(
+            "INSERT INTO attestation_records (
+                turn_id, session_id, statement_json, predicate_type, generated_at,
+                source_audit_range_or_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                record.turn_id,
+                record.session_id,
+                record.statement_json,
+                record.predicate_type,
+                record.generated_at,
+                record.source_audit_range_or_hash,
+            ],
+        )
+        .map_err(|source| AuditError::Database {
+            path: dest_path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let _ = dest.execute(
+        "UPDATE sqlite_sequence SET seq = (SELECT COALESCE(MAX(audit_id), 0) FROM cep_audit_entries)
+         WHERE name = 'cep_audit_entries'",
+        [],
+    );
+    Ok(())
 }
 
 /// Materialized audit row for tests and PROV projection.

@@ -96,7 +96,8 @@ pub struct WorkspaceSection {
     ///
     /// Use a fully-qualified OCI ref (e.g. `"docker.io/library/python:3.12-slim"`)
     /// or a template name stored under `~/.microsandbox/snapshots/`. When absent,
-    /// the provisioner applies its own default.
+    /// hosts must supply an explicit image or template source for Direct Upper
+    /// preparation — no provisioner default is implied by the profile schema.
     #[serde(default)]
     pub image: Option<String>,
     /// Number of virtual CPUs to allocate to the Upper VM. Defaults to provisioner default.
@@ -136,6 +137,10 @@ pub struct LancetSection {
     pub isolation: Option<LancetIsolationSection>,
     #[serde(default)]
     pub effects: Option<LancetEffectsSection>,
+    #[serde(default)]
+    pub workspace: Option<LancetWorkspacePolicySection>,
+    #[serde(default)]
+    pub verify: Option<LancetVerifySection>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, toml::Value>,
 }
@@ -211,6 +216,27 @@ pub struct LancetCommandSection {
 pub struct LancetPolicySection {
     #[serde(default)]
     pub path: Option<String>,
+}
+
+/// `[lancet.workspace]` — immutable Direct write-region policy.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LancetWorkspacePolicySection {
+    #[serde(default)]
+    pub allowed_write_paths: Vec<String>,
+}
+
+/// `[lancet.verify]` — immutable Direct post-mutation verify command.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LancetVerifySection {
+    pub argv: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub expected_exit_code: Option<i32>,
 }
 
 /// `[lancet.isolation]` — physical boundary configuration namespace.
@@ -460,6 +486,8 @@ impl Default for LancetSection {
             policy: None,
             isolation: None,
             effects: None,
+            workspace: None,
+            verify: None,
             extensions: BTreeMap::new(),
         }
     }
@@ -512,6 +540,14 @@ impl<'de> Deserialize<'de> for LancetSection {
             .remove("effects")
             .map(|value| value.try_into().map_err(de::Error::custom))
             .transpose()?;
+        let workspace = raw
+            .remove("workspace")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
+        let verify = raw
+            .remove("verify")
+            .map(|value| value.try_into().map_err(de::Error::custom))
+            .transpose()?;
 
         Ok(Self {
             mode,
@@ -522,6 +558,8 @@ impl<'de> Deserialize<'de> for LancetSection {
             policy,
             isolation,
             effects,
+            workspace,
+            verify,
             extensions: raw,
         })
     }
@@ -1518,6 +1556,8 @@ required_boundaries = ["network"]
             policy: None,
             isolation: None,
             effects: None,
+            workspace: None,
+            verify: None,
             extensions,
         };
         let serialized = toml::to_string(&section).unwrap();
@@ -1669,6 +1709,80 @@ unexpected_key = "bad"
             err.to_string().contains("unexpected_key") || err.to_string().contains("unknown field"),
             "unknown workspace field must be rejected, got: {err}"
         );
+    }
+
+    #[test]
+    fn lancet_workspace_roundtrip() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.workspace]
+allowed_write_paths = ["src/**", "crates/foo/**"]
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile: AgentProfile = parse(&toml).unwrap();
+        let paths = &profile
+            .lancet
+            .workspace
+            .as_ref()
+            .unwrap()
+            .allowed_write_paths;
+        assert_eq!(
+            paths,
+            &vec!["src/**".to_string(), "crates/foo/**".to_string()]
+        );
+    }
+
+    #[test]
+    fn lancet_workspace_unknown_field_rejected() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.workspace]
+allowed_write_paths = ["src/**"]
+unexpected = true
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn lancet_verify_roundtrip() {
+        let toml = format!(
+            r#"{prefix}
+
+[lancet.verify]
+argv = ["cargo", "test", "-p", "lattice-api"]
+cwd = "."
+expected_exit_code = 0
+timeout_ms = 120000
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile: AgentProfile = parse(&toml).unwrap();
+        let verify = profile.lancet.verify.as_ref().unwrap();
+        assert_eq!(verify.argv, vec!["cargo", "test", "-p", "lattice-api"]);
+        assert_eq!(verify.cwd.as_deref(), Some("."));
+        assert_eq!(verify.expected_exit_code, Some(0));
+        assert_eq!(verify.timeout_ms, Some(120_000));
+    }
+
+    #[test]
+    fn workspace_image_optional_without_provisioner_default() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "open"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile: AgentProfile = parse(&toml).unwrap();
+        assert!(profile.workspace.as_ref().unwrap().image.is_none());
+        let docs = include_str!("schema.rs");
+        assert!(docs.contains("no provisioner default is implied by the profile schema"));
     }
 
     #[test]

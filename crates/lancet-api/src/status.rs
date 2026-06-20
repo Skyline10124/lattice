@@ -3,7 +3,7 @@
 
 //! Public LANCET status API for frontends.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lancet_audit::{AuditQueryFilters, CepAuditStore};
 use lancet_authority::allowed_primitives_for;
@@ -13,6 +13,7 @@ use lancet_protocol::{
 };
 use serde_json::Value;
 
+use crate::config::audit_db_path_for_project;
 use crate::error::{LancetError, LancetResult};
 
 /// Audit-derived LANCET status plus the current host primitive probe.
@@ -50,7 +51,8 @@ pub fn collect_status_with_probe(
     project_root: &Path,
     host_probe: HostProbeReport,
 ) -> LancetResult<LancetStatusOutput> {
-    let db_path = audit_db_path(project_root);
+    let db_path = audit_db_path_for_project(project_root)
+        .map_err(|err| LancetError::Config(format!("resolve external audit path: {err}")))?;
 
     if !db_path.exists() {
         return Ok(LancetStatusOutput {
@@ -117,10 +119,6 @@ pub fn collect_status_with_probe(
         recent_calls,
         last_guard_verdict,
     })
-}
-
-fn audit_db_path(project_root: &Path) -> PathBuf {
-    project_root.join(".lattice").join("cep_audit.db")
 }
 
 fn compute_duration_ms(started_at: &str, ended_at: Option<&str>) -> Option<i64> {

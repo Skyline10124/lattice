@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_protocol::envelope::Capability;
 use lancet_protocol::policy::{
-    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyBudgetSnapshot,
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, SourcedCapability,
+    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
+    PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
+    SourcedCapability,
 };
 use serde_json::json;
 
@@ -73,12 +74,14 @@ fn integration_read_file_allowed_with_base_capability() {
     let input = PolicyInput {
         method: "observe.workspace".into(),
         params: json!({"mode": "read_file", "path": "src/main.rs"}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::ReadPath {
-                path_pattern: "src/**".into(),
-            },
-            source: base_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::ReadPath {
+                    path_pattern: "src/**".into(),
+                },
+                source: base_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
@@ -92,7 +95,9 @@ fn integration_create_requires_declared_envelope() {
     let input = PolicyInput {
         method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-        envelope_snapshot: empty_envelope(),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: empty_envelope(),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     let decision = hook.decide(&input);
@@ -113,12 +118,14 @@ fn integration_create_allowed_with_declared_capability() {
     let input = PolicyInput {
         method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::WritePath {
-                path_pattern: "src/**".into(),
-            },
-            source: declared_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::WritePath {
+                    path_pattern: "src/**".into(),
+                },
+                source: declared_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
@@ -135,12 +142,14 @@ fn integration_command_run_denied_by_policy() {
             "argv": ["sh", "-c", "echo hello"],
             "declared_impact": "workspace_mutation"
         }),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::RunCommand {
-                argv_allowlist: vec!["sh -c".into()],
-            },
-            source: declared_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::RunCommand {
+                    argv_allowlist: vec!["sh -c".into()],
+                },
+                source: declared_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     let decision = hook.decide(&input);
@@ -164,12 +173,14 @@ fn integration_command_run_allowed_for_diagnostic() {
             "argv": ["cargo", "test"],
             "declared_impact": "command_execution"
         }),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::RunCommand {
-                argv_allowlist: vec!["cargo test".into()],
-            },
-            source: declared_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::RunCommand {
+                    argv_allowlist: vec!["cargo test".into()],
+                },
+                source: declared_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
@@ -186,10 +197,12 @@ fn integration_web_fetch_denied_by_network_policy() {
     let input = PolicyInput {
         method: "fetch.web".into(),
         params: json!({"url": "https://evil.example.com/page"}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::FetchUrl { host: "*".into() },
-            source: base_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::FetchUrl { host: "*".into() },
+                source: base_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     let decision = hook.decide(&input);
@@ -212,12 +225,14 @@ fn integration_web_fetch_allowed_for_allowed_host() {
     let input = PolicyInput {
         method: "fetch.web".into(),
         params: json!({"url": "https://example.com/page"}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::FetchUrl {
-                host: "example.com".into(),
-            },
-            source: base_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::FetchUrl {
+                    host: "example.com".into(),
+                },
+                source: base_source(),
+            }]),
+        },
         audit_context: audit_ctx(default_budget()),
     };
     assert_eq!(hook.decide(&input), PolicyDecision::Allowed);
@@ -231,12 +246,14 @@ fn integration_budget_exceeded_denies_observation() {
     let input = PolicyInput {
         method: "observe.workspace".into(),
         params: json!({"mode": "read_file", "path": "src/main.rs"}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::ReadPath {
-                path_pattern: "src/**".into(),
-            },
-            source: base_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::ReadPath {
+                    path_pattern: "src/**".into(),
+                },
+                source: base_source(),
+            }]),
+        },
         audit_context: audit_ctx(PolicyBudgetSnapshot {
             turn_observation_bytes_used: 65536,
             turn_observation_bytes_limit: 65536,
@@ -262,10 +279,12 @@ fn integration_todo_budget_exceeded_denies_todo_write() {
     let input = PolicyInput {
         method: "session.todo_write".into(),
         params: json!({"todos": [{"content": "task", "status": "pending"}]}),
-        envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
-            capability: Capability::MutateSessionState,
-            source: base_source(),
-        }]),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: envelope_with_caps(vec![SourcedCapability {
+                capability: Capability::MutateSessionState,
+                source: base_source(),
+            }]),
+        },
         audit_context: audit_ctx(PolicyBudgetSnapshot {
             turn_observation_bytes_used: 0,
             turn_observation_bytes_limit: 65536,
@@ -292,7 +311,9 @@ fn integration_capability_checked_before_budget() {
     let input = PolicyInput {
         method: "mutate.create".into(),
         params: json!({"path": "src/new.rs", "content": "x"}),
-        envelope_snapshot: empty_envelope(),
+        authority: PolicyAuthorityInput::Envelope {
+            envelope_snapshot: empty_envelope(),
+        },
         audit_context: audit_ctx(PolicyBudgetSnapshot {
             turn_observation_bytes_used: 65536,
             turn_observation_bytes_limit: 65536,

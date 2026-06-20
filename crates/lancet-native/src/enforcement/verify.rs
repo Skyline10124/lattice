@@ -7,6 +7,10 @@
 //! is executed if configured. Verify failure returns `VerifyFailed`, retains the
 //! diff, and leaves the envelope valid for same-turn repair.
 
+use crate::execution_backend::{
+    DirectVerifyConfig, ExecRequest, ExecutionBackendError, ExecutionRouting, PathFacts,
+    PathIntent, PathKind, RoutingInvocationState,
+};
 use crate::executor::shell::{ExecuteConfig, execute_argv};
 use crate::executor::supervisor::overlay::{
     CandidateArtifactView, VerifyDiscardPlan, VerifyDiscardReport, VerifyLayerStatus,
@@ -14,7 +18,11 @@ use crate::executor::supervisor::overlay::{
 };
 use crate::executor::supervisor::syscall::{LiveSupervisorSyscalls, SupervisorSyscalls};
 use crate::server::registry::Cancellation;
-use lancet_authority::policy::command::{CommandPolicy, EffectiveImpact, classify_command};
+use lancet_authority::effect::region::AuthorizedEffectRegion;
+use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_path_facts};
+use lancet_authority::policy::command::{
+    CommandPolicy, EffectiveImpact, build_allowed_params_env, classify_command,
+};
 use lancet_protocol::envelope::ExecutionEnvelope;
 use lancet_protocol::error::{
     CepErrorData, ExecutionErrorData, GuardErrorData, ValidationErrorData,
@@ -289,6 +297,243 @@ async fn run_verify_on_candidate_view_with_syscalls<S: SupervisorSyscalls>(
     }
 
     Ok(ArtifactVerifyOutcome { verify, discard })
+}
+
+/// Normalize a Direct verify profile config into one Upper [`ExecRequest`].
+pub fn normalize_direct_verify_request(
+    config: &DirectVerifyConfig,
+    policy: &CommandPolicy,
+) -> Result<ExecRequest, CepError> {
+    if config.argv.is_empty() {
+        return Err(CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "direct verify argv must not be empty",
+            CepErrorData::Validation(ValidationErrorData {
+                field: "verify.argv".into(),
+                reason: "must not be empty".into(),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    let impact = classify_command(&config.argv, None, policy)?;
+    match impact {
+        EffectiveImpact::Diagnostic => {}
+        EffectiveImpact::WorkspaceMutation => {
+            return Err(CepError::new(
+                CepErrorCode::GuardDenied,
+                "direct verify command must be diagnostic/verification-class, not WorkspaceMutation",
+                CepErrorData::Guard(GuardErrorData {
+                    method: "verify".into(),
+                    reason: "verify command classified as WorkspaceMutation".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+        EffectiveImpact::HardDenied => {
+            return Err(CepError::new(
+                CepErrorCode::GuardDenied,
+                "direct verify command is hard-denied by command policy",
+                CepErrorData::Guard(GuardErrorData {
+                    method: "verify".into(),
+                    reason: "verify command classified as HardDenied".into(),
+                }),
+                Retriability::Permanent,
+            ));
+        }
+    }
+
+    let requested_timeout = config
+        .timeout_ms
+        .unwrap_or(std::cmp::min(policy.default_timeout_ms, 60_000));
+    let effective_timeout = std::cmp::min(requested_timeout, policy.max_timeout_ms);
+    let env = build_allowed_params_env(&BTreeMap::new(), policy)?;
+    ExecRequest::new(
+        config.argv.clone(),
+        env,
+        effective_timeout,
+        config.cwd.clone(),
+    )
+    .map_err(|_| {
+        CepError::new(
+            CepErrorCode::SchemaMismatch,
+            "direct verify argv must not be empty",
+            CepErrorData::Validation(ValidationErrorData {
+                field: "verify.argv".into(),
+                reason: "must not be empty".into(),
+            }),
+            Retriability::Permanent,
+        )
+    })
+}
+
+/// Run Direct-mode post-mutation verification exclusively through the Upper backend.
+///
+/// Adapter failures return a typed execution error (`BackendExecution` stage).
+/// A completed non-success exit code returns `Ok` with `success = false`
+/// (`VerificationFailure` stage).
+pub async fn run_verify_with_backend(
+    config: &DirectVerifyConfig,
+    execution: &ExecutionRouting,
+    command_policy: &CommandPolicy,
+    cancellation: &mut Cancellation,
+    routing: &RoutingInvocationState,
+    authorized_region: &AuthorizedEffectRegion,
+) -> Result<VerifyOutcome, CepError> {
+    if cancellation.is_cancelled() {
+        return Err(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "direct verify cancelled before adapter preflight",
+            CepErrorData::Execution(ExecutionErrorData {
+                command: config.argv.join(" "),
+                exit_code: None,
+                stderr: Some("cancelled".into()),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    let request = normalize_direct_verify_request(config, command_policy)?;
+    let cwd = request.cwd.clone();
+    let cwd_str = cwd.as_str();
+
+    routing.mark_adapter_preflight_invoked();
+    let path_facts = execution
+        .backend
+        .resolve_path(&cwd, PathIntent::ExecCwd)
+        .await
+        .map_err(|err| verify_backend_error(&config.argv, err))?;
+
+    validate_direct_verify_cwd(cwd_str, &path_facts, authorized_region)?;
+
+    if cancellation.is_cancelled() {
+        return Err(CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "direct verify cancelled before backend execution",
+            CepErrorData::Execution(ExecutionErrorData {
+                command: config.argv.join(" "),
+                exit_code: None,
+                stderr: Some("cancelled".into()),
+            }),
+            Retriability::Permanent,
+        ));
+    }
+
+    routing.mark_backend_invoked();
+    let output = execution
+        .backend
+        .exec(&request)
+        .await
+        .map_err(|err| verify_backend_error(&config.argv, err))?;
+
+    let success = output.exit_code == config.expected_exit_code;
+    Ok(VerifyOutcome {
+        success,
+        exit_code: output.exit_code,
+        stdout_summary: bounded_summary(&output.stdout, command_policy.max_output_bytes),
+        stderr_summary: bounded_summary(&output.stderr, command_policy.max_output_bytes),
+    })
+}
+
+fn validate_direct_verify_cwd(
+    path: &str,
+    facts: &PathFacts,
+    authorized_region: &AuthorizedEffectRegion,
+) -> Result<(), CepError> {
+    let guard_path = if path == "." { "" } else { path };
+    let direct_facts = path_facts_to_direct(facts);
+    let empty_region = AuthorizedEffectRegion::empty();
+    let region = if path == "." {
+        &empty_region
+    } else {
+        authorized_region
+    };
+    validate_direct_path_facts(guard_path, &direct_facts, region)
+}
+
+fn path_facts_to_direct(facts: &PathFacts) -> DirectPathFacts {
+    DirectPathFacts {
+        normalized_path: facts.normalized_path.clone(),
+        exists: facts.exists,
+        kind: facts.kind.map(path_kind_to_direct),
+        parent_exists: facts.parent_exists,
+        parent_kind: facts.parent_kind.map(path_kind_to_direct),
+        canonical_under_workspace: facts.canonical_under_workspace,
+    }
+}
+
+fn path_kind_to_direct(kind: PathKind) -> DirectPathKind {
+    match kind {
+        PathKind::File => DirectPathKind::File,
+        PathKind::Directory => DirectPathKind::Directory,
+        PathKind::Symlink => DirectPathKind::Symlink,
+    }
+}
+
+fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError {
+    let command = argv.join(" ");
+    match err {
+        ExecutionBackendError::Path(path_err) => CepError::new(
+            CepErrorCode::PathContainment,
+            format!("direct verify cwd rejected: {path_err}"),
+            CepErrorData::Validation(ValidationErrorData {
+                field: "verify.cwd".into(),
+                reason: path_err.to_string(),
+            }),
+            Retriability::Permanent,
+        ),
+        ExecutionBackendError::Unavailable { message } => CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!("direct verify backend unavailable: {message}"),
+            CepErrorData::Execution(ExecutionErrorData {
+                command,
+                exit_code: None,
+                stderr: Some(message),
+            }),
+            Retriability::Transient,
+        ),
+        ExecutionBackendError::ExecutionFailed { message } => CepError::new(
+            CepErrorCode::ExecutionFailed,
+            format!("direct verify backend execution failed: {message}"),
+            CepErrorData::Execution(ExecutionErrorData {
+                command,
+                exit_code: None,
+                stderr: Some(message),
+            }),
+            Retriability::Transient,
+        ),
+        ExecutionBackendError::ContentTooLarge => CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "direct verify output exceeded configured limits",
+            CepErrorData::Execution(ExecutionErrorData {
+                command,
+                exit_code: None,
+                stderr: Some("content too large".into()),
+            }),
+            Retriability::Permanent,
+        ),
+        ExecutionBackendError::Timeout => CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "direct verify timed out",
+            CepErrorData::Execution(ExecutionErrorData {
+                command,
+                exit_code: None,
+                stderr: Some("timeout".into()),
+            }),
+            Retriability::Transient,
+        ),
+    }
+}
+
+fn bounded_summary(output: &str, max_bytes: usize) -> Option<String> {
+    if output.is_empty() {
+        return None;
+    }
+    if output.len() <= max_bytes {
+        return Some(output.to_string());
+    }
+    let truncated: String = output.chars().take(max_bytes).collect();
+    Some(truncated)
 }
 
 async fn run_verify_at_project_root(
@@ -888,5 +1133,432 @@ mod verify_tests {
         .unwrap_err();
 
         assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+    }
+
+    mod phase34_direct_verify {
+        use super::*;
+        use crate::execution_backend::{
+            DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend, ExecutionBackendError,
+            ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts, PathIntent,
+            RoutingInvocationState, UpperContext, WorkspacePath,
+        };
+        use lancet_authority::effect::region::AuthorizedEffectRegion;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct VerifySpyBackend {
+            resolve_calls: Mutex<Vec<(String, PathIntent)>>,
+            exec_calls: Mutex<Vec<ExecRequest>>,
+            resolve_result: Mutex<Option<Result<PathFacts, ExecutionBackendError>>>,
+            exec_result: Mutex<Option<Result<ExecOutput, ExecutionBackendError>>>,
+        }
+
+        impl VerifySpyBackend {
+            fn cwd_facts(path: &str) -> PathFacts {
+                let normalized_path = if path == "." {
+                    String::new()
+                } else {
+                    path.to_string()
+                };
+                PathFacts {
+                    normalized_path,
+                    exists: true,
+                    kind: Some(crate::execution_backend::PathKind::Directory),
+                    parent_exists: true,
+                    parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                    byte_size: None,
+                    canonical_under_workspace: true,
+                }
+            }
+        }
+
+        impl ExecutionBackend for VerifySpyBackend {
+            fn backend_name(&self) -> &str {
+                "verify-spy"
+            }
+
+            fn resolve_path(
+                &self,
+                path: &WorkspacePath,
+                intent: PathIntent,
+            ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+            {
+                self.resolve_calls
+                    .lock()
+                    .unwrap()
+                    .push((path.as_str().to_string(), intent));
+                let result = self
+                    .resolve_result
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| Ok(Self::cwd_facts(path.as_str())));
+                Box::pin(async move { result })
+            }
+
+            fn read_file(
+                &self,
+                _path: &WorkspacePath,
+            ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn write_file(
+                &self,
+                _path: &WorkspacePath,
+                _content: &[u8],
+            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn remove_file(
+                &self,
+                _path: &WorkspacePath,
+            ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+            {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn list_dir(
+                &self,
+                _path: &WorkspacePath,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn grep(
+                &self,
+                _request: &GrepRequest,
+            ) -> Pin<
+                Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
+            > {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn find_files(
+                &self,
+                _request: &FindRequest,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async {
+                    Err(ExecutionBackendError::Unavailable {
+                        message: "not used".into(),
+                    })
+                })
+            }
+
+            fn exec(
+                &self,
+                request: &ExecRequest,
+            ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
+            {
+                self.exec_calls.lock().unwrap().push(request.clone());
+                let result = self
+                    .exec_result
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(Ok(ExecOutput {
+                        exit_code: 0,
+                        stdout: "ok".into(),
+                        stderr: String::new(),
+                    }));
+                Box::pin(async move { result })
+            }
+
+            fn changed_paths(
+                &self,
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+        }
+
+        fn routing_with_spy() -> (ExecutionRouting, Arc<VerifySpyBackend>) {
+            let spy = Arc::new(VerifySpyBackend::default());
+            let execution = ExecutionRouting {
+                backend: spy.clone(),
+                upper: UpperContext {
+                    execution_backend: "verify-spy".into(),
+                    upper_workspace_id: "upper-verify".into(),
+                },
+            };
+            (execution, spy)
+        }
+
+        fn direct_config() -> DirectVerifyConfig {
+            DirectVerifyConfig {
+                argv: vec!["echo".into(), "ok".into()],
+                cwd: WorkspacePath::project_root(),
+                timeout_ms: Some(5_000),
+                expected_exit_code: 0,
+            }
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_uses_backend_argv_env_timeout_cwd() {
+            let policy = default_policy();
+            let (execution, spy) = routing_with_spy();
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+            let region = AuthorizedEffectRegion::empty();
+
+            let outcome = run_verify_with_backend(
+                &direct_config(),
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &region,
+            )
+            .await
+            .unwrap();
+
+            assert!(outcome.success);
+            let exec_calls = spy.exec_calls.lock().unwrap();
+            assert_eq!(exec_calls.len(), 1);
+            assert_eq!(exec_calls[0].argv, vec!["echo", "ok"]);
+            assert_eq!(exec_calls[0].cwd.as_str(), ".");
+            assert_eq!(exec_calls[0].timeout_ms, 5_000);
+            let resolve_calls = spy.resolve_calls.lock().unwrap();
+            assert_eq!(resolve_calls.len(), 1);
+            assert_eq!(resolve_calls[0].0, ".");
+            assert_eq!(resolve_calls[0].1, PathIntent::ExecCwd);
+            assert!(routing_state.adapter_preflight_invoked());
+            assert!(routing_state.backend_invoked());
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_omitted_cwd_uses_project_root_sentinel() {
+            let policy = default_policy();
+            let config = DirectVerifyConfig {
+                argv: vec!["echo".into(), "root".into()],
+                cwd: WorkspacePath::project_root(),
+                timeout_ms: None,
+                expected_exit_code: 0,
+            };
+            let (execution, spy) = routing_with_spy();
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+
+            run_verify_with_backend(
+                &config,
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap();
+
+            let exec_calls = spy.exec_calls.lock().unwrap();
+            assert_eq!(exec_calls[0].cwd.as_str(), ".");
+            assert!(!exec_calls[0].cwd.as_str().starts_with('/'));
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_cwd_preflight_denial_before_exec() {
+            let policy = default_policy();
+            let (execution, spy) = routing_with_spy();
+            *spy.resolve_result.lock().unwrap() = Some(Ok(PathFacts {
+                normalized_path: ".git".into(),
+                exists: true,
+                kind: Some(crate::execution_backend::PathKind::Directory),
+                parent_exists: true,
+                parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace: true,
+            }));
+            let config = DirectVerifyConfig {
+                argv: vec!["echo".into(), "bad".into()],
+                cwd: WorkspacePath::parse(".git").unwrap(),
+                timeout_ms: None,
+                expected_exit_code: 0,
+            };
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+
+            let err = run_verify_with_backend(
+                &config,
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, CepErrorCode::GuardDenied);
+            assert!(routing_state.adapter_preflight_invoked());
+            assert!(!routing_state.backend_invoked());
+            assert!(spy.exec_calls.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_cancellation_before_exec() {
+            let policy = default_policy();
+            let (execution, _spy) = routing_with_spy();
+            let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            cancel_tx.send(true).unwrap();
+            let routing_state = RoutingInvocationState::default();
+
+            let err = run_verify_with_backend(
+                &direct_config(),
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+            assert!(!routing_state.backend_invoked());
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_nonzero_expected_exit_is_failure_outcome() {
+            let policy = default_policy();
+            let (execution, spy) = routing_with_spy();
+            *spy.exec_result.lock().unwrap() = Some(Ok(ExecOutput {
+                exit_code: 7,
+                stdout: String::new(),
+                stderr: "fail".into(),
+            }));
+            let config = DirectVerifyConfig {
+                argv: vec!["echo".into(), "fail".into()],
+                cwd: WorkspacePath::project_root(),
+                timeout_ms: None,
+                expected_exit_code: 0,
+            };
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+
+            let outcome = run_verify_with_backend(
+                &config,
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap();
+
+            assert!(!outcome.success);
+            assert_eq!(outcome.exit_code, 7);
+            assert!(routing_state.backend_invoked());
+        }
+
+        #[tokio::test]
+        async fn phase34_direct_verify_adapter_error_is_distinct_from_verify_failure() {
+            let policy = default_policy();
+            let (execution, spy) = routing_with_spy();
+            *spy.exec_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
+                message: "adapter blew up".into(),
+            }));
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+
+            let err = run_verify_with_backend(
+                &direct_config(),
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, CepErrorCode::ExecutionFailed);
+            assert_ne!(err.code, CepErrorCode::VerifyFailed);
+            assert!(routing_state.backend_invoked());
+            assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
+        }
+
+        static HOST_VERIFY_SENTINEL: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+
+        #[tokio::test]
+        async fn phase34_direct_verify_never_invokes_host_run_verify() {
+            HOST_VERIFY_SENTINEL.store(false, std::sync::atomic::Ordering::SeqCst);
+            struct HostVerifyGuard;
+            impl Drop for HostVerifyGuard {
+                fn drop(&mut self) {
+                    if HOST_VERIFY_SENTINEL.load(std::sync::atomic::Ordering::SeqCst) {
+                        panic!("host run_verify path must not be used in Direct verify");
+                    }
+                }
+            }
+            let _guard = HostVerifyGuard;
+            let policy = default_policy();
+            let (execution, _spy) = routing_with_spy();
+            let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+            let mut cancel = Cancellation::new(cancel_rx);
+            let routing_state = RoutingInvocationState::default();
+
+            let outcome = run_verify_with_backend(
+                &direct_config(),
+                &execution,
+                &policy,
+                &mut cancel,
+                &routing_state,
+                &AuthorizedEffectRegion::empty(),
+            )
+            .await
+            .unwrap();
+
+            assert!(outcome.success);
+        }
     }
 }

@@ -23,6 +23,7 @@ pub use schema::{
     AgentProfile, AgentSection, CredentialRef, EgressPolicyConfig, LancetCommandIsolationSection,
     LancetCommandSection, LancetIsolationMode, LancetIsolationSection, LancetLandlockBehavior,
     LancetNetworkSection, LancetObservationSection, LancetPolicySection, LancetProjectRootSection,
-    LancetSection, LancetUnsupportedHostBehavior, LlmRetrySection, LlmSection, PromptSection,
-    ToolsSection, WorkspaceSection,
+    LancetSection, LancetUnsupportedHostBehavior, LancetVerifySection,
+    LancetWorkspacePolicySection, LlmRetrySection, LlmSection, PromptSection, ToolsSection,
+    WorkspaceSection,
 };

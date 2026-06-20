@@ -210,6 +210,11 @@ pub fn build_test_context(
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::envelope::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+
+        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
+        execution: None,
+        direct_verify: None,
+        routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
     (ctx, event_rx, canonical_root)
 }
