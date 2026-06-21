@@ -516,6 +516,15 @@ mod upper_lease_tests {
             *self.destroyed.lock().unwrap() = Some(handle.id.clone());
             Ok(())
         }
+
+        async fn export_candidate(
+            &self,
+            _handle: &UpperHandle,
+            _baseline_oid: &str,
+            _max_artifact_bytes: u64,
+        ) -> lattice_workspace::Result<lattice_workspace::CandidateExport> {
+            Err(lattice_workspace::WorkspaceError::Unavailable("noop".into()))
+        }
     }
 
     #[tokio::test]

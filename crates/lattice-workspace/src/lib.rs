@@ -29,7 +29,7 @@
 //!   allowlist policies; there is no `NetworkPolicy::allowlist()` constructor
 //!   (T-33-03; Wave 0 A7 confirmed DNS-native resolution for allowlisted domains).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
@@ -47,9 +47,13 @@ pub use paths::{
 // Shared git2 helpers used by both MicrosandboxWorkspace and DeterministicWorkspace.
 // Exposed as pub so downstream crates (33-04 DeterministicWorkspace) can call them.
 pub mod git;
+pub mod promotion;
 mod template;
 
-pub use git::{checkout_tree_to_dir, git_archive_to_tempdir};
+pub use git::{
+    build_baseline_pack, checkout_tree_to_dir, export_candidate_from_repo, git_archive_to_tempdir,
+    provision_exact_baseline, BASELINE_TRANSFER_CHUNK_BYTES, CANDIDATE_EXPORT_CHUNK_BYTES,
+};
 
 // Feature-gated test infrastructure.
 #[cfg(any(test, feature = "test-utils"))]
@@ -270,6 +274,9 @@ pub enum WorkspaceError {
     /// The provided OID string is not a valid 40-character hex SHA-1.
     #[error("invalid baseline OID `{0}`: must be 40 hex characters")]
     InvalidOid(String),
+    /// Upper HEAD does not match the requested host baseline commit OID.
+    #[error("baseline identity mismatch: expected {expected}, got {actual}")]
+    BaselineIdentityMismatch { expected: String, actual: String },
     #[error("invalid workspace path: {0}")]
     InvalidPath(String),
     #[error("path not found: {path}")]
@@ -282,9 +289,78 @@ pub enum WorkspaceError {
     ContentTooLarge { actual: usize, max: usize },
     #[error("adapter unavailable: {0}")]
     Unavailable(String),
+    #[error("upper working tree is not clean")]
+    UpperDirty { porcelain: String },
+    #[error("baseline {baseline} is not an ancestor of candidate {candidate}")]
+    NotDescendant { baseline: String, candidate: String },
+    #[error("candidate artifact size {actual} exceeds limit {max}")]
+    ArtifactTooLarge { actual: u64, max: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, WorkspaceError>;
+
+/// Host-owned incremental candidate bundle produced by [`Workspace::export_candidate`].
+///
+/// Owns a synced tempfile; raw bundle bytes never pass through UTF-8 stdout.
+pub struct CandidateExport {
+    artifact: tempfile::NamedTempFile,
+    baseline_oid: String,
+    candidate_oid: String,
+    artifact_len: u64,
+}
+
+impl std::fmt::Debug for CandidateExport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CandidateExport")
+            .field("baseline_oid", &self.baseline_oid)
+            .field("candidate_oid", &self.candidate_oid)
+            .field("artifact_len", &self.artifact_len)
+            .finish()
+    }
+}
+
+impl CandidateExport {
+    /// Path to the host tempfile containing the raw bundle bytes.
+    pub fn path(&self) -> &Path {
+        self.artifact.path()
+    }
+
+    pub fn baseline_oid(&self) -> &str {
+        &self.baseline_oid
+    }
+
+    pub fn candidate_oid(&self) -> &str {
+        &self.candidate_oid
+    }
+
+    pub fn artifact_len(&self) -> u64 {
+        self.artifact_len
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn from_test_artifact(
+        artifact: tempfile::NamedTempFile,
+        baseline_oid: String,
+        candidate_oid: String,
+        artifact_len: u64,
+    ) -> Self {
+        Self::from_parts(artifact, baseline_oid, candidate_oid, artifact_len)
+    }
+
+    pub(crate) fn from_parts(
+        artifact: tempfile::NamedTempFile,
+        baseline_oid: String,
+        candidate_oid: String,
+        artifact_len: u64,
+    ) -> Self {
+        Self {
+            artifact,
+            baseline_oid,
+            candidate_oid,
+            artifact_len,
+        }
+    }
+}
 
 // ── OID validation ────────────────────────────────────────────────────────────
 
@@ -387,6 +463,18 @@ pub trait Workspace: Send + Sync {
 
     /// Return `git status --porcelain=v1` of the `/workspace` root.
     async fn git_status(&self, handle: &UpperHandle) -> Result<GitStatus>;
+
+    /// Export a clean Upper candidate as a bounded incremental Git bundle on the host.
+    ///
+    /// Rejects dirty staged/unstaged/untracked states, non-ancestor baselines, and
+    /// artifacts larger than `max_artifact_bytes`. Raw bundle bytes are stored in a
+    /// host tempfile — never in [`ExecOutput::stdout`].
+    async fn export_candidate(
+        &self,
+        handle: &UpperHandle,
+        baseline_oid: &str,
+        max_artifact_bytes: u64,
+    ) -> Result<CandidateExport>;
 
     /// Stop the Upper, snapshot it as a warm template, return the snapshot name.
     ///

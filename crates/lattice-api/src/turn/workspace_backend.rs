@@ -498,6 +498,15 @@ mod workspace_execution_backend_tests {
                 stderr: String::new(),
             })
         }
+
+        async fn export_candidate(
+            &self,
+            _handle: &UpperHandle,
+            _baseline_oid: &str,
+            _max_artifact_bytes: u64,
+        ) -> lattice_workspace::Result<lattice_workspace::CandidateExport> {
+            Err(WorkspaceError::Unavailable("spy".into()))
+        }
     }
 
     #[test]

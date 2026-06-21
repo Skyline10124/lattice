@@ -505,6 +505,17 @@ async fn run_inner(
             eprintln!("{}: {}", "error".red(), msg);
             return Ok(std::process::ExitCode::from(1));
         }
+        Err(lattice_api::ApiError::PromotionRecoveryRequired) => {
+            eprintln!(
+                "{}: promotion recovery required before turn start",
+                "error".red()
+            );
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::PromotionRecoveryConflict(msg)) => {
+            eprintln!("{}: promotion recovery conflict: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
     };
 
     // D-A6: drain the stream to completion; never break on a terminal event

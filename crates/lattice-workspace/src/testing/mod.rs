@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use crate::{
     Backend, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest, GitStatus,
     GrepMatch, GrepRequest, PathFacts, PathIntent, Result, UpperHandle, UpperSpec, Workspace,
-    WorkspaceError, WorkspacePath,
+    WorkspaceError, WorkspacePath, CandidateExport,
 };
 
 pub mod contract_tests;
@@ -64,10 +64,6 @@ impl DeterministicWorkspace {
             .cloned()
     }
 
-    fn git_err(e: impl std::fmt::Display) -> WorkspaceError {
-        WorkspaceError::Git(e.to_string())
-    }
-
     fn handle_dir(&self, handle: &UpperHandle) -> Result<PathBuf> {
         self.handles
             .read()
@@ -82,44 +78,20 @@ impl DeterministicWorkspace {
 impl Workspace for DeterministicWorkspace {
     // ── Upper methods ─────────────────────────────────────────────────────────
 
-    /// Provision an Upper: checkout `spec.baseline_oid` into a fresh tempdir
-    /// subdir using `git2`, then `git init` + stage + commit the tree so the
-    /// subdir is a standalone git repository.
+    /// Provision an Upper with the exact host baseline commit and reachable objects.
     ///
     /// The `EgressPolicy` is recorded (inspectable via `requested_policy`) but
     /// NOT enforced — commands run on the host network in this adapter.
     async fn create_upper(&self, spec: &UpperSpec) -> Result<UpperHandle> {
         crate::validate_baseline_oid(&spec.baseline_oid)?;
 
-        // Allocate a unique subdir under base_dir.
         let uid = uuid::Uuid::new_v4().simple().to_string();
         let dir = self.base_dir.path().join(&uid);
         std::fs::create_dir_all(&dir).map_err(WorkspaceError::Io)?;
 
-        // Checkout the baseline tree into the new dir (no .git metadata).
-        crate::git::checkout_tree_to_dir(&spec.host_repo_path, &spec.baseline_oid, &dir)?;
+        let pack = crate::git::build_baseline_pack(&spec.host_repo_path, &spec.baseline_oid)?;
+        crate::git::provision_exact_baseline(&dir, pack.path(), &spec.baseline_oid)?;
 
-        // Init a new git repo in the dir and commit the checked-out tree.
-        let repo = git2::Repository::init(&dir).map_err(Self::git_err)?;
-        let sig = git2::Signature::now("lattice-det", "det@localhost").map_err(Self::git_err)?;
-        let mut index = repo.index().map_err(Self::git_err)?;
-        index
-            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-            .map_err(Self::git_err)?;
-        index.write().map_err(Self::git_err)?;
-        let tree_id = index.write_tree().map_err(Self::git_err)?;
-        let tree = repo.find_tree(tree_id).map_err(Self::git_err)?;
-        repo.commit(
-            Some("HEAD"),
-            &sig,
-            &sig,
-            &format!("baseline:{}", spec.baseline_oid),
-            &tree,
-            &[],
-        )
-        .map_err(Self::git_err)?;
-
-        // Register handle.
         let id = format!("det-{}", &uid[..8]);
         self.handles
             .write()
@@ -173,6 +145,16 @@ impl Workspace for DeterministicWorkspace {
             porcelain: out.stdout.clone(),
             is_clean: out.stdout.trim().is_empty(),
         })
+    }
+
+    async fn export_candidate(
+        &self,
+        handle: &UpperHandle,
+        baseline_oid: &str,
+        max_artifact_bytes: u64,
+    ) -> Result<CandidateExport> {
+        let dir = self.handle_dir(handle)?;
+        crate::git::export_candidate_from_repo(&dir, baseline_oid, max_artifact_bytes)
     }
 
     /// Copy the handle's directory to a named sibling under `base_dir`.

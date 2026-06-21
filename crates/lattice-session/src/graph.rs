@@ -348,6 +348,11 @@ fn hash_json(kind: &str, value: &serde_json::Value) -> String {
 }
 
 /// Canonicalize JSON by sorting object keys alphabetically (recursive).
+pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    canonical_json(value).into_bytes()
+}
+
+/// Canonicalize JSON by sorting object keys alphabetically (recursive).
 fn canonical_json(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Object(map) => {

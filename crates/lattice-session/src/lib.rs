@@ -19,6 +19,12 @@ pub use graph::{
     derive_commit_message,
 };
 
+pub mod promotion;
+pub use promotion::{
+    PromotedSessionCommitInput, PromotedSessionManifest, PROMOTION_MANIFEST_SCHEMA_VERSION,
+    create_promoted_session_commit,
+};
+
 pub mod sqlite_graph;
 pub use sqlite_graph::SqliteSessionGraphStore;
 
@@ -49,6 +55,8 @@ pub enum SessionError {
     Conflict(String),
     #[error("commit '{0}' not found")]
     MissingCommit(String),
+    #[error("git error: {0}")]
+    Git(String),
 }
 
 pub(crate) fn validate_branch_name(name: &str) -> Result<()> {

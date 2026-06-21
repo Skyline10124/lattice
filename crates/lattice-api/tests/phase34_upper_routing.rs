@@ -596,6 +596,16 @@ impl Workspace for FailingWorkspace {
     async fn destroy_upper(&self, _handle: &UpperHandle) -> lattice_workspace::Result<()> {
         Ok(())
     }
+
+    async fn export_candidate(
+        &self,
+        _handle: &UpperHandle,
+        _baseline_oid: &str,
+        _max_artifact_bytes: u64,
+    ) -> lattice_workspace::Result<lattice_workspace::CandidateExport> {
+        self.host_touched.store(true, Ordering::SeqCst);
+        Err(WsError::Unavailable("must not export".into()))
+    }
 }
 
 #[tokio::test]

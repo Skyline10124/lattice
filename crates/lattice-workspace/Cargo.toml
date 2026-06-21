@@ -10,6 +10,7 @@ description = "LATTICE Upper-workspace execution adapter seam with a microsandbo
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
@@ -23,7 +24,30 @@ base64 = { workspace = true }
 tempfile = { workspace = true }
 regex = { workspace = true }
 
+[[test]]
+name = "promotion_recovery"
+path = "tests/promotion_recovery.rs"
+
+[[test]]
+name = "promotion_lower"
+path = "tests/promotion_lower.rs"
+
+[[test]]
+name = "promotion_ref_transaction"
+path = "tests/promotion_ref_transaction.rs"
+
+[[test]]
+name = "promotion_candidate_validation"
+path = "tests/promotion_candidate_validation.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "promotion_end_to_end"
+path = "tests/promotion_end_to_end.rs"
+required-features = ["test-utils"]
+
 [dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 default = []

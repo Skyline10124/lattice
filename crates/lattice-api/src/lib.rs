@@ -25,9 +25,11 @@ pub use lattice_session::{
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
+pub use lattice_workspace::promotion::{PromotionLimits, PromotionOutcome, VerificationResult};
 pub use turn::{
     RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
-    TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, run_turn, stream_turn,
+    TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, promote_verified_candidate,
+    prepare_promotion_target, run_turn, stream_turn, PromotionSessionMetadata, PromotionTurnTarget,
 };
 
 #[doc(hidden)]

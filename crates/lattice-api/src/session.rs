@@ -28,6 +28,12 @@ pub enum ApiError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    #[error("promotion recovery required before turn start")]
+    PromotionRecoveryRequired,
+
+    #[error("promotion recovery conflict: {0}")]
+    PromotionRecoveryConflict(String),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -216,6 +222,9 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
             path.display(),
             source
         )),
+        lattice_session::SessionError::Git(msg) => {
+            ApiError::Internal(format!("git error: {msg}"))
+        }
     }
 }
 

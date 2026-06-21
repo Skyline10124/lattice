@@ -15,6 +15,7 @@ mod execute;
 mod live;
 mod llm;
 mod mapping;
+pub mod promotion;
 mod types;
 mod upper;
 pub mod workspace_backend;
@@ -39,6 +40,10 @@ mod live_tests;
 
 pub use collector::collect_turn_result_from_events;
 pub use execute::{run_turn, stream_turn};
+pub use promotion::{
+    promote_verified_candidate, prepare_promotion_target, PromotionSessionMetadata,
+    PromotionTurnTarget,
+};
 pub use types::{
     RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
     TurnEventStream, TurnUsageSummary,

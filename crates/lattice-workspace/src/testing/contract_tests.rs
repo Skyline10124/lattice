@@ -133,6 +133,7 @@ where
     test_no_lower_path_in_handle(ws, make_spec.clone()).await;
     test_baseline_content(ws, make_spec.clone()).await;
     test_upper_git_root(ws, make_spec.clone()).await;
+    test_exact_baseline_identity(ws, make_spec.clone()).await;
     test_destroy_is_idempotent(ws, make_spec).await;
 }
 
@@ -274,6 +275,86 @@ where
     );
 
     ws.destroy_upper(&handle).await.unwrap();
+}
+
+/// V-02 / PROMO-02 — Upper `HEAD` equals the host baseline OID exactly.
+async fn test_exact_baseline_identity<W, F>(ws: &W, make_spec: F)
+where
+    W: Workspace,
+    F: Fn(PathBuf, String) -> UpperSpec,
+{
+    let (repo, oid) = make_chained_fixture_repo();
+    let spec = make_spec(repo.path().to_owned(), oid.clone());
+    let handle = ws
+        .create_upper(&spec)
+        .await
+        .expect("test_exact_baseline_identity: create_upper must succeed");
+
+    let out = ws
+        .exec_upper(&handle, "git", &["rev-parse", "HEAD"])
+        .await
+        .expect("test_exact_baseline_identity: rev-parse HEAD must succeed");
+    assert_eq!(out.exit_code, 0, "git rev-parse HEAD must exit 0");
+    assert_eq!(
+        out.stdout.trim(),
+        oid,
+        "Upper HEAD must equal host baseline OID exactly"
+    );
+
+    let parents = ws
+        .exec_upper(&handle, "git", &["cat-file", "-p", "HEAD"])
+        .await
+        .expect("test_exact_baseline_identity: cat-file HEAD must succeed");
+    assert_eq!(parents.exit_code, 0);
+    assert!(
+        parents.stdout.lines().any(|line| line.starts_with("parent ")),
+        "baseline commit must preserve parent topology; got:\n{}",
+        parents.stdout
+    );
+
+    ws.destroy_upper(&handle).await.unwrap();
+}
+
+/// Host repo with a two-commit chain so the baseline commit has a parent.
+pub fn make_chained_fixture_repo() -> (tempfile::TempDir, String) {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = git2::Repository::init(dir.path()).expect("git init");
+    let sig = git2::Signature::now("contract-test", "ct@localhost").expect("sig");
+
+    std::fs::write(dir.path().join("root.txt"), b"root\n").expect("write root");
+    let mut index = repo.index().expect("index");
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .expect("add_all");
+    index.write().expect("index write");
+    let root_tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("find_tree");
+    let root_oid = repo
+        .commit(Some("HEAD"), &sig, &sig, "root", &root_tree, &[])
+        .expect("root commit");
+
+    std::fs::write(dir.path().join("child.txt"), b"child\n").expect("write child");
+    let mut index = repo.index().expect("index");
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .expect("add_all");
+    index.write().expect("index write");
+    let child_tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("find_tree");
+    let baseline_oid = repo
+        .commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "baseline",
+            &child_tree,
+            &[&repo.find_commit(root_oid).expect("parent")],
+        )
+        .expect("baseline commit");
+
+    (dir, baseline_oid.to_string())
 }
 
 /// V-05 (det tier) — `destroy_upper` is idempotent: a second call succeeds.

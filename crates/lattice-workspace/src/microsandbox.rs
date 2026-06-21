@@ -40,7 +40,7 @@ use crate::{
     Backend, CredentialSpec, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest,
     GitStatus, GrepMatch, GrepRequest, MAX_WORKSPACE_WRITE_BYTES, NetPlan, PathFacts, PathIntent,
     PathKind, Result, UpperHandle, UpperSpec, Workspace, WorkspaceError, WorkspacePath,
-    plan_egress, validate_baseline_oid,
+    CandidateExport, plan_egress, validate_baseline_oid,
 };
 
 /// Fixed shell command that installs `git` inside a Debian/Ubuntu-based Upper.
@@ -243,68 +243,17 @@ impl MicrosandboxWorkspace {
         Ok(name.to_string())
     }
 
-    /// Deliver the baseline git tree into `/workspace` inside a live sandbox.
+    /// Deliver the exact host baseline commit into `/workspace/.git` inside a live sandbox.
     ///
-    /// Steps:
-    /// 1. Export the `baseline_oid` tree to a host tempdir via `git_archive_to_tempdir`.
-    /// 2. Create `/workspace` inside the VM.
-    /// 3. Deliver the archive content via per-file base64 exec injection (Option B).
-    /// 4. `git init`, `git add -A`, `git commit` inside the VM.
-    ///
-    /// The `host_repo_path` is used only on the host side; it never enters exec argv
-    /// or SDK builder chains (WS-02, T-33-01).
-    ///
-    /// # Note on Option A vs B
-    ///
-    /// Option A (tar + readonly volume bind) is preferred if the SDK exposes a volume
-    /// API that supports readonly bind-mounts of a host tempdir (not a writable Lower
-    /// mount).  The SDK 0.5.6 volume builder does not expose a readonly bind for an
-    /// arbitrary host path in the feature surface confirmed by Wave 0, so Option B
-    /// (per-file base64 exec injection) is used here.  For large repos, a future
-    /// optimisation can switch to writing a tar archive to a temp file and exec-ing
-    /// `tar -xf` with a read-only bind, once the SDK surface is extended.
+    /// Builds a host pack via [`crate::git::build_baseline_pack`], uploads it in bounded
+    /// binary-safe chunks, ingests with `git index-pack`, attaches `HEAD` to
+    /// [`crate::git::LATTICE_UPPER_REF`], and verifies the exact baseline OID.
     async fn deliver_baseline(&self, sandbox: &Sandbox, spec: &UpperSpec) -> Result<()> {
-        use crate::git::git_archive_to_tempdir;
-
-        // Step 1: export baseline_oid tree to a host tempdir (git2-backed, no shell).
-        // The TempDir is dropped at the end of this function, deleting the archive.
-        let archive_dir = git_archive_to_tempdir(&spec.host_repo_path, &spec.baseline_oid)?;
-
-        // Step 2: create /workspace inside VM.
         sandbox
             .exec("mkdir", ["-p", "/workspace"])
             .await
             .map_err(Self::sdk_err)?;
 
-        // Step 3: deliver files via per-file base64 injection (Option B).
-        // Iterate directory entries and inject each file into /workspace/<rel-path>.
-        Self::inject_dir_to_vm(
-            sandbox,
-            archive_dir.path(),
-            std::path::Path::new("/workspace"),
-        )
-        .await?;
-
-        // Step 4: git-init sequence inside Upper (always via exec, never host bind).
-        //
-        // Probe for git first using `sh -c "command -v git"` (sh is always available).
-        // The downstream behaviour when git is MISSING is driven by the rootfs
-        // source and egress policy (M-33-05 hardening):
-        //
-        //   * `ImageOrTemplate::Template` + missing git → hard error.  A git-ready
-        //     template is built once by `build_git_ready_template`; a template that
-        //     lacks git is a build defect, not a runtime fallback case.
-        //   * `ImageOrTemplate::Image` + Open/Allowlist egress → one-time
-        //     `apt-get install git` (network reachable), then hard error if it
-        //     still is not present.
-        //   * `ImageOrTemplate::Image` + Blocked egress → deliver files only and
-        //     return Ok (exec-only Upper).  apt-get cannot reach the network under
-        //     Blocked; callers that need a git root under Blocked must use a
-        //     git-ready template (proven by the integration tests).
-        //
-        // The old unconditional "swallow apt-get failure and silently skip git
-        // init" path is removed: the Template path no longer produces a git-less
-        // Upper without surfacing an error.
         let has_git = Self::probe_git(sandbox).await?;
 
         if !has_git {
@@ -317,8 +266,6 @@ impl MicrosandboxWorkspace {
                 }
                 crate::ImageOrTemplate::Image(_) => match spec.egress {
                     EgressPolicy::Open | EgressPolicy::Allowlist(_) => {
-                        // Network reachable — install git once via the fixed literal.
-                        // T-33-05: APT_GET_GIT is a compile-time constant, argv slice.
                         let _ = sandbox
                             .exec_with("sh", |e| {
                                 e.args(["-c", APT_GET_GIT]).timeout(APT_GET_GIT_TIMEOUT)
@@ -331,47 +278,207 @@ impl MicrosandboxWorkspace {
                                     .to_string(),
                             ));
                         }
-                        // git now present — fall through to init/add/commit.
                     }
                     EgressPolicy::Blocked => {
-                        // Blocked egress: apt-get cannot reach the mirror.  Deliver
-                        // files only; the Upper is exec-capable but has no .git root.
-                        // Callers needing git under Blocked must use a git-ready
-                        // template (the Template branch above guarantees git there).
                         return Ok(());
                     }
                 },
             }
         }
 
-        // git is available — run init/add/commit inside Upper.
-        sandbox
-            .exec("git", ["-C", "/workspace", "init"])
-            .await
-            .map_err(Self::sdk_err)?;
-        sandbox
-            .exec("git", ["-C", "/workspace", "add", "-A"])
-            .await
-            .map_err(Self::sdk_err)?;
-        sandbox
-            .exec(
-                "git",
-                [
-                    "-C",
-                    "/workspace",
-                    "-c",
-                    "user.email=lattice@local",
-                    "-c",
-                    "user.name=lattice",
-                    "commit",
-                    "--allow-empty-message",
-                    "-m",
-                    &format!("baseline:{}", spec.baseline_oid),
-                ],
-            )
-            .await
-            .map_err(Self::sdk_err)?;
+        let pack = crate::git::build_baseline_pack(&spec.host_repo_path, &spec.baseline_oid)?;
+
+        Self::exec_git_workspace(sandbox, &["init"], "git init").await?;
+
+        let guest_pack = Self::upload_baseline_pack(sandbox, pack.path()).await?;
+
+        Self::exec_git_workspace(sandbox, &["index-pack", &guest_pack], "index-pack").await?;
+        Self::exec_git_workspace(
+            sandbox,
+            &[
+                "update-ref",
+                crate::git::LATTICE_UPPER_REF,
+                &spec.baseline_oid,
+            ],
+            "update-ref lattice-upper",
+        )
+        .await?;
+        Self::exec_git_workspace(
+            sandbox,
+            &["symbolic-ref", "HEAD", crate::git::LATTICE_UPPER_REF],
+            "symbolic-ref HEAD",
+        )
+        .await?;
+        Self::exec_git_workspace(
+            sandbox,
+            &["checkout", "-f", &spec.baseline_oid],
+            "checkout baseline",
+        )
+        .await?;
+
+        let actual = Self::exec_git_workspace_stdout(sandbox, &["rev-parse", "HEAD"], "rev-parse HEAD")
+            .await?
+            .trim()
+            .to_string();
+        if actual != spec.baseline_oid {
+            return Err(WorkspaceError::BaselineIdentityMismatch {
+                expected: spec.baseline_oid.clone(),
+                actual,
+            });
+        }
+
         Ok(())
+    }
+
+    /// Upload a host pack file to a guest tempfile in bounded base64 chunks.
+    async fn upload_baseline_pack(
+        sandbox: &Sandbox,
+        pack_path: &std::path::Path,
+    ) -> Result<String> {
+        use std::io::Read;
+
+        const GUEST_PACK_PATH: &str = "/tmp/lattice-baseline.pack";
+
+        sandbox
+            .exec_with("sh", |e| {
+                e.args(["-c", ": > \"$1\"", "sh", GUEST_PACK_PATH])
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+
+        let mut file = std::fs::File::open(pack_path).map_err(WorkspaceError::Io)?;
+        let mut buf = vec![0u8; crate::git::BASELINE_TRANSFER_CHUNK_BYTES];
+        loop {
+            let n = file.read(&mut buf).map_err(WorkspaceError::Io)?;
+            if n == 0 {
+                break;
+            }
+            let b64 = STANDARD.encode(&buf[..n]);
+            sandbox
+                .exec_with("sh", |e| {
+                    e.args([
+                        "-c",
+                        "printf '%s' \"$1\" | base64 -d >> \"$2\"",
+                        "sh",
+                        &b64,
+                        GUEST_PACK_PATH,
+                    ])
+                })
+                .await
+                .map_err(Self::sdk_err)?;
+        }
+
+        Ok(GUEST_PACK_PATH.to_string())
+    }
+
+    /// Download a guest bundle file into a synced host tempfile using bounded base64 chunks.
+    async fn download_guest_bundle(
+        sandbox: &Sandbox,
+        guest_path: &str,
+        max_artifact_bytes: u64,
+    ) -> Result<(tempfile::NamedTempFile, u64)> {
+        use std::io::Write;
+
+        let size_out = sandbox
+            .exec_with("stat", |e| e.args(["-c", "%s", guest_path]))
+            .await
+            .map_err(Self::sdk_err)?;
+        if size_out.status().code != 0 {
+            let stderr = size_out
+                .stderr()
+                .map_err(|e| WorkspaceError::Sdk(format!("stat stderr: {e}")))?;
+            return Err(WorkspaceError::Git(format!("stat bundle failed: {stderr}")));
+        }
+        let artifact_len: u64 = size_out
+            .stdout()
+            .map_err(|e| WorkspaceError::Sdk(format!("stat stdout: {e}")))?
+            .trim()
+            .parse()
+            .map_err(|_| WorkspaceError::Git("invalid bundle size from stat".into()))?;
+        if artifact_len > max_artifact_bytes {
+            return Err(WorkspaceError::ArtifactTooLarge {
+                actual: artifact_len,
+                max: max_artifact_bytes,
+            });
+        }
+
+        let mut bundle_file = tempfile::NamedTempFile::new().map_err(WorkspaceError::Io)?;
+        let chunk = crate::git::CANDIDATE_EXPORT_CHUNK_BYTES;
+        let mut offset = 0u64;
+        while offset < artifact_len {
+            let skip = offset / chunk as u64;
+            let chunk_arg = chunk.to_string();
+            let skip_arg = skip.to_string();
+            let out = sandbox
+                .exec_with("sh", |e| {
+                    e.args([
+                        "-c",
+                        "dd if=\"$1\" bs=\"$2\" skip=\"$3\" count=1 2>/dev/null | base64",
+                        "sh",
+                        guest_path,
+                        &chunk_arg,
+                        &skip_arg,
+                    ])
+                })
+                .await
+                .map_err(Self::sdk_err)?;
+            if out.status().code != 0 {
+                let stderr = out
+                    .stderr()
+                    .map_err(|e| WorkspaceError::Sdk(format!("dd stderr: {e}")))?;
+                return Err(WorkspaceError::Git(format!("bundle chunk read failed: {stderr}")));
+            }
+            let b64 = out
+                .stdout()
+                .map_err(|e| WorkspaceError::Sdk(format!("dd stdout: {e}")))?
+                .trim()
+                .to_string();
+            if b64.is_empty() {
+                break;
+            }
+            let bytes = STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|e| WorkspaceError::Git(format!("base64 decode failed: {e}")))?;
+            bundle_file
+                .write_all(&bytes)
+                .map_err(WorkspaceError::Io)?;
+            offset += bytes.len() as u64;
+        }
+
+        bundle_file.flush().map_err(WorkspaceError::Io)?;
+        bundle_file.as_file().sync_all().map_err(WorkspaceError::Io)?;
+        Ok((bundle_file, artifact_len))
+    }
+
+    async fn exec_git_workspace(sandbox: &Sandbox, args: &[&str], ctx: &str) -> Result<()> {
+        let _ = Self::exec_git_workspace_stdout(sandbox, args, ctx).await?;
+        Ok(())
+    }
+
+    async fn exec_git_workspace_stdout(
+        sandbox: &Sandbox,
+        args: &[&str],
+        ctx: &str,
+    ) -> Result<String> {
+        let out = sandbox
+            .exec_with("git", |e| {
+                let mut argv = vec!["-C", "/workspace"];
+                argv.extend_from_slice(args);
+                e.args(argv)
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+        if out.status().code != 0 {
+            let stderr = out
+                .stderr()
+                .map_err(|e| WorkspaceError::Sdk(format!("stderr decode: {e}")))?;
+            return Err(WorkspaceError::Git(format!(
+                "{ctx} failed (exit {}): {stderr}",
+                out.status().code
+            )));
+        }
+        out.stdout()
+            .map_err(|e| WorkspaceError::Sdk(format!("stdout decode: {e}")))
     }
 
     /// Probe whether `git` is on `PATH` inside the sandbox.
@@ -393,64 +500,6 @@ impl MicrosandboxWorkspace {
             .map_err(Self::sdk_err)?;
         let stdout = check.stdout().unwrap_or_else(|_| "missing".to_string());
         Ok(stdout.trim().starts_with("ok"))
-    }
-
-    /// Recursively inject all files from `host_dir` into `guest_base` via base64.
-    ///
-    /// Uses `exec_with sh -c "printf '%s' '<b64>' | base64 -d > <path>"` for each file.
-    /// Directories are created with `mkdir -p` before files inside them are injected.
-    async fn inject_dir_to_vm(
-        sandbox: &Sandbox,
-        host_dir: &std::path::Path,
-        guest_base: &std::path::Path,
-    ) -> Result<()> {
-        let entries = std::fs::read_dir(host_dir).map_err(WorkspaceError::Io)?;
-        for entry in entries {
-            let entry = entry.map_err(WorkspaceError::Io)?;
-            let host_path = entry.path();
-            let file_name = entry.file_name();
-            let guest_path = guest_base.join(&file_name);
-            let guest_path_str = guest_path.to_string_lossy().to_string();
-
-            if host_path.is_dir() {
-                sandbox
-                    .exec("mkdir", ["-p", &guest_path_str])
-                    .await
-                    .map_err(Self::sdk_err)?;
-                // Recurse into subdirectory.
-                Box::pin(Self::inject_dir_to_vm(sandbox, &host_path, &guest_path)).await?;
-            } else if host_path.is_file() {
-                let content = std::fs::read(&host_path).map_err(WorkspaceError::Io)?;
-                let b64 = STANDARD.encode(&content);
-                // Ensure parent directory exists.
-                if let Some(parent) = guest_path.parent() {
-                    let parent_str = parent.to_string_lossy().to_string();
-                    if !parent_str.is_empty() && parent_str != "/" {
-                        sandbox
-                            .exec("mkdir", ["-p", &parent_str])
-                            .await
-                            .map_err(Self::sdk_err)?;
-                    }
-                }
-                // Decode base64 into the guest path.
-                // NEVER use sandbox.shell() — use exec_with argv slices (T-33-05).
-                // Pass payload and destination as positional args so guest paths
-                // are never interpolated into the shell command string.
-                sandbox
-                    .exec_with("sh", |e| {
-                        e.args([
-                            "-c",
-                            "printf '%s' \"$1\" | base64 -d > \"$2\"",
-                            "sh",
-                            &b64,
-                            &guest_path_str,
-                        ])
-                    })
-                    .await
-                    .map_err(Self::sdk_err)?;
-            }
-        }
-        Ok(())
     }
 
     /// Inject `CredentialSpec::File` entries into the sandbox post-boot.
@@ -649,13 +698,13 @@ impl MicrosandboxWorkspace {
             });
         }
         let b64 = STANDARD.encode(content);
-        if let Some(parent) = std::path::Path::new(rel).parent().and_then(|p| p.to_str()) {
-            if !parent.is_empty() {
-                sandbox
-                    .exec_with("mkdir", |e| e.args(["-p", parent]).cwd("/workspace"))
-                    .await
-                    .map_err(Self::sdk_err)?;
-            }
+        if let Some(parent) = std::path::Path::new(rel).parent().and_then(|p| p.to_str())
+            && !parent.is_empty()
+        {
+            sandbox
+                .exec_with("mkdir", |e| e.args(["-p", parent]).cwd("/workspace"))
+                .await
+                .map_err(Self::sdk_err)?;
         }
         sandbox
             .exec_with("sh", |e| {
@@ -964,6 +1013,129 @@ impl Workspace for MicrosandboxWorkspace {
             porcelain: out.stdout.clone(),
             is_clean: out.stdout.trim().is_empty(),
         })
+    }
+
+    async fn export_candidate(
+        &self,
+        handle: &UpperHandle,
+        baseline_oid: &str,
+        max_artifact_bytes: u64,
+    ) -> Result<CandidateExport> {
+        validate_baseline_oid(baseline_oid)?;
+
+        let status = self
+            .exec_upper(
+                handle,
+                "git",
+                &[
+                    "-C",
+                    "/workspace",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
+            )
+            .await?;
+        if !status.stdout.is_empty() {
+            return Err(WorkspaceError::UpperDirty {
+                porcelain: status.stdout,
+            });
+        }
+
+        let candidate_oid = Self::exec_git_workspace_stdout(
+            &self.clone_sandbox(handle).await?,
+            &["rev-parse", "HEAD"],
+            "rev-parse HEAD",
+        )
+        .await?
+        .trim()
+        .to_string();
+        validate_baseline_oid(&candidate_oid)?;
+
+        let sandbox = self.clone_sandbox(handle).await?;
+        let is_ancestor = sandbox
+            .exec_with("git", |e| {
+                e.args([
+                    "-C",
+                    "/workspace",
+                    "merge-base",
+                    "--is-ancestor",
+                    baseline_oid,
+                    &candidate_oid,
+                ])
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+        match is_ancestor.status().code {
+            0 => {}
+            1 => {
+                return Err(WorkspaceError::NotDescendant {
+                    baseline: baseline_oid.to_owned(),
+                    candidate: candidate_oid.clone(),
+                });
+            }
+            _ => {
+                let stderr = is_ancestor
+                    .stderr()
+                    .map_err(|e| WorkspaceError::Sdk(format!("merge-base stderr: {e}")))?;
+                return Err(WorkspaceError::Git(format!(
+                    "merge-base --is-ancestor failed: {stderr}"
+                )));
+            }
+        }
+
+        const GUEST_BUNDLE: &str = "/tmp/lattice-candidate.bundle";
+        let export_ref = format!(
+            "refs/lattice/export/candidate-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+
+        Self::exec_git_workspace(
+            &sandbox,
+            &["update-ref", &export_ref, &candidate_oid],
+            "update-ref export ref",
+        )
+        .await?;
+
+        let range = format!("{baseline_oid}..{export_ref}");
+        Self::exec_git_workspace(
+            &sandbox,
+            &["bundle", "create", GUEST_BUNDLE, &range],
+            "bundle create",
+        )
+        .await?;
+
+        let export = match Self::download_guest_bundle(&sandbox, GUEST_BUNDLE, max_artifact_bytes).await
+        {
+            Ok(export) => export,
+            Err(err) => {
+                let _ = sandbox.exec("rm", ["-f", GUEST_BUNDLE]).await;
+                let _ = Self::exec_git_workspace(
+                    &sandbox,
+                    &["update-ref", "-d", &export_ref],
+                    "delete export ref",
+                )
+                .await;
+                return Err(err);
+            }
+        };
+
+        let _ = sandbox.exec("rm", ["-f", GUEST_BUNDLE]).await;
+        let _ = Self::exec_git_workspace(
+            &sandbox,
+            &["update-ref", "-d", &export_ref],
+            "delete export ref",
+        )
+        .await;
+
+        Ok(crate::CandidateExport::from_parts(
+            export.0,
+            baseline_oid.to_owned(),
+            candidate_oid,
+            export.1,
+        ))
     }
 
     /// Stop the Upper and save it as a warm template snapshot.
