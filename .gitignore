@@ -21,6 +21,8 @@ book/
 findings/
 *.db
 .lattice/
+.lancet/
 .cursor/
 build/
+repos/
 .tmp/
