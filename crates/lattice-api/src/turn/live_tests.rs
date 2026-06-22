@@ -14,7 +14,7 @@ use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::SessionGraphStore;
+use lattice_session::{SessionGraphStore, WorkspaceDisposition};
 
 use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;
@@ -41,7 +41,9 @@ impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
 
 fn make_session(dir: &std::path::Path) -> SessionApi {
     let api = SessionApi::sqlite(dir);
-    let _ = api.store().create_session(TEST_SESSION_ID, None, "test");
+    let _ = api
+        .store()
+        .create_session(TEST_SESSION_ID, None, "test", "main");
     api
 }
 
@@ -330,6 +332,7 @@ async fn stream_turn_live_with_agent_basic_completed() {
         session_id: committed_sid,
         commit_id,
         status,
+        ..
     } = &events[committed_pos]
     {
         assert_eq!(*status, RunTurnStatus::Completed);
@@ -666,6 +669,7 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
     let create_req = crate::session::CreateSessionRequest {
         label: None,
         active_agent: "test".to_string(),
+        project_branch: "main".to_string(),
     };
     let created = session.create_session(create_req).expect("create session");
     let session_id = created.session_id.clone();
@@ -745,6 +749,8 @@ async fn stream_turn_live_with_agent_commit_failure_deterministic() {
         model: "sonnet".to_string(),
         provider: "anthropic".to_string(),
         status: lattice_session::TurnCommitStatus::Completed,
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
         commit_message: "Racing commit".to_string(),
         usage: None,
         terminal_reason: None,

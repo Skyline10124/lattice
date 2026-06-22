@@ -154,15 +154,27 @@ fn make_v1_4_request(
     )
 }
 
+/// Create an unattached branch at the current HEAD without checking it out.
+fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
+    std::process::Command::new("git")
+        .args(["branch", name])
+        .current_dir(root)
+        .status()
+        .expect("git branch (create unattached target)");
+    name.to_string()
+}
+
 #[tokio::test]
 async fn v1_4_command_artifact_dogfood() {
     let ws = setup_v1_4_workspace();
     let session_dir = tempfile::tempdir().expect("session dir");
     let sessions_path = session_dir.path().join("sessions");
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-dogfood");
     let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
+            project_branch: target,
         })
         .expect("create session")
         .session_id;
@@ -244,7 +256,7 @@ async fn v1_4_command_artifact_dogfood() {
         .expect("query turn audit rows");
     let methods: Vec<&str> = rows.iter().map(|row| row.method.as_str()).collect();
     assert!(
-        methods.iter().any(|method| *method == "exec.command_run"),
+        methods.contains(&"exec.command_run"),
         "exec.command_run must appear in audit rows: {methods:?}"
     );
 
@@ -296,7 +308,9 @@ async fn v1_4_command_artifact_dogfood() {
         "command metadata must record policy enforcement: {command_meta}"
     );
     assert!(
-        !command_meta.to_string().contains("v1.4 artifact produced by local command"),
+        !command_meta
+            .to_string()
+            .contains("v1.4 artifact produced by local command"),
         "command metadata must not leak artifact body"
     );
 
@@ -329,7 +343,9 @@ async fn v1_4_command_artifact_dogfood() {
         "replay statement materials must include command activity"
     );
     assert!(
-        !statement_json.to_string().contains("v1.4 artifact produced by local command"),
+        !statement_json
+            .to_string()
+            .contains("v1.4 artifact produced by local command"),
         "replay statement must not leak artifact body"
     );
 }

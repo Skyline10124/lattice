@@ -124,6 +124,13 @@ pub struct AgentTurnResult {
     pub terminal_reason: Option<String>,
     /// Events emitted during turn execution.
     pub events: Vec<AgentTurnEvent>,
+    /// Whether the provisional-completion hook exhausted its cleanup budget.
+    ///
+    /// `true` when the hook returned `Complete { cleanup_exhausted: true }`.
+    /// `false` on every other termination path (no hook, hook returned
+    /// `Complete { cleanup_exhausted: false }`, error, cancel, timeout,
+    /// max-rounds). Initialized explicitly on every return path.
+    pub cleanup_exhausted: bool,
 }
 
 /// Events emitted during agent turn execution.

@@ -24,7 +24,9 @@ fn make_multi_parent_fixture() -> (tempfile::TempDir, String) {
         .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
         .expect("add_all");
     index.write().expect("index write");
-    let root_tree = repo.find_tree(index.write_tree().expect("write_tree")).expect("tree");
+    let root_tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("tree");
     let root_oid = repo
         .commit(Some("HEAD"), &sig, &sig, "root", &root_tree, &[])
         .expect("root commit");
@@ -35,7 +37,9 @@ fn make_multi_parent_fixture() -> (tempfile::TempDir, String) {
         .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
         .expect("add_all");
     index.write().expect("index write");
-    let child_tree = repo.find_tree(index.write_tree().expect("write_tree")).expect("tree");
+    let child_tree = repo
+        .find_tree(index.write_tree().expect("write_tree"))
+        .expect("tree");
     let baseline_oid = repo
         .commit(
             Some("HEAD"),
@@ -92,7 +96,10 @@ async fn deterministic_exact_baseline() {
         .expect("cat-file HEAD");
     assert_eq!(parents.exit_code, 0);
     assert!(
-        parents.stdout.lines().any(|line| line.starts_with("parent ")),
+        parents
+            .stdout
+            .lines()
+            .any(|line| line.starts_with("parent ")),
         "baseline commit must retain parent lines; got:\n{}",
         parents.stdout
     );
@@ -147,9 +154,7 @@ mod microsandbox {
         let (repo_dir, baseline_oid) = make_multi_parent_fixture();
         let ws = MicrosandboxWorkspace::from_env();
         let spec = UpperSpec {
-            image_or_template: ImageOrTemplate::Template(
-                "lattice-git-ready-base".into(),
-            ),
+            image_or_template: ImageOrTemplate::Template("lattice-git-ready-base".into()),
             baseline_oid: baseline_oid.clone(),
             host_repo_path: repo_dir.path().to_owned(),
             egress: EgressPolicy::Blocked,

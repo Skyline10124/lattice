@@ -6,15 +6,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use git2::Repository;
 use lattice_workspace::git::export_candidate_from_repo;
 use lattice_workspace::promotion::{
-    commit, prepare, recover, FaultPoint, ManagedLower, PromotionError, PromotionJournal,
-    PromotionLimits, PromotionRefs, RecoveryOutcome, RefComponent, TestIdentityReader,
-    VerificationResult,
+    FaultPoint, ManagedLower, PromotionError, PromotionJournal, PromotionLimits, PromotionRefs,
+    RecoveryOutcome, RefComponent, TestIdentityReader, VerificationResult, commit, prepare,
+    recover,
 };
 
 fn init_repo(dir: &Path, branch: &str) -> String {
@@ -148,11 +148,16 @@ fn make_request(
         repository_path: repo.to_path_buf(),
         branch: "main".into(),
         export,
-        verification: VerificationResult {
-            candidate_oid: candidate.to_owned(),
-            passed: true,
-            summary: "test".into(),
-        },
+        verification: VerificationResult::new(
+            candidate.to_owned(),
+            vec!["test-cmd".into()],
+            "test-profile-hash".into(),
+            0,
+            Some(0),
+            true,
+            "test".into(),
+        )
+        .expect("test evidence"),
         session_id: session.clone(),
         turn_id: turn.clone(),
         limits: PromotionLimits::default(),
@@ -175,9 +180,10 @@ fn simple_session_commit(
         .find_tree(tree)
         .map_err(|e| PromotionError::Git(e.to_string()))?;
     let parents: Vec<git2::Commit> = match parent {
-        Some(oid) => vec![repo
-            .find_commit(oid)
-            .map_err(|e| PromotionError::Git(e.to_string()))?],
+        Some(oid) => vec![
+            repo.find_commit(oid)
+                .map_err(|e| PromotionError::Git(e.to_string()))?,
+        ],
         None => Vec::new(),
     };
     repo.commit(
@@ -313,28 +319,18 @@ mod promotion_commit_failures {
     }
 
     #[test]
-    fn existing_candidate_ref_blocks_whole_transaction() {
+    fn existing_candidate_ref_with_same_oid_succeeds_via_verify() {
+        // D-14: already-pinned candidate participates as verify in transaction.
         let fx = CandidateFixture::with_change(b"cand\n");
         fx.ready();
         Command::new("git")
-            .args([
-                "update-ref",
-                fx.refs.candidate_ref.as_str(),
-                &fx.candidate,
-            ])
+            .args(["update-ref", fx.refs.candidate_ref.as_str(), &fx.candidate])
             .current_dir(fx.repo())
             .output()
             .expect("seed candidate ref");
         let prepared = prepare(fx.request()).expect("prepare");
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_cb = Arc::clone(&calls);
-        let err = commit(prepared, move |repo, parent| {
-            calls_cb.fetch_add(1, Ordering::SeqCst);
-            simple_session_commit(repo, parent)
-        })
-        .unwrap_err();
-        assert!(matches!(err, PromotionError::CandidateRefExists));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let outcome = commit(prepared, simple_session_commit).expect("pinned retry must succeed");
+        assert_eq!(outcome.candidate_oid, fx.candidate);
     }
 
     #[test]
@@ -343,11 +339,7 @@ mod promotion_commit_failures {
         fx.ready();
         let prior_session = git_rev_parse(fx.repo(), "HEAD");
         Command::new("git")
-            .args([
-                "update-ref",
-                fx.refs.session_ref.as_str(),
-                &prior_session,
-            ])
+            .args(["update-ref", fx.refs.session_ref.as_str(), &prior_session])
             .current_dir(fx.repo())
             .output()
             .expect("seed session ref");
@@ -375,8 +367,7 @@ mod promotion_commit_failures {
             simple_session_commit(repo, parent)
         })
         .expect("commit");
-        assert!(snapshot_refs(fx.repo(), &fx.refs)
-            .contains_key(fx.refs.session_ref.as_str()));
+        assert!(snapshot_refs(fx.repo(), &fx.refs).contains_key(fx.refs.session_ref.as_str()));
     }
 
     #[test]
@@ -439,7 +430,14 @@ mod promotion_success {
         let (session, turn, refs) = fixture_refs();
         detach_primary(dir.path());
         pin_main_to_baseline(dir.path(), &baseline);
-        let prepared = prepare(make_request(dir.path(), &baseline, &candidate, &session, &turn)).expect("prepare");
+        let prepared = prepare(make_request(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &session,
+            &turn,
+        ))
+        .expect("prepare");
         let outcome = commit(prepared, simple_session_commit).expect("commit");
         assert_eq!(outcome.project_oid, candidate);
         assert_eq!(outcome.candidate_oid, candidate);
@@ -517,7 +515,10 @@ mod promotion_recovery_gate {
         std::fs::write(lower.worktree_path().join("tracked.txt"), b"third\n").expect("third");
         let outcome = recover(&lower).expect("recover");
         assert!(matches!(outcome, RecoveryOutcome::RecoveryConflict { .. }));
-        assert!(PromotionJournal::exists(&promotion_state_dir(fx.repo(), "main")));
+        assert!(PromotionJournal::exists(&promotion_state_dir(
+            fx.repo(),
+            "main"
+        )));
     }
 }
 
@@ -539,12 +540,8 @@ mod promotion_only_lower_writer {
         let reader = TestIdentityReader::new("boot-test");
         reader.register_process(std::process::id(), 1);
         {
-            let _guard = LowerLockGuard::acquire(
-                &lower.promotion_paths().lock_path,
-                &reader,
-                None,
-            )
-            .expect("lock");
+            let _guard = LowerLockGuard::acquire(&lower.promotion_paths().lock_path, &reader, None)
+                .expect("lock");
         }
         assert_eq!(std::fs::read(&tracked).unwrap(), before);
 

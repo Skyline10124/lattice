@@ -717,3 +717,55 @@ lacked Direct-mode integration evidence.
 **Changed files:** `crates/lattice-api/tests/release_e2e.rs`,
 `crates/lattice-api/tests/v1_4_command_artifact_dogfood.rs`,
 `crates/lancet-native/src/handlers/command.rs`.
+
+---
+
+## 36-UAT: TUI target branch, disposition rendering, and prune coverage — 2026-06-22
+
+Severity: MAJOR (TUI target branch and CLI disposition visibility) / MINOR
+(pending snapshot prune coverage).
+
+**Problem:**
+
+- Starting a new TUI session without `--project-branch` silently targeted
+  `main`, bypassing the explicit project-target requirement enforced by
+  `session new`.
+- Human-readable `session log` output showed terminal `status` but omitted the
+  independent workspace `disposition`, even though storage and JSON projection
+  already carried it.
+- Phase 36 prune tests manipulated retained snapshots directly through the
+  workspace adapter and never exercised `prune_session_snapshots` with a
+  pending turn, leaving the CR-01 `skipped` path without integration coverage.
+
+**Fix:**
+
+- Made `--project-branch` conditionally required for `lattice tui` when no
+  existing session ID is supplied, and added a runtime guard that rejects
+  missing or blank branches before new-session creation.
+- Extracted the human turn-log renderer and added a `disposition:` row beside
+  `status:`, with a focused rendering regression test.
+- Added an integration test that creates a `PendingWorktree` turn with retained
+  snapshot evidence, invokes `prune_session_snapshots`, asserts the snapshot is
+  returned in `skipped`, and confirms it remains available for resume.
+
+**Verification:**
+
+- `cargo test -p lattice-tui` — 3 passed.
+- `cargo test -p lattice-cli` — 167 unit + 9 cutover + 16 smoke passed.
+- `cargo test -p lattice-api --test phase36_resume` — 19 passed.
+- `cargo clippy -p lattice-cli -p lattice-tui --all-targets` — passed; existing
+  warnings remain in dependency crates and pre-existing CLI test code.
+- `git diff --check -- crates/lattice-cli/src/main.rs
+  crates/lattice-cli/src/commands/session.rs crates/lattice-tui/src/runtime.rs
+  crates/lattice-api/tests/phase36_resume.rs` — passed.
+- `scripts/ci-local.sh` — stopped at the repository-wide `fmt` gate because of
+  existing rustfmt drift across unrelated `lancet-*`, `lattice-agent`, and
+  `lattice-workspace` files; clippy and workspace tests were therefore not
+  reached by that script.
+
+**Changed files:** `crates/lattice-cli/src/main.rs`,
+`crates/lattice-cli/src/commands/session.rs`,
+`crates/lattice-tui/src/runtime.rs`,
+`crates/lattice-api/tests/phase36_resume.rs`,
+`.planning/phases/36-turn-lifecycle-and-disposition/36-UAT.md`, and this
+changelog.

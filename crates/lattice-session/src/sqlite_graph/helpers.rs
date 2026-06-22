@@ -7,10 +7,11 @@ use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::graph::{GraphMessage, GraphToolCall, TurnCommitStatus, TurnLogEntry};
+use crate::graph::{GraphMessage, GraphToolCall, TurnLogEntry};
 use crate::{Result, SessionError};
 
 use super::SqliteSessionGraphStore;
+use super::commit::{decode_lifecycle_json, decode_strict_disposition, decode_strict_status};
 
 impl SqliteSessionGraphStore {
     /// Resolve the current HEAD commit ID.
@@ -441,7 +442,7 @@ impl SqliteSessionGraphStore {
 
             // Only include commits not in the other side's ancestors.
             if !other_set.contains(&cid) {
-                // Read commit data.
+                // Read commit data including disposition and lifecycle_json.
                 let (
                     parents_json,
                     status_str,
@@ -452,36 +453,43 @@ impl SqliteSessionGraphStore {
                     commit_message,
                     created_at,
                     message_ids_json,
+                    disposition_str,
+                    lifecycle_json_str,
                 ): (
                     String, String, String, String, String, String, String, String, String,
+                    String, String,
                 ) = conn
                     .query_row(
-                        "SELECT parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json
+                        "SELECT parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json, disposition, lifecycle_json
                          FROM graph_commits WHERE commit_id=?1 AND session_id=?2",
                         params![cid, session_id],
                         |row| Ok((
                             row.get(0)?, row.get(1)?, row.get(2)?,
                             row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?,
-                            row.get(7)?, row.get(8)?,
+                            row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?,
                         )),
                     )
                     .map_err(|_| SessionError::MissingCommit(cid.clone()))?;
 
-                let status = match status_str.as_str() {
-                    "completed" => TurnCommitStatus::Completed,
-                    "error" => TurnCommitStatus::Error,
-                    "cancelled" => TurnCommitStatus::Cancelled,
-                    _ => TurnCommitStatus::Completed,
-                };
+                // Strict decode status and disposition.
+                let status = decode_strict_status(&status_str)?;
+                let disposition = decode_strict_disposition(&disposition_str)?;
+                let lifecycle = decode_lifecycle_json(&self.db_path, &lifecycle_json_str)?;
+
                 let parent_ids: Vec<String> =
                     self.parse_json_column("parents_json", &parents_json)?;
                 let message_ids: Vec<String> =
                     self.parse_json_column("message_ids_json", &message_ids_json)?;
 
+                // Suppress unused-variable warning — lifecycle is decoded for
+                // strict validation but TurnLogEntry does not carry it.
+                let _ = lifecycle;
+
                 entries.push(TurnLogEntry {
                     commit_id: cid,
                     parent_ids: parent_ids.clone(),
                     status,
+                    disposition,
                     agent_name,
                     profile_snapshot_hash,
                     model,

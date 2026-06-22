@@ -62,7 +62,10 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
-pub use traits::{CepErrorPayload, LlmClient, ToolCallExecutor, ToolExecutionError};
+pub use traits::{
+    CepErrorPayload, LlmClient, ProvisionalCompletionHook, ProvisionalDecision, ToolCallExecutor,
+    ToolExecutionError,
+};
 pub use types::{
     AgentToolResultSummary, AgentTurnEvent, AgentTurnRequest, AgentTurnResult, AgentTurnStatus,
     LlmRetryConfig,
@@ -109,7 +112,7 @@ impl AgentLoop {
     pub async fn run_turn(&self, request: AgentTurnRequest) -> AgentTurnResult {
         // Compute the cooperative deadline from request.timeout.
         let deadline = request.timeout.map(|d| Instant::now() + d);
-        self.run_turn_inner(&request, None, deadline).await
+        self.run_turn_inner(&request, None, deadline, None).await
     }
 
     /// Execute a single turn with a live `AgentTurnEvent` mirror channel.
@@ -140,9 +143,34 @@ impl AgentLoop {
         request: AgentTurnRequest,
         events: tokio::sync::mpsc::Sender<AgentTurnEvent>,
     ) -> AgentTurnResult {
-        // Compute the cooperative deadline from request.timeout.
+        self.run_turn_live_with_hook(request, events, None).await
+    }
+
+    /// Execute a single turn with a live event mirror and an optional
+    /// provisional-completion hook.
+    ///
+    /// When the LLM returns a final non-tool-call response, the loop invokes
+    /// the hook with the provisional assistant message before terminating:
+    ///
+    /// - `ProvisionalDecision::Continue(msg)` appends the returned system
+    ///   message to `messages`, `all_messages`, and `llm_messages`, then
+    ///   continues the **same** loop iteration. Messages, provider cache,
+    ///   rounds, usage, cancellation flag, and deadline remain continuous.
+    /// - `ProvisionalDecision::Complete { cleanup_exhausted }` terminates
+    ///   the loop and sets `AgentTurnResult.cleanup_exhausted`.
+    /// - Hook errors become `AgentTurnStatus::Error` without
+    ///   workspace-specific error types.
+    ///
+    /// When `hook` is `None`, behavior is identical to `run_turn_live`.
+    pub async fn run_turn_live_with_hook(
+        &self,
+        request: AgentTurnRequest,
+        events: tokio::sync::mpsc::Sender<AgentTurnEvent>,
+        hook: Option<Box<dyn ProvisionalCompletionHook>>,
+    ) -> AgentTurnResult {
         let deadline = request.timeout.map(|d| Instant::now() + d);
-        self.run_turn_inner(&request, Some(&events), deadline).await
+        self.run_turn_inner(&request, Some(&events), deadline, hook)
+            .await
     }
 
     /// Inner turn execution (called by `run_turn` and `run_turn_live`).
@@ -159,6 +187,7 @@ impl AgentLoop {
         request: &AgentTurnRequest,
         live_events: Option<&tokio::sync::mpsc::Sender<AgentTurnEvent>>,
         deadline: Option<Instant>,
+        mut provisional_hook: Option<Box<dyn ProvisionalCompletionHook>>,
     ) -> AgentTurnResult {
         // Build initial messages from transcript + user input
         let mut messages = self.build_messages(request);
@@ -178,6 +207,7 @@ impl AgentLoop {
                     status: AgentTurnStatus::Error,
                     terminal_reason: Some(e),
                     events: Vec::new(),
+                    cleanup_exhausted: false,
                 };
             }
         };
@@ -209,6 +239,7 @@ impl AgentLoop {
                     status: AgentTurnStatus::Error,
                     terminal_reason: Some(reason),
                     events: all_events,
+                    cleanup_exhausted: false,
                 };
             }
             round += 1;
@@ -225,6 +256,7 @@ impl AgentLoop {
                     status: AgentTurnStatus::Cancelled,
                     terminal_reason: Some("cancelled by caller".to_string()),
                     events: all_events,
+                    cleanup_exhausted: false,
                 };
             }
 
@@ -268,6 +300,7 @@ impl AgentLoop {
                         status: AgentTurnStatus::Cancelled,
                         terminal_reason: Some("cancelled by caller".to_string()),
                         events: all_events,
+                        cleanup_exhausted: false,
                     };
                 }
 
@@ -310,6 +343,7 @@ impl AgentLoop {
                                 status: AgentTurnStatus::Error,
                                 terminal_reason: Some(format!("LLM error: {}", info.message)),
                                 events: all_events,
+                                cleanup_exhausted: false,
                             };
                         }
 
@@ -332,6 +366,7 @@ impl AgentLoop {
                                     status: AgentTurnStatus::Cancelled,
                                     terminal_reason: Some("cancelled by caller".to_string()),
                                     events: all_events,
+                                    cleanup_exhausted: false,
                                 };
                             }
                             RetryDelayOutcome::Timeout => {
@@ -343,6 +378,7 @@ impl AgentLoop {
                                     status: AgentTurnStatus::Error,
                                     terminal_reason: Some("timeout".to_string()),
                                     events: all_events,
+                                    cleanup_exhausted: false,
                                 };
                             }
                         }
@@ -357,6 +393,7 @@ impl AgentLoop {
                             status: AgentTurnStatus::Error,
                             terminal_reason: Some("timeout".to_string()),
                             events: all_events,
+                            cleanup_exhausted: false,
                         };
                     }
                 }
@@ -397,6 +434,7 @@ impl AgentLoop {
                         status: AgentTurnStatus::Error,
                         terminal_reason: Some(format!("LLM error: {msg}")),
                         events: all_events,
+                        cleanup_exhausted: false,
                     };
                 }
                 StreamOutcome::Exhausted => {
@@ -415,6 +453,7 @@ impl AgentLoop {
                         status: AgentTurnStatus::Error,
                         terminal_reason: Some("LLM stream ended without completion".to_string()),
                         events: all_events,
+                        cleanup_exhausted: false,
                     };
                 }
                 StreamOutcome::Cancelled => {
@@ -436,6 +475,7 @@ impl AgentLoop {
                         status: AgentTurnStatus::Cancelled,
                         terminal_reason: Some("cancelled by caller".to_string()),
                         events: all_events,
+                        cleanup_exhausted: false,
                     };
                 }
                 StreamOutcome::Timeout => {
@@ -455,6 +495,7 @@ impl AgentLoop {
                         status: AgentTurnStatus::Error,
                         terminal_reason: Some("timeout".to_string()),
                         events: all_events,
+                        cleanup_exhausted: false,
                     };
                 }
                 StreamOutcome::Done => {
@@ -487,8 +528,82 @@ impl AgentLoop {
                             name: None,
                         };
                         messages.push(assistant_msg.clone());
-                        all_messages.push(assistant_msg);
+                        all_messages.push(assistant_msg.clone());
+                        if let Err(e) = append_llm_message(&mut llm_messages, &assistant_msg) {
+                            return AgentTurnResult {
+                                messages: all_messages,
+                                assistant_output: stream_result.assistant_content,
+                                usage: accumulated_usage,
+                                tool_results: tool_summaries,
+                                status: AgentTurnStatus::Error,
+                                terminal_reason: Some(e),
+                                events: all_events,
+                                cleanup_exhausted: false,
+                            };
+                        }
 
+                        // Invoke the provisional-completion hook if present.
+                        if let Some(ref mut hook) = provisional_hook {
+                            match hook.on_provisional_complete(&assistant_msg).await {
+                                Ok(ProvisionalDecision::Continue(system_msg)) => {
+                                    // Append the continuation system message
+                                    // to all three buffers and continue the loop.
+                                    messages.push(system_msg.clone());
+                                    all_messages.push(system_msg.clone());
+                                    if let Err(e) =
+                                        append_llm_message(&mut llm_messages, &system_msg)
+                                    {
+                                        return AgentTurnResult {
+                                            messages: all_messages,
+                                            assistant_output: stream_result.assistant_content,
+                                            usage: accumulated_usage,
+                                            tool_results: tool_summaries,
+                                            status: AgentTurnStatus::Error,
+                                            terminal_reason: Some(e),
+                                            events: all_events,
+                                            cleanup_exhausted: false,
+                                        };
+                                    }
+                                    continue;
+                                }
+                                Ok(ProvisionalDecision::Complete {
+                                    cleanup_exhausted,
+                                    final_message,
+                                }) => {
+                                    // CR-04: persist the hook's terminal fact
+                                    // (e.g. the final workspace-dirty state that
+                                    // caused cleanup exhaustion) into the
+                                    // transcript before terminating the loop.
+                                    if let Some(msg) = final_message {
+                                        all_messages.push(msg);
+                                    }
+                                    return AgentTurnResult {
+                                        messages: all_messages,
+                                        assistant_output: stream_result.assistant_content,
+                                        usage: accumulated_usage,
+                                        tool_results: tool_summaries,
+                                        status: AgentTurnStatus::Completed,
+                                        terminal_reason: Some(finish_reason),
+                                        events: all_events,
+                                        cleanup_exhausted,
+                                    };
+                                }
+                                Err(hook_error) => {
+                                    return AgentTurnResult {
+                                        messages: all_messages,
+                                        assistant_output: stream_result.assistant_content,
+                                        usage: accumulated_usage,
+                                        tool_results: tool_summaries,
+                                        status: AgentTurnStatus::Error,
+                                        terminal_reason: Some(hook_error),
+                                        events: all_events,
+                                        cleanup_exhausted: false,
+                                    };
+                                }
+                            }
+                        }
+
+                        // No hook: return the final response.
                         return AgentTurnResult {
                             messages: all_messages,
                             assistant_output: stream_result.assistant_content,
@@ -497,6 +612,7 @@ impl AgentLoop {
                             status: AgentTurnStatus::Completed,
                             terminal_reason: Some(finish_reason),
                             events: all_events,
+                            cleanup_exhausted: false,
                         };
                     }
 
@@ -565,6 +681,7 @@ impl AgentLoop {
                             status: AgentTurnStatus::Error,
                             terminal_reason: Some(invalid_info.unwrap_or_default()),
                             events: all_events,
+                            cleanup_exhausted: false,
                         };
                     }
 
@@ -611,6 +728,7 @@ impl AgentLoop {
                             status: AgentTurnStatus::Error,
                             terminal_reason: Some(e),
                             events: all_events,
+                            cleanup_exhausted: false,
                         };
                     }
 
@@ -628,6 +746,7 @@ impl AgentLoop {
                             status: AgentTurnStatus::Cancelled,
                             terminal_reason: Some("cancelled by caller".to_string()),
                             events: all_events,
+                            cleanup_exhausted: false,
                         };
                     }
 
@@ -649,6 +768,7 @@ impl AgentLoop {
                                 status: AgentTurnStatus::Cancelled,
                                 terminal_reason: Some("cancelled by caller".to_string()),
                                 events: all_events,
+                                cleanup_exhausted: false,
                             };
                         }
 
@@ -686,6 +806,7 @@ impl AgentLoop {
                                     status: AgentTurnStatus::Error,
                                     terminal_reason: Some("timeout".to_string()),
                                     events: all_events,
+                                    cleanup_exhausted: false,
                                 };
                             }
                         };
@@ -743,6 +864,7 @@ impl AgentLoop {
                                 status: AgentTurnStatus::Error,
                                 terminal_reason: Some(e),
                                 events: all_events,
+                                cleanup_exhausted: false,
                             };
                         }
 
@@ -762,6 +884,7 @@ impl AgentLoop {
                                 status: AgentTurnStatus::Cancelled,
                                 terminal_reason: Some("cancelled by caller".to_string()),
                                 events: all_events,
+                                cleanup_exhausted: false,
                             };
                         }
                     }

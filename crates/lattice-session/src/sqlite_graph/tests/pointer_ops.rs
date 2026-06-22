@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use crate::SessionError;
 use crate::graph::{
     GraphHead, GraphMessage, SessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
-    derive_commit_message,
+    WorkspaceDisposition, derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
@@ -41,6 +41,8 @@ fn commit_input(
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
         status,
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
         commit_message: derive_commit_message(&messages),
         usage: None,
         terminal_reason: None,
@@ -55,7 +57,7 @@ fn setup_session_with_commits(
     label: Option<&str>,
 ) -> Vec<TurnCommit> {
     store
-        .create_session(session_id, label, "coder")
+        .create_session(session_id, label, "coder", "main")
         .expect("create");
 
     let mut commits: Vec<TurnCommit> = Vec::new();
@@ -79,6 +81,8 @@ fn setup_session_with_commits(
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: format!("Turn {i}"),
             usage: None,
             terminal_reason: None,
@@ -168,7 +172,7 @@ fn log_is_one_entry_per_turn_commit() {
 
     // Create session with tool messages too.
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First turn: user + assistant.
@@ -414,6 +418,8 @@ fn diff_reports_unique_commit_paths() {
         model: "sonnet".to_string(),
         provider: "anthropic".to_string(),
         status: TurnCommitStatus::Completed,
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
         commit_message: derive_commit_message(&feature_messages),
         usage: None,
         terminal_reason: None,
@@ -453,7 +459,7 @@ fn checkout_existing_empty_branch_succeeds() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // main branch was created by create_session with NULL commit_id.
@@ -525,7 +531,7 @@ fn commit_turn_while_detached_does_not_move_main_branch() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // Commit A on main.
@@ -616,7 +622,7 @@ fn commit_turn_allows_repeated_identical_user_message_across_turns() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First turn with user "hello" and assistant "hi".

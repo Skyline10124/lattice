@@ -7,41 +7,38 @@
 //! transactions, journaled materialization, and the public prepare/commit/recover
 //! orchestration live here.
 
-mod lower;
-mod lock;
 mod candidate;
-mod refs;
-mod materialize;
 mod journal;
+mod lock;
+mod lower;
+mod materialize;
+mod refs;
 mod service;
 
-pub use lower::{
-    LowerBaseline, LowerDirtyReason, ManagedLower, PromotionError, PromotionPaths,
-};
-pub use refs::{
-    PromotionRefs, RefComponent, RefTransactionError, RefTransactionOutcome,
-    RefTransactionRequest, ValidatedRefName, build_update_ref_z_payload, run_ref_transaction,
-};
-pub use lock::{
-    recover_stale_lock, DurabilityRecorder, LowerLockGuard, LockMetadata,
-    LockOwnerIdentity, ProcessIdentityReader, ProcIdentityReader, StaleLockDisposition,
-    TestIdentityReader,
-};
 pub use candidate::{
-    validate_candidate, CandidateHazard, CandidateReviewFact, PromotionLimits,
-    ValidatedCandidate, VerificationResult,
-};
-pub use materialize::{
-    build_materialization_plan, classify_path, DurableFs, DurableFsRecorder, MaterializationPlan,
-    MaterializeEntry, PathClassification, PathState,
+    CandidateHazard, CandidateReviewFact, PinnedCandidate, PromotionLimits, ValidatedCandidate,
+    VerificationResult, load_pinned_candidate, pin_candidate, prepare_pinned, validate_candidate,
 };
 pub use journal::{
-    parse_journal, recover_journal, resolve_recovery_direction, run_materialization, FaultPoint,
-    JournalHeader, JournalRecord, ParsedJournal, PromotionJournal, RecoveryDirection,
-    RecoveryOutcome,
+    FaultPoint, JournalHeader, JournalRecord, ParsedJournal, PromotionJournal, RecoveryDirection,
+    RecoveryOutcome, parse_journal, recover_journal, resolve_recovery_direction,
+    run_materialization,
+};
+pub use lock::{
+    DurabilityRecorder, LockMetadata, LockOwnerIdentity, LowerLockGuard, ProcIdentityReader,
+    ProcessIdentityReader, StaleLockDisposition, TestIdentityReader, recover_stale_lock,
+};
+pub use lower::{LowerBaseline, LowerDirtyReason, ManagedLower, PromotionError, PromotionPaths};
+pub use materialize::VecDurableRecorder;
+pub use materialize::{
+    DurableFs, DurableFsRecorder, MaterializationPlan, MaterializeEntry, PathClassification,
+    PathState, build_materialization_plan, classify_path,
+};
+pub use refs::{
+    PromotionRefs, RefComponent, RefTransactionError, RefTransactionOutcome, RefTransactionRequest,
+    ValidatedRefName, build_update_ref_z_payload, run_ref_transaction,
 };
 pub use service::{
-    commit, commit_with_reader, prepare, recover, recover_with_reader, PreparedPromotion,
-    PromotionOutcome, PromotionRequest,
+    PreparedPromotion, PromotionOutcome, PromotionRequest, commit, commit_with_reader, prepare,
+    prepare_from_validated, recover, recover_with_reader,
 };
-pub use materialize::VecDurableRecorder;

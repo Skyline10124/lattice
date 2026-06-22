@@ -16,22 +16,31 @@
 mod models;
 mod profile;
 mod session;
-mod turn;
+pub mod turn;
 
 pub use lattice_session::{
     GraphDiff, GraphHead, GraphRef, GraphSession, ResetResult, SessionGraphSummary, SessionStatus,
     TurnLogEntry,
 };
+pub use lattice_workspace::CandidateExport;
+pub use lattice_workspace::promotion::PinnedCandidate;
+pub use lattice_workspace::promotion::{PromotionLimits, PromotionOutcome, VerificationResult};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
 pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
-pub use lattice_workspace::promotion::{PromotionLimits, PromotionOutcome, VerificationResult};
 pub use turn::{
-    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent,
-    TurnEventStream, TurnUsageSummary, collect_turn_result_from_events, promote_verified_candidate,
-    prepare_promotion_target, run_turn, stream_turn, PromotionSessionMetadata, PromotionTurnTarget,
+    LifecycleFailureKind, PromotionLifecycleError, PromotionSessionMetadata, PromotionTurnTarget,
+    PruneSnapshotsRequest, ResourceAction, ResumeError, ResumeMode, ResumeTurnRequest,
+    RunTurnRequest, RunTurnResult, RunTurnStage, RunTurnStatus, SnapshotPruneResult,
+    ToolResultSummary, TurnEvent, TurnEventStream, TurnLifecycleOutcome, TurnTargetError,
+    TurnUsageSummary, UnfinalizedTurn, WorkspaceDirtyHook, classify_lifecycle_failure,
+    collect_turn_result_from_events, commit_promoted_with_retry, finalize_turn, outcome_promoted,
+    outcome_workspace_less, prepare_promotion_target, promote_preexported_candidate,
+    promote_verified_candidate, prune_session_snapshots, resolve_resume_mode, resolve_turn_target,
+    resume_turn, retry_pinned_candidate, run_terminal_verification, run_turn, stream_turn,
 };
 
 #[doc(hidden)]
 pub use turn::CepExecutorAdapter;
+pub use turn::upper::{ResolvedUpperConfig, resolve_upper_config};
 pub use turn::workspace_backend::WorkspaceExecutionBackend;

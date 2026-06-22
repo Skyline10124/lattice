@@ -107,6 +107,7 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
             session_id,
             commit_id,
             status,
+            ..
         } => {
             state.last_commit = Some(CommitSignal::Committed);
             state.session_id = Some(session_id.clone());
@@ -514,6 +515,10 @@ async fn run_inner(
         }
         Err(lattice_api::ApiError::PromotionRecoveryConflict(msg)) => {
             eprintln!("{}: promotion recovery conflict: {}", "error".red(), msg);
+            return Ok(std::process::ExitCode::from(1));
+        }
+        Err(lattice_api::ApiError::PromotionLifecycle(e)) => {
+            eprintln!("{}: promotion lifecycle: {}", "error".red(), e);
             return Ok(std::process::ExitCode::from(1));
         }
     };

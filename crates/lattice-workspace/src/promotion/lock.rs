@@ -67,7 +67,9 @@ pub struct ProcIdentityReader;
 
 impl ProcessIdentityReader for ProcIdentityReader {
     fn read_boot_id(&self) -> Result<String, PromotionError> {
-        fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_owned()).map_err(PromotionError::Io)
+        fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|s| s.trim().to_owned())
+            .map_err(PromotionError::Io)
     }
 
     fn read_process_start_ticks(&self, pid: u32) -> Result<u64, PromotionError> {
@@ -154,7 +156,9 @@ impl LowerLockGuard {
         }
         let metadata = match read_lock_metadata(lock_path) {
             Ok(meta) => meta,
-            Err(PromotionError::GitCommand { .. }) => return Ok(Some(StaleLockDisposition::Malformed)),
+            Err(PromotionError::GitCommand { .. }) => {
+                return Ok(Some(StaleLockDisposition::Malformed));
+            }
             Err(other) => return Err(other),
         };
 
@@ -288,7 +292,10 @@ impl TestIdentityReader {
     }
 
     pub fn register_process(&self, pid: u32, start_ticks: u64) {
-        self.start_ticks_by_pid.lock().unwrap().insert(pid, start_ticks);
+        self.start_ticks_by_pid
+            .lock()
+            .unwrap()
+            .insert(pid, start_ticks);
         self.alive.lock().unwrap().insert(pid);
     }
 
@@ -297,7 +304,10 @@ impl TestIdentityReader {
     }
 
     pub fn reuse_pid(&self, pid: u32, new_start_ticks: u64) {
-        self.start_ticks_by_pid.lock().unwrap().insert(pid, new_start_ticks);
+        self.start_ticks_by_pid
+            .lock()
+            .unwrap()
+            .insert(pid, new_start_ticks);
         self.alive.lock().unwrap().insert(pid);
     }
 }

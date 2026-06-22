@@ -808,9 +808,8 @@ fn direct_path_kind(kind: crate::execution_backend::PathKind) -> DirectPathKind 
 }
 
 fn validate_direct_observation_facts(path: &str, facts: &PathFacts) -> Result<(), CepError> {
-    let guard_path = if path == "." { "" } else { path };
     validate_direct_path_facts(
-        guard_path,
+        path,
         &path_facts_to_direct(facts),
         &AuthorizedEffectRegion::empty(),
     )
@@ -943,10 +942,10 @@ async fn handle_direct_read_file(
     if !facts.exists || !matches!(facts.kind, Some(crate::execution_backend::PathKind::File)) {
         return Err(path_not_found(&params.path));
     }
-    if let Some(size) = facts.byte_size {
-        if size as usize > policy.observation.max_single_read_bytes {
-            return Err(single_read_budget_exceeded(size as usize, policy));
-        }
+    if let Some(size) = facts.byte_size
+        && size as usize > policy.observation.max_single_read_bytes
+    {
+        return Err(single_read_budget_exceeded(size as usize, policy));
     }
 
     ctx.mark_backend_invoked();

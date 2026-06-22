@@ -7,7 +7,6 @@
 //! that saves and restores the environment, so tests that manipulate
 //! env vars can run concurrently without clobbering each other.
 
-use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use tempfile::TempDir;
 
@@ -80,9 +79,5 @@ impl ScopedXdgStateHome {
             _lock: guard,
             _state: state,
         }
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        self._state.path()
     }
 }

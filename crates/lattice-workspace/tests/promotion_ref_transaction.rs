@@ -114,14 +114,8 @@ fn sample_request(
     candidate: &str,
     session: &str,
 ) -> RefTransactionRequest {
-    RefTransactionRequest::new(
-        refs.clone(),
-        old_project,
-        old_session,
-        candidate,
-        session,
-    )
-    .expect("request")
+    RefTransactionRequest::new(refs.clone(), old_project, old_session, candidate, session)
+        .expect("request")
 }
 
 mod ref_protocol {
@@ -139,7 +133,10 @@ mod ref_protocol {
         );
         let payload = build_update_ref_z_payload(&request).expect("payload");
 
-        let parts: Vec<&[u8]> = payload.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+        let parts: Vec<&[u8]> = payload
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .collect();
         assert_eq!(parts[0], b"start");
         assert_eq!(
             parts[1],
@@ -300,11 +297,7 @@ mod ref_transaction {
         let refs = fixture_refs();
 
         Command::new("git")
-            .args([
-                "update-ref",
-                refs.candidate_ref.as_str(),
-                &candidate,
-            ])
+            .args(["update-ref", refs.candidate_ref.as_str(), &candidate])
             .current_dir(dir.path())
             .output()
             .expect("seed candidate ref");
@@ -374,10 +367,7 @@ mod ref_transaction {
         assert!(run_ref_transaction(dir.path(), &request).is_err());
         let after = snapshot_refs(dir.path(), &refs);
         assert_eq!(after.get(refs.project_ref.as_str()), Some(&base));
-        assert_eq!(
-            after.get(refs.session_ref.as_str()),
-            Some(&moved_session)
-        );
+        assert_eq!(after.get(refs.session_ref.as_str()), Some(&moved_session));
         assert_eq!(
             after.get(refs.candidate_ref.as_str()),
             before.get(refs.candidate_ref.as_str())

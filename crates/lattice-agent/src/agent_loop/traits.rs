@@ -116,3 +116,42 @@ pub trait LlmClient: Send + Sync {
         Ok(Box::pin(futures::stream::iter(events)))
     }
 }
+
+/// Decision returned by a provisional completion hook.
+///
+/// - `Continue` supplies a system message that the loop appends before
+///   requesting the next LLM round. The same loop iteration continues
+///   without resetting messages, usage, round count, deadline, or
+///   cancellation state.
+/// - `Complete` terminates the loop. `cleanup_exhausted` signals whether
+///   the hook reached its configured cleanup-round budget.
+#[derive(Debug, Clone)]
+pub enum ProvisionalDecision {
+    /// Continue the loop with the supplied workspace fact message.
+    Continue(lattice_session::GraphMessage),
+    /// Terminate the loop with an explicit exhaustion fact.
+    Complete {
+        cleanup_exhausted: bool,
+        /// Optional terminal fact appended to the transcript on completion
+        /// (CR-04): the loop appends it to `all_messages` before returning.
+        final_message: Option<lattice_session::GraphMessage>,
+    },
+}
+
+/// Injectable hook invoked at the no-tool final-response branch of the
+/// agent loop.
+///
+/// The hook receives the provisional assistant message and decides
+/// whether to continue the same loop iteration with a system fact or
+/// to complete the turn. Errors propagate as terminal agent errors.
+///
+/// The trait is workspace-agnostic: it uses only `GraphMessage` from
+/// `lattice-session` and carries no workspace, Git, snapshot, or
+/// disposition concepts.
+#[async_trait::async_trait]
+pub trait ProvisionalCompletionHook: Send {
+    async fn on_provisional_complete(
+        &mut self,
+        assistant: &lattice_session::GraphMessage,
+    ) -> Result<ProvisionalDecision, String>;
+}

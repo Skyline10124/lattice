@@ -440,7 +440,6 @@ fn validate_direct_verify_cwd(
     facts: &PathFacts,
     authorized_region: &AuthorizedEffectRegion,
 ) -> Result<(), CepError> {
-    let guard_path = if path == "." { "" } else { path };
     let direct_facts = path_facts_to_direct(facts);
     let empty_region = AuthorizedEffectRegion::empty();
     let region = if path == "." {
@@ -448,7 +447,7 @@ fn validate_direct_verify_cwd(
     } else {
         authorized_region
     };
-    validate_direct_path_facts(guard_path, &direct_facts, region)
+    validate_direct_path_facts(path, &direct_facts, region)
 }
 
 fn path_facts_to_direct(facts: &PathFacts) -> DirectPathFacts {
@@ -1157,13 +1156,8 @@ mod verify_tests {
 
         impl VerifySpyBackend {
             fn cwd_facts(path: &str) -> PathFacts {
-                let normalized_path = if path == "." {
-                    String::new()
-                } else {
-                    path.to_string()
-                };
                 PathFacts {
-                    normalized_path,
+                    normalized_path: path.to_string(),
                     exists: true,
                     kind: Some(crate::execution_backend::PathKind::Directory),
                     parent_exists: true,

@@ -157,16 +157,27 @@ fn make_release_e2e_request(
 
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
-/// Single `run_turn` driving exec.command_run → mutate.edit → mutate.edit → Done(stop)
-/// under Direct mode (no envelope declare).
-///
-/// Asserts:
-/// 1. Turn completes with status=Completed.
-/// 2. Upper-backed edits are verified via tool outcomes (section 6).
-/// 3. Session has exactly one commit in the graph.
-/// 4. On-disk attestation has correct in-toto subject / predicate / materials.
-/// 5. Audit rows are in exec.command_run → edit → edit order (Direct mode).
-/// 6. Both mutate.edit tool results succeed without profile verify configured.
+// Single `run_turn` driving exec.command_run → mutate.edit → mutate.edit → Done(stop)
+// under Direct mode (no envelope declare).
+//
+// Asserts:
+// 1. Turn completes with status=Completed.
+// 2. Upper-backed edits are verified via tool outcomes (section 6).
+// 3. Session has exactly one commit in the graph.
+// 4. On-disk attestation has correct in-toto subject / predicate / materials.
+// 5. Audit rows are in exec.command_run → edit → edit order (Direct mode).
+// 6. Both mutate.edit tool results succeed without profile verify configured.
+
+/// Create an unattached branch at the current HEAD without checking it out.
+fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
+    std::process::Command::new("git")
+        .args(["branch", name])
+        .current_dir(root)
+        .status()
+        .expect("git branch (create unattached target)");
+    name.to_string()
+}
+
 #[tokio::test]
 async fn release_e2e_criterion_8() {
     let initial_content = "pub fn answer() -> i32 { 1 }";
@@ -193,10 +204,7 @@ async fn release_e2e_criterion_8() {
     });
 
     // Edit 2: refresh expected_hash after edit 1 mutates Upper content.
-    let hash2 = format!(
-        "blake3:{}",
-        blake3::hash(bad_content.as_bytes()).to_hex()
-    );
+    let hash2 = format!("blake3:{}", blake3::hash(bad_content.as_bytes()).to_hex());
     let good_edit_args = serde_json::json!({
         "path": "src/lib.rs",
         "expected_hash": hash2,
@@ -242,12 +250,14 @@ async fn release_e2e_criterion_8() {
     );
 
     // ── Execute the single turn ──────────────────────────────────────────
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
     let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
+            project_branch: target,
         })
         .expect("create session")
         .session_id;

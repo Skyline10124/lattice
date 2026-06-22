@@ -11,7 +11,7 @@ use rusqlite::Connection;
 
 use crate::graph::{
     GraphHead, GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, TurnUsage,
-    derive_commit_message,
+    WorkspaceDisposition, derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
@@ -42,6 +42,8 @@ fn commit_input_with_usage(
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
         status,
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
         commit_message: derive_commit_message(&messages),
         usage,
         terminal_reason,
@@ -54,7 +56,7 @@ fn head_transcript_empty_session_has_no_parent_and_no_messages() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let transcript = store.head_transcript("sess-1").expect("head_transcript");
@@ -76,7 +78,7 @@ fn head_transcript_reads_current_branch_history_in_commit_order() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First commit: user + assistant.
@@ -157,7 +159,7 @@ fn head_transcript_respects_checkout_or_branch_head() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First commit on main.
@@ -220,7 +222,7 @@ fn commit_turn_persists_usage_and_terminal_reason() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // Completed turn with usage.
@@ -326,7 +328,7 @@ fn head_transcript_uses_detached_head_commit_id() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // Commit first turn on main.
@@ -387,7 +389,7 @@ fn user_contents(messages: &[GraphMessage]) -> Vec<&str> {
 /// Build A → B on main, C on side branch, M merge(parents: [B, C]).
 fn setup_merge_graph(store: &SqliteSessionGraphStore) -> (String, String, String, String) {
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let commit_a = store
@@ -443,7 +445,7 @@ fn head_transcript_rejects_corrupt_cross_session_parent_without_leaking_messages
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("victim", None, "coder")
+        .create_session("victim", None, "coder", "main")
         .expect("create victim");
     let victim_commit = store
         .commit_turn(commit_input(
@@ -457,7 +459,7 @@ fn head_transcript_rejects_corrupt_cross_session_parent_without_leaking_messages
         .expect("victim commit");
 
     store
-        .create_session("attacker", None, "coder")
+        .create_session("attacker", None, "coder", "main")
         .expect("create attacker");
     let attacker_base = store
         .commit_turn(commit_input(
@@ -501,7 +503,7 @@ fn head_transcript_linear_history_unchanged_by_topological_traversal() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let commit1 = store

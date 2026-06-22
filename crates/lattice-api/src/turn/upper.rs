@@ -3,15 +3,13 @@
 
 //! Fail-closed Upper configuration resolution and one-shot lease lifecycle.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use lattice_profile::{
-    AgentProfile, CredentialRef, EgressPolicyConfig, LoadedAgentProfile, WorkspaceSection,
-};
+use lattice_profile::{CredentialRef, EgressPolicyConfig, LoadedAgentProfile, WorkspaceSection};
 use lattice_workspace::{
-    AllowlistEntry, Backend, CredentialSpec, EgressPolicy, ImageOrTemplate, UpperHandle, UpperSpec,
-    Workspace, WorkspaceError,
+    AllowlistEntry, CredentialSpec, EgressPolicy, ImageOrTemplate, SnapshotRef, UpperHandle,
+    UpperSpec, Workspace, WorkspaceError,
 };
 
 use super::workspace_backend::WorkspaceExecutionBackend;
@@ -45,6 +43,8 @@ pub struct PreparedUpper {
 pub struct UpperLease {
     workspace: Arc<dyn Workspace>,
     handle: Option<UpperHandle>,
+    /// Set after successful retain; prevents Drop from destroying the retained snapshot.
+    retained: bool,
 }
 
 impl UpperLease {
@@ -56,6 +56,11 @@ impl UpperLease {
         self.handle.as_ref()
     }
 
+    /// Whether the Upper was successfully retained (snapshot preserved).
+    pub fn is_retained(&self) -> bool {
+        self.retained
+    }
+
     pub async fn destroy(&mut self) -> Result<(), UpperPrepareError> {
         if let Some(handle) = self.handle.take() {
             self.workspace
@@ -65,10 +70,36 @@ impl UpperLease {
         }
         Ok(())
     }
+
+    /// Retain the Upper as a named snapshot for later resume.
+    ///
+    /// On success, takes the handle from the lease so Drop does not destroy it.
+    /// The snapshot persists independently of the lease lifecycle.
+    /// On failure, the handle remains available for explicit destroy.
+    pub async fn retain(
+        &mut self,
+        snapshot_name: &str,
+        max_pending_snapshots: u32,
+    ) -> Result<SnapshotRef, UpperPrepareError> {
+        let handle = self
+            .handle
+            .as_ref()
+            .ok_or_else(|| UpperPrepareError::Workspace("no handle to retain".to_string()))?;
+        let snapshot_ref = self
+            .workspace
+            .retain_upper(handle, snapshot_name, max_pending_snapshots)
+            .await
+            .map_err(|e| UpperPrepareError::Workspace(e.to_string()))?;
+        // Success: take the handle so Drop won't destroy it.
+        self.handle.take();
+        self.retained = true;
+        Ok(snapshot_ref)
+    }
 }
 
 impl Drop for UpperLease {
     fn drop(&mut self) {
+        // If retained, the handle was already taken — nothing to destroy.
         if let Some(handle) = self.handle.take() {
             let workspace = Arc::clone(&self.workspace);
             if let Ok(handle_rt) = tokio::runtime::Handle::try_current() {
@@ -191,6 +222,7 @@ pub fn resolve_upper_config(
     profile: &LoadedAgentProfile,
     project_root: &Path,
     enabled_tools: &[String],
+    baseline_oid: Option<&str>,
 ) -> Result<ResolvedUpperConfig, UpperPrepareError> {
     let requires_upper = upper_backed_tools_enabled(enabled_tools);
     let section = match profile.profile.workspace.as_ref() {
@@ -229,14 +261,19 @@ pub fn resolve_upper_config(
     } else {
         resolve_explicit_image_or_template(image)?
     };
-    let baseline_oid = resolve_baseline_head(project_root)?;
+    // Use the injected baseline OID when provided (D-27, T-36-20); fall back
+    // to repository HEAD only for non-preflight paths.
+    let baseline = match baseline_oid {
+        Some(oid) => oid.to_owned(),
+        None => resolve_baseline_head(project_root)?,
+    };
     let credentials = resolve_credentials(&section.credentials)?;
 
     Ok(ResolvedUpperConfig {
         requires_upper,
         spec: UpperSpec {
             image_or_template,
-            baseline_oid,
+            baseline_oid: baseline,
             host_repo_path: project_root.to_path_buf(),
             egress: map_egress(section),
             credentials,
@@ -273,12 +310,15 @@ pub async fn prepare_upper(
     let lease = UpperLease {
         workspace,
         handle: Some(handle),
+        retained: false,
     };
     Ok(PreparedUpper { lease, backend })
 }
 
 #[cfg(test)]
 mod upper_workspace_source_tests {
+    use std::path::PathBuf;
+
     use super::*;
     use lattice_profile::{
         AgentProfile, AgentSection, LancetSection, LlmSection, PromptSection, ToolsSection,
@@ -311,6 +351,8 @@ mod upper_workspace_source_tests {
                     cpus: None,
                     memory_mb: None,
                     allowed_egress_targets: vec![],
+                    cleanup_rounds: 3,
+                    max_pending_snapshots: 5,
                 }),
             },
             system_prompt: "sys".into(),
@@ -342,16 +384,26 @@ mod upper_workspace_source_tests {
             },
             system_prompt: "sys".into(),
         };
-        let err = resolve_upper_config(&profile, Path::new("."), &["observe.workspace".into()])
-            .unwrap_err();
+        let err = resolve_upper_config(
+            &profile,
+            Path::new("."),
+            &["observe.workspace".into()],
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, UpperPrepareError::MissingWorkspaceSection));
     }
 
     #[test]
     fn upper_workspace_source_missing_image_fails() {
         let profile = profile_with_workspace(None);
-        let err = resolve_upper_config(&profile, Path::new("."), &["observe.workspace".into()])
-            .unwrap_err();
+        let err = resolve_upper_config(
+            &profile,
+            Path::new("."),
+            &["observe.workspace".into()],
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, UpperPrepareError::MissingWorkspaceSource));
     }
 
@@ -378,6 +430,8 @@ mod upper_workspace_source_tests {
 
 #[cfg(test)]
 mod upper_config_tests {
+    use std::path::PathBuf;
+
     use super::*;
     use lattice_profile::{
         AgentProfile, AgentSection, LancetSection, LlmSection, PromptSection, ToolsSection,
@@ -442,12 +496,14 @@ mod upper_config_tests {
                     cpus: None,
                     memory_mb: None,
                     allowed_egress_targets: vec![],
+                    cleanup_rounds: 3,
+                    max_pending_snapshots: 5,
                 }),
             },
             system_prompt: "sys".into(),
         };
-        let cfg =
-            resolve_upper_config(&profile, dir.path(), &["observe.workspace".into()]).unwrap();
+        let cfg = resolve_upper_config(&profile, dir.path(), &["observe.workspace".into()], None)
+            .unwrap();
         assert!(cfg.requires_upper);
         assert!(matches!(
             cfg.spec.image_or_template,
@@ -460,7 +516,7 @@ mod upper_config_tests {
 mod upper_lease_tests {
     use super::*;
     use async_trait::async_trait;
-    use lattice_workspace::{ExecOutput, GitStatus, Workspace};
+    use lattice_workspace::{Backend, ExecOutput, GitStatus, Workspace};
 
     struct NoopWorkspace {
         destroyed: std::sync::Mutex<Option<String>>,
@@ -523,7 +579,9 @@ mod upper_lease_tests {
             _baseline_oid: &str,
             _max_artifact_bytes: u64,
         ) -> lattice_workspace::Result<lattice_workspace::CandidateExport> {
-            Err(lattice_workspace::WorkspaceError::Unavailable("noop".into()))
+            Err(lattice_workspace::WorkspaceError::Unavailable(
+                "noop".into(),
+            ))
         }
     }
 
@@ -538,6 +596,7 @@ mod upper_lease_tests {
                 id: "noop-1".into(),
                 backend: Backend::Deterministic,
             }),
+            retained: false,
         };
         lease.destroy().await.expect("destroy once");
     }

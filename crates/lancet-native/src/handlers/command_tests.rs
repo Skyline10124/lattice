@@ -3223,13 +3223,8 @@ mod phase34_direct_command {
 
     impl CommandSpyBackend {
         fn cwd_facts(path: &str) -> PathFacts {
-            let normalized_path = if path == "." {
-                String::new()
-            } else {
-                path.to_string()
-            };
             PathFacts {
-                normalized_path,
+                normalized_path: path.to_string(),
                 exists: true,
                 kind: Some(crate::execution_backend::PathKind::Directory),
                 parent_exists: true,
@@ -3422,10 +3417,7 @@ mod phase34_direct_command {
         ctx
     }
 
-    fn set_spy_changed_paths(
-        spy: &CommandSpyBackend,
-        paths: Vec<&str>,
-    ) {
+    fn set_spy_changed_paths(spy: &CommandSpyBackend, paths: Vec<&str>) {
         let parsed: Vec<WorkspacePath> = paths
             .into_iter()
             .map(|p| WorkspacePath::parse(p).unwrap())
@@ -3681,7 +3673,7 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
 
-        let mut config = direct_policy_config(std::path::Path::new(root));
+        let config = direct_policy_config(std::path::Path::new(root));
         let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             config.clone(),
         ));
@@ -3723,7 +3715,7 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
 
-        let mut config = direct_policy_config(std::path::Path::new(root));
+        let config = direct_policy_config(std::path::Path::new(root));
         let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             config.clone(),
         ));
@@ -3765,11 +3757,8 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["tests/out.rs"]);
-        let mut ctx = direct_ctx_with_policy_mode(
-            root,
-            routing,
-            lancet_protocol::envelope::CepMode::Enforce,
-        );
+        let mut ctx =
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
         ctx.direct_verify = Some(DirectVerifyConfig {
             argv: vec!["echo".into(), "verify-should-not-run".into()],
             cwd: WorkspacePath::project_root(),
@@ -3795,11 +3784,13 @@ mod phase34_direct_command {
         assert_eq!(err.code, CepErrorCode::ReplanRequired);
         assert_eq!(spy.exec_calls.lock().unwrap().len(), 1);
         let meta = routing_metadata(&durable);
-        assert!(meta["out_of_scope_paths"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v.as_str() == Some("tests/out.rs")));
+        assert!(
+            meta["out_of_scope_paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_str() == Some("tests/out.rs"))
+        );
     }
 
     #[tokio::test]
@@ -3809,11 +3800,8 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
-        let mut ctx = direct_ctx_with_policy_mode(
-            root,
-            routing,
-            lancet_protocol::envelope::CepMode::Enforce,
-        );
+        let mut ctx =
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
         ctx.direct_verify = Some(DirectVerifyConfig {
             argv: vec!["echo".into(), "verify-ok".into()],
             cwd: WorkspacePath::project_root(),
@@ -3845,11 +3833,8 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
-        let ctx = direct_ctx_with_policy_mode(
-            root,
-            routing,
-            lancet_protocol::envelope::CepMode::Enforce,
-        );
+        let ctx =
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
         let ledger = ctx.effect_ledger.clone();
         let authorized = ctx.authorized_region.clone();
 
@@ -3880,7 +3865,10 @@ mod phase34_direct_command {
                 if path.to_string_lossy() == "src/lib.rs"
         ));
         for effect in &observed {
-            assert!(region.contains(effect), "effect must be authorized: {effect:?}");
+            assert!(
+                region.contains(effect),
+                "effect must be authorized: {effect:?}"
+            );
         }
     }
 
@@ -3890,11 +3878,8 @@ mod phase34_direct_command {
         let root = dir.path().to_str().unwrap();
         let registry = native_command_registry(root);
         let (routing, _spy) = routing_with_spy();
-        let ctx = direct_ctx_with_policy_mode(
-            root,
-            routing,
-            lancet_protocol::envelope::CepMode::Enforce,
-        );
+        let ctx =
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
         let ledger = ctx.effect_ledger.clone();
 
         dispatch_direct(
@@ -3932,11 +3917,10 @@ mod phase34_direct_command {
         let root = dir.path().to_str().unwrap();
         let registry = native_command_registry(root);
         let (routing, spy) = routing_with_spy();
-        *spy.changed_paths_result.lock().unwrap() = Some(Err(
-            ExecutionBackendError::ExecutionFailed {
+        *spy.changed_paths_result.lock().unwrap() =
+            Some(Err(ExecutionBackendError::ExecutionFailed {
                 message: "git status failed".into(),
-            },
-        ));
+            }));
         let ctx = direct_ctx_with_policy(root, routing);
         let durable = ctx.durable_metadata.clone();
 

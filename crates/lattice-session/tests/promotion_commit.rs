@@ -5,7 +5,7 @@
 
 use git2::Oid;
 use lattice_session::{
-    PromotedSessionCommitInput, PromotedSessionManifest, PROMOTION_MANIFEST_SCHEMA_VERSION,
+    PROMOTION_MANIFEST_SCHEMA_VERSION_V2, PromotedSessionCommitInput, PromotedSessionManifest,
     create_promoted_session_commit,
 };
 
@@ -29,6 +29,10 @@ fn sample_input(parent_session_oid: Option<Oid>) -> PromotedSessionCommitInput {
         candidate_oid: CANDIDATE_OID.to_string(),
         committed_at_unix_seconds: COMMITTED_AT,
         parent_session_oid,
+        target_project_ref: "refs/heads/main".to_string(),
+        candidate_ref: Some("refs/lattice/candidate/abc".to_string()),
+        execution_status: lattice_session::graph::TurnCommitStatus::Completed,
+        verification: None,
     }
 }
 
@@ -52,9 +56,7 @@ fn read_manifest(repo: &git2::Repository, commit_oid: Oid) -> PromotedSessionMan
         .expect("turn/ entry")
         .to_object(repo)
         .expect("turn object");
-    let turn_tree = turn_entry
-        .peel_to_tree()
-        .expect("turn tree");
+    let turn_tree = turn_entry.peel_to_tree().expect("turn tree");
     let manifest_entry = turn_tree
         .get_name("manifest.json")
         .expect("manifest.json entry");
@@ -67,9 +69,7 @@ fn read_manifest(repo: &git2::Repository, commit_oid: Oid) -> PromotedSessionMan
     let value: serde_json::Value = serde_json::from_str(text).expect("manifest json");
 
     PromotedSessionManifest {
-        schema_version: value["schema_version"]
-            .as_u64()
-            .expect("schema_version") as u32,
+        schema_version: value["schema_version"].as_u64().expect("schema_version") as u32,
         session_id: value["session_id"]
             .as_str()
             .expect("session_id")
@@ -91,6 +91,16 @@ fn read_manifest(repo: &git2::Repository, commit_oid: Oid) -> PromotedSessionMan
             .as_i64()
             .expect("committed_at_unix_seconds"),
         parent_oid: value["parent_oid"].as_str().map(str::to_string),
+        target_project_ref: value["target_project_ref"]
+            .as_str()
+            .expect("target_project_ref")
+            .to_string(),
+        candidate_ref: value["candidate_ref"].as_str().map(str::to_string),
+        execution_status: value["execution_status"]
+            .as_str()
+            .expect("execution_status")
+            .to_string(),
+        verification: None,
     }
 }
 
@@ -114,7 +124,7 @@ fn session_commit_object_is_deterministic_and_ref_neutral() {
     assert_eq!(
         manifest,
         PromotedSessionManifest {
-            schema_version: PROMOTION_MANIFEST_SCHEMA_VERSION,
+            schema_version: PROMOTION_MANIFEST_SCHEMA_VERSION_V2,
             session_id: SESSION_ID.to_string(),
             turn_id: TURN_ID.to_string(),
             baseline_oid: BASELINE_OID.to_string(),
@@ -122,6 +132,10 @@ fn session_commit_object_is_deterministic_and_ref_neutral() {
             disposition: "promoted".to_string(),
             committed_at_unix_seconds: COMMITTED_AT,
             parent_oid: None,
+            target_project_ref: "refs/heads/main".to_string(),
+            candidate_ref: Some("refs/lattice/candidate/abc".to_string()),
+            execution_status: "completed".to_string(),
+            verification: None,
         }
     );
 
@@ -132,13 +146,11 @@ fn session_commit_object_is_deterministic_and_ref_neutral() {
 #[test]
 fn session_commit_object_links_optional_parent() {
     let (_dir, repo) = init_repo();
-    let root_oid =
-        create_promoted_session_commit(&repo, &sample_input(None)).expect("root commit");
+    let root_oid = create_promoted_session_commit(&repo, &sample_input(None)).expect("root commit");
 
     let refs_before = refs_snapshot(&repo);
     let child_input = sample_input(Some(root_oid));
-    let child_oid =
-        create_promoted_session_commit(&repo, &child_input).expect("child commit");
+    let child_oid = create_promoted_session_commit(&repo, &child_input).expect("child commit");
     let refs_after = refs_snapshot(&repo);
 
     assert_ne!(root_oid, child_oid);
@@ -148,7 +160,11 @@ fn session_commit_object_links_optional_parent() {
     );
 
     let child = repo.find_commit(child_oid).expect("child commit");
-    assert_eq!(child.parent_count(), 1, "child must have exactly one parent");
+    assert_eq!(
+        child.parent_count(),
+        1,
+        "child must have exactly one parent"
+    );
     assert_eq!(
         child.parent_id(0).expect("parent id"),
         root_oid,

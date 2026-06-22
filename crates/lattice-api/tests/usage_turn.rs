@@ -9,14 +9,9 @@
 
 mod support;
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use lancet_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, ImpactKind, Intent,
-    OnFailure, Scope,
-};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
@@ -72,6 +67,19 @@ struct Workspace {
     loaded: LoadedAgentProfile,
 }
 
+fn workspace_toml_suffix(enabled_tools: &[&str]) -> &'static str {
+    if support::upper_backed_tools_enabled(enabled_tools) {
+        r#"
+[workspace]
+image = "test-template"
+[lancet.workspace]
+allowed_write_paths = ["src/**"]
+"#
+    } else {
+        ""
+    }
+}
+
 fn setup_workspace(src_content: &str, enabled_tools: &[&str]) -> Workspace {
     let ws = tempfile::tempdir().unwrap();
     let root = ws.path().to_path_buf();
@@ -93,7 +101,7 @@ system = "You are a test agent."
 [tools]
 enabled = {enabled:?}{workspace}
 "#,
-        workspace = support::workspace_toml_suffix(enabled_tools),
+        workspace = workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 
@@ -113,11 +121,26 @@ enabled = {enabled:?}{workspace}
     }
 }
 
+/// Create an unattached branch at the current HEAD without checking it out.
+fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
+    std::process::Command::new("git")
+        .args(["branch", name])
+        .current_dir(root)
+        .status()
+        .expect("git branch (create unattached target)");
+    name.to_string()
+}
+
 fn create_default_session(sessions_path: &std::path::Path) -> String {
+    create_session_with_branch(sessions_path, "main")
+}
+
+fn create_session_with_branch(sessions_path: &std::path::Path, branch: &str) -> String {
     lattice_api::SessionApi::sqlite(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
+            project_branch: branch.to_string(),
         })
         .expect("create session")
         .session_id
@@ -168,9 +191,10 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
             .build(),
     );
 
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-read");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
+    let session_id = create_session_with_branch(&sessions_path, &target);
 
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
@@ -328,9 +352,10 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
             .push_events(final_response_events("Edited successfully."))
             .build(),
     );
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-edit");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
+    let session_id = create_session_with_branch(&sessions_path, &target);
     let result = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
         make_request(&ws, "Change the answer to 42", &session_id, fake_llm),
@@ -379,9 +404,10 @@ async fn usage_resume_session_includes_previous_turn_context() {
             .build(),
     );
 
+    let target = create_unattached_target_branch(&ws.root, "lattice-target-resume");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = create_default_session(&sessions_path);
+    let session_id = create_session_with_branch(&sessions_path, &target);
 
     let result1 = lattice_api::run_turn(
         lattice_api::SessionApi::sqlite(&sessions_path),
@@ -461,7 +487,7 @@ system = "You are a test agent."
 enabled = {enabled:?}{workspace}
 {network_toml}
 "#,
-        workspace = support::workspace_toml_suffix(enabled_tools),
+        workspace = workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 

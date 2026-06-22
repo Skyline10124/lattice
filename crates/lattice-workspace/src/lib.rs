@@ -25,6 +25,7 @@
 //!   from logs and traces (CRED-01, T-33-02).
 //! - [`validate_baseline_oid`] enforces hex-only 40-char format before any OID
 //!   is used in exec arguments (T-33-05).
+//!   WR-06: accepts 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
 //! - [`apply_egress`] builds `NetworkPolicy::none().allow_domains([...])?` for
 //!   allowlist policies; there is no `NetworkPolicy::allowlist()` constructor
 //!   (T-33-03; Wave 0 A7 confirmed DNS-native resolution for allowlisted domains).
@@ -47,12 +48,18 @@ pub use paths::{
 // Shared git2 helpers used by both MicrosandboxWorkspace and DeterministicWorkspace.
 // Exposed as pub so downstream crates (33-04 DeterministicWorkspace) can call them.
 pub mod git;
+pub mod git_status;
 pub mod promotion;
 mod template;
 
 pub use git::{
-    build_baseline_pack, checkout_tree_to_dir, export_candidate_from_repo, git_archive_to_tempdir,
-    provision_exact_baseline, BASELINE_TRANSFER_CHUNK_BYTES, CANDIDATE_EXPORT_CHUNK_BYTES,
+    BASELINE_TRANSFER_CHUNK_BYTES, CANDIDATE_EXPORT_CHUNK_BYTES, build_baseline_pack,
+    checkout_tree_to_dir, export_candidate_from_repo, git_archive_to_tempdir,
+    provision_exact_baseline,
+};
+
+pub use git_status::{
+    GitStatus, GitStatusCode, GitStatusEntry, StatusParseError, parse_git_status_z,
 };
 
 // Feature-gated test infrastructure.
@@ -201,6 +208,7 @@ pub struct UpperSpec {
     pub image_or_template: ImageOrTemplate,
     /// 40-character hex Git OID of the baseline commit to check out.
     /// Validated by [`validate_baseline_oid`] before first use.
+    /// WR-06: 64-character SHA-256 OIDs are also accepted.
     pub baseline_oid: String,
     /// Host path to the git repository containing `baseline_oid`.
     /// Used only for git-archive export on the host; never passed into exec.
@@ -233,6 +241,26 @@ pub struct UpperHandle {
     pub backend: Backend,
 }
 
+/// Typed reference to a retained snapshot, distinct from a warm template.
+///
+/// A  identifies a credential-bearing per-turn snapshot that preserves
+/// the entire Upper filesystem state (including ).  Unlike warm templates
+/// (which are credential-free and shared), retained snapshots are per-session and
+/// may contain injected secrets (D-11, design spec §7.3).
+///
+/// # Security (T-36-05, T-36-15)
+///
+/// The  is the derived physical locator ().
+/// Debug output exposes only  and ; never log snapshot content or
+/// resolved credentials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotRef {
+    /// The backend that owns the snapshot artifact.
+    pub backend: Backend,
+    /// The derived physical snapshot name (D-12 format).
+    pub name: String,
+}
+
 /// Result of running a command in a sandbox.
 #[derive(Clone, Debug)]
 pub struct ExecOutput {
@@ -245,15 +273,6 @@ impl ExecOutput {
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
-}
-
-/// The result of `git status --porcelain=v1` inside an Upper.
-#[derive(Clone, Debug, Default)]
-pub struct GitStatus {
-    /// Raw `git status --porcelain=v1` output.
-    pub porcelain: String,
-    /// `true` when `porcelain` is empty (working tree is clean).
-    pub is_clean: bool,
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -272,7 +291,8 @@ pub enum WorkspaceError {
     #[error("git operation failed: {0}")]
     Git(String),
     /// The provided OID string is not a valid 40-character hex SHA-1.
-    #[error("invalid baseline OID `{0}`: must be 40 hex characters")]
+    /// WR-06: not a valid 40- (SHA-1) or 64- (SHA-256) character hex OID.
+    #[error("invalid baseline OID `{0}`: must be 40 or 64 hex characters")]
     InvalidOid(String),
     /// Upper HEAD does not match the requested host baseline commit OID.
     #[error("baseline identity mismatch: expected {expected}, got {actual}")]
@@ -289,12 +309,23 @@ pub enum WorkspaceError {
     ContentTooLarge { actual: usize, max: usize },
     #[error("adapter unavailable: {0}")]
     Unavailable(String),
-    #[error("upper working tree is not clean")]
-    UpperDirty { porcelain: String },
+    #[error("upper working tree is not clean: {summary}")]
+    UpperDirty { summary: String },
     #[error("baseline {baseline} is not an ancestor of candidate {candidate}")]
     NotDescendant { baseline: String, candidate: String },
     #[error("candidate artifact size {actual} exceeds limit {max}")]
     ArtifactTooLarge { actual: u64, max: u64 },
+    /// Snapshot quota exceeded: cannot retain more than  pending snapshots.
+    #[error("snapshot quota exceeded: {current} pending snapshots, maximum is {max}")]
+    SnapshotQuotaExceeded { current: u32, max: u32 },
+    /// Invalid snapshot name (does not match D-12 format).
+    #[error(
+        "invalid snapshot name : must match lattice-{{session}}-{{commit_hex8}}-{{nonce_hex8}}"
+    )]
+    InvalidSnapshotName(String),
+    /// Referenced snapshot does not exist.
+    #[error("snapshot not found: {name}")]
+    SnapshotNotFound { name: String },
 }
 
 pub type Result<T> = std::result::Result<T, WorkspaceError>;
@@ -364,15 +395,36 @@ impl CandidateExport {
 
 // ── OID validation ────────────────────────────────────────────────────────────
 
-/// Validate that `oid` is exactly 40 lowercase/uppercase hex characters.
+/// Validate that `oid` is a 40- (SHA-1) or 64- (SHA-256) character hex OID.
 ///
 /// Returns [`WorkspaceError::InvalidOid`] if not.  Call this before using
 /// `baseline_oid` in any exec argv to prevent injection (T-33-05).
+/// WR-06: the previous 40-char-only check silently rejected SHA-256 repos.
 pub fn validate_baseline_oid(oid: &str) -> Result<()> {
-    if oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit()) {
+    let len = oid.len();
+    let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());
+    if is_hex && (len == 40 || len == 64) {
         Ok(())
     } else {
         Err(WorkspaceError::InvalidOid(oid.to_string()))
+    }
+}
+
+// ── Snapshot name validation (D-12) ─────────────────────────────────────────
+
+/// Validate that `name` matches the D-12 retained snapshot format:
+/// `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`.
+///
+/// Returns `Ok(())` if valid, or [`WorkspaceError::InvalidSnapshotName`] if not.
+pub fn validate_snapshot_name(name: &str) -> Result<()> {
+    // lattice-{session_id}-{8hex}-{8hex}
+    // Minimum: "lattice-x-00000000-00000000" = 28 chars
+    let re = regex::Regex::new(r"^lattice-.+-[0-9a-fA-F]{8}-[0-9a-fA-F]{8}$")
+        .expect("snapshot name regex is compile-time constant");
+    if re.is_match(name) {
+        Ok(())
+    } else {
+        Err(WorkspaceError::InvalidSnapshotName(name.to_string()))
     }
 }
 
@@ -461,7 +513,10 @@ pub trait Workspace: Send + Sync {
         args: &[&str],
     ) -> Result<ExecOutput>;
 
-    /// Return `git status --porcelain=v1` of the `/workspace` root.
+    /// Return parsed porcelain-v1 `-z` status of the `/workspace` root.
+    ///
+    /// The result uses typed [`GitStatus`](git_status::GitStatus) entries,
+    /// never raw line text.
     async fn git_status(&self, handle: &UpperHandle) -> Result<GitStatus>;
 
     /// Export a clean Upper candidate as a bounded incremental Git bundle on the host.
@@ -571,6 +626,93 @@ pub trait Workspace: Send + Sync {
         ))
     }
 
+    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+
+    /// Retain the Upper's full filesystem state (including credentials and `.git`)
+    /// as a named snapshot, then remove the live handle.
+    ///
+    /// Distinct from [`template_create`](Self::template_create): retained snapshots
+    /// may contain injected secrets and are per-session, not shared templates.
+    ///
+    /// # Arguments
+    ///
+    /// - `handle`: the live Upper to quiesce and snapshot.
+    /// - `snapshot_name`: must match the D-12 format
+    ///   `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`.
+    /// - `max_pending_snapshots`: per-session quota; the method counts existing
+    ///   snapshots with the same `lattice-{session_id}-` prefix and refuses if
+    ///   the count is already at the limit.
+    ///
+    /// # Behavior
+    ///
+    /// - Validates `snapshot_name` format and checks quota before any effect.
+    /// - Quiesces the Upper (stops processes, syncs filesystem).
+    /// - Creates the named snapshot preserving the entire disk state.
+    /// - Removes the live handle from the adapter's internal map only after
+    ///   successful snapshot creation.
+    /// - On failure, the live handle remains available for the caller to destroy.
+    async fn retain_upper(
+        &self,
+        handle: &UpperHandle,
+        snapshot_name: &str,
+        max_pending_snapshots: u32,
+    ) -> Result<SnapshotRef> {
+        let _ = (handle, snapshot_name, max_pending_snapshots);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "retain_upper".into(),
+        ))
+    }
+
+    /// Restore a cold Upper from a retained snapshot.
+    ///
+    /// Creates a new live handle without deleting the source snapshot.
+    /// Processes, sockets, and tmpfs do not survive — this is a cold filesystem
+    /// restart (D-15). The caller must rebuild AgentLoop and CEP runtime state.
+    async fn restore_retained_upper(
+        &self,
+        snapshot_ref: &SnapshotRef,
+        new_name: &str,
+        spec: &UpperSpec,
+    ) -> Result<UpperHandle> {
+        let _ = (snapshot_ref, new_name, spec);
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "restore_retained_upper".into(),
+        ))
+    }
+
+    /// Check whether a retained snapshot exists.
+    async fn retained_snapshot_exists(&self, snapshot_ref: &SnapshotRef) -> Result<bool> {
+        let _ = snapshot_ref;
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "retained_snapshot_exists".into(),
+        ))
+    }
+
+    /// List all retained snapshot names for the given session prefix.
+    ///
+    /// Returns snapshot names matching `lattice-{session_id}-*`.
+    async fn list_retained_snapshots(&self, session_id_prefix: &str) -> Result<Vec<String>> {
+        let _ = session_id_prefix;
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "list_retained_snapshots".into(),
+        ))
+    }
+
+    /// Release (delete) a retained snapshot. Idempotent.
+    ///
+    /// Releasing a nonexistent snapshot succeeds silently.
+    async fn release_retained_snapshot(&self, snapshot_ref: &SnapshotRef) -> Result<()> {
+        let _ = snapshot_ref;
+        Err(WorkspaceError::Unsupported(
+            Backend::Microsandbox,
+            "release_retained_snapshot".into(),
+        ))
+    }
+
     /// Typed argv execution; default delegates to [`exec_upper`].
     async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {
         let prog = request
@@ -624,5 +766,40 @@ mod egress_tests {
             plan_egress(&EgressPolicy::Allowlist(vec![])),
             NetPlan::Allow(vec![]),
         );
+    }
+}
+
+// ── OID validation tests (WR-06) ────────────────────────────────────────────
+
+#[cfg(test)]
+mod oid_validation_tests {
+    use super::*;
+
+    #[test]
+    fn validate_baseline_oid_accepts_sha1_40_hex() {
+        assert!(validate_baseline_oid(&"a".repeat(40)).is_ok());
+    }
+
+    #[test]
+    fn validate_baseline_oid_accepts_sha256_64_hex() {
+        // WR-06: SHA-256 (64 hex) OIDs must be accepted, not rejected.
+        assert!(validate_baseline_oid(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validate_baseline_oid_rejects_non_hex() {
+        let err = validate_baseline_oid("not-a-valid-oid");
+        assert!(err.is_err(), "non-hex OID must be rejected");
+    }
+
+    #[test]
+    fn validate_baseline_oid_rejects_wrong_lengths() {
+        // 39 and 41 hex chars are neither SHA-1 nor SHA-256.
+        assert!(validate_baseline_oid(&"a".repeat(39)).is_err());
+        assert!(validate_baseline_oid(&"a".repeat(41)).is_err());
+        // 65 hex chars are also invalid.
+        assert!(validate_baseline_oid(&"a".repeat(65)).is_err());
+        // Empty is invalid.
+        assert!(validate_baseline_oid("").is_err());
     }
 }

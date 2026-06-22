@@ -68,19 +68,64 @@ pub struct CredentialRef {
     pub env_var_name: String,
 }
 
+// ── Workspace lifecycle limit constants ─────────────────────────────────────
+
+/// Default number of cleanup rounds before the host exhausts the budget (D-09).
+/// Valid range: `1..=32`.
+pub const DEFAULT_CLEANUP_ROUNDS: u32 = 3;
+
+/// Default maximum pending snapshots per session (D-17).
+/// Valid range: `1..=100`.
+pub const DEFAULT_MAX_PENDING_SNAPSHOTS: u32 = 5;
+
+fn default_cleanup_rounds() -> u32 {
+    DEFAULT_CLEANUP_ROUNDS
+}
+
+fn default_max_pending_snapshots() -> u32 {
+    DEFAULT_MAX_PENDING_SNAPSHOTS
+}
+
+fn deserialize_bounded_cleanup_rounds<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if !(1..=32).contains(&value) {
+        return Err(de::Error::custom(format!(
+            "cleanup_rounds must be in 1..=32, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+fn deserialize_bounded_max_pending_snapshots<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if !(1..=100).contains(&value) {
+        return Err(de::Error::custom(format!(
+            "max_pending_snapshots must be in 1..=100, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 /// `[workspace]` — Upper VM execution environment configuration.
 ///
 /// Controls egress policy, credential references, resource limits, and the OCI image
 /// (or pre-warmed template name) for the Upper workspace provisioned per turn.
 ///
-/// All fields are `Option<T>` with `#[serde(default)]` so missing fields fall back to
-/// caller defaults. Older profiles without `[workspace]` still parse and produce
-/// `AgentProfile.workspace = None`.
+/// Most fields are `Option<T>` with `#[serde(default)]` so missing fields fall back to
+/// caller defaults. Lifecycle limit fields (`cleanup_rounds`, `max_pending_snapshots`)
+/// are non-optional `u32` with bounded defaults. Older profiles without `[workspace]`
+/// still parse and produce `AgentProfile.workspace = None`.
 ///
 /// **Security invariant (T-33-04):** credentials are turn-time injection only.
 /// This section stores only references (`CredentialRef`); resolved values are never
 /// present in profile or session snapshot data.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSection {
     /// Egress policy for the Upper VM. Defaults to `open` when absent.
@@ -112,6 +157,40 @@ pub struct WorkspaceSection {
     /// `egress` is `open` or `blocked`.
     #[serde(default)]
     pub allowed_egress_targets: Vec<String>,
+    /// Number of agent cleanup rounds before the host exhausts the budget (D-09).
+    ///
+    /// When the configured limit is exhausted, the cleanup callback returns `None`
+    /// and the orchestrator sets disposition to `pending_worktree`.
+    /// Valid range: `1..=32`. Default: `3`.
+    #[serde(
+        default = "default_cleanup_rounds",
+        deserialize_with = "deserialize_bounded_cleanup_rounds"
+    )]
+    pub cleanup_rounds: u32,
+    /// Maximum number of pending retained snapshots per session (D-17).
+    ///
+    /// When the quota is exceeded, new snapshot retention is refused.
+    /// Valid range: `1..=100`. Default: `5`.
+    #[serde(
+        default = "default_max_pending_snapshots",
+        deserialize_with = "deserialize_bounded_max_pending_snapshots"
+    )]
+    pub max_pending_snapshots: u32,
+}
+
+impl Default for WorkspaceSection {
+    fn default() -> Self {
+        Self {
+            egress: None,
+            credentials: Vec::new(),
+            image: None,
+            cpus: None,
+            memory_mb: None,
+            allowed_egress_targets: Vec::new(),
+            cleanup_rounds: DEFAULT_CLEANUP_ROUNDS,
+            max_pending_snapshots: DEFAULT_MAX_PENDING_SNAPSHOTS,
+        }
+    }
 }
 
 /// LANCET `[lancet]` profile section with typed policy sub-tables.
@@ -1892,6 +1971,264 @@ unknown = true
         assert!(
             err.to_string().contains("unknown"),
             "should reject unknown field, got: {err}"
+        );
+    }
+
+    // ── Workspace lifecycle limits ──────────────────────────────────────────
+
+    #[test]
+    fn workspace_lifecycle_limits_defaults_when_omitted() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "open"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.cleanup_rounds, 3, "default cleanup_rounds must be 3");
+        assert_eq!(
+            ws.max_pending_snapshots, 5,
+            "default max_pending_snapshots must be 5"
+        );
+    }
+
+    #[test]
+    fn workspace_lifecycle_limits_explicit_values_roundtrip() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_rounds = 10
+max_pending_snapshots = 20
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.cleanup_rounds, 10);
+        assert_eq!(ws.max_pending_snapshots, 20);
+
+        // Roundtrip
+        let serialized = toml::to_string(&profile).unwrap();
+        let profile2: AgentProfile = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            profile, profile2,
+            "lifecycle limits roundtrip must be lossless"
+        );
+    }
+
+    #[test]
+    fn workspace_lifecycle_limits_boundary_values_accepted() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_rounds = 1
+max_pending_snapshots = 1
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.cleanup_rounds, 1);
+        assert_eq!(ws.max_pending_snapshots, 1);
+
+        let toml_upper = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_rounds = 32
+max_pending_snapshots = 100
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml_upper).unwrap();
+        let ws = profile.workspace.as_ref().unwrap();
+        assert_eq!(ws.cleanup_rounds, 32);
+        assert_eq!(ws.max_pending_snapshots, 100);
+    }
+
+    #[test]
+    fn workspace_lifecycle_limits_zero_rejected() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_rounds = 0
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("cleanup_rounds"),
+            "zero cleanup_rounds must be rejected, got: {err}"
+        );
+
+        let toml2 = format!(
+            r#"{prefix}
+
+[workspace]
+max_pending_snapshots = 0
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml2).unwrap_err();
+        assert!(
+            err.to_string().contains("max_pending_snapshots"),
+            "zero max_pending_snapshots must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_lifecycle_limits_out_of_range_rejected() {
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_rounds = 33
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("cleanup_rounds"),
+            "cleanup_rounds=33 must be rejected, got: {err}"
+        );
+
+        let toml2 = format!(
+            r#"{prefix}
+
+[workspace]
+max_pending_snapshots = 101
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml2).unwrap_err();
+        assert!(
+            err.to_string().contains("max_pending_snapshots"),
+            "max_pending_snapshots=101 must be rejected, got: {err}"
+        );
+    }
+
+    // ── Workspace compatibility and strictness ──────────────────────────────
+
+    #[test]
+    fn workspace_typo_cleanup_round_rejected() {
+        // `cleanup_round` (singular) is a typo — must be `cleanup_rounds`
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+cleanup_round = 5
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("cleanup_round") || err.to_string().contains("unknown field"),
+            "typo `cleanup_round` must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_typo_max_pending_snapshot_rejected() {
+        // `max_pending_snapshot` (singular) is a typo — must be `max_pending_snapshots`
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+max_pending_snapshot = 5
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_pending_snapshot")
+                || err.to_string().contains("unknown field"),
+            "typo `max_pending_snapshot` must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_serialization_contains_resolved_lifecycle_values() {
+        // A profile with [workspace] and omitted limits must serialize with
+        // the resolved default values — ensuring downstream consumers see
+        // explicit numbers in the canonical profile snapshot.
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "open"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let serialized = toml::to_string(&profile).unwrap();
+        assert!(
+            serialized.contains("cleanup_rounds = 3"),
+            "serialized profile must contain resolved cleanup_rounds, got: {serialized}"
+        );
+        assert!(
+            serialized.contains("max_pending_snapshots = 5"),
+            "serialized profile must contain resolved max_pending_snapshots, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn workspace_serialization_contains_no_secret_values() {
+        // Even with credentials and lifecycle limits, no secret values appear
+        // in the serialized profile.
+        let toml = format!(
+            r#"{prefix}
+
+[workspace]
+egress = "allowlist"
+cleanup_rounds = 10
+max_pending_snapshots = 20
+allowed_egress_targets = ["api.example.com"]
+
+[[workspace.credentials]]
+env_var_name = "SUPER_SECRET_KEY"
+"#,
+            prefix = minimal_profile_prefix()
+        );
+        let profile = parse(&toml).unwrap();
+        let serialized = toml::to_string(&profile).unwrap();
+
+        // Must contain lifecycle limits
+        assert!(
+            serialized.contains("cleanup_rounds = 10"),
+            "must contain explicit cleanup_rounds"
+        );
+        assert!(
+            serialized.contains("max_pending_snapshots = 20"),
+            "must contain explicit max_pending_snapshots"
+        );
+
+        // Must NOT contain any secret value (only the env var name is stored)
+        assert!(
+            !serialized.contains("sk-") && !serialized.contains("secret-value"),
+            "serialized profile must not contain secret values"
+        );
+
+        // env_var_name is present (it's a reference, not a secret)
+        assert!(
+            serialized.contains("SUPER_SECRET_KEY"),
+            "CredentialRef env_var_name must be present in serialization"
+        );
+    }
+
+    #[test]
+    fn workspace_absent_section_parses_with_none() {
+        // Profiles without [workspace] still parse; lifecycle code must apply
+        // limits only when an Upper exists.
+        let profile = parse(minimal_profile_prefix()).unwrap();
+        assert!(
+            profile.workspace.is_none(),
+            "absent [workspace] must produce None, not a default WorkspaceSection"
         );
     }
 }

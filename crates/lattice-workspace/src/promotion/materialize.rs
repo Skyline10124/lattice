@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use git2::{ObjectType, Oid, Repository};
 use serde::{Deserialize, Serialize};
 
-use super::candidate::PromotionLimits;
 use super::PromotionError;
+use super::candidate::PromotionLimits;
 
 /// Git tree entry state recorded in the materialization journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,9 +120,7 @@ impl<'a> DurableFs<'a> {
                     && entry.path.contains('/')
                     && let Some(parent) = abs.parent()
                 {
-                    let sibling_count = fs::read_dir(parent)?
-                        .filter_map(Result::ok)
-                        .count();
+                    let sibling_count = fs::read_dir(parent)?.filter_map(Result::ok).count();
                     if sibling_count > 1 {
                         return Err(PromotionError::MaterializeConflict {
                             path: entry.path.clone(),
@@ -268,7 +266,11 @@ pub fn build_materialization_plan(
     collect_tree_paths(&repo, &baseline_tree, "", &mut baseline_paths)?;
     collect_tree_paths(&repo, &candidate_tree, "", &mut candidate_paths)?;
 
-    let mut keys: HashSet<String> = baseline_paths.keys().chain(candidate_paths.keys()).cloned().collect();
+    let mut keys: HashSet<String> = baseline_paths
+        .keys()
+        .chain(candidate_paths.keys())
+        .cloned()
+        .collect();
     let mut entries = Vec::new();
     for path in keys.drain() {
         let old = baseline_paths.remove(&path).unwrap_or(PathState::Absent);
@@ -443,9 +445,9 @@ fn state_eq(
     match (left, right) {
         (PathState::Absent, PathState::Absent) => Ok(true),
         (PathState::Directory, PathState::Directory) => Ok(true),
-        (PathState::Blob { oid: a, mode: ma }, PathState::Blob { oid: b, mode: mb }) => {
-            Ok(a == b && ma == mb && blob_bytes(repo, a)? == fs::read(worktree_root.join(rel_path))?)
-        }
+        (PathState::Blob { oid: a, mode: ma }, PathState::Blob { oid: b, mode: mb }) => Ok(a == b
+            && ma == mb
+            && blob_bytes(repo, a)? == fs::read(worktree_root.join(rel_path))?),
         (PathState::Symlink { oid: a }, PathState::Symlink { oid: b }) => {
             Ok(a == b && blob_bytes(repo, a)? == symlink_target_bytes(worktree_root, rel_path)?)
         }
@@ -454,7 +456,8 @@ fn state_eq(
 }
 
 fn blob_bytes(repo: &Repository, oid: &str) -> Result<Vec<u8>, PromotionError> {
-    let parsed = Oid::from_str(oid).map_err(|e| PromotionError::Git(format!("parse oid {oid}: {e}")))?;
+    let parsed =
+        Oid::from_str(oid).map_err(|e| PromotionError::Git(format!("parse oid {oid}: {e}")))?;
     let blob = repo
         .find_blob(parsed)
         .map_err(|e| PromotionError::Git(format!("find blob {oid}: {e}")))?;
@@ -535,14 +538,15 @@ fn remove_path_kind(rel_path: &str, abs: &Path, old: &PathState) -> Result<(), P
 
 fn staged_temp_path(dest: &Path) -> PathBuf {
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = dest
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+    let file_name = dest.file_name().and_then(|s| s.to_str()).unwrap_or("file");
     parent.join(format!(".lattice-stage-{file_name}"))
 }
 
-fn sync_path(path: &Path, recorder: Option<&dyn DurableFsRecorder>, file: bool) -> Result<(), PromotionError> {
+fn sync_path(
+    path: &Path,
+    recorder: Option<&dyn DurableFsRecorder>,
+    file: bool,
+) -> Result<(), PromotionError> {
     let opened = File::open(path)?;
     opened.sync_all()?;
     if file && let Some(rec) = recorder {

@@ -350,7 +350,6 @@ mod cep_native_registry {
     use lancet_catalog::methods::envelope::Envelope;
     use lancet_catalog::methods::external::Fetch;
     use lancet_catalog::methods::session::TodoWrite;
-    use lancet_catalog::methods::workspace::{ObserveWorkspace, ObserveWorkspaceParams};
     use lancet_native::SEMANTIC_STAGE_NATIVE;
     use lancet_protocol::envelope::Capability;
     use lattice_profile::LancetNetworkSection;
@@ -429,11 +428,9 @@ mod cep_native_registry {
 
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
-        use lancet_catalog::methods::workspace::ReadFileParams;
         use lattice_agent::LlmClient;
         use lattice_agent::testing::FakeStreamingLlmClient;
 
-        use crate::turn::cep::build_envelope_turn_deps_for_test;
         use crate::turn::test_support::build_test_production_deps;
         use lancet_catalog::methods::session::TodoWrite;
 

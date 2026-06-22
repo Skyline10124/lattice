@@ -7,8 +7,8 @@ use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
 
 use crate::graph::{
-    GraphHead, GraphRef, GraphRefKind, GraphSession, SessionGraphStore, SessionGraphSummary,
-    SessionStatus,
+    GraphHead, GraphRef, GraphRefKind, GraphSession, PreparedTurnCommit, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, TurnCommit,
 };
 use crate::{Result, SessionError};
 
@@ -20,14 +20,18 @@ impl SqliteSessionGraphStore {
         session_id: &str,
         label: Option<&str>,
         active_agent_name: &str,
+        project_target_branch: &str,
     ) -> Result<GraphSession> {
+        // Validate project target branch syntax before insertion.
+        crate::validate_branch_name(project_target_branch)?;
+
         let conn = self.conn()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO graph_sessions (session_id, label, active_agent_name, head_ref, head_commit_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            params![session_id, label, active_agent_name, DEFAULT_BRANCH, now, now],
+            "INSERT INTO graph_sessions (session_id, label, active_agent_name, head_ref, head_commit_id, project_target_branch, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7)",
+            params![session_id, label, active_agent_name, DEFAULT_BRANCH, project_target_branch, now, now],
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
@@ -51,6 +55,7 @@ impl SqliteSessionGraphStore {
             active_agent_name: active_agent_name.to_string(),
             created_at: now.clone(),
             updated_at: now,
+            project_target_branch: Some(project_target_branch.to_string()),
         })
     }
 
@@ -58,7 +63,7 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
         let session = conn
             .query_row(
-                "SELECT session_id, label, active_agent_name, created_at, updated_at
+                "SELECT session_id, label, active_agent_name, created_at, updated_at, project_target_branch
                  FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
                 |row| {
@@ -68,6 +73,7 @@ impl SqliteSessionGraphStore {
                         active_agent_name: row.get(2)?,
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
+                        project_target_branch: row.get(5)?,
                     })
                 },
             )
@@ -83,15 +89,16 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
 
         // Read session row.
-        let (head_ref, head_commit_id, active_agent_name): (
+        let (head_ref, head_commit_id, active_agent_name, project_target_branch): (
             Option<String>,
             Option<String>,
             String,
+            Option<String>,
         ) = conn
             .query_row(
-                "SELECT head_ref, head_commit_id, active_agent_name FROM graph_sessions WHERE session_id=?1",
+                "SELECT head_ref, head_commit_id, active_agent_name, project_target_branch FROM graph_sessions WHERE session_id=?1",
                 params![session_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|_| SessionError::NotFound(session_id.to_string()))?;
 
@@ -158,6 +165,7 @@ impl SqliteSessionGraphStore {
             active_agent_name,
             branches,
             commit_count: commit_count as usize,
+            project_target_branch,
         })
     }
 
@@ -167,7 +175,8 @@ impl SqliteSessionGraphStore {
         let mut stmt = conn
             .prepare(
                 "SELECT s.session_id, s.label, s.active_agent_name, s.head_ref, s.head_commit_id, s.updated_at,
-                        (SELECT COUNT(*) FROM graph_commits c WHERE c.session_id = s.session_id) as commit_count
+                        (SELECT COUNT(*) FROM graph_commits c WHERE c.session_id = s.session_id) as commit_count,
+                        s.project_target_branch
                  FROM graph_sessions s",
             )
             .map_err(|source| SessionError::Database {
@@ -185,6 +194,7 @@ impl SqliteSessionGraphStore {
                     head_commit_id: row.get(4)?,
                     updated_at: row.get(5)?,
                     commit_count: row.get::<_, i64>(6)? as usize,
+                    project_target_branch: row.get(7)?,
                 })
             })
             .map_err(|source| SessionError::Database {
@@ -257,8 +267,9 @@ impl SessionGraphStore for SqliteSessionGraphStore {
         session_id: &str,
         label: Option<&str>,
         active_agent_name: &str,
+        project_target_branch: &str,
     ) -> Result<GraphSession> {
-        self.create_session_impl(session_id, label, active_agent_name)
+        self.create_session_impl(session_id, label, active_agent_name, project_target_branch)
     }
 
     fn open_session(&self, session_id: &str) -> Result<GraphSession> {
@@ -306,5 +317,21 @@ impl SessionGraphStore for SqliteSessionGraphStore {
 
     fn reset(&self, session_id: &str, target: &str) -> Result<crate::graph::ResetResult> {
         self.reset_impl(session_id, target)
+    }
+
+    fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
+        self.commit_prepared_turn_outer(prepared)
+    }
+
+    fn get_turn_commit(&self, session_id: &str, commit_id: &str) -> Result<Option<TurnCommit>> {
+        self.get_turn_commit_impl(session_id, commit_id)
+    }
+
+    fn set_snapshot_lost(&self, commit_id: &str, lost: bool) -> Result<()> {
+        self.set_snapshot_lost_impl(commit_id, lost)
+    }
+
+    fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
+        self.get_snapshot_lost_impl(commit_id)
     }
 }

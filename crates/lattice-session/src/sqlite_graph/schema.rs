@@ -58,6 +58,8 @@ impl SqliteSessionGraphStore {
                 commit_message       TEXT NOT NULL,
                 usage_json           TEXT,
                 terminal_reason      TEXT,
+                disposition          TEXT NOT NULL DEFAULT 'not_applicable',
+                lifecycle_json       TEXT NOT NULL DEFAULT '{}',
                 created_at           TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES graph_sessions(session_id)
             );
@@ -75,6 +77,12 @@ impl SqliteSessionGraphStore {
                 ordinal        INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES graph_sessions(session_id)
             );
+
+            CREATE TABLE IF NOT EXISTS graph_snapshot_state (
+                commit_id    TEXT PRIMARY KEY,
+                snapshot_lost INTEGER NOT NULL DEFAULT 0,
+                updated_at   TEXT NOT NULL
+            );
             ",
         )
         .map_err(|source| SessionError::Database {
@@ -88,6 +96,9 @@ impl SqliteSessionGraphStore {
         for col_sql in &[
             "ALTER TABLE graph_commits ADD COLUMN usage_json TEXT",
             "ALTER TABLE graph_commits ADD COLUMN terminal_reason TEXT",
+            "ALTER TABLE graph_sessions ADD COLUMN project_target_branch TEXT",
+            "ALTER TABLE graph_commits ADD COLUMN disposition TEXT NOT NULL DEFAULT 'not_applicable'",
+            "ALTER TABLE graph_commits ADD COLUMN lifecycle_json TEXT NOT NULL DEFAULT '{}'",
         ] {
             match conn.execute_batch(col_sql) {
                 Ok(()) => {}

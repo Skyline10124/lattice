@@ -24,19 +24,6 @@ pub fn upper_backed_tools_enabled(enabled_tools: &[&str]) -> bool {
         .any(|tool| UPPER_BACKED_TOOLS.contains(tool))
 }
 
-pub fn workspace_toml_suffix(enabled_tools: &[&str]) -> &'static str {
-    if upper_backed_tools_enabled(enabled_tools) {
-        r#"
-[workspace]
-image = "test-template"
-[lancet.workspace]
-allowed_write_paths = ["src/**"]
-"#
-    } else {
-        ""
-    }
-}
-
 pub fn init_git_repo(root: &Path) {
     std::process::Command::new("git")
         .args(["init", "-q"])

@@ -27,9 +27,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 
 use crate::{
-    Backend, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest, GitStatus,
-    GrepMatch, GrepRequest, PathFacts, PathIntent, Result, UpperHandle, UpperSpec, Workspace,
-    WorkspaceError, WorkspacePath, CandidateExport,
+    Backend, CandidateExport, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest,
+    GitStatus, GrepMatch, GrepRequest, PathFacts, PathIntent, Result, SnapshotRef, UpperHandle,
+    UpperSpec, Workspace, WorkspaceError, WorkspacePath, validate_snapshot_name,
 };
 
 pub mod contract_tests;
@@ -41,6 +41,9 @@ pub struct DeterministicWorkspace {
     base_dir: Arc<tempfile::TempDir>,
     handles: Arc<RwLock<HashMap<String, PathBuf>>>,
     policies: Arc<RwLock<HashMap<String, EgressPolicy>>>,
+    /// Retained snapshot store: snapshot name → directory path.
+    /// Distinct from warm templates; may contain credential state (D-11).
+    retained: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
 impl DeterministicWorkspace {
@@ -50,6 +53,7 @@ impl DeterministicWorkspace {
             base_dir: Arc::new(tempfile::TempDir::new()?),
             handles: Arc::new(RwLock::new(HashMap::new())),
             policies: Arc::new(RwLock::new(HashMap::new())),
+            retained: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -136,15 +140,33 @@ impl Workspace for DeterministicWorkspace {
         })
     }
 
-    /// Run `git status --porcelain=v1` via `exec_upper` and parse the result.
+    /// Run `git status --porcelain=v1 -z` via `Command::output().stdout` directly.
+    ///
+    /// Uses raw stdout bytes (not `exec_upper`'s lossy UTF-8 conversion) so that
+    /// non-UTF-8 filenames fail closed through the NUL parser rather than being
+    /// silently replaced.
     async fn git_status(&self, handle: &UpperHandle) -> Result<GitStatus> {
-        let out = self
-            .exec_upper(handle, "git", &["status", "--porcelain=v1"])
-            .await?;
-        Ok(GitStatus {
-            porcelain: out.stdout.clone(),
-            is_clean: out.stdout.trim().is_empty(),
-        })
+        let dir = self.handle_dir(handle)?;
+        let output = std::process::Command::new("git")
+            .args([
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ])
+            .current_dir(&dir)
+            .output()
+            .map_err(WorkspaceError::Io)?;
+        if !output.status.success() {
+            return Err(WorkspaceError::Git(format!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let status = crate::parse_git_status_z(&output.stdout)
+            .map_err(|e| WorkspaceError::Git(format!("git status parse failed: {e}")))?;
+        Ok(status)
     }
 
     async fn export_candidate(
@@ -275,9 +297,167 @@ impl Workspace for DeterministicWorkspace {
         crate::primitives::find_files_tree(&dir, request)
     }
 
+    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+
+    async fn retain_upper(
+        &self,
+        handle: &UpperHandle,
+        snapshot_name: &str,
+        max_pending_snapshots: u32,
+    ) -> Result<SnapshotRef> {
+        // Validate D-12 name format before any effect.
+        validate_snapshot_name(snapshot_name)?;
+
+        // Extract session prefix from snapshot name for quota counting.
+        // Format: lattice-{session_id}-{commit_hex8}-{nonce_hex8}
+        let session_prefix = extract_session_prefix(snapshot_name);
+
+        // Quota check: count existing snapshots with the same session prefix.
+        let current_count = {
+            let retained = self.retained.read().unwrap_or_else(|e| e.into_inner());
+            retained
+                .keys()
+                .filter(|name| name.starts_with(&session_prefix))
+                .count() as u32
+        };
+        if current_count >= max_pending_snapshots {
+            return Err(WorkspaceError::SnapshotQuotaExceeded {
+                current: current_count,
+                max: max_pending_snapshots,
+            });
+        }
+
+        // Get the handle's directory (must still be live).
+        let src_dir = self.handle_dir(handle)?;
+
+        // Copy the entire directory tree (including .git) to a retained location.
+        let retained_dir = self
+            .base_dir
+            .path()
+            .join(format!("retained-{snapshot_name}"));
+        copy_dir_all(&src_dir, &retained_dir).map_err(WorkspaceError::Io)?;
+
+        // Only after successful copy: remove the live handle.
+        self.handles
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&handle.id);
+        self.policies
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&handle.id);
+
+        // Register the retained snapshot.
+        self.retained
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(snapshot_name.to_string(), retained_dir);
+
+        Ok(SnapshotRef {
+            backend: Backend::Deterministic,
+            name: snapshot_name.to_string(),
+        })
+    }
+
+    async fn restore_retained_upper(
+        &self,
+        snapshot_ref: &SnapshotRef,
+        new_name: &str,
+        spec: &UpperSpec,
+    ) -> Result<UpperHandle> {
+        crate::validate_baseline_oid(&spec.baseline_oid)?;
+
+        // Look up the retained snapshot directory.
+        let retained_dir = {
+            let retained = self.retained.read().unwrap_or_else(|e| e.into_inner());
+            retained.get(&snapshot_ref.name).cloned().ok_or_else(|| {
+                WorkspaceError::SnapshotNotFound {
+                    name: snapshot_ref.name.clone(),
+                }
+            })?
+        };
+
+        if !retained_dir.exists() {
+            return Err(WorkspaceError::SnapshotNotFound {
+                name: snapshot_ref.name.clone(),
+            });
+        }
+
+        // Copy into a fresh handle directory (cold restore, D-15).
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        let dest = self.base_dir.path().join(&uid);
+        copy_dir_all(&retained_dir, &dest).map_err(WorkspaceError::Io)?;
+
+        let id = format!("det-{}", &uid[..8]);
+        self.handles
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), dest);
+        self.policies
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.clone(), spec.egress.clone());
+
+        let _ = new_name; // DeterministicWorkspace derives its own id.
+
+        Ok(UpperHandle {
+            id,
+            backend: Backend::Deterministic,
+        })
+    }
+
+    async fn retained_snapshot_exists(&self, snapshot_ref: &SnapshotRef) -> Result<bool> {
+        let retained = self.retained.read().unwrap_or_else(|e| e.into_inner());
+        Ok(retained.contains_key(&snapshot_ref.name))
+    }
+
+    async fn list_retained_snapshots(&self, session_id_prefix: &str) -> Result<Vec<String>> {
+        let retained = self.retained.read().unwrap_or_else(|e| e.into_inner());
+        let prefix = format!("lattice-{session_id_prefix}-");
+        let mut names: Vec<String> = retained
+            .keys()
+            .filter(|name| name.starts_with(&prefix))
+            .cloned()
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    async fn release_retained_snapshot(&self, snapshot_ref: &SnapshotRef) -> Result<()> {
+        self.retained
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&snapshot_ref.name);
+        Ok(())
+    }
+
     async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {
         let dir = self.handle_dir(handle)?;
         crate::primitives::exec_on_host(&dir, request)
+    }
+}
+
+/// Extract the session prefix from a D-12 snapshot name for quota counting.
+///
+/// Input:  `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`
+/// Output: `lattice-{session_id}-` (trailing dash included for exact
+/// session-boundary prefix matching).
+///
+/// This matches the `lattice-{session_id}-` prefix used in D-17 quota enforcement.
+fn extract_session_prefix(snapshot_name: &str) -> String {
+    // Format: lattice-{session_id}-{8hex}-{8hex}
+    // Strip the last two segments: -{nonce_hex8} and -{commit_hex8}
+    let parts: Vec<&str> = snapshot_name.rsplitn(3, '-').collect();
+    if parts.len() >= 3 {
+        // parts[0] = nonce_hex8, parts[1] = commit_hex8, parts[2] = lattice-{session_id}
+        // WR-03: include the trailing dash so `starts_with` matches the session
+        // boundary exactly (matching the documented `lattice-{session_id}-`
+        // prefix and `list_retained_snapshots`), preventing a shorter session
+        // id from counting a longer one's snapshots.
+        format!("{}-", parts[2])
+    } else {
+        // Fallback: return the whole name (shouldn't happen with validated names).
+        snapshot_name.to_string()
     }
 }
 
@@ -399,8 +579,8 @@ mod tests {
         let status = ws.git_status(&handle).await.unwrap();
         assert!(
             status.is_clean,
-            "fresh upper should be clean; porcelain: {:?}",
-            status.porcelain
+            "fresh upper should be clean; entries: {:?}",
+            status.entries
         );
     }
 }

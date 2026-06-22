@@ -28,7 +28,7 @@ pub(super) fn make_test_run_turn_request(
         loaded_profile: Some(make_loaded_profile_with_tools(
             "sonnet",
             "System from profile.",
-            &enabled_tools.iter().cloned().collect::<Vec<_>>(),
+            enabled_tools,
         )),
         cancel_flag: None,
         test_llm: Some(llm),
@@ -53,16 +53,16 @@ pub(super) async fn build_test_production_deps(
         enabled_tools,
     );
     let loaded = request.loaded_profile.as_ref().unwrap();
-    super::cep::build_production_turn_deps(
-        &request,
+    super::cep::build_production_turn_deps(super::cep::ProductionTurnDepsInput {
+        request: &request,
         project_root,
         enabled_tools,
         llm,
         lancet,
-        "test-model",
-        "0.0.0-test",
-        loaded,
-    )
+        model_id: "test-model",
+        runtime_version: "0.0.0-test",
+        loaded_profile: loaded,
+    })
     .await
     .expect("production deps")
 }
@@ -106,7 +106,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let session_api = SessionApi::sqlite(&sessions_path);
     let store = SqliteSessionGraphStore::new(&sessions_path);
     store
-        .create_session(TEST_SESSION_ID, None, "test")
+        .create_session(TEST_SESSION_ID, None, "test", "main")
         .expect("create default test session");
 
     TestFixture {
@@ -174,6 +174,8 @@ pub(super) fn make_loaded_profile_with_tools(
         cpus: None,
         memory_mb: None,
         allowed_egress_targets: vec![],
+        cleanup_rounds: 3,
+        max_pending_snapshots: 5,
     });
     lattice_profile::LoadedAgentProfile {
         path: std::path::PathBuf::from("/tmp/test/agent.toml"),

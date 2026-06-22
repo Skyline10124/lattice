@@ -9,6 +9,7 @@ description = "LATTICE thin public API facade for session creation, turn executi
 [dependencies]
 async-trait = { workspace = true }
 lancet-api = { workspace = true }
+chrono = { workspace = true }
 lancet-protocol = { workspace = true }
 lancet-catalog = { workspace = true }
 lancet-authority = { workspace = true }

@@ -46,9 +46,10 @@ use lattice_agent::{
 use lattice_llm::ToolCall;
 use lattice_profile::{
     LancetIsolationMode, LancetLandlockBehavior, LancetNetworkSection, LancetObservationSection,
-    LancetSection, LancetUnsupportedHostBehavior, LancetVerifySection,
-    LancetWorkspacePolicySection, LoadedAgentProfile,
+    LancetSection, LancetUnsupportedHostBehavior, LoadedAgentProfile,
 };
+#[cfg(test)]
+use lattice_profile::{LancetVerifySection, LancetWorkspacePolicySection};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -189,6 +190,17 @@ pub(crate) struct ProductionTurnDeps {
     pub upper_lease: Option<UpperLease>,
     #[cfg(test)]
     pub build_metrics: CepRuntimeBuildMetrics,
+}
+
+pub(crate) struct ProductionTurnDepsInput<'a> {
+    pub request: &'a RunTurnRequest,
+    pub project_root: &'a str,
+    pub enabled_tools: &'a [String],
+    pub llm: Arc<dyn lattice_agent::LlmClient>,
+    pub lancet: Option<&'a LancetSection>,
+    pub model_id: &'a str,
+    pub runtime_version: &'a str,
+    pub loaded_profile: &'a LoadedAgentProfile,
 }
 
 /// Build executor-facing CEP policy from profile `[lancet]` and the runtime project root.
@@ -645,15 +657,18 @@ fn resolve_lancet_policy(
 /// Translation of the profile into policy happens here; runtime composition is
 /// delegated to [`lancet_api::LancetRuntime::build`].
 pub(crate) async fn build_production_turn_deps(
-    request: &RunTurnRequest,
-    project_root: &str,
-    enabled_tools: &[String],
-    llm: Arc<dyn lattice_agent::LlmClient>,
-    lancet: Option<&LancetSection>,
-    model_id: &str,
-    runtime_version: &str,
-    loaded_profile: &LoadedAgentProfile,
+    input: ProductionTurnDepsInput<'_>,
 ) -> Result<ProductionTurnDeps, ApiError> {
+    let ProductionTurnDepsInput {
+        request,
+        project_root,
+        enabled_tools,
+        llm,
+        lancet,
+        model_id,
+        runtime_version,
+        loaded_profile,
+    } = input;
     // Canonicalize the project root up front so the profile policy and the
     // runtime share one canonical root. Falls back to the raw path on failure,
     // matching `CepPolicyConfig::defaults_for_project_root`'s tolerance.
@@ -674,7 +689,10 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
-    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), enabled_tools)
+    // Phase 36 Plan 11: pass None for baseline_oid to maintain backward compatibility.
+    // Future lifecycle orchestration will inject the preflight baseline from
+    // resolve_turn_target when Upper-backed turns are activated.
+    let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), enabled_tools, None)
         .map_err(|err| match err {
             UpperPrepareError::MissingWorkspaceSection
             | UpperPrepareError::MissingWorkspaceSource => {
@@ -1503,16 +1521,17 @@ mod phase34_turn_wiring {
             test_persist_audit: Some(false),
             workspace_override: None,
         };
-        let deps = build_production_turn_deps(
-            &request,
-            project.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string()],
+        let enabled_tools = [TodoWrite::NAME.to_string()];
+        let deps = build_production_turn_deps(ProductionTurnDepsInput {
+            request: &request,
+            project_root: project.path().to_str().unwrap(),
+            enabled_tools: &enabled_tools,
             llm,
-            None,
-            "m",
-            "v",
-            &profile,
-        )
+            lancet: None,
+            model_id: "m",
+            runtime_version: "v",
+            loaded_profile: &profile,
+        })
         .await
         .expect("direct deps");
 
@@ -1550,16 +1569,17 @@ mod phase34_turn_wiring {
             test_persist_audit: None,
             workspace_override: None,
         };
-        let deps = build_production_turn_deps(
-            &request,
-            dir.path().to_str().unwrap(),
-            &[TodoWrite::NAME.to_string()],
+        let enabled_tools = [TodoWrite::NAME.to_string()];
+        let deps = build_production_turn_deps(ProductionTurnDepsInput {
+            request: &request,
+            project_root: dir.path().to_str().unwrap(),
+            enabled_tools: &enabled_tools,
             llm,
-            None,
-            "m",
-            "v",
-            &profile,
-        )
+            lancet: None,
+            model_id: "m",
+            runtime_version: "v",
+            loaded_profile: &profile,
+        })
         .await
         .expect("host-only direct deps");
         assert!(deps.upper_lease.is_none());

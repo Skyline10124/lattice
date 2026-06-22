@@ -67,6 +67,7 @@ async fn run_turn_uses_existing_session_transcript() {
         .create_session(CreateSessionRequest {
             label: None,
             active_agent: "test".to_string(),
+            project_branch: "main".to_string(),
         })
         .unwrap();
     let session_id = created.session_id.clone();

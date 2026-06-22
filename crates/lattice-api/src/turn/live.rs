@@ -7,6 +7,10 @@
 //! [`prepare_live_turn`], a spawned background task ([`run_live_turn_task`])
 //! that drains agent events concurrently via `tokio::select!`, and emits public
 //! [`TurnEvent`] values through a bounded channel before committing.
+//!
+//! The spawned task classifies the terminal outcome using the lifecycle state
+//! machine (D-25/D-26), ensuring every committed turn carries an explicit
+//! `(status, disposition)` pair.
 
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
@@ -14,8 +18,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use lattice_agent::{AgentTurnEvent, AgentTurnResult};
-use lattice_session::GraphHead;
+use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
+use lattice_session::{GraphHead, TurnCommitStatus};
 
 use lancet_api::store_turn_attestation;
 
@@ -24,9 +28,12 @@ use super::execute::{
     TurnCommitContext, build_commit_input, build_profile_snapshot_metadata, derive_terminal_event,
     map_agent_event,
 };
+use super::lifecycle::{
+    LifecycleFailureKind, TurnLifecycleOutcome, classify_lifecycle_failure, outcome_workspace_less,
+};
 use super::mapping::{build_agent_request, map_status, resolve_model_and_prompt};
 use super::types::{RunTurnRequest, TurnEvent, TurnEventStream};
-use super::upper::{UpperLease, UpperPrepareError};
+use super::upper::UpperPrepareError;
 use crate::session::{OpenSessionRequest, Result, SessionApi};
 
 /// Bounded channel capacity for the turn event stream.
@@ -42,8 +49,6 @@ const OBSERVER_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 const CEP_EVENT_DRAIN_GRACE: Duration = Duration::from_millis(50);
 
 /// All state gathered during startup validation, before the live task spawns.
-///
-/// Constructed by [`prepare_live_turn`]; consumed by [`run_live_turn_task`].
 pub(crate) struct PreparedTurn {
     pub session_id: String,
     pub parent_commit_id: Option<String>,
@@ -59,10 +64,6 @@ pub(crate) struct PreparedTurn {
 }
 
 /// Perform all startup validation for a live turn.
-///
-/// Resolves model/provider, opens the required session, reads the HEAD
-/// transcript, snapshots the active profile, and extracts branch information.
-/// Any failure here is returned as `Result::Err` before the stream is created.
 pub(crate) fn prepare_live_turn(
     session: &SessionApi,
     request: &RunTurnRequest,
@@ -111,11 +112,6 @@ fn is_streaming_delta(event: &TurnEvent) -> bool {
 }
 
 /// Best-effort public observer sink (M-19b).
-///
-/// Streaming deltas use non-blocking `try_send` and may be dropped when the
-/// channel is full. Lifecycle, terminal, and commit events use a bounded wait;
-/// on timeout or failure the sink stops forwarding but the background task
-/// keeps draining the agent channel and completes the durable commit.
 struct ObserverSink {
     sender: mpsc::Sender<TurnEvent>,
     gave_up: bool,
@@ -210,11 +206,47 @@ fn is_cep_event(event: &TurnEvent) -> bool {
     )
 }
 
+/// Classify an agent result into a typed lifecycle outcome (D-25/D-26).
+///
+/// For the current non-promotion flow (no candidate export, no workspace
+/// verification), the classification is:
+///
+/// - **Completed** → `outcome_workspace_less()` (NotApplicable, no resource action).
+/// - **Error** → `Aborted + Destroy` (agent error before candidate).
+/// - **Cancelled** → `Aborted + Destroy` (cancelled before candidate).
+///
+/// When promotion is wired in a future plan, this function will be extended
+/// to handle `candidate_exported = true` with verification and promotion
+/// outcomes.
+pub(super) fn classify_live_outcome(
+    agent_result: &AgentTurnResult,
+    _candidate_exported: bool,
+) -> TurnLifecycleOutcome {
+    match agent_result.status {
+        AgentTurnStatus::Completed => outcome_workspace_less(),
+        AgentTurnStatus::Error => classify_lifecycle_failure(
+            TurnCommitStatus::Error,
+            false,
+            false,
+            LifecycleFailureKind::AgentErrorBeforeCandidate,
+        ),
+        AgentTurnStatus::Cancelled => classify_lifecycle_failure(
+            TurnCommitStatus::Cancelled,
+            false,
+            false,
+            LifecycleFailureKind::CancelledBeforeCandidate,
+        ),
+    }
+}
+
 /// Background task that runs the agent loop, maps events live, and commits.
 ///
 /// Event emission order: TurnStarted -> [agent events] -> [terminal] ->
 /// TurnCommitting -> TurnCommitted/CommitFailed. The sender is dropped after
 /// the final event, closing the stream.
+///
+/// The committed outcome carries an explicit `(status, disposition)` pair
+/// classified by [`classify_live_outcome`] (D-25/D-26).
 async fn run_live_turn_task(
     session: SessionApi,
     prepared: PreparedTurn,
@@ -289,8 +321,7 @@ async fn run_live_turn_task(
     let mut agent_fut = Box::pin(agent_loop.run_turn_live(agent_request, agent_tx));
     let mut ordered_events = CepOrderedEmitter::default();
 
-    // 5. Concurrent drain loop. Forwarding uses non-blocking / bounded-wait
-    // observer emission so a slow consumer cannot stall agent_rx drain.
+    // 5. Concurrent drain loop
     let mut agent_result: AgentTurnResult = loop {
         tokio::select! {
             maybe_event = agent_rx.recv() => {
@@ -304,8 +335,7 @@ async fn run_live_turn_task(
         }
     };
 
-    // 6. Post-loop drain: give CEP side-channel lifecycle events a short
-    // chance to arrive before aborting the forwarder, then flush local buffers.
+    // 6. Post-loop drain
     while let Ok(Some(event)) = tokio::time::timeout(CEP_EVENT_DRAIN_GRACE, agent_rx.recv()).await {
         ordered_events
             .emit(&mut observer, map_agent_event(event))
@@ -320,13 +350,18 @@ async fn run_live_turn_task(
     }
     ordered_events.finish(&mut observer).await;
 
+    // 6a. Classify the lifecycle outcome BEFORE resource teardown (D-25/D-26).
+    let outcome = classify_live_outcome(&agent_result, false);
+
     runtime.shutdown().await;
     audit.await_pending().await;
 
-    if let Some(mut lease) = upper_lease.take() {
-        if let Err(err) = lease.destroy().await {
-            agent_result = fold_upper_destroy_error(agent_result, err);
-        }
+    // 6b. Resource teardown: destroy the Upper (no snapshot retained in the
+    // current non-promotion flow).
+    if let Some(mut lease) = upper_lease.take()
+        && let Err(err) = lease.destroy().await
+    {
+        agent_result = fold_upper_destroy_error(agent_result, err);
     }
 
     {
@@ -344,7 +379,7 @@ async fn run_live_turn_task(
     // 8. Emit TurnCommitting
     observer.emit(TurnEvent::TurnCommitting).await;
 
-    // 9. Build commit context and input
+    // 9. Build commit context and input with lifecycle-classified disposition.
     let ctx = TurnCommitContext {
         session_id: prepared.session_id.clone(),
         parent_ids: prepared.parent_ids,
@@ -355,10 +390,19 @@ async fn run_live_turn_task(
         profile_snapshot_json: prepared.profile_snapshot_json,
     };
 
-    let commit_input = build_commit_input(&request.input, &ctx, &agent_result);
+    // WR-05: pass the classified disposition (D-25/D-26) and lifecycle evidence
+    // explicitly so build_commit_input cannot silently default them. The live
+    // path attaches no TurnLifecycleEvidence at this point (it is populated by
+    // the promotion/finalize path); pass None to preserve prior behavior.
+    let commit_input = build_commit_input(
+        &request.input,
+        &ctx,
+        &agent_result,
+        outcome.disposition.clone(),
+        None,
+    );
 
-    // 10. Commit and emit result. Commit runs even when the observer stopped
-    // accepting events.
+    // 10. Commit and emit result.
     match session.commit_turn(commit_input) {
         Ok(commit) => {
             let status = map_status(&agent_result.status);
@@ -367,6 +411,7 @@ async fn run_live_turn_task(
                     session_id: prepared.session_id,
                     commit_id: commit.commit_id,
                     status,
+                    disposition: commit.disposition,
                 })
                 .await;
         }
@@ -378,8 +423,6 @@ async fn run_live_turn_task(
                 .await;
         }
     }
-
-    // Sender drops here, closing the stream.
 }
 
 fn fold_upper_destroy_error(
@@ -414,6 +457,7 @@ pub(super) async fn stream_turn_live_prepared(
 }
 
 /// Execute a turn and return its events as a live stream.
+#[cfg(test)]
 pub(super) async fn stream_turn_live(
     session: SessionApi,
     request: RunTurnRequest,
@@ -514,5 +558,113 @@ mod tests {
             rx.recv().await,
             Some(TurnEvent::ModelStarted { model, .. }) if model == "model"
         ));
+    }
+
+    // ── Live activation lifecycle tests (Task 3) ────────────────────────────
+
+    fn make_agent_result(status: AgentTurnStatus) -> AgentTurnResult {
+        let terminal_reason = if matches!(status, AgentTurnStatus::Completed) {
+            None
+        } else {
+            Some("test reason".to_string())
+        };
+        AgentTurnResult {
+            status,
+            messages: vec![],
+            assistant_output: String::new(),
+            usage: lattice_session::TurnUsage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            },
+            tool_results: vec![],
+            terminal_reason,
+            events: vec![],
+            cleanup_exhausted: false,
+        }
+    }
+
+    #[test]
+    fn live_activation_completed_classifies_as_workspace_less() {
+        let result = make_agent_result(AgentTurnStatus::Completed);
+        let outcome = classify_live_outcome(&result, false);
+
+        assert_eq!(outcome.status, TurnCommitStatus::Completed);
+        assert_eq!(
+            outcome.disposition,
+            lattice_session::WorkspaceDisposition::NotApplicable
+        );
+        assert_eq!(
+            outcome.resource_action,
+            super::super::lifecycle::ResourceAction::None
+        );
+    }
+
+    #[test]
+    fn live_activation_error_classifies_as_aborted() {
+        let result = make_agent_result(AgentTurnStatus::Error);
+        let outcome = classify_live_outcome(&result, false);
+
+        assert_eq!(outcome.status, TurnCommitStatus::Error);
+        assert_eq!(
+            outcome.disposition,
+            lattice_session::WorkspaceDisposition::Aborted
+        );
+        assert_eq!(
+            outcome.resource_action,
+            super::super::lifecycle::ResourceAction::Destroy
+        );
+    }
+
+    #[test]
+    fn live_activation_cancelled_classifies_as_aborted() {
+        let result = make_agent_result(AgentTurnStatus::Cancelled);
+        let outcome = classify_live_outcome(&result, false);
+
+        assert_eq!(outcome.status, TurnCommitStatus::Cancelled);
+        assert_eq!(
+            outcome.disposition,
+            lattice_session::WorkspaceDisposition::Aborted
+        );
+        assert_eq!(
+            outcome.resource_action,
+            super::super::lifecycle::ResourceAction::Destroy
+        );
+    }
+
+    #[test]
+    fn live_activation_outcome_messages_are_typed() {
+        let completed =
+            classify_live_outcome(&make_agent_result(AgentTurnStatus::Completed), false);
+        assert!(
+            completed
+                .messages
+                .iter()
+                .any(|m| m.contains("no workspace"))
+        );
+
+        let errored = classify_live_outcome(&make_agent_result(AgentTurnStatus::Error), false);
+        assert!(errored.messages.iter().any(|m| m.contains("agent error")));
+
+        let cancelled =
+            classify_live_outcome(&make_agent_result(AgentTurnStatus::Cancelled), false);
+        assert!(cancelled.messages.iter().any(|m| m.contains("cancelled")));
+    }
+
+    #[test]
+    fn live_activation_no_candidate_exported_flag() {
+        let statuses: [(AgentTurnStatus, &str); 3] = [
+            (AgentTurnStatus::Completed, "Completed"),
+            (AgentTurnStatus::Error, "Error"),
+            (AgentTurnStatus::Cancelled, "Cancelled"),
+        ];
+        for (status, name) in statuses {
+            let result = make_agent_result(status);
+            let outcome = classify_live_outcome(&result, false);
+            assert!(
+                !outcome.candidate_exported,
+                "candidate_exported must be false for {name}"
+            );
+        }
     }
 }

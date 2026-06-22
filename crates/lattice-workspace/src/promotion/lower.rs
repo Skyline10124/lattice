@@ -20,10 +20,7 @@ pub enum PromotionError {
     #[error("lower worktree is dirty: {0:?}")]
     Dirty(LowerDirtyReason),
     #[error("git command failed: {context}: {stderr}")]
-    GitCommand {
-        context: String,
-        stderr: String,
-    },
+    GitCommand { context: String, stderr: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("git worktree add failed: {stderr}")]
@@ -78,6 +75,10 @@ pub enum PromotionError {
     CallbackFailed(String),
     #[error("candidate ref already exists")]
     CandidateRefExists,
+    #[error("invalid verification evidence: {reason}")]
+    InvalidEvidence { reason: String },
+    #[error("candidate substitution rejected: expected {expected}, got {actual}")]
+    CandidateSubstitution { expected: String, actual: String },
     #[error(transparent)]
     RefTransaction(#[from] super::refs::RefTransactionError),
 }
@@ -123,7 +124,10 @@ impl ManagedLower {
     ///
     /// Rejects branches already attached to a non-managed checkout. Never uses
     /// `--force` on `git worktree add`.
-    pub fn provision_or_open(repository_path: impl AsRef<Path>, branch: &str) -> Result<Self, PromotionError> {
+    pub fn provision_or_open(
+        repository_path: impl AsRef<Path>,
+        branch: &str,
+    ) -> Result<Self, PromotionError> {
         let repository_path = repository_path.as_ref().canonicalize()?;
         let project_ref = format!("refs/heads/{branch}");
 
@@ -133,7 +137,10 @@ impl ManagedLower {
         let paths = promotion_paths(&git_common_dir, branch);
         let worktrees = parse_worktree_list(&repository_path)?;
 
-        if let Some(attached) = worktrees.iter().find(|wt| wt.branch.as_deref() == Some(project_ref.as_str())) {
+        if let Some(attached) = worktrees
+            .iter()
+            .find(|wt| wt.branch.as_deref() == Some(project_ref.as_str()))
+        {
             if attached.path != paths.worktree_dir {
                 return Err(PromotionError::BranchAlreadyAttached {
                     branch: branch.to_owned(),
@@ -300,7 +307,11 @@ fn validate_branch_ref(branch: &str) -> Result<(), PromotionError> {
 }
 
 fn git_common_dir(repository_path: &Path) -> Result<PathBuf, PromotionError> {
-    let raw = git_output(repository_path, &["rev-parse", "--git-common-dir"], "git-common-dir")?;
+    let raw = git_output(
+        repository_path,
+        &["rev-parse", "--git-common-dir"],
+        "git-common-dir",
+    )?;
     let path = PathBuf::from(raw);
     if path.is_absolute() {
         Ok(path)
@@ -323,7 +334,11 @@ pub(crate) fn promotion_paths(git_common_dir: &Path, branch: &str) -> PromotionP
 }
 
 fn hex_encode(input: &str) -> String {
-    input.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+    input
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 struct WorktreeEntry {
@@ -365,11 +380,7 @@ fn parse_worktree_list(repository_path: &Path) -> Result<Vec<WorktreeEntry>, Pro
 }
 
 fn git_output(cwd: &Path, args: &[&str], context: &str) -> Result<String, PromotionError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()?;
+    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
@@ -381,11 +392,7 @@ fn git_output(cwd: &Path, args: &[&str], context: &str) -> Result<String, Promot
 }
 
 fn git_stdout(cwd: &Path, args: &[&str], context: &str) -> Result<String, PromotionError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()?;
+    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
     if output.status.success() || output.status.code() == Some(1) {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -397,11 +404,7 @@ fn git_stdout(cwd: &Path, args: &[&str], context: &str) -> Result<String, Promot
 }
 
 fn git_exit(cwd: &Path, args: &[&str], context: &str) -> Result<i32, PromotionError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()?;
+    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
     if output.status.success() {
         Ok(0)
     } else if let Some(code) = output.status.code() {

@@ -19,11 +19,12 @@ use lattice_api::{
 };
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_session::{SessionGraphStore, SqliteSessionGraphStore, WorkspaceDisposition};
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {
     status: RunTurnStatus,
+    disposition: WorkspaceDisposition,
     usage: Option<TurnUsageSummary>,
     assistant_output: String,
     terminal_reason: Option<String>,
@@ -76,8 +77,16 @@ fn observe_durable_turn(
         .map(|m| m.content.clone())
         .unwrap_or_default();
 
+    let disposition = session_store
+        .log(session_id)
+        .expect("log after commit")
+        .last()
+        .map(|entry| entry.disposition.clone())
+        .unwrap_or(WorkspaceDisposition::NotApplicable);
+
     DurableTurnObservation {
         status,
+        disposition,
         usage: last_usage(session_store, session_id),
         assistant_output,
         terminal_reason: last_terminal_reason(session_store, session_id),
@@ -89,6 +98,19 @@ struct Workspace {
     _global_agents: tempfile::TempDir,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
+}
+
+fn workspace_toml_suffix(enabled_tools: &[&str]) -> &'static str {
+    if support::upper_backed_tools_enabled(enabled_tools) {
+        r#"
+[workspace]
+image = "test-template"
+[lancet.workspace]
+allowed_write_paths = ["src/**"]
+"#
+    } else {
+        ""
+    }
 }
 
 fn setup_workspace(enabled_tools: &[&str]) -> Workspace {
@@ -112,7 +134,7 @@ system = "You are a test agent."
 [tools]
 enabled = {enabled:?}{workspace}
 "#,
-        workspace = support::workspace_toml_suffix(enabled_tools),
+        workspace = workspace_toml_suffix(enabled_tools),
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
 
@@ -137,6 +159,7 @@ fn create_default_session(sessions_path: &std::path::Path) -> String {
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
+            project_branch: "main".to_string(),
         })
         .expect("create session")
         .session_id
@@ -230,12 +253,20 @@ async fn assert_run_equals_collector(
         collected.status.clone(),
     );
     assert_eq!(durable.status, collected.status);
+    assert_eq!(
+        durable.disposition, collected.disposition,
+        "durable and collected disposition must match"
+    );
     assert_eq!(durable.assistant_output, collected.assistant_output);
     assert_eq!(durable.usage, collected.usage);
 }
 
 fn assert_run_results_equivalent(collected: &RunTurnResult, run_result: &RunTurnResult) {
     assert_eq!(collected.status, run_result.status);
+    assert_eq!(
+        collected.disposition, run_result.disposition,
+        "streamed and synchronous disposition must be identical"
+    );
     assert_eq!(collected.assistant_output, run_result.assistant_output);
     assert_eq!(collected.usage, run_result.usage);
     assert_eq!(collected.tool_results, run_result.tool_results);
@@ -465,4 +496,132 @@ async fn stream_turn_emits_activity_before_commit() {
     assert!(model_started_pos < token_delta_pos);
     assert!(token_delta_pos < turn_committing_pos);
     assert!(turn_committing_pos < turn_committed_pos);
+}
+
+/// Parity: completed turns have matching disposition across stream, run, and durable.
+#[tokio::test]
+async fn consistency_completed_disposition_parity() {
+    let ws = setup_workspace(&[]);
+    let streaming_events = vec![
+        LlmEvent::Token {
+            content: "hello".to_string(),
+        },
+        LlmEvent::Done {
+            finish_reason: "stop".to_string(),
+            usage: Some(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            }),
+        },
+    ];
+
+    let stream_dir = tempfile::tempdir().unwrap();
+    let stream_sessions_path = stream_dir.path().join("sessions");
+    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_request = make_request(
+        &ws,
+        "hi",
+        &stream_session_id,
+        llm_with_events(streaming_events.clone()),
+    );
+
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
+        .await
+        .expect("stream_turn must start")
+        .collect()
+        .await;
+
+    let collected = collect_turn_result_from_events(events.clone()).unwrap();
+    assert_eq!(collected.status, RunTurnStatus::Completed);
+    assert_eq!(collected.disposition, WorkspaceDisposition::NotApplicable);
+
+    // Verify TurnCommitted event has disposition
+    let committed = events
+        .iter()
+        .find(|e| matches!(e, TurnEvent::TurnCommitted { .. }))
+        .expect("must have TurnCommitted");
+    if let TurnEvent::TurnCommitted {
+        disposition,
+        status,
+        ..
+    } = committed
+    {
+        assert_eq!(*status, RunTurnStatus::Completed);
+        assert_eq!(*disposition, WorkspaceDisposition::NotApplicable);
+    }
+
+    let run_dir = tempfile::tempdir().unwrap();
+    let run_sessions_path = run_dir.path().join("sessions");
+    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path);
+    let run_request = make_request(
+        &ws,
+        "hi",
+        &run_session_id,
+        llm_with_events(streaming_events),
+    );
+    let run_result = run_turn(run_session, run_request).await.unwrap();
+
+    assert_run_results_equivalent(&collected, &run_result);
+    assert_eq!(run_result.disposition, WorkspaceDisposition::NotApplicable);
+
+    let durable = observe_durable_turn(&stream_store, &collected.session_id, collected.status);
+    assert_eq!(durable.disposition, collected.disposition);
+}
+
+/// Parity: error turns have matching disposition across stream, run, and durable.
+#[tokio::test]
+async fn consistency_error_disposition_parity() {
+    let ws = setup_workspace(&[]);
+    let streaming_events = vec![
+        LlmEvent::Token {
+            content: "partial".to_string(),
+        },
+        LlmEvent::Error {
+            message: "provider error".to_string(),
+        },
+    ];
+
+    let stream_dir = tempfile::tempdir().unwrap();
+    let stream_sessions_path = stream_dir.path().join("sessions");
+    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_session_id = create_default_session(&stream_sessions_path);
+    let stream_request = make_request(
+        &ws,
+        "hello",
+        &stream_session_id,
+        llm_with_events(streaming_events.clone()),
+    );
+
+    let events: Vec<TurnEvent> = stream_turn(stream_session, stream_request)
+        .await
+        .expect("stream_turn must start")
+        .collect()
+        .await;
+
+    let collected = collect_turn_result_from_events(events.clone()).unwrap();
+    assert_eq!(collected.status, RunTurnStatus::Error);
+    assert_eq!(collected.disposition, WorkspaceDisposition::Aborted);
+
+    let run_dir = tempfile::tempdir().unwrap();
+    let run_sessions_path = run_dir.path().join("sessions");
+    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session_id = create_default_session(&run_sessions_path);
+    let run_request = make_request(
+        &ws,
+        "hello",
+        &run_session_id,
+        llm_with_events(streaming_events),
+    );
+    let run_result = run_turn(run_session, run_request).await.unwrap();
+
+    assert_run_results_equivalent(&collected, &run_result);
+    assert_eq!(run_result.disposition, WorkspaceDisposition::Aborted);
+
+    let durable = observe_durable_turn(&stream_store, &collected.session_id, collected.status);
+    assert_eq!(durable.disposition, collected.disposition);
 }

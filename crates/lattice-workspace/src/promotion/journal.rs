@@ -3,7 +3,6 @@
 
 //! JSONL promotion journal, crash recovery, and fault injection hooks.
 
-
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,10 +10,10 @@ use std::path::{Path, PathBuf};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 
-use super::materialize::{
-    classify_path, DurableFs, MaterializationPlan, MaterializeEntry, PathClassification,
-};
 use super::PromotionError;
+use super::materialize::{
+    DurableFs, MaterializationPlan, MaterializeEntry, PathClassification, classify_path,
+};
 
 const JOURNAL_FILE: &str = "materialization.jsonl";
 
@@ -141,9 +140,10 @@ impl PromotionJournal {
     }
 
     pub fn append_record(&mut self, record: JournalRecord) -> Result<(), PromotionError> {
-        let line = serde_json::to_string(&record).map_err(|e| PromotionError::JournalMalformed {
-            detail: e.to_string(),
-        })?;
+        let line =
+            serde_json::to_string(&record).map_err(|e| PromotionError::JournalMalformed {
+                detail: e.to_string(),
+            })?;
         self.file.write_all(line.as_bytes())?;
         self.file.write_all(b"\n")?;
         self.file.sync_all()?;
@@ -166,10 +166,7 @@ impl PromotionJournal {
 
     pub fn record_intent(&mut self, entry: MaterializeEntry) -> Result<usize, PromotionError> {
         let index = self.next_index;
-        self.append_record(JournalRecord::Intent {
-            index,
-            entry,
-        })?;
+        self.append_record(JournalRecord::Intent { index, entry })?;
         Ok(index)
     }
 
@@ -231,11 +228,10 @@ pub fn parse_journal(path: &Path) -> Result<ParsedJournal, PromotionError> {
 
     let mut records = Vec::new();
     for line in &complete_lines {
-        let record: JournalRecord = serde_json::from_str(line).map_err(|e| {
-            PromotionError::JournalMalformed {
+        let record: JournalRecord =
+            serde_json::from_str(line).map_err(|e| PromotionError::JournalMalformed {
                 detail: format!("invalid jsonl record: {e}"),
-            }
-        })?;
+            })?;
         records.push(record);
     }
 
@@ -294,13 +290,7 @@ pub fn recover_journal(
     let mut fs = DurableFs::new(worktree_root, &repo, None);
 
     for entry in parsed.header.path_plan.entries() {
-        let class = classify_path(
-            worktree_root,
-            &repo,
-            &entry.path,
-            &entry.old,
-            &entry.new,
-        )?;
+        let class = classify_path(worktree_root, &repo, &entry.path, &entry.old, &entry.new)?;
         if class == PathClassification::ThirdState {
             return Ok(RecoveryOutcome::RecoveryConflict {
                 detail: format!("third-state path {}", entry.path),
@@ -327,13 +317,7 @@ pub fn recover_journal(
     }
 
     for entry in parsed.header.path_plan.entries() {
-        let class = classify_path(
-            worktree_root,
-            &repo,
-            &entry.path,
-            &entry.old,
-            &entry.new,
-        )?;
+        let class = classify_path(worktree_root, &repo, &entry.path, &entry.old, &entry.new)?;
         if class == PathClassification::ThirdState {
             return Ok(RecoveryOutcome::RecoveryConflict {
                 detail: format!("third-state path {}", entry.path),

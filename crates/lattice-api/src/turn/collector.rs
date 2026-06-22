@@ -10,6 +10,7 @@ use super::types::{
     RunTurnResult, RunTurnStage, RunTurnStatus, ToolResultSummary, TurnEvent, TurnUsageSummary,
 };
 use crate::session::ApiError;
+use lattice_session::WorkspaceDisposition;
 
 const SYNTHETIC_STAGES: &[RunTurnStage] = &[
     RunTurnStage::Profile,
@@ -26,6 +27,7 @@ pub(super) struct RunTurnCollector {
     session_id: Option<String>,
     commit_id: Option<String>,
     status: Option<RunTurnStatus>,
+    disposition: Option<WorkspaceDisposition>,
     usage_total: Option<TurnUsageSummary>,
     assistant_output: String,
     round_tokens: String,
@@ -39,6 +41,7 @@ impl RunTurnCollector {
             session_id: None,
             commit_id: None,
             status: None,
+            disposition: None,
             usage_total: None,
             assistant_output: String::new(),
             round_tokens: String::new(),
@@ -65,6 +68,13 @@ impl RunTurnCollector {
                 if finish_reason == "stop" || finish_reason == "length" {
                     self.assistant_output = std::mem::take(&mut self.round_tokens);
                 } else {
+                    // WR-02: preserve assistant content emitted alongside
+                    // tool_calls by accumulating it into `assistant_output`
+                    // before clearing the round buffer. A subsequent
+                    // stop/length round overwrites with the final answer, but
+                    // if the turn ends on a tool_calls round (no final stop),
+                    // this content is no longer silently discarded.
+                    self.assistant_output.push_str(&self.round_tokens);
                     self.round_tokens.clear();
                 }
             }
@@ -92,10 +102,12 @@ impl RunTurnCollector {
                 session_id,
                 commit_id,
                 status,
+                disposition,
             } => {
                 self.session_id = Some(session_id);
                 self.commit_id = Some(commit_id);
                 self.status = Some(status);
+                self.disposition = Some(disposition);
             }
             TurnEvent::CommitFailed { reason } => {
                 self.commit_error = Some(map_commit_failed(reason));
@@ -130,12 +142,16 @@ impl RunTurnCollector {
         let status = self
             .status
             .ok_or_else(|| ApiError::Internal("turn ended without committed status".into()))?;
+        let disposition = self
+            .disposition
+            .ok_or_else(|| ApiError::Internal("turn ended without committed disposition".into()))?;
 
         Ok(RunTurnResult {
             session_id,
             commit_id,
             assistant_output: self.assistant_output,
             status,
+            disposition,
             usage: normalize_usage(self.usage_total),
             tool_results: self.tool_results,
             stages: SYNTHETIC_STAGES.to_vec(),
@@ -219,6 +235,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 commit_id: "c1".to_string(),
                 status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::NotApplicable,
             },
         ])
         .unwrap();
@@ -280,6 +297,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 commit_id: "c1".to_string(),
                 status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::NotApplicable,
             },
         ])
         .unwrap();
@@ -294,6 +312,54 @@ mod tests {
                 total_tokens: 43,
             })
         );
+    }
+
+    /// WR-02: content emitted alongside tool_calls must not be silently
+    /// discarded when the turn ends on a tool_calls round (no final stop).
+    #[test]
+    fn tool_call_round_content_preserved_when_turn_ends_on_tool_calls() {
+        let result = drain(vec![
+            TurnEvent::TurnStarted {
+                session_id: "s1".to_string(),
+                parent_commit_id: None,
+                branch: None,
+            },
+            TurnEvent::TokenDelta {
+                content: "thinking before tools".to_string(),
+            },
+            TurnEvent::ModelFinished {
+                finish_reason: "tool_calls".to_string(),
+                usage: Some(TurnUsageSummary {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                }),
+            },
+            TurnEvent::ToolCallFinished {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                ok: true,
+                output_len: 42,
+                error_summary: None,
+            },
+            TurnEvent::TurnCommitting,
+            TurnEvent::TurnCommitted {
+                session_id: "s1".to_string(),
+                commit_id: "c1".to_string(),
+                status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::NotApplicable,
+            },
+        ])
+        .unwrap();
+
+        // Without the WR-02 accumulation, `assistant_output` would be empty
+        // because the tool_calls branch cleared `round_tokens` and no stop
+        // round ever overwrote it.
+        assert_eq!(
+            result.assistant_output, "thinking before tools",
+            "content emitted alongside tool_calls must be preserved when the turn ends on a tool_calls round"
+        );
+        assert_eq!(result.tool_results.len(), 1);
     }
 
     #[test]
@@ -315,6 +381,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 commit_id: "c1".to_string(),
                 status: RunTurnStatus::Error,
+                disposition: WorkspaceDisposition::NotApplicable,
             },
         ])
         .unwrap();
@@ -342,6 +409,7 @@ mod tests {
                 session_id: "s1".to_string(),
                 commit_id: "c1".to_string(),
                 status: RunTurnStatus::Cancelled,
+                disposition: WorkspaceDisposition::NotApplicable,
             },
         ])
         .unwrap();
@@ -377,5 +445,169 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, ApiError::Internal(_)));
+    }
+
+    /// RED: collector must capture and propagate non-default disposition from TurnCommitted.
+    /// This test will fail until the collector captures disposition from the event.
+    #[test]
+    fn turn_event_disposition_collector_captures_promoted() {
+        let result = drain(vec![
+            TurnEvent::TurnStarted {
+                session_id: "s1".to_string(),
+                parent_commit_id: None,
+                branch: Some("main".to_string()),
+            },
+            TurnEvent::TurnCommitting,
+            TurnEvent::TurnCommitted {
+                session_id: "s1".to_string(),
+                commit_id: "c1".to_string(),
+                status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::Promoted,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(
+            result.disposition,
+            WorkspaceDisposition::Promoted,
+            "collector must propagate disposition from TurnCommitted"
+        );
+    }
+
+    /// RED: same status with different dispositions must be distinguishable.
+    #[test]
+    fn turn_event_disposition_independence_same_status() {
+        let result_pending = drain(vec![
+            TurnEvent::TurnStarted {
+                session_id: "s1".to_string(),
+                parent_commit_id: None,
+                branch: None,
+            },
+            TurnEvent::TurnCommitting,
+            TurnEvent::TurnCommitted {
+                session_id: "s1".to_string(),
+                commit_id: "c1".to_string(),
+                status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::PendingVerification,
+            },
+        ])
+        .unwrap();
+
+        let result_promoted = drain(vec![
+            TurnEvent::TurnStarted {
+                session_id: "s2".to_string(),
+                parent_commit_id: None,
+                branch: None,
+            },
+            TurnEvent::TurnCommitting,
+            TurnEvent::TurnCommitted {
+                session_id: "s2".to_string(),
+                commit_id: "c2".to_string(),
+                status: RunTurnStatus::Completed,
+                disposition: WorkspaceDisposition::Promoted,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(result_pending.status, result_promoted.status);
+        assert_ne!(
+            result_pending.disposition, result_promoted.disposition,
+            "same status must allow different dispositions"
+        );
+    }
+
+    /// Parity matrix: for each terminal status, verify disposition is preserved
+    /// through the collector independently from status.
+    #[test]
+    fn disposition_parity_matrix_status_x_disposition() {
+        let cases: Vec<(RunTurnStatus, WorkspaceDisposition)> = vec![
+            (RunTurnStatus::Completed, WorkspaceDisposition::Promoted),
+            (
+                RunTurnStatus::Completed,
+                WorkspaceDisposition::PendingWorktree,
+            ),
+            (
+                RunTurnStatus::Completed,
+                WorkspaceDisposition::NotApplicable,
+            ),
+            (RunTurnStatus::Error, WorkspaceDisposition::Rejected),
+            (
+                RunTurnStatus::Error,
+                WorkspaceDisposition::PendingVerification,
+            ),
+            (RunTurnStatus::Error, WorkspaceDisposition::NotApplicable),
+            (RunTurnStatus::Cancelled, WorkspaceDisposition::Aborted),
+            (
+                RunTurnStatus::Cancelled,
+                WorkspaceDisposition::PendingConflict,
+            ),
+            (
+                RunTurnStatus::Cancelled,
+                WorkspaceDisposition::NotApplicable,
+            ),
+        ];
+
+        for (status, disposition) in cases {
+            let result = drain(vec![
+                TurnEvent::TurnStarted {
+                    session_id: "s1".to_string(),
+                    parent_commit_id: None,
+                    branch: None,
+                },
+                TurnEvent::TurnCommitting,
+                TurnEvent::TurnCommitted {
+                    session_id: "s1".to_string(),
+                    commit_id: "c1".to_string(),
+                    status: status.clone(),
+                    disposition: disposition.clone(),
+                },
+            ])
+            .unwrap_or_else(|e| panic!("drain failed for {status:?}+{disposition:?}: {e}"));
+
+            assert_eq!(
+                result.status, status,
+                "status mismatch for {status:?}+{disposition:?}"
+            );
+            assert_eq!(
+                result.disposition, disposition,
+                "disposition mismatch for {status:?}+{disposition:?}"
+            );
+        }
+    }
+
+    /// Collector must not derive disposition from status.
+    /// Verifies that the same status can produce different dispositions.
+    #[test]
+    fn collector_no_disposition_inference_from_status() {
+        let make_result = |disposition: WorkspaceDisposition| -> crate::turn::types::RunTurnResult {
+            drain(vec![
+                TurnEvent::TurnStarted {
+                    session_id: "s1".to_string(),
+                    parent_commit_id: None,
+                    branch: None,
+                },
+                TurnEvent::TurnCommitting,
+                TurnEvent::TurnCommitted {
+                    session_id: "s1".to_string(),
+                    commit_id: "c1".to_string(),
+                    status: RunTurnStatus::Completed,
+                    disposition,
+                },
+            ])
+            .expect("drain must succeed")
+        };
+
+        let promoted = make_result(WorkspaceDisposition::Promoted);
+        let pending = make_result(WorkspaceDisposition::PendingPromotion);
+        let not_applicable = make_result(WorkspaceDisposition::NotApplicable);
+
+        // All have the same status
+        assert_eq!(promoted.status, pending.status);
+        assert_eq!(pending.status, not_applicable.status);
+
+        // But different dispositions
+        assert_ne!(promoted.disposition, pending.disposition);
+        assert_ne!(pending.disposition, not_applicable.disposition);
+        assert_ne!(promoted.disposition, not_applicable.disposition);
     }
 }

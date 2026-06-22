@@ -9,10 +9,10 @@ use std::sync::Arc;
 
 use git2::Repository;
 use lattice_workspace::promotion::{
-    build_materialization_plan, classify_path, parse_journal, recover_journal,
-    resolve_recovery_direction, run_materialization, DurableFs, DurableFsRecorder, FaultPoint,
-    JournalHeader, MaterializationPlan, PathClassification, PromotionError, PromotionJournal,
-    PromotionLimits, RecoveryDirection, RecoveryOutcome,
+    DurableFs, DurableFsRecorder, FaultPoint, JournalHeader, MaterializationPlan,
+    PathClassification, PromotionError, PromotionJournal, PromotionLimits, RecoveryDirection,
+    RecoveryOutcome, build_materialization_plan, classify_path, parse_journal, recover_journal,
+    resolve_recovery_direction, run_materialization,
 };
 
 fn init_repo(dir: &Path, branch: &str) -> String {
@@ -88,7 +88,11 @@ fn git_common_dir(repo: &Path) -> PathBuf {
 }
 
 fn promotion_state_dir(repo: &Path, branch: &str) -> PathBuf {
-    let hex = branch.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let hex = branch
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     git_common_dir(repo).join("lattice/promotion").join(hex)
 }
 
@@ -126,7 +130,9 @@ mod materialization {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(dir.path().join("tool.sh")).unwrap().permissions();
+            let mut perms = std::fs::metadata(dir.path().join("tool.sh"))
+                .unwrap()
+                .permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(dir.path().join("tool.sh"), perms).unwrap();
         }
@@ -141,8 +147,13 @@ mod materialization {
         git_commit_all(dir.path(), "candidate content");
         let candidate = git_rev_parse(dir.path());
 
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         assert!(!plan.is_empty());
 
         let worktree = dir.path().join("lower");
@@ -158,7 +169,10 @@ mod materialization {
         assert_eq!(std::fs::read(worktree.join("plain.txt")).unwrap(), b"v2\n");
         assert_eq!(std::fs::read(worktree.join("new.txt")).unwrap(), b"added\n");
         assert!(!worktree.join("tool.sh").exists());
-        assert_eq!(std::fs::read(worktree.join("keep/file.txt")).unwrap(), b"stay\n");
+        assert_eq!(
+            std::fs::read(worktree.join("keep/file.txt")).unwrap(),
+            b"stay\n"
+        );
     }
 
     #[test]
@@ -174,8 +188,13 @@ mod materialization {
         git_commit_all(dir.path(), "candidate");
         let candidate = git_rev_parse(dir.path());
 
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let worktree = dir.path().join("lower");
         std::fs::create_dir_all(&worktree).expect("mkdir");
         checkout_tree(dir.path(), &baseline, &worktree);
@@ -183,7 +202,9 @@ mod materialization {
 
         let repo = Repository::open(dir.path()).expect("repo");
         let mut fs = DurableFs::new(&worktree, &repo, None);
-        let err = fs.apply_entry(plan.entries().first().expect("entry")).unwrap_err();
+        let err = fs
+            .apply_entry(plan.entries().first().expect("entry"))
+            .unwrap_err();
         assert!(matches!(err, PromotionError::MaterializeConflict { .. }));
         assert!(worktree.join("dir/unrelated.txt").exists());
     }
@@ -200,8 +221,13 @@ mod materialization {
         git_commit_all(dir.path(), "candidate");
         let candidate = git_rev_parse(dir.path());
 
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let worktree = dir.path().join("lower");
         std::fs::create_dir_all(&worktree).expect("mkdir");
         checkout_tree(dir.path(), &baseline, &worktree);
@@ -209,14 +235,18 @@ mod materialization {
 
         let repo = Repository::open(dir.path()).expect("repo");
         let entry = plan.entries().first().expect("entry");
-        let class = classify_path(&worktree, &repo, &entry.path, &entry.old, &entry.new).expect("class");
+        let class =
+            classify_path(&worktree, &repo, &entry.path, &entry.old, &entry.new).expect("class");
         assert_eq!(class, PathClassification::ThirdState);
         let mut fs = DurableFs::new(&worktree, &repo, None);
         assert!(matches!(
             fs.apply_entry(entry).unwrap_err(),
             PromotionError::MaterializeConflict { .. }
         ));
-        assert_eq!(std::fs::read(worktree.join("file.txt")).unwrap(), b"third\n");
+        assert_eq!(
+            std::fs::read(worktree.join("file.txt")).unwrap(),
+            b"third\n"
+        );
     }
 
     #[test]
@@ -231,8 +261,13 @@ mod materialization {
         git_commit_all(dir.path(), "candidate");
         let candidate = git_rev_parse(dir.path());
 
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let worktree = dir.path().join("lower");
         std::fs::create_dir_all(&worktree).expect("mkdir");
         checkout_tree(dir.path(), &baseline, &worktree);
@@ -295,8 +330,13 @@ mod journal_recovery {
     #[test]
     fn crash_matrix_recovers_toward_candidate_ref() {
         let (dir, baseline, candidate, worktree, state_dir) = fixture_repo();
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let hdr = header(&baseline, &candidate, plan);
 
         for fault in crash_points(plan_len(&hdr)) {
@@ -320,10 +360,17 @@ mod journal_recovery {
             ));
             assert!(PromotionJournal::exists(&state_dir));
 
-            let outcome = recover_journal(dir.path(), &worktree, &state_dir, &candidate).expect("recover");
+            let outcome =
+                recover_journal(dir.path(), &worktree, &state_dir, &candidate).expect("recover");
             assert_eq!(outcome, RecoveryOutcome::Complete);
-            assert_eq!(std::fs::read(worktree.join("tracked.txt")).unwrap(), b"cand\n");
-            assert_eq!(std::fs::read(worktree.join("added.txt")).unwrap(), b"added\n");
+            assert_eq!(
+                std::fs::read(worktree.join("tracked.txt")).unwrap(),
+                b"cand\n"
+            );
+            assert_eq!(
+                std::fs::read(worktree.join("added.txt")).unwrap(),
+                b"added\n"
+            );
             assert!(!PromotionJournal::exists(&state_dir));
         }
     }
@@ -331,8 +378,13 @@ mod journal_recovery {
     #[test]
     fn recovery_after_baseline_ref_preserves_baseline() {
         let (dir, baseline, candidate, worktree, state_dir) = fixture_repo();
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let hdr = header(&baseline, &candidate, plan);
         std::fs::create_dir_all(&state_dir).expect("state");
 
@@ -348,17 +400,26 @@ mod journal_recovery {
         )
         .expect_err("crash");
 
-        let outcome = recover_journal(dir.path(), &worktree, &state_dir, &baseline).expect("recover");
+        let outcome =
+            recover_journal(dir.path(), &worktree, &state_dir, &baseline).expect("recover");
         assert_eq!(outcome, RecoveryOutcome::Complete);
-        assert_eq!(std::fs::read(worktree.join("tracked.txt")).unwrap(), b"base\n");
+        assert_eq!(
+            std::fs::read(worktree.join("tracked.txt")).unwrap(),
+            b"base\n"
+        );
         assert!(!worktree.join("added.txt").exists());
     }
 
     #[test]
     fn third_ref_and_third_state_preserve_journal() {
         let (dir, baseline, candidate, worktree, state_dir) = fixture_repo();
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let hdr = header(&baseline, &candidate, plan);
         std::fs::create_dir_all(&state_dir).expect("state");
         PromotionJournal::create_new(&state_dir, hdr).expect("journal");
@@ -372,21 +433,31 @@ mod journal_recovery {
             ),
             RecoveryDirection::RefConflict
         );
-        let outcome = recover_journal(dir.path(), &worktree, &state_dir, "deadbeef").expect("recover");
+        let outcome =
+            recover_journal(dir.path(), &worktree, &state_dir, "deadbeef").expect("recover");
         assert!(matches!(outcome, RecoveryOutcome::RecoveryConflict { .. }));
         assert!(PromotionJournal::exists(&state_dir));
 
         std::fs::write(worktree.join("tracked.txt"), b"user\n").expect("third");
-        let outcome = recover_journal(dir.path(), &worktree, &state_dir, &candidate).expect("recover");
+        let outcome =
+            recover_journal(dir.path(), &worktree, &state_dir, &candidate).expect("recover");
         assert!(matches!(outcome, RecoveryOutcome::RecoveryConflict { .. }));
-        assert_eq!(std::fs::read(worktree.join("tracked.txt")).unwrap(), b"user\n");
+        assert_eq!(
+            std::fs::read(worktree.join("tracked.txt")).unwrap(),
+            b"user\n"
+        );
     }
 
     #[test]
     fn torn_final_line_is_tolerated_malformed_middle_is_fatal() {
         let (dir, baseline, candidate, _worktree, state_dir) = fixture_repo();
-        let plan = build_materialization_plan(dir.path(), &baseline, &candidate, &PromotionLimits::default())
-            .expect("plan");
+        let plan = build_materialization_plan(
+            dir.path(),
+            &baseline,
+            &candidate,
+            &PromotionLimits::default(),
+        )
+        .expect("plan");
         let hdr = header(&baseline, &candidate, plan);
         std::fs::create_dir_all(&state_dir).expect("state");
         let path = PromotionJournal::path_in(&state_dir);
@@ -394,8 +465,10 @@ mod journal_recovery {
             &path,
             format!(
                 "{}\n{{\"kind\":\"finished\"",
-                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Header(hdr.clone()))
-                    .unwrap()
+                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Header(
+                    hdr.clone()
+                ))
+                .unwrap()
             ),
         )
         .expect("write torn");
@@ -406,8 +479,10 @@ mod journal_recovery {
             &path,
             format!(
                 "{}\n{{not-json}}\n{}",
-                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Header(hdr)).unwrap(),
-                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Finished).unwrap()
+                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Header(hdr))
+                    .unwrap(),
+                serde_json::to_string(&lattice_workspace::promotion::JournalRecord::Finished)
+                    .unwrap()
             ),
         )
         .expect("write bad");

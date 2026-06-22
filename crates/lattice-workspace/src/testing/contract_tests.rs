@@ -307,7 +307,10 @@ where
         .expect("test_exact_baseline_identity: cat-file HEAD must succeed");
     assert_eq!(parents.exit_code, 0);
     assert!(
-        parents.stdout.lines().any(|line| line.starts_with("parent ")),
+        parents
+            .stdout
+            .lines()
+            .any(|line| line.starts_with("parent ")),
         "baseline commit must preserve parent topology; got:\n{}",
         parents.stdout
     );

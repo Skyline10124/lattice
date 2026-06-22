@@ -10,7 +10,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use crate::graph::{SessionGraphStore, TurnCommitInput, TurnCommitStatus};
+use crate::graph::{SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition};
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
 
@@ -26,7 +26,9 @@ fn temp_dir(name: &str) -> PathBuf {
 /// Returns (store, last_commit_id).
 fn build_long_session(dir: PathBuf, n: usize) -> (SqliteSessionGraphStore, String) {
     let store = SqliteSessionGraphStore::new(dir);
-    store.create_session("long", None, "coder").expect("create");
+    store
+        .create_session("long", None, "coder", "main")
+        .expect("create");
 
     let mut parent_ids: Vec<String> = vec![];
     let mut last_commit_id = String::new();
@@ -47,6 +49,8 @@ fn build_long_session(dir: PathBuf, n: usize) -> (SqliteSessionGraphStore, Strin
             model: "test-model".to_string(),
             provider: "test-provider".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: format!("turn {i}"),
             usage: None,
             terminal_reason: None,

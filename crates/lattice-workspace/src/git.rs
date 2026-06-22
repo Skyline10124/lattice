@@ -12,11 +12,18 @@ use std::process::{Command, Stdio};
 
 use crate::{Result, WorkspaceError};
 
-/// Maximum host/guest pack transfer chunk before base64 encoding (512 KiB).
-pub const BASELINE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
+/// Maximum host/guest pack transfer chunk before base64 encoding (64 KiB).
+///
+/// The base64-encoded chunk is passed as a single argv element to `sh` inside
+/// the Upper VM.  Linux `MAX_ARG_STRLEN` is 128 KiB per argument; 64 KiB raw
+/// produces ~87 KiB base64, safely within that limit.
+pub const BASELINE_TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Maximum host/guest candidate bundle transfer chunk before base64 encoding (512 KiB).
-pub const CANDIDATE_EXPORT_CHUNK_BYTES: usize = 512 * 1024;
+/// Maximum host/guest candidate bundle transfer chunk before base64 encoding (64 KiB).
+///
+/// Same constraint as [`BASELINE_TRANSFER_CHUNK_BYTES`] — the base64 string is
+/// passed through `exec_with("sh", ...)` and must stay under `MAX_ARG_STRLEN`.
+pub const CANDIDATE_EXPORT_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Temporary export ref prefix removed on every exit path.
 const CANDIDATE_EXPORT_REF_PREFIX: &str = "refs/lattice/export/candidate-";
@@ -176,9 +183,11 @@ pub fn export_candidate_from_repo(
         )));
     }
     if !status.stdout.is_empty() {
-        return Err(WorkspaceError::UpperDirty {
-            porcelain: String::from_utf8_lossy(&status.stdout).into_owned(),
-        });
+        // Parse through strict NUL-delimited parser (fail-closed on non-UTF-8).
+        let git_status = crate::parse_git_status_z(&status.stdout)
+            .map_err(|e| WorkspaceError::Git(format!("status parse failed: {e}")))?;
+        let summary = crate::git_status::GitStatusEntry::workspace_dirty_fact(&git_status.entries);
+        return Err(WorkspaceError::UpperDirty { summary });
     }
 
     let candidate_oid = git_rev_parse(repo_path, &["rev-parse", "HEAD"], "rev-parse HEAD")?;
@@ -233,7 +242,10 @@ pub fn export_candidate_from_repo(
     let mut bundle_file = tempfile::NamedTempFile::new().map_err(WorkspaceError::Io)?;
     std::fs::copy(&bundle_path, bundle_file.path()).map_err(WorkspaceError::Io)?;
     bundle_file.flush().map_err(WorkspaceError::Io)?;
-    bundle_file.as_file().sync_all().map_err(WorkspaceError::Io)?;
+    bundle_file
+        .as_file()
+        .sync_all()
+        .map_err(WorkspaceError::Io)?;
 
     Ok(crate::CandidateExport::from_parts(
         bundle_file,
@@ -292,7 +304,11 @@ fn git_is_ancestor(repo_path: &Path, ancestor: &str, descendant: &str) -> Result
     }
 }
 
-fn run_git(repo_path: &Path, args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>, ctx: &str) -> Result<()> {
+fn run_git(
+    repo_path: &Path,
+    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    ctx: &str,
+) -> Result<()> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo_path)

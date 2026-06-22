@@ -73,7 +73,11 @@ fn git_common_dir(repo: &Path) -> PathBuf {
 }
 
 fn managed_worktree_path(repo: &Path, branch: &str) -> PathBuf {
-    let hex = branch.as_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let hex = branch
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     git_common_dir(repo).join("lattice/worktrees").join(hex)
 }
 
@@ -93,7 +97,10 @@ mod managed_lower {
         init_repo(dir.path(), "main");
         detach_primary(dir.path());
         let lower = ManagedLower::provision_or_open(dir.path(), "main").expect("provision");
-        assert_eq!(lower.worktree_path(), managed_worktree_path(dir.path(), "main"));
+        assert_eq!(
+            lower.worktree_path(),
+            managed_worktree_path(dir.path(), "main")
+        );
         let baseline = lower.inspect_clean().expect("clean");
         assert_eq!(baseline.project_ref, "refs/heads/main");
         assert_eq!(baseline.baseline_oid, git_rev_parse(lower.worktree_path()));
@@ -374,7 +381,7 @@ mod lower_lock {
         .expect("write stale lock");
         reader.kill_process(9001);
 
-        let err =         recover_stale_lock(
+        let err = recover_stale_lock(
             &lock_path,
             "stale-1",
             &reader,

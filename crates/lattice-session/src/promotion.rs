@@ -1,22 +1,34 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Minimal Phase 35 promoted Session commit object builder.
+//! Minimal Phase 35/36 promoted Session commit object builder.
 //!
 //! Creates Git commit objects with a canonical `turn/manifest.json` tree only.
 //! Ref movement remains exclusively in the workspace-owned promotion transaction.
+//!
+//! Phase 36 extends the manifest with execution status, disposition, target ref,
+//! candidate ref, and structured verification evidence. Only the `promoted`
+//! disposition produces a Git Session object; pending/rejected/aborted remain
+//! SQLite-only (D-21).
 
 use crate::graph::canonical_json_bytes;
+use crate::graph::{TurnCommitStatus, TurnVerificationEvidence};
 use crate::{Result, SessionError};
 
 /// Schema version for the Phase 35 skeleton `turn/manifest.json`.
 pub const PROMOTION_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// Schema version for the Phase 36 lifecycle-aware `turn/manifest.json`.
+pub const PROMOTION_MANIFEST_SCHEMA_VERSION_V2: u32 = 2;
 
 const LATTICE_AUTHOR_NAME: &str = "LATTICE";
 const LATTICE_AUTHOR_EMAIL: &str = "lattice@localhost";
 const PROMOTED_DISPOSITION: &str = "promoted";
 
 /// Canonical promoted-turn manifest stored at `turn/manifest.json`.
+///
+/// Phase 36 adds execution status, target project ref, candidate ref, and
+/// structured verification evidence to the Phase 35 skeleton.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedSessionManifest {
     pub schema_version: u32,
@@ -27,9 +39,20 @@ pub struct PromotedSessionManifest {
     pub disposition: String,
     pub committed_at_unix_seconds: i64,
     pub parent_oid: Option<String>,
+    /// Phase 36: target project branch ref (e.g., `refs/heads/main`).
+    pub target_project_ref: String,
+    /// Phase 36: candidate ref that was promoted.
+    pub candidate_ref: Option<String>,
+    /// Phase 36: execution status string (e.g., `"completed"`).
+    pub execution_status: String,
+    /// Phase 36: verification execution evidence, if available.
+    pub verification: Option<TurnVerificationEvidence>,
 }
 
 /// Input for creating a promoted Session commit object without moving refs.
+///
+/// Phase 36 extends this with lifecycle evidence fields that are carried into
+/// the manifest JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedSessionCommitInput {
     pub session_id: String,
@@ -38,6 +61,75 @@ pub struct PromotedSessionCommitInput {
     pub candidate_oid: String,
     pub committed_at_unix_seconds: i64,
     pub parent_session_oid: Option<git2::Oid>,
+    /// Phase 36: target project branch ref.
+    pub target_project_ref: String,
+    /// Phase 36: candidate ref that was promoted.
+    pub candidate_ref: Option<String>,
+    /// Phase 36: execution outcome of the turn.
+    pub execution_status: TurnCommitStatus,
+    /// Phase 36: verification execution evidence.
+    pub verification: Option<TurnVerificationEvidence>,
+}
+
+/// Build the canonical `PromotedSessionManifest` from a promoted input.
+pub fn build_promoted_manifest(input: &PromotedSessionCommitInput) -> PromotedSessionManifest {
+    let parent_oid = input.parent_session_oid.map(|oid| oid.to_string());
+
+    PromotedSessionManifest {
+        schema_version: PROMOTION_MANIFEST_SCHEMA_VERSION_V2,
+        session_id: input.session_id.clone(),
+        turn_id: input.turn_id.clone(),
+        baseline_oid: input.baseline_oid.clone(),
+        candidate_oid: input.candidate_oid.clone(),
+        disposition: PROMOTED_DISPOSITION.to_string(),
+        committed_at_unix_seconds: input.committed_at_unix_seconds,
+        parent_oid,
+        target_project_ref: input.target_project_ref.clone(),
+        candidate_ref: input.candidate_ref.clone(),
+        execution_status: input.execution_status.as_str().to_string(),
+        verification: input.verification.clone(),
+    }
+}
+
+/// Serialize manifest to canonical JSON bytes (sorted keys, deterministic).
+pub fn manifest_json_canonical_bytes(manifest: &PromotedSessionManifest) -> Result<Vec<u8>> {
+    let parent_oid = match &manifest.parent_oid {
+        Some(oid) => serde_json::Value::String(oid.clone()),
+        None => serde_json::Value::Null,
+    };
+
+    let candidate_ref = match &manifest.candidate_ref {
+        Some(r) => serde_json::Value::String(r.clone()),
+        None => serde_json::Value::Null,
+    };
+
+    let verification = match &manifest.verification {
+        Some(v) => serde_json::json!({
+            "argv": v.argv,
+            "candidate_oid": v.candidate_oid,
+            "exit_code": v.exit_code,
+            "expected_exit_code": v.expected_exit_code,
+            "passed": v.passed,
+            "profile_hash": v.profile_hash,
+        }),
+        None => serde_json::Value::Null,
+    };
+
+    let value = serde_json::json!({
+        "baseline_oid": manifest.baseline_oid,
+        "candidate_oid": manifest.candidate_oid,
+        "candidate_ref": candidate_ref,
+        "committed_at_unix_seconds": manifest.committed_at_unix_seconds,
+        "disposition": manifest.disposition,
+        "execution_status": manifest.execution_status,
+        "parent_oid": parent_oid,
+        "schema_version": manifest.schema_version,
+        "session_id": manifest.session_id,
+        "target_project_ref": manifest.target_project_ref,
+        "turn_id": manifest.turn_id,
+        "verification": verification,
+    });
+    Ok(canonical_json_bytes(&value))
 }
 
 /// Create a promoted Session commit object in `repo` without updating any ref.
@@ -50,22 +142,9 @@ pub fn create_promoted_session_commit(
     validate_git_oid("baseline_oid", &input.baseline_oid)?;
     validate_git_oid("candidate_oid", &input.candidate_oid)?;
 
-    let parent_oid = input
-        .parent_session_oid
-        .map(|oid| oid.to_string());
+    let manifest = build_promoted_manifest(input);
 
-    let manifest = PromotedSessionManifest {
-        schema_version: PROMOTION_MANIFEST_SCHEMA_VERSION,
-        session_id: input.session_id.clone(),
-        turn_id: input.turn_id.clone(),
-        baseline_oid: input.baseline_oid.clone(),
-        candidate_oid: input.candidate_oid.clone(),
-        disposition: PROMOTED_DISPOSITION.to_string(),
-        committed_at_unix_seconds: input.committed_at_unix_seconds,
-        parent_oid,
-    };
-
-    let manifest_bytes = manifest_json_bytes(&manifest)?;
+    let manifest_bytes = manifest_json_canonical_bytes(&manifest)?;
     let blob_oid = repo
         .blob(&manifest_bytes)
         .map_err(|e| SessionError::Git(format!("write manifest blob: {e}")))?;
@@ -113,10 +192,7 @@ pub fn create_promoted_session_commit(
         None => Vec::new(),
     };
 
-    let message = format!(
-        "lattice session: promoted turn {}",
-        input.turn_id
-    );
+    let message = format!("lattice session: promoted turn {}", input.turn_id);
 
     repo.commit(
         None,
@@ -132,24 +208,6 @@ pub fn create_promoted_session_commit(
     .map_err(|e| SessionError::Git(format!("create session commit object: {e}")))
 }
 
-fn manifest_json_bytes(manifest: &PromotedSessionManifest) -> Result<Vec<u8>> {
-    let parent_oid = match &manifest.parent_oid {
-        Some(oid) => serde_json::Value::String(oid.clone()),
-        None => serde_json::Value::Null,
-    };
-    let value = serde_json::json!({
-        "baseline_oid": manifest.baseline_oid,
-        "candidate_oid": manifest.candidate_oid,
-        "committed_at_unix_seconds": manifest.committed_at_unix_seconds,
-        "disposition": manifest.disposition,
-        "parent_oid": parent_oid,
-        "schema_version": manifest.schema_version,
-        "session_id": manifest.session_id,
-        "turn_id": manifest.turn_id,
-    });
-    Ok(canonical_json_bytes(&value))
-}
-
 fn validate_non_empty_id(field: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         Err(SessionError::Git(format!("{field} must be non-empty")))
@@ -159,11 +217,15 @@ fn validate_non_empty_id(field: &str, value: &str) -> Result<()> {
 }
 
 fn validate_git_oid(field: &str, oid: &str) -> Result<()> {
-    if oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit()) {
+    // WR-06: accept both SHA-1 (40 hex) and SHA-256 (64 hex) Git OIDs. The
+    // previous 40-char-only check silently rejected SHA-256 repositories.
+    let len = oid.len();
+    let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());
+    if is_hex && (len == 40 || len == 64) {
         Ok(())
     } else {
         Err(SessionError::Git(format!(
-            "{field} must be a 40-character hex Git OID, got '{oid}'"
+            "{field} must be a 40- (SHA-1) or 64- (SHA-256) character hex Git OID, got '{oid}'"
         )))
     }
 }

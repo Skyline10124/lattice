@@ -4,7 +4,7 @@
 //! Phase 34 integration: Direct observation/mutation route through Upper only.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
@@ -64,20 +64,20 @@ fn capture_recursive(
     exclude_audit: Option<&Path>,
     out: &mut BTreeMap<String, LowerEntry>,
 ) {
-    if let Some(ex) = exclude_audit {
-        if current.starts_with(ex) {
-            return;
-        }
+    if let Some(ex) = exclude_audit
+        && current.starts_with(ex)
+    {
+        return;
     }
     let Ok(read_dir) = std::fs::read_dir(current) else {
         return;
     };
     for entry in read_dir.flatten() {
         let path = entry.path();
-        if let Some(ex) = exclude_audit {
-            if path.starts_with(ex) {
-                continue;
-            }
+        if let Some(ex) = exclude_audit
+            && path.starts_with(ex)
+        {
+            continue;
         }
         let rel = path
             .strip_prefix(lower_root)
@@ -160,6 +160,16 @@ fn init_git_baseline(lower: &Path, seed_file: &str, seed_content: &str) -> Strin
         .commit(Some("HEAD"), &sig, &sig, "baseline", &tree, &[])
         .expect("commit");
     oid.to_string()
+}
+
+/// Create an unattached branch at the current HEAD without checking it out.
+fn create_unattached_target_branch(root: &Path, name: &str) -> String {
+    std::process::Command::new("git")
+        .args(["branch", name])
+        .current_dir(root)
+        .status()
+        .expect("git branch (create unattached target)");
+    name.to_string()
 }
 
 async fn direct_runtime_fixture(
@@ -426,6 +436,8 @@ async fn phase34_upper_routing_e2e() {
                 cpus: None,
                 memory_mb: None,
                 allowed_egress_targets: vec![],
+                cleanup_rounds: 3,
+                max_pending_snapshots: 5,
             }),
         },
         system_prompt: "test".into(),
@@ -467,12 +479,14 @@ async fn phase34_upper_routing_e2e() {
             .build(),
     );
 
+    let target = create_unattached_target_branch(lower.path(), "lattice-target-e2e");
     let sessions_path = lower.path().join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
             active_agent: "phase34".into(),
+            project_branch: target,
         })
         .expect("session")
         .session_id;
@@ -516,10 +530,10 @@ async fn phase34_upper_routing_e2e() {
                 lower.path(),
                 SECRET,
             );
-            if let Ok(meta) = serde_json::from_str::<Value>(meta) {
-                if let Some(id) = meta.get("upper_workspace_id").and_then(|v| v.as_str()) {
-                    *upper_ids.entry(id.to_string()).or_insert(0) += 1;
-                }
+            if let Ok(meta) = serde_json::from_str::<Value>(meta)
+                && let Some(id) = meta.get("upper_workspace_id").and_then(|v| v.as_str())
+            {
+                *upper_ids.entry(id.to_string()).or_insert(0) += 1;
             }
         }
         scan_value_for_leaks(&Value::String(row.method.clone()), lower.path(), SECRET);
@@ -650,18 +664,22 @@ async fn phase34_adapter_failure_has_no_lower_fallback() {
                 cpus: None,
                 memory_mb: None,
                 allowed_egress_targets: vec![],
+                cleanup_rounds: 3,
+                max_pending_snapshots: 5,
             }),
         },
         system_prompt: "test".into(),
     };
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(FakeStreamingLlmClient::builder().build());
+    let target = create_unattached_target_branch(lower.path(), "lattice-target-fail");
     let sessions_path = lower.path().join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
             active_agent: "phase34".into(),
+            project_branch: target,
         })
         .expect("session")
         .session_id;
@@ -725,6 +743,7 @@ async fn generated_profiles_are_executable_host_only() {
             .create_session(CreateSessionRequest {
                 label: None,
                 active_agent: profile.agent.name.clone(),
+                project_branch: "main".to_string(),
             })
             .expect("session")
             .session_id;
@@ -738,7 +757,7 @@ async fn generated_profiles_are_executable_host_only() {
             test_persist_audit: None,
             workspace_override: None,
         };
-        stream_turn(session_api, request)
+        let _stream = stream_turn(session_api, request)
             .await
             .expect("host-only profile reaches Direct runtime");
     }

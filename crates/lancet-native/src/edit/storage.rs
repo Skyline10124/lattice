@@ -337,7 +337,6 @@ fn validate_facts(
     facts: &PathFacts,
     authorized_region: &AuthorizedEffectRegion,
 ) -> Result<(), PatchDiagnostic> {
-    let guard_path = if path == "." { "" } else { path };
     let direct_facts = DirectPathFacts {
         normalized_path: facts.normalized_path.clone(),
         exists: facts.exists,
@@ -346,7 +345,7 @@ fn validate_facts(
         parent_kind: facts.parent_kind.map(path_kind),
         canonical_under_workspace: facts.canonical_under_workspace,
     };
-    validate_direct_path_facts(guard_path, &direct_facts, authorized_region).map_err(|err| {
+    validate_direct_path_facts(path, &direct_facts, authorized_region).map_err(|err| {
         PatchDiagnostic::new(PatchErrorCode::BoundaryDenied, err.message.clone())
             .with_path(path.to_string())
     })

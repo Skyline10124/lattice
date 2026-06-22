@@ -8,12 +8,14 @@
 //! reset operations.
 
 use lattice_session::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, ResetResult, SessionGraphStore,
-    SessionGraphSummary, SessionStatus, SqliteSessionGraphStore, TurnCommit, TurnCommitInput,
-    TurnLogEntry,
+    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult,
+    SessionGraphStore, SessionGraphSummary, SessionStatus, SqliteSessionGraphStore, TurnCommit,
+    TurnCommitInput, TurnLogEntry,
 };
 use std::path::PathBuf;
 use uuid::Uuid;
+
+use crate::turn::promotion::PromotionLifecycleError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -34,6 +36,9 @@ pub enum ApiError {
 
     #[error("promotion recovery conflict: {0}")]
     PromotionRecoveryConflict(String),
+
+    #[error("promotion lifecycle: {0}")]
+    PromotionLifecycle(#[from] PromotionLifecycleError),
 }
 
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -42,6 +47,7 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 pub struct CreateSessionRequest {
     pub label: Option<String>,
     pub active_agent: String,
+    pub project_branch: String,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -113,9 +119,19 @@ impl SessionApi {
     }
 
     pub fn create_session(&self, request: CreateSessionRequest) -> Result<GraphSession> {
+        if request.project_branch.trim().is_empty() {
+            return Err(ApiError::BadRequest(
+                "project_branch must not be blank".into(),
+            ));
+        }
         let session_id = Uuid::new_v4().simple().to_string();
         self.store
-            .create_session(&session_id, request.label.as_deref(), &request.active_agent)
+            .create_session(
+                &session_id,
+                request.label.as_deref(),
+                &request.active_agent,
+                &request.project_branch,
+            )
             .map_err(map_session_error)
     }
 
@@ -195,6 +211,38 @@ impl SessionApi {
         input.session_id = resolved;
         self.store.commit_turn(input).map_err(map_session_error)
     }
+
+    /// Persist a precomputed turn commit with prepared identity.
+    ///
+    /// Thin wrapper over the session store's prepared commit path.
+    /// Uses the prepared commit ID for idempotent retry (D-23).
+    pub(crate) fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
+        self.store
+            .commit_prepared_turn(prepared)
+            .map_err(map_session_error)
+    }
+
+    /// Look up a single turn commit by session and commit ID.
+    pub(crate) fn get_turn_commit(
+        &self,
+        session_id: &str,
+        commit_id: &str,
+    ) -> Result<Option<TurnCommit>> {
+        let resolved = self.resolve_id(session_id)?;
+        self.store
+            .get_turn_commit(&resolved, commit_id)
+            .map_err(map_session_error)
+    }
+
+    /// Query whether a commit's retained snapshot is operationally lost.
+    ///
+    /// Returns `None` if no metadata is recorded for the commit.
+    /// Never modifies immutable commit fields (T-36-07).
+    pub(crate) fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
+        self.store
+            .get_snapshot_lost(commit_id)
+            .map_err(map_session_error)
+    }
 }
 
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {
@@ -222,8 +270,9 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
             path.display(),
             source
         )),
-        lattice_session::SessionError::Git(msg) => {
-            ApiError::Internal(format!("git error: {msg}"))
+        lattice_session::SessionError::Git(msg) => ApiError::Internal(format!("git error: {msg}")),
+        lattice_session::SessionError::InvalidPersistedValue { field, value } => {
+            ApiError::Internal(format!("invalid persisted value for '{field}': {value}"))
         }
     }
 }
@@ -233,7 +282,7 @@ fn map_session_error(e: lattice_session::SessionError) -> ApiError {
 #[cfg(test)]
 mod session_graph {
     use super::*;
-    use lattice_session::{TurnCommitInput, TurnCommitStatus};
+    use lattice_session::{TurnCommitInput, TurnCommitStatus, WorkspaceDisposition};
     use std::env;
     use std::fs;
 
@@ -258,7 +307,7 @@ mod session_graph {
         label: Option<&str>,
     ) -> Vec<String> {
         api.store()
-            .create_session(session_id, label, "coder")
+            .create_session(session_id, label, "coder", "main")
             .expect("create");
 
         let mut commit_ids: Vec<String> = Vec::new();
@@ -282,6 +331,8 @@ mod session_graph {
                 model: "sonnet".to_string(),
                 provider: "anthropic".to_string(),
                 status: TurnCommitStatus::Completed,
+                disposition: WorkspaceDisposition::NotApplicable,
+                lifecycle: None,
                 commit_message: format!("Turn {i}"),
                 usage: None,
                 terminal_reason: None,
@@ -300,6 +351,7 @@ mod session_graph {
             .create_session(CreateSessionRequest {
                 label: Some("my session".into()),
                 active_agent: "coder".into(),
+                project_branch: "main".to_string(),
             })
             .expect("create_session");
 
@@ -363,6 +415,7 @@ mod session_graph {
             .create_session(CreateSessionRequest {
                 label: None,
                 active_agent: "coder".into(),
+                project_branch: "main".to_string(),
             })
             .expect("create");
         assert_eq!(created.session_id.len(), 32);
@@ -495,6 +548,8 @@ mod session_graph {
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: "Feature work".to_string(),
             usage: None,
             terminal_reason: None,
@@ -533,6 +588,7 @@ mod session_graph {
             let _ = api.create_session(CreateSessionRequest {
                 label: None,
                 active_agent: "coder".into(),
+                project_branch: "main".to_string(),
             });
             let _ = api.open_session(OpenSessionRequest { id: String::new() });
             let _ = api.status("");
@@ -558,5 +614,64 @@ mod session_graph {
         // the expected methods. If richer history rewriting methods were added,
         // this module would need updating.
         fn _assert_trait_bound(_store: &dyn SessionGraphStore) {}
+    }
+
+    #[test]
+    fn session_api_rejects_empty_project_branch() {
+        let api = api("empty_branch");
+        let err = api
+            .create_session(CreateSessionRequest {
+                label: None,
+                active_agent: "coder".into(),
+                project_branch: String::new(),
+            })
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must not be blank"),
+            "expected blank rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn session_api_rejects_whitespace_project_branch() {
+        let api = api("ws_branch");
+        let err = api
+            .create_session(CreateSessionRequest {
+                label: None,
+                active_agent: "coder".into(),
+                project_branch: "   ".to_string(),
+            })
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must not be blank"),
+            "expected blank rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn create_session_persists_explicit_project_branch() {
+        let api = api("persist_branch");
+        let created = api
+            .create_session(CreateSessionRequest {
+                label: None,
+                active_agent: "coder".into(),
+                project_branch: "feature/my-branch".to_string(),
+            })
+            .expect("create");
+        assert_eq!(
+            created.project_target_branch.as_deref(),
+            Some("feature/my-branch")
+        );
+        let opened = api
+            .open_session(OpenSessionRequest {
+                id: created.session_id.clone(),
+            })
+            .expect("open");
+        assert_eq!(
+            opened.project_target_branch.as_deref(),
+            Some("feature/my-branch")
+        );
     }
 }

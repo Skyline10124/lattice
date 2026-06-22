@@ -11,7 +11,8 @@ use rusqlite::{Connection, params};
 
 use crate::SessionError;
 use crate::graph::{
-    GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, derive_commit_message,
+    GraphMessage, SessionGraphStore, TurnCommitInput, TurnCommitStatus, WorkspaceDisposition,
+    derive_commit_message,
 };
 use crate::sqlite_graph::SqliteSessionGraphStore;
 use crate::test_helpers::{assistant_msg, tool_msg, user_msg};
@@ -103,6 +104,8 @@ fn commit_input(
         model: "test-model".to_string(),
         provider: "test-provider".to_string(),
         status,
+        disposition: WorkspaceDisposition::NotApplicable,
+        lifecycle: None,
         commit_message: derive_commit_message(&messages),
         usage: None,
         terminal_reason: None,
@@ -144,7 +147,7 @@ fn create_session_does_not_create_commit() {
     let store = SqliteSessionGraphStore::new(dir);
 
     let session = store
-        .create_session("sess-1", Some("test"), "coder")
+        .create_session("sess-1", Some("test"), "coder", "main")
         .expect("create_session should succeed");
 
     assert_eq!(session.session_id, "sess-1");
@@ -165,7 +168,7 @@ fn open_session_returns_existing_session() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", Some("test"), "coder")
+        .create_session("sess-1", Some("test"), "coder", "main")
         .expect("create");
 
     let opened = store.open_session("sess-1").expect("open_session");
@@ -191,7 +194,7 @@ fn commit_turn_writes_messages_commit_and_branch_ref_atomically() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let messages = vec![user_msg("Hello"), assistant_msg("Hi there!")];
@@ -263,7 +266,7 @@ fn commit_turn_rejects_stale_parent() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First commit succeeds.
@@ -303,7 +306,7 @@ fn commit_turn_rejects_cross_session_secondary_parent() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("victim", None, "coder")
+        .create_session("victim", None, "coder", "main")
         .expect("create victim");
     let victim_commit = store
         .commit_turn(commit_input(
@@ -315,7 +318,7 @@ fn commit_turn_rejects_cross_session_secondary_parent() {
         .expect("victim commit");
 
     store
-        .create_session("attacker", None, "coder")
+        .create_session("attacker", None, "coder", "main")
         .expect("create attacker");
     let attacker_commit = store
         .commit_turn(commit_input(
@@ -356,7 +359,7 @@ fn commit_turn_round_trips_tool_message() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let messages = vec![
@@ -391,7 +394,7 @@ fn commit_turn_accepts_completed_error_and_cancelled_statuses() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     for (i, status) in [
@@ -427,6 +430,8 @@ fn commit_turn_accepts_completed_error_and_cancelled_statuses() {
             model: "test-model".to_string(),
             provider: "test-provider".to_string(),
             status: status.clone(),
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: format!("Turn {i}"),
             usage: None,
             terminal_reason: None,
@@ -455,7 +460,7 @@ fn commit_turn_first_commit_has_empty_parent_ids() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     let messages = vec![user_msg("First turn")];
@@ -474,7 +479,7 @@ fn commit_turn_second_commit_has_first_as_parent() {
     let store = SqliteSessionGraphStore::new(dir);
 
     store
-        .create_session("sess-1", None, "coder")
+        .create_session("sess-1", None, "coder", "main")
         .expect("create");
 
     // First commit.

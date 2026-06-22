@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use lattice_session::WorkspaceDisposition;
 
 // ─── Stream timeout constants (L-18-03) ───────────────────────────
 
@@ -149,6 +150,7 @@ async fn run_integration_commits_existing_session() {
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "test".to_string(),
+            project_branch: "main".to_string(),
         })
         .expect("create session");
     let llm = std::sync::Arc::new(StubLlmClient);
@@ -254,6 +256,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "test".to_string(),
+            project_branch: "main".to_string(),
         })
         .expect("create session");
     let llm: std::sync::Arc<dyn lattice_agent::LlmClient> = std::sync::Arc::new(
@@ -422,6 +425,7 @@ fn render_json_event_roundtrips_every_variant() {
             session_id: "s1".into(),
             commit_id: "c1".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
         TurnEvent::CommitFailed {
             reason: "parent mismatch".into(),
@@ -632,6 +636,7 @@ fn render_human_committed_lowercases_status() {
         session_id: "s1".into(),
         commit_id: "c1".into(),
         status: RunTurnStatus::Completed,
+        disposition: WorkspaceDisposition::NotApplicable,
     };
     let mut state = RunRenderState::default();
     let mut out = Vec::new();
@@ -852,6 +857,7 @@ fn seq_happy_path_human() {
             session_id: "S1".into(),
             commit_id: "C1".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (out, err, state) = fake_event_loop(events, false);
@@ -904,6 +910,7 @@ fn seq_happy_path_verbose_with_epilogue() {
             session_id: "S1".into(),
             commit_id: "C1".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (out, mut err, state) = fake_event_loop(events, true);
@@ -937,6 +944,7 @@ fn seq_trailing_token_newline_emitted() {
             session_id: "S".into(),
             commit_id: "C".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (out, _err, _state) = fake_event_loop(events, false);
@@ -1034,6 +1042,7 @@ fn seq_tool_failure_renders_summary() {
             session_id: "S".into(),
             commit_id: "C".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (_out, err, state) = fake_event_loop(events, false);
@@ -1070,6 +1079,7 @@ fn seq_turn_failed_then_commit_drains_stream() {
             session_id: "S".into(),
             commit_id: "C".into(),
             status: RunTurnStatus::Error,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (_out, err, state) = fake_event_loop(events, false);
@@ -1200,6 +1210,7 @@ fn seq_jsonl_round_trips_every_variant() {
             session_id: "s1".into(),
             commit_id: "c1".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
         TurnEvent::CommitFailed {
             reason: "parent mismatch".into(),
@@ -1265,6 +1276,7 @@ fn seq_reasoning_hidden_default_in_human() {
             session_id: "S".into(),
             commit_id: "C".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (out, err, _state) = fake_event_loop(events, false);
@@ -1302,6 +1314,7 @@ fn seq_reasoning_visible_in_verbose() {
             session_id: "S".into(),
             commit_id: "C".into(),
             status: RunTurnStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
         },
     ];
     let (out, err, _state) = fake_event_loop(events, true);

@@ -67,6 +67,10 @@ enum Commands {
         /// Agent profile name used when creating a new TUI session.
         #[arg(long, default_value = "default")]
         agent: String,
+        /// Project target branch for new TUI sessions.
+        /// Required when creating a new session; ignored when opening an existing one.
+        #[arg(long, required_unless_present = "session_id")]
+        project_branch: Option<String>,
     },
 }
 
@@ -113,12 +117,17 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         Some(Commands::Lancet { action }) => {
             lancet_cmd::run(action, cli.json)?;
         }
-        Some(Commands::Tui { session_id, agent }) => {
+        Some(Commands::Tui {
+            session_id,
+            agent,
+            project_branch,
+        }) => {
             let agents_dir =
                 commands::run::safe_agents_dir(None).map_err(|error| anyhow::anyhow!(error))?;
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
                 agent,
+                project_branch,
                 session_dir: session_cmd::default_session_dir(),
                 agents_dir,
                 project_root: std::env::current_dir()?,
@@ -148,7 +157,16 @@ mod tests {
 
     #[test]
     fn cli_surface_session_new_agent() {
-        let cli = Cli::try_parse_from(["lattice", "session", "new", "--agent", "coder"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "session",
+            "new",
+            "--agent",
+            "coder",
+            "--project-branch",
+            "main",
+        ])
+        .unwrap();
         assert!(cli.command.is_some());
     }
 
@@ -251,18 +269,25 @@ mod tests {
     }
 
     #[test]
-    fn cli_surface_tui_parses_without_session_id() {
-        let cli = Cli::try_parse_from(["lattice", "tui"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Tui { .. })));
+    fn cli_surface_tui_requires_project_branch_for_new_session() {
+        assert!(
+            Cli::try_parse_from(["lattice", "tui"]).is_err(),
+            "new TUI sessions must require --project-branch"
+        );
     }
 
     #[test]
     fn cli_surface_tui_parses_session_id_and_agent() {
         let cli = Cli::try_parse_from(["lattice", "tui", "sess1", "--agent", "coder"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Tui { session_id, agent } => {
+            Commands::Tui {
+                session_id,
+                agent,
+                project_branch,
+            } => {
                 assert_eq!(session_id.as_deref(), Some("sess1"));
                 assert_eq!(agent, "coder");
+                assert!(project_branch.is_none());
             }
             _ => panic!("expected Tui"),
         }
@@ -300,5 +325,40 @@ mod tests {
     fn cli_surface_audit_unchanged() {
         let cli = Cli::try_parse_from(["lattice", "audit"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Audit(_))));
+    }
+
+    #[test]
+    fn cli_surface_tui_accepts_project_branch() {
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "tui",
+            "--agent",
+            "coder",
+            "--project-branch",
+            "feature/x",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Commands::Tui {
+                session_id,
+                agent,
+                project_branch,
+            } => {
+                assert!(session_id.is_none());
+                assert_eq!(agent, "coder");
+                assert_eq!(project_branch.as_deref(), Some("feature/x"));
+            }
+            _ => panic!("expected Tui"),
+        }
+    }
+
+    #[test]
+    fn cli_surface_session_new_requires_project_branch() {
+        // session new without --project-branch should fail after 36-15.
+        // Currently this parses fine (no required flag), making this test RED.
+        assert!(
+            Cli::try_parse_from(["lattice", "session", "new", "--agent", "coder"]).is_err(),
+            "session new should require --project-branch"
+        );
     }
 }

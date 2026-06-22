@@ -460,6 +460,9 @@ fn normalize_lexical_pure(path: &str) -> Result<PathBuf, lancet_protocol::CepErr
             }
         }
     }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
     Ok(result)
 }
 

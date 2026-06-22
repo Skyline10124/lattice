@@ -497,7 +497,11 @@ async fn authorize_direct_mutation(
                 });
                 direct_mutation_backend_error(method)(err)
             })?;
-        let guard_path = if ws_path.is_project_root() { "" } else { ws_path.as_str() };
+        let guard_path = if ws_path.is_project_root() {
+            ""
+        } else {
+            ws_path.as_str()
+        };
         let direct_facts = DirectPathFacts {
             normalized_path: facts.normalized_path.clone(),
             exists: facts.exists,
@@ -657,7 +661,7 @@ async fn run_mutation_verify_if_configured(
                 });
                 emit_verify_failed(ctx, method, "", outcome.exit_code).await;
                 let spec = direct_verify_spec(verify_config);
-                return Err(verify_failed_error(&spec, &outcome));
+                Err(verify_failed_error(&spec, &outcome))
             }
             Ok(_) => {
                 ctx.record_effect(ObservedEffect {

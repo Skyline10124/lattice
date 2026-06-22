@@ -5,5 +5,7 @@
 
 mod chunked_queries;
 mod commit_turn;
+mod disposition;
 mod head_transcript;
 mod pointer_ops;
+mod session_project_branch;

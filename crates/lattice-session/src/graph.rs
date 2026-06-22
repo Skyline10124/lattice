@@ -58,6 +58,8 @@ pub struct GraphSession {
     pub active_agent_name: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub project_target_branch: Option<String>,
 }
 
 /// Ref kind: branch or detached HEAD.
@@ -87,6 +89,8 @@ pub enum GraphHead {
     Detached { commit_id: String },
 }
 
+// ─── Terminal Status and Disposition ──────────────────────────────────────
+
 /// Status of a completed turn commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,7 +108,154 @@ impl TurnCommitStatus {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// Strict parser: unknown text returns a typed error instead of defaulting.
+    pub fn parse(raw: &str) -> crate::Result<Self> {
+        match raw {
+            "completed" => Ok(Self::Completed),
+            "error" => Ok(Self::Error),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(crate::SessionError::InvalidPersistedValue {
+                field: "status",
+                value: raw.to_owned(),
+            }),
+        }
+    }
 }
+
+/// Terminal workspace disposition: independent from execution status.
+///
+/// Every terminal turn has both a `TurnCommitStatus` (execution outcome) and a
+/// `WorkspaceDisposition` (workspace promotion outcome). These are separate
+/// exhaustive typed values (D-18).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDisposition {
+    Promoted,
+    PendingWorktree,
+    PendingVerification,
+    PendingPromotion,
+    PendingConflict,
+    Rejected,
+    Aborted,
+    NotApplicable,
+}
+
+impl WorkspaceDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Promoted => "promoted",
+            Self::PendingWorktree => "pending_worktree",
+            Self::PendingVerification => "pending_verification",
+            Self::PendingPromotion => "pending_promotion",
+            Self::PendingConflict => "pending_conflict",
+            Self::Rejected => "rejected",
+            Self::Aborted => "aborted",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+
+    /// Strict parser: unknown text returns a typed error instead of defaulting.
+    pub fn parse(raw: &str) -> crate::Result<Self> {
+        match raw {
+            "promoted" => Ok(Self::Promoted),
+            "pending_worktree" => Ok(Self::PendingWorktree),
+            "pending_verification" => Ok(Self::PendingVerification),
+            "pending_promotion" => Ok(Self::PendingPromotion),
+            "pending_conflict" => Ok(Self::PendingConflict),
+            "rejected" => Ok(Self::Rejected),
+            "aborted" => Ok(Self::Aborted),
+            "not_applicable" => Ok(Self::NotApplicable),
+            _ => Err(crate::SessionError::InvalidPersistedValue {
+                field: "disposition",
+                value: raw.to_owned(),
+            }),
+        }
+    }
+}
+
+// ─── Lifecycle Evidence ───────────────────────────────────────────────────
+
+/// Verification execution evidence bound to a candidate OID (D-04).
+///
+/// Records the verify command argv, profile hash, expected/actual exit code,
+/// pass/fail result, and the candidate OID that was verified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnVerificationEvidence {
+    pub argv: Vec<String>,
+    pub profile_hash: String,
+    pub candidate_oid: String,
+    pub expected_exit_code: i32,
+    pub exit_code: Option<i32>,
+    pub passed: bool,
+}
+
+impl TurnVerificationEvidence {
+    /// Construct validated evidence: argv must be non-empty and candidate_oid
+    /// must be non-empty to bind verification to a specific candidate.
+    pub fn new(
+        argv: Vec<String>,
+        profile_hash: String,
+        candidate_oid: String,
+        expected_exit_code: i32,
+        exit_code: Option<i32>,
+        passed: bool,
+    ) -> crate::Result<Self> {
+        if argv.is_empty() {
+            return Err(crate::SessionError::InvalidPersistedValue {
+                field: "verification.argv",
+                value: "[] (empty)".to_owned(),
+            });
+        }
+        if candidate_oid.is_empty() {
+            return Err(crate::SessionError::InvalidPersistedValue {
+                field: "verification.candidate_oid",
+                value: "(empty)".to_owned(),
+            });
+        }
+        Ok(Self {
+            argv,
+            profile_hash,
+            candidate_oid,
+            expected_exit_code,
+            exit_code,
+            passed,
+        })
+    }
+}
+
+/// Snapshot backend identity: the adapter type and unique nonce.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnSnapshotIdentity {
+    pub backend: String,
+    pub nonce: u32,
+}
+
+/// Derived snapshot reference: logical identity plus the deterministic
+/// physical name `lattice-{session_id}-{commit_id_hex8}-{nonce_hex8}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnSnapshotRef {
+    pub identity: TurnSnapshotIdentity,
+    pub name: String,
+}
+
+/// Immutable logical lifecycle evidence for a terminal turn (D-29).
+///
+/// Carries target ref, baseline/candidate OIDs and refs, verification evidence,
+/// retained snapshot reference, and resume linkage. Fields are optional where
+/// the lifecycle stage may legitimately lack evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnLifecycleEvidence {
+    pub target_project_ref: String,
+    pub baseline_oid: Option<String>,
+    pub candidate_oid: Option<String>,
+    pub candidate_ref: Option<String>,
+    pub verification: Option<TurnVerificationEvidence>,
+    pub snapshot_ref: Option<TurnSnapshotRef>,
+    pub resumes_turn_oid: Option<String>,
+}
+
+// ─── Turn DTOs ────────────────────────────────────────────────────────────
 
 /// Input for creating a turn commit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +269,10 @@ pub struct TurnCommitInput {
     pub model: String,
     pub provider: String,
     pub status: TurnCommitStatus,
+    #[serde(default = "WorkspaceDisposition::default_for_deser")]
+    pub disposition: WorkspaceDisposition,
+    #[serde(default)]
+    pub lifecycle: Option<TurnLifecycleEvidence>,
     pub commit_message: String,
     #[serde(default)]
     pub usage: Option<TurnUsage>,
@@ -138,6 +293,10 @@ pub struct TurnCommit {
     pub model: String,
     pub provider: String,
     pub status: TurnCommitStatus,
+    #[serde(default = "WorkspaceDisposition::default_for_deser")]
+    pub disposition: WorkspaceDisposition,
+    #[serde(default)]
+    pub lifecycle: Option<TurnLifecycleEvidence>,
     pub commit_message: String,
     #[serde(default)]
     pub usage: Option<TurnUsage>,
@@ -152,6 +311,8 @@ pub struct TurnLogEntry {
     pub commit_id: String,
     pub parent_ids: Vec<String>,
     pub status: TurnCommitStatus,
+    #[serde(default = "WorkspaceDisposition::default_for_deser")]
+    pub disposition: WorkspaceDisposition,
     pub agent_name: String,
     pub profile_snapshot_hash: String,
     pub model: String,
@@ -166,6 +327,13 @@ pub struct TurnLogEntry {
     pub created_at: String,
 }
 
+impl WorkspaceDisposition {
+    /// Default for backward-compatible deserialization of pre-Phase-36 rows.
+    fn default_for_deser() -> Self {
+        Self::NotApplicable
+    }
+}
+
 /// Session status: HEAD, branches, commit count.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatus {
@@ -176,6 +344,8 @@ pub struct SessionStatus {
     pub active_agent_name: String,
     pub branches: Vec<GraphRef>,
     pub commit_count: usize,
+    #[serde(default)]
+    pub project_target_branch: Option<String>,
 }
 
 /// Session summary for list display.
@@ -191,6 +361,8 @@ pub struct SessionGraphSummary {
     pub head_commit_id: Option<String>,
     pub commit_count: usize,
     pub updated_at: String,
+    #[serde(default)]
+    pub project_target_branch: Option<String>,
 }
 
 /// Graph-path diff result.
@@ -221,6 +393,7 @@ pub trait SessionGraphStore: Send + Sync {
         session_id: &str,
         label: Option<&str>,
         active_agent_name: &str,
+        project_target_branch: &str,
     ) -> crate::Result<GraphSession>;
 
     fn open_session(&self, session_id: &str) -> crate::Result<GraphSession>;
@@ -244,6 +417,31 @@ pub trait SessionGraphStore: Send + Sync {
     fn diff(&self, session_id: &str, from: &str, to: &str) -> crate::Result<GraphDiff>;
 
     fn reset(&self, session_id: &str, target: &str) -> crate::Result<ResetResult>;
+
+    /// Persist a precomputed turn commit with prepared identity.
+    ///
+    /// Uses the prepared timestamp, message IDs, and commit ID. Validates current
+    /// HEAD as CAS. Rejects a same-ID row whose payload differs (T-36-06).
+    fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> crate::Result<TurnCommit>;
+
+    /// Look up a single turn commit by session and commit ID.
+    ///
+    /// Returns `None` if not found. Decodes lifecycle evidence strictly.
+    fn get_turn_commit(
+        &self,
+        session_id: &str,
+        commit_id: &str,
+    ) -> crate::Result<Option<TurnCommit>>;
+
+    /// Mark a commit's retained snapshot as lost (operational state only).
+    ///
+    /// Must never mutate immutable commit fields or IDs (T-36-07).
+    fn set_snapshot_lost(&self, commit_id: &str, lost: bool) -> crate::Result<()>;
+
+    /// Query snapshot-lost operational state for a commit.
+    ///
+    /// Returns `None` if no operational state has been recorded.
+    fn get_snapshot_lost(&self, commit_id: &str) -> crate::Result<Option<bool>>;
 }
 
 /// Derive commit message from first user message.
@@ -334,6 +532,136 @@ pub fn canonical_turn_commit_id(
     hash_json("v1_turn_commit", &payload)
 }
 
+/// Schema version for the v2 lifecycle-aware commit payload (D-29).
+pub const COMMIT_PAYLOAD_SCHEMA_VERSION_V2: u32 = 2;
+
+/// Precomputed turn commit identity, produced before any storage effects.
+#[derive(Debug, Clone)]
+pub struct PreparedTurnCommit {
+    /// The computed commit ID (SHA-256 hex).
+    pub commit_id: String,
+    /// Computed message IDs in transcript order.
+    pub message_ids: Vec<String>,
+    /// The turn seed used for message ID scoping.
+    pub turn_seed: String,
+    /// The full immutable turn commit.
+    pub commit: TurnCommit,
+    /// Original messages in transcript order, carried for persistence.
+    pub messages: Vec<GraphMessage>,
+}
+
+/// Compute the final immutable turn commit ID before any storage effects.
+///
+/// Includes all D-29 logical lifecycle fields in the canonical payload.
+/// Bumps the schema version to v2 so lifecycle-aware commits have distinct
+/// identity from v1 commits.
+pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> PreparedTurnCommit {
+    let turn_seed = canonical_turn_seed(
+        &input.session_id,
+        &input.parent_ids,
+        created_at,
+        &input.model,
+        &input.provider,
+        &input.status,
+        &input.commit_message,
+    );
+
+    let message_ids: Vec<String> = input
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| canonical_message_id(&input.session_id, &turn_seed, msg, i))
+        .collect();
+
+    let commit_id = canonical_turn_commit_id_v2(input, &message_ids, created_at);
+
+    let commit = TurnCommit {
+        commit_id: commit_id.clone(),
+        session_id: input.session_id.clone(),
+        parent_ids: input.parent_ids.clone(),
+        message_ids: message_ids.clone(),
+        agent_name: input.agent_name.clone(),
+        profile_snapshot_hash: input.profile_snapshot_hash.clone(),
+        profile_snapshot_json: input.profile_snapshot_json.clone(),
+        model: input.model.clone(),
+        provider: input.provider.clone(),
+        status: input.status.clone(),
+        disposition: input.disposition.clone(),
+        lifecycle: input.lifecycle.clone(),
+        commit_message: input.commit_message.clone(),
+        usage: input.usage.clone(),
+        terminal_reason: input.terminal_reason.clone(),
+        created_at: created_at.to_string(),
+    };
+
+    PreparedTurnCommit {
+        commit_id,
+        message_ids,
+        turn_seed,
+        commit,
+        messages: input.messages.clone(),
+    }
+}
+
+/// V2 canonical turn commit ID including disposition and lifecycle evidence (D-29).
+fn canonical_turn_commit_id_v2(
+    input: &TurnCommitInput,
+    message_ids: &[String],
+    created_at: &str,
+) -> String {
+    let lifecycle_payload = input.lifecycle.as_ref().map(|lc| {
+        serde_json::json!({
+            "target_project_ref": lc.target_project_ref,
+            "baseline_oid": lc.baseline_oid,
+            "candidate_oid": lc.candidate_oid,
+            "candidate_ref": lc.candidate_ref,
+            "verification": lc.verification.as_ref().map(|v| serde_json::json!({
+                "argv": v.argv,
+                "profile_hash": v.profile_hash,
+                "candidate_oid": v.candidate_oid,
+                "expected_exit_code": v.expected_exit_code,
+                "exit_code": v.exit_code,
+                "passed": v.passed,
+            })),
+            "snapshot_backend": lc.snapshot_ref.as_ref().map(|s| &s.identity.backend),
+            "snapshot_nonce": lc.snapshot_ref.as_ref().map(|s| s.identity.nonce),
+            "resumes_turn_oid": lc.resumes_turn_oid,
+        })
+    });
+
+    let payload = serde_json::json!({
+        "schema_version": COMMIT_PAYLOAD_SCHEMA_VERSION_V2,
+        "session_id": input.session_id,
+        "parent_ids": input.parent_ids,
+        "message_ids": message_ids,
+        "agent_name": input.agent_name,
+        "profile_snapshot_hash": input.profile_snapshot_hash,
+        "model": input.model,
+        "provider": input.provider,
+        "status": input.status.as_str(),
+        "disposition": input.disposition.as_str(),
+        "lifecycle": lifecycle_payload,
+        "commit_message": input.commit_message,
+        "created_at": created_at,
+    });
+    hash_json("v2_turn_commit", &payload)
+}
+
+/// Derive the physical snapshot name from session ID, commit ID, and nonce.
+///
+/// Format:  (D-12, D-29).
+pub fn derive_snapshot_name(session_id: &str, commit_id: &str, nonce: u32) -> String {
+    let commit_prefix: String = commit_id.chars().take(8).collect();
+    format!("lattice-{}-{}-{:08x}", session_id, commit_prefix, nonce)
+}
+
+/// Validate that a snapshot name matches the expected derivation.
+///
+/// Rejects substituted session IDs, commit prefixes, or nonces.
+pub fn validate_snapshot_name(name: &str, session_id: &str, commit_id: &str, nonce: u32) -> bool {
+    name == derive_snapshot_name(session_id, commit_id, nonce)
+}
+
 fn hash_json(kind: &str, value: &serde_json::Value) -> String {
     let json = canonical_json(value);
     let mut hasher = Sha256::new();
@@ -407,6 +735,7 @@ mod graph_contract {
             active_agent_name: "coder".to_string(),
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
+            project_target_branch: None,
         };
         assert_eq!(session.session_id, "sess-1");
 
@@ -456,6 +785,8 @@ mod graph_contract {
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: "Hello".to_string(),
             usage: None,
             terminal_reason: None,
@@ -475,6 +806,8 @@ mod graph_contract {
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: "Hello".to_string(),
             usage: None,
             terminal_reason: None,
@@ -494,6 +827,7 @@ mod graph_contract {
             active_agent_name: "coder".to_string(),
             branches: vec![],
             commit_count: 5,
+            project_target_branch: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("commit_count"));
@@ -506,6 +840,7 @@ mod graph_contract {
             head_commit_id: Some("abc".to_string()),
             commit_count: 5,
             updated_at: "2026-01-01T00:00:00Z".to_string(),
+            project_target_branch: None,
         };
         assert_eq!(summary.commit_count, 5);
     }
@@ -537,6 +872,7 @@ mod graph_contract {
             commit_id: "abc".to_string(),
             parent_ids: vec!["parent".to_string()],
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
             agent_name: "coder".to_string(),
             profile_snapshot_hash: "profile-hash".to_string(),
             model: "sonnet".to_string(),
@@ -845,6 +1181,8 @@ mod graph_contract {
             model: "sonnet".to_string(),
             provider: "anthropic".to_string(),
             status: TurnCommitStatus::Completed,
+            disposition: WorkspaceDisposition::NotApplicable,
+            lifecycle: None,
             commit_message: "Hello".to_string(),
             usage: Some(TurnUsage {
                 prompt_tokens: 100,

@@ -3,12 +3,10 @@
 
 //! Explicit DTO bridge between native [`ExecutionBackend`] and [`Workspace`].
 
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use lancet_native::{
     DirectoryEntry as NativeDirectoryEntry, ExecOutput as NativeExecOutput,
     ExecRequest as NativeExecRequest, ExecutionBackend, ExecutionBackendError,
@@ -17,8 +15,8 @@ use lancet_native::{
     PathKind as NativePathKind, UpperContext, WorkspacePath as NativeWorkspacePath,
 };
 use lattice_workspace::{
-    DirectoryEntry, ExecOutput, ExecRequest, FindRequest, GrepMatch, GrepRequest, PathFacts,
-    PathIntent, PathKind, UpperHandle, Workspace, WorkspaceError, WorkspacePath,
+    DirectoryEntry, ExecOutput, ExecRequest, FindRequest, GrepRequest, PathFacts, PathIntent,
+    PathKind, UpperHandle, Workspace, WorkspaceError, WorkspacePath,
     WorkspacePathError as WsPathError,
 };
 
@@ -69,7 +67,7 @@ impl WorkspaceExecutionBackend {
     fn convert_path_out(
         path: &WorkspacePath,
     ) -> Result<NativeWorkspacePath, ExecutionBackendError> {
-        NativeWorkspacePath::parse(path.as_str()).map_err(|e| ExecutionBackendError::Path(e))
+        NativeWorkspacePath::parse(path.as_str()).map_err(ExecutionBackendError::Path)
     }
 
     fn convert_intent(intent: NativePathIntent) -> PathIntent {
@@ -381,13 +379,14 @@ impl ExecutionBackend for WorkspaceExecutionBackend {
                 .git_status(&handle)
                 .await
                 .map_err(Self::map_error)?;
+            // Consume typed entries directly — no line-based parsing (D-08).
             let mut out = Vec::new();
-            for path_str in parse_porcelain_changed_paths(&status.porcelain) {
-                let path = NativeWorkspacePath::parse(&path_str).map_err(|err| {
+            for entry in &status.entries {
+                let path = NativeWorkspacePath::parse(&entry.path).map_err(|err| {
                     ExecutionBackendError::ExecutionFailed {
                         message: format!(
-                            "changed_paths: unparseable porcelain path {:?}: {}",
-                            path_str, err
+                            "changed_paths: unparseable path {:?}: {}",
+                            entry.path, err
                         ),
                     }
                 })?;
@@ -398,40 +397,21 @@ impl ExecutionBackend for WorkspaceExecutionBackend {
     }
 }
 
-fn parse_porcelain_changed_paths(porcelain: &str) -> Vec<String> {
-    porcelain
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| {
-            if line.len() < 3 {
-                return None;
-            }
-            let rest = line[2..].trim_start();
-            if rest.is_empty() {
-                return None;
-            }
-            let path = if let Some((_, new_path)) = rest.split_once(" -> ") {
-                new_path.trim()
-            } else {
-                rest
-            };
-            Some(path.to_string())
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod workspace_execution_backend_tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use async_trait::async_trait;
     use std::collections::BTreeMap;
 
+    use lattice_workspace::git_status::{GitStatusCode, GitStatusEntry};
     use lattice_workspace::{Backend, UpperSpec};
 
     #[derive(Default)]
     struct SpyWorkspace {
         records: Mutex<Vec<String>>,
-        git_status_porcelain: Mutex<String>,
+        git_status_entries: Mutex<Vec<GitStatusEntry>>,
     }
 
     #[async_trait]
@@ -453,9 +433,10 @@ mod workspace_execution_backend_tests {
             &self,
             _handle: &UpperHandle,
         ) -> lattice_workspace::Result<lattice_workspace::GitStatus> {
+            let entries = self.git_status_entries.lock().unwrap().clone();
             Ok(lattice_workspace::GitStatus {
-                porcelain: self.git_status_porcelain.lock().unwrap().clone(),
-                is_clean: false,
+                is_clean: entries.is_empty(),
+                entries,
             })
         }
 
@@ -509,18 +490,23 @@ mod workspace_execution_backend_tests {
         }
     }
 
-    #[test]
-    fn parse_porcelain_changed_paths_handles_renames() {
-        let porcelain = " M src/lib.rs\n?? tests/new.rs\nR  old.rs -> new.rs\n";
-        let paths = super::parse_porcelain_changed_paths(porcelain);
-        assert_eq!(paths, vec!["src/lib.rs", "tests/new.rs", "new.rs"]);
-    }
-
     #[tokio::test]
-    async fn workspace_execution_backend_changed_paths_from_git_status() {
+    async fn workspace_execution_backend_changed_paths_from_typed_entries() {
         let spy = Arc::new(SpyWorkspace::default());
-        *spy.git_status_porcelain.lock().unwrap() =
-            " M src/lib.rs\n?? tests/new.rs\n".to_string();
+        *spy.git_status_entries.lock().unwrap() = vec![
+            GitStatusEntry {
+                index_status: GitStatusCode::Unmodified,
+                worktree_status: GitStatusCode::Modified,
+                path: "src/lib.rs".into(),
+                source_path: None,
+            },
+            GitStatusEntry {
+                index_status: GitStatusCode::Untracked,
+                worktree_status: GitStatusCode::Untracked,
+                path: "tests/new.rs".into(),
+                source_path: None,
+            },
+        ];
         let handle = UpperHandle {
             id: "upper-test".into(),
             backend: Backend::Deterministic,

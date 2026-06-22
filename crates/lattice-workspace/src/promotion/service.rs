@@ -10,19 +10,17 @@ use std::sync::Arc;
 use git2::Repository;
 use uuid::Uuid;
 
-use super::candidate::{validate_candidate, ValidatedCandidate, VerificationResult};
+use super::candidate::{ValidatedCandidate, VerificationResult, validate_candidate};
 use super::journal::{
-    recover_journal, FaultPoint, JournalHeader, PromotionJournal, RecoveryOutcome,
+    FaultPoint, JournalHeader, PromotionJournal, RecoveryOutcome, recover_journal,
 };
 use super::lock::{
-    recover_stale_lock, DurabilityRecorder, LowerLockGuard, ProcessIdentityReader,
-    ProcIdentityReader, StaleLockDisposition,
+    DurabilityRecorder, LowerLockGuard, ProcIdentityReader, ProcessIdentityReader,
+    StaleLockDisposition, recover_stale_lock,
 };
-use super::materialize::{build_materialization_plan, DurableFs, MaterializationPlan};
+use super::materialize::{DurableFs, MaterializationPlan, build_materialization_plan};
 use super::refs::{PromotionRefs, RefComponent, RefTransactionRequest, run_ref_transaction};
-use super::{
-    ManagedLower, PromotionError, PromotionLimits,
-};
+use super::{ManagedLower, PromotionError, PromotionLimits};
 
 /// Inputs for the long-running prepare phase (no Lower lock or journal).
 #[derive(Debug)]
@@ -59,11 +57,7 @@ pub struct PromotionOutcome {
 
 /// Prepare validates the candidate and builds the immutable plan without Lower effects.
 pub fn prepare(request: PromotionRequest) -> Result<PreparedPromotion, PromotionError> {
-    let refs = PromotionRefs::new(
-        &request.branch,
-        &request.session_id,
-        &request.turn_id,
-    )?;
+    let refs = PromotionRefs::new(&request.branch, &request.session_id, &request.turn_id)?;
 
     let validated = validate_candidate(
         &request.repository_path,
@@ -80,10 +74,8 @@ pub fn prepare(request: PromotionRequest) -> Result<PreparedPromotion, Promotion
         &request.limits,
     )?;
 
-    let old_project_oid = resolve_ref_required(
-        &request.repository_path,
-        refs.project_ref.as_str(),
-    )?;
+    let old_project_oid =
+        resolve_ref_required(&request.repository_path, refs.project_ref.as_str())?;
 
     if old_project_oid != validated.baseline_oid {
         return Err(PromotionError::BaselineMismatch {
@@ -104,6 +96,50 @@ pub fn prepare(request: PromotionRequest) -> Result<PreparedPromotion, Promotion
     })
 }
 
+/// Build a [`PreparedPromotion`] from an already-validated candidate.
+///
+/// Used for the pinned-retry path where the candidate has been validated
+/// via [`prepare_pinned`] without requiring a bundle. The caller supplies
+/// the validated candidate and the function builds the materialization plan
+/// and checks baseline consistency.
+pub fn prepare_from_validated(
+    repository_path: PathBuf,
+    branch: String,
+    session_id: &RefComponent,
+    turn_id: &RefComponent,
+    validated: ValidatedCandidate,
+    limits: &PromotionLimits,
+) -> Result<PreparedPromotion, PromotionError> {
+    let refs = PromotionRefs::new(&branch, session_id, turn_id)?;
+
+    let path_plan = build_materialization_plan(
+        &repository_path,
+        &validated.baseline_oid,
+        &validated.candidate_oid,
+        limits,
+    )?;
+
+    let old_project_oid = resolve_ref_required(&repository_path, refs.project_ref.as_str())?;
+
+    if old_project_oid != validated.baseline_oid {
+        return Err(PromotionError::BaselineMismatch {
+            expected: validated.baseline_oid.clone(),
+            actual: old_project_oid,
+        });
+    }
+
+    Ok(PreparedPromotion {
+        repository_path,
+        branch,
+        refs,
+        validated,
+        path_plan,
+        journal_id: Uuid::new_v4().to_string(),
+        old_project_oid,
+        fault: None,
+    })
+}
+
 /// Commit is the only API that writes managed Lower (D-01/D-02).
 pub fn commit<F>(
     prepared: PreparedPromotion,
@@ -112,12 +148,7 @@ pub fn commit<F>(
 where
     F: FnOnce(&Repository, Option<git2::Oid>) -> Result<git2::Oid, PromotionError>,
 {
-    commit_with_reader(
-        prepared,
-        &ProcIdentityReader,
-        None,
-        make_session_commit,
-    )
+    commit_with_reader(prepared, &ProcIdentityReader, None, make_session_commit)
 }
 
 /// Commit with injectable identity/durability hooks (tests and stale-lock recovery).
@@ -145,10 +176,8 @@ where
         });
     }
 
-    let observed_project_oid = resolve_ref_required(
-        lower.repository_path(),
-        prepared.refs.project_ref.as_str(),
-    )?;
+    let observed_project_oid =
+        resolve_ref_required(lower.repository_path(), prepared.refs.project_ref.as_str())?;
     if observed_project_oid != prepared.old_project_oid {
         return Err(PromotionError::BaselineConflict {
             expected: prepared.old_project_oid.clone(),
@@ -156,12 +185,21 @@ where
         });
     }
 
-    if resolve_ref(lower.repository_path(), prepared.refs.candidate_ref.as_str())?.is_some() {
-        return Err(PromotionError::CandidateRefExists);
+    // D-14: if candidate ref already exists, verify it matches (pinned retry path).
+    let existing_candidate_oid = resolve_ref(
+        lower.repository_path(),
+        prepared.refs.candidate_ref.as_str(),
+    )?;
+    if let Some(ref existing) = existing_candidate_oid
+        && *existing != prepared.validated.candidate_oid
+    {
+        return Err(PromotionError::CandidateSubstitution {
+            expected: existing.clone(),
+            actual: prepared.validated.candidate_oid.clone(),
+        });
     }
 
-    let old_session_oid =
-        resolve_ref(lower.repository_path(), prepared.refs.session_ref.as_str())?;
+    let old_session_oid = resolve_ref(lower.repository_path(), prepared.refs.session_ref.as_str())?;
 
     let header = JournalHeader {
         journal_id: prepared.journal_id.clone(),
@@ -177,10 +215,7 @@ where
     let repo = Repository::open(lower.repository_path())
         .map_err(|e| PromotionError::Git(e.to_string()))?;
 
-    let parent_session_oid = old_session_oid
-        .as_deref()
-        .map(parse_git_oid)
-        .transpose()?;
+    let parent_session_oid = old_session_oid.as_deref().map(parse_git_oid).transpose()?;
 
     let session_oid = match make_session_commit(&repo, parent_session_oid) {
         Ok(oid) => oid.to_string(),
@@ -190,12 +225,13 @@ where
         }
     };
 
-    let txn_request = RefTransactionRequest::new(
+    let txn_request = RefTransactionRequest::with_existing_candidate(
         prepared.refs.clone(),
         prepared.old_project_oid.clone(),
         old_session_oid.clone(),
         prepared.validated.candidate_oid.clone(),
         session_oid.clone(),
+        existing_candidate_oid.clone(),
     )?;
 
     let txn_outcome = match run_ref_transaction(lower.repository_path(), &txn_request) {
@@ -215,12 +251,8 @@ where
         return Err(map_post_ref_crash(err));
     }
 
-    let materialize_result = materialize_journaled_paths(
-        &lower,
-        &mut journal,
-        &header,
-        prepared.fault,
-    );
+    let materialize_result =
+        materialize_journaled_paths(&lower, &mut journal, &header, prepared.fault);
 
     if let Err(err) = materialize_result {
         return Err(map_post_ref_crash(err));
@@ -294,15 +326,11 @@ pub fn recover_with_reader(
                 &metadata.lock_id,
                 identity_reader,
                 durability,
-                || {
-                    match replay_journal(&lower, &project_oid)? {
-                        RecoveryOutcome::Complete => Ok(()),
-                        RecoveryOutcome::RecoveryRequired => {
-                            Err(PromotionError::RecoveryRequired)
-                        }
-                        RecoveryOutcome::RecoveryConflict { detail } => {
-                            Err(PromotionError::RecoveryConflict { detail })
-                        }
+                || match replay_journal(&lower, &project_oid)? {
+                    RecoveryOutcome::Complete => Ok(()),
+                    RecoveryOutcome::RecoveryRequired => Err(PromotionError::RecoveryRequired),
+                    RecoveryOutcome::RecoveryConflict { detail } => {
+                        Err(PromotionError::RecoveryConflict { detail })
                     }
                 },
             )?;
@@ -380,7 +408,10 @@ fn replay_pending_journal_if_any(lower: &ManagedLower) -> Result<(), PromotionEr
     }
 }
 
-fn replay_journal(lower: &ManagedLower, project_ref_oid: &str) -> Result<RecoveryOutcome, PromotionError> {
+fn replay_journal(
+    lower: &ManagedLower,
+    project_ref_oid: &str,
+) -> Result<RecoveryOutcome, PromotionError> {
     recover_journal(
         lower.repository_path(),
         lower.worktree_path(),
@@ -485,10 +516,7 @@ fn parse_git_oid(raw: &str) -> Result<git2::Oid, PromotionError> {
     git2::Oid::from_str(raw).map_err(|e| PromotionError::Git(format!("parse oid: {e}")))
 }
 
-fn maybe_fault(
-    active: Option<FaultPoint>,
-    point: FaultPoint,
-) -> Result<(), PromotionError> {
+fn maybe_fault(active: Option<FaultPoint>, point: FaultPoint) -> Result<(), PromotionError> {
     if active == Some(point) {
         return Err(PromotionError::SimulatedCrash);
     }

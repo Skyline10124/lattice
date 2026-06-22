@@ -10,11 +10,11 @@ use std::process::Command;
 
 use git2::{IndexAddOption, Repository, Signature};
 use lattice_workspace::{
+    EgressPolicy, ImageOrTemplate, UpperSpec, Workspace, WorkspaceError,
     promotion::{
-        validate_candidate, CandidateHazard, PromotionLimits, VerificationResult, PromotionError,
+        CandidateHazard, PromotionError, PromotionLimits, VerificationResult, validate_candidate,
     },
     testing::DeterministicWorkspace,
-    EgressPolicy, ImageOrTemplate, UpperSpec, Workspace, WorkspaceError,
 };
 
 mod candidate_export {
@@ -36,15 +36,8 @@ mod candidate_export {
         index.write().expect("index write");
         let tree_id = index.write_tree().expect("write_tree");
         let tree = repo.find_tree(tree_id).expect("tree");
-        repo.commit(
-            Some("HEAD"),
-            &sig(),
-            &sig(),
-            message,
-            &tree,
-            parents,
-        )
-        .expect("commit")
+        repo.commit(Some("HEAD"), &sig(), &sig(), message, &tree, parents)
+            .expect("commit")
     }
 
     /// Baseline with one child commit (clean candidate ahead of baseline).
@@ -68,11 +61,7 @@ mod candidate_export {
             &[&repo.find_commit(baseline).expect("parent")],
         );
 
-        (
-            dir,
-            baseline.to_string(),
-            candidate.to_string(),
-        )
+        (dir, baseline.to_string(), candidate.to_string())
     }
 
     fn make_spec(host_repo_path: PathBuf, baseline_oid: String) -> UpperSpec {
@@ -128,7 +117,11 @@ mod candidate_export {
         let candidate = commit_candidate_in_upper(&ws, &handle).await;
 
         let export = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect("export");
         assert_eq!(export.baseline_oid(), baseline);
@@ -178,13 +171,20 @@ mod candidate_export {
         ws.exec_upper(
             &handle,
             "sh",
-            &["-c", "echo staged >> candidate.txt && git add candidate.txt"],
+            &[
+                "-c",
+                "echo staged >> candidate.txt && git add candidate.txt",
+            ],
         )
         .await
         .expect("stage modification");
 
         let err = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect_err("staged changes must reject");
         assert!(matches!(err, WorkspaceError::UpperDirty { .. }));
@@ -197,16 +197,16 @@ mod candidate_export {
         let handle = provision_upper(&ws, &baseline, host_dir.path()).await;
         let _ = commit_candidate_in_upper(&ws, &handle).await;
 
-        ws.exec_upper(
-            &handle,
-            "sh",
-            &["-c", "echo dirty >> candidate.txt"],
-        )
-        .await
-        .expect("modify");
+        ws.exec_upper(&handle, "sh", &["-c", "echo dirty >> candidate.txt"])
+            .await
+            .expect("modify");
 
         let err = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect_err("unstaged changes must reject");
         assert!(matches!(err, WorkspaceError::UpperDirty { .. }));
@@ -224,7 +224,11 @@ mod candidate_export {
             .expect("untracked");
 
         let err = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect_err("untracked must reject");
         assert!(matches!(err, WorkspaceError::UpperDirty { .. }));
@@ -273,15 +277,8 @@ mod candidate_validation {
         index.write().expect("index write");
         let tree_id = index.write_tree().expect("write_tree");
         let tree = repo.find_tree(tree_id).expect("tree");
-        repo.commit(
-            Some("HEAD"),
-            &sig(),
-            &sig(),
-            message,
-            &tree,
-            parents,
-        )
-        .expect("commit")
+        repo.commit(Some("HEAD"), &sig(), &sig(), message, &tree, parents)
+            .expect("commit")
     }
 
     struct HostFixture {
@@ -341,32 +338,47 @@ mod candidate_validation {
         }
 
         fn verification(&self, passed: bool) -> VerificationResult {
-            VerificationResult {
-                candidate_oid: self.candidate.clone(),
+            VerificationResult::new(
+                self.candidate.clone(),
+                vec!["test-cmd".into()],
+                "abc123def456".into(),
+                0,
+                if passed { Some(0) } else { Some(1) },
                 passed,
-                summary: "test".into(),
-            }
+                "test".into(),
+            )
+            .expect("test evidence")
+        }
+
+        #[allow(dead_code)]
+        fn evidence(&self, passed: bool) -> VerificationResult {
+            VerificationResult::new(
+                self.candidate.clone(),
+                vec!["test-cmd".into(), "--flag".into()],
+                "abc123def456".into(),
+                0,
+                if passed { Some(0) } else { Some(1) },
+                passed,
+                "test".into(),
+            )
+            .expect("test evidence")
         }
     }
 
     fn snapshot_repo_state(repo_path: &Path) -> RepoSnapshot {
-        let git_common = git_output(repo_path, &["rev-parse", "--git-common-dir"]).unwrap_or_default();
+        let git_common =
+            git_output(repo_path, &["rev-parse", "--git-common-dir"]).unwrap_or_default();
         let lock_path = PathBuf::from(git_common)
             .join("lattice/promotion")
             .join(hex_branch("main"))
             .join("lower.lock");
         RepoSnapshot {
-            project_ref: git_output(repo_path, &["rev-parse", "refs/heads/main"]).unwrap_or_default(),
-            session_ref: git_output(
-                repo_path,
-                &["rev-parse", "refs/lattice/sessions/s1/main"],
-            )
-            .ok(),
-            candidate_ref: git_output(
-                repo_path,
-                &["rev-parse", "refs/lattice/candidates/s1/t1"],
-            )
-            .ok(),
+            project_ref: git_output(repo_path, &["rev-parse", "refs/heads/main"])
+                .unwrap_or_default(),
+            session_ref: git_output(repo_path, &["rev-parse", "refs/lattice/sessions/s1/main"])
+                .ok(),
+            candidate_ref: git_output(repo_path, &["rev-parse", "refs/lattice/candidates/s1/t1"])
+                .ok(),
             lower_head: None,
             lock_exists: lock_path.exists(),
             journal_exists: lock_path
@@ -377,7 +389,11 @@ mod candidate_validation {
     }
 
     fn hex_branch(branch: &str) -> String {
-        branch.as_bytes().iter().map(|b| format!("{b:02x}")).collect()
+        branch
+            .as_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -482,11 +498,16 @@ mod candidate_validation {
             &fx.repo_path,
             &export,
             &fx.baseline,
-            &VerificationResult {
-                candidate_oid: export.candidate_oid().to_string(),
-                passed: true,
-                summary: "test".into(),
-            },
+            &VerificationResult::new(
+                export.candidate_oid().to_string(),
+                vec!["test-cmd".into()],
+                "abc123".into(),
+                0,
+                Some(0),
+                true,
+                "test".into(),
+            )
+            .expect("test evidence"),
             &PromotionLimits::default(),
         )
         .expect("validate");
@@ -529,11 +550,16 @@ mod candidate_validation {
             &fx.repo_path,
             &export,
             &fx.baseline,
-            &VerificationResult {
-                candidate_oid: export.candidate_oid().to_string(),
-                passed: true,
-                summary: "test".into(),
-            },
+            &VerificationResult::new(
+                export.candidate_oid().to_string(),
+                vec!["test-cmd".into()],
+                "abc123".into(),
+                0,
+                Some(0),
+                true,
+                "test".into(),
+            )
+            .expect("test evidence"),
             &limits,
         )
         .expect_err("object count");
@@ -550,11 +576,16 @@ mod candidate_validation {
             &fx.repo_path,
             &export,
             &fx.baseline,
-            &VerificationResult {
-                candidate_oid: export.candidate_oid().to_string(),
-                passed: true,
-                summary: "test".into(),
-            },
+            &VerificationResult::new(
+                export.candidate_oid().to_string(),
+                vec!["test-cmd".into()],
+                "abc123".into(),
+                0,
+                Some(0),
+                true,
+                "test".into(),
+            )
+            .expect("test evidence"),
             &limits_ok,
         )
         .expect("within limit");
@@ -577,18 +608,27 @@ mod candidate_validation {
         .await
         .expect("commit gitmodules");
         let export = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect("export");
         let err = validate_candidate(
             host_dir.path(),
             &export,
             &baseline,
-            &VerificationResult {
-                candidate_oid: export.candidate_oid().to_string(),
-                passed: true,
-                summary: "test".into(),
-            },
+            &VerificationResult::new(
+                export.candidate_oid().to_string(),
+                vec!["test-cmd".into()],
+                "abc123".into(),
+                0,
+                Some(0),
+                true,
+                "test".into(),
+            )
+            .expect("test evidence"),
             &PromotionLimits::default(),
         )
         .expect_err("gitmodules");
@@ -619,18 +659,27 @@ mod candidate_validation {
         .await
         .expect("commit symlink");
         let export = ws
-            .export_candidate(&handle, &baseline, PromotionLimits::default().max_artifact_bytes)
+            .export_candidate(
+                &handle,
+                &baseline,
+                PromotionLimits::default().max_artifact_bytes,
+            )
             .await
             .expect("export");
         let err = validate_candidate(
             host_dir.path(),
             &export,
             &baseline,
-            &VerificationResult {
-                candidate_oid: export.candidate_oid().to_string(),
-                passed: true,
-                summary: "test".into(),
-            },
+            &VerificationResult::new(
+                export.candidate_oid().to_string(),
+                vec!["test-cmd".into()],
+                "abc123".into(),
+                0,
+                Some(0),
+                true,
+                "test".into(),
+            )
+            .expect("test evidence"),
             &PromotionLimits::default(),
         )
         .expect_err("symlink");
@@ -655,5 +704,142 @@ mod candidate_validation {
         );
         let after = snapshot_repo_state(&fx.repo_path);
         assert_eq!(before, after);
+    }
+}
+
+/// Phase 36 D-04: structured verification evidence binding tests.
+///
+/// These tests assert that:
+/// - Empty argv or empty profile hash is invalid evidence.
+/// - `passed` must agree with expected/actual exit code.
+/// - Timeout/no-exit cannot be passing.
+/// - Evidence fields survive validation.
+/// - Malformed evidence rejects before any bundle import.
+mod verification_evidence {
+    use super::*;
+
+    #[test]
+    fn verification_empty_argv_rejected() {
+        let err = VerificationResult::new(
+            "a".repeat(40),
+            vec![],
+            "abc123".into(),
+            0,
+            Some(0),
+            true,
+            "test".into(),
+        )
+        .expect_err("empty argv must be rejected");
+        assert!(
+            err.to_string().contains("evidence"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verification_empty_profile_hash_rejected() {
+        let err = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into()],
+            String::new(),
+            0,
+            Some(0),
+            true,
+            "test".into(),
+        )
+        .expect_err("empty profile_hash must be rejected");
+        assert!(
+            err.to_string().contains("evidence"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verification_coherence_exit_mismatch_rejected() {
+        // passed=true but exit_code (99) != expected_exit_code (0)
+        let err = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into()],
+            "abc123".into(),
+            0,
+            Some(99),
+            true,
+            "test".into(),
+        )
+        .expect_err("exit mismatch with passed=true must be rejected");
+        assert!(
+            err.to_string().contains("evidence"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verification_timeout_cannot_pass() {
+        // passed=true but exit_code=None (timeout/no-exit)
+        let err = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into()],
+            "abc123".into(),
+            0,
+            None,
+            true,
+            "test".into(),
+        )
+        .expect_err("timeout with passed=true must be rejected");
+        assert!(
+            err.to_string().contains("evidence"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn verification_valid_evidence_constructs() {
+        let vr = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into(), "--flag".into()],
+            "abc123def456".into(),
+            0,
+            Some(0),
+            true,
+            "ok".into(),
+        )
+        .expect("valid evidence must construct");
+        assert!(vr.passed);
+        assert_eq!(vr.exit_code, Some(0));
+        assert_eq!(vr.expected_exit_code, 0);
+        assert_eq!(vr.argv, vec!["cmd".to_string(), "--flag".to_string()]);
+        assert_eq!(vr.profile_hash, "abc123def456");
+    }
+
+    #[test]
+    fn verification_failed_with_nonzero_exit_constructs() {
+        let vr = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into()],
+            "abc123".into(),
+            0,
+            Some(1),
+            false,
+            "failed".into(),
+        )
+        .expect("failed with nonzero exit must construct");
+        assert!(!vr.passed);
+        assert_eq!(vr.exit_code, Some(1));
+    }
+
+    #[test]
+    fn verification_failed_with_timeout_constructs() {
+        let vr = VerificationResult::new(
+            "a".repeat(40),
+            vec!["cmd".into()],
+            "abc123".into(),
+            0,
+            None,
+            false,
+            "timeout".into(),
+        )
+        .expect("failed with timeout must construct");
+        assert!(!vr.passed);
+        assert_eq!(vr.exit_code, None);
     }
 }

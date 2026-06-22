@@ -17,9 +17,19 @@ use std::path::PathBuf;
 pub struct TuiOptions {
     pub session_id: Option<String>,
     pub agent: String,
+    pub project_branch: Option<String>,
     pub session_dir: PathBuf,
     pub agents_dir: PathBuf,
     pub project_root: PathBuf,
+}
+
+fn required_project_branch(project_branch: Option<&str>) -> Result<&str> {
+    match project_branch {
+        Some(branch) if !branch.trim().is_empty() => Ok(branch),
+        _ => Err(anyhow::anyhow!(
+            "--project-branch is required when creating a new TUI session"
+        )),
+    }
 }
 
 pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
@@ -30,22 +40,29 @@ pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
                 id: session_id.clone(),
             })
             .with_context(|| format!("open session {session_id}"))?,
-        None => session_api
-            .create_session(CreateSessionRequest {
-                label: None,
-                active_agent: options.agent.clone(),
-            })
-            .context("create chat session")?,
+        None => {
+            let project_branch =
+                required_project_branch(options.project_branch.as_deref())?.to_string();
+            session_api
+                .create_session(CreateSessionRequest {
+                    label: None,
+                    active_agent: options.agent.clone(),
+                    project_branch,
+                })
+                .context("create chat session")?
+        }
     };
 
     let session_id = session.session_id;
     let active_agent = session.active_agent_name;
 
     // ---------- banner ----------
+    let project_branch = session.project_target_branch.as_deref().unwrap_or("main");
     println!();
     println!("  LATTICE");
     println!("  session  {}", session_id);
     println!("  agent    {}", active_agent);
+    println!("  project  {}", project_branch);
     println!();
     println!("  /help    show commands");
     println!("  /quit    exit");
@@ -251,4 +268,37 @@ fn flush_mid_token<WOut: Write, WErr: Write>(
         *tokens_ended_without_newline = false;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_session_project_branch_is_required() {
+        let error = required_project_branch(None).expect_err("missing branch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("--project-branch is required when creating a new TUI session")
+        );
+    }
+
+    #[test]
+    fn new_session_project_branch_rejects_blank_values() {
+        let error = required_project_branch(Some("  ")).expect_err("blank branch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("--project-branch is required when creating a new TUI session")
+        );
+    }
+
+    #[test]
+    fn new_session_project_branch_preserves_explicit_value() {
+        assert_eq!(
+            required_project_branch(Some("feature/x")).expect("valid branch"),
+            "feature/x"
+        );
+    }
 }

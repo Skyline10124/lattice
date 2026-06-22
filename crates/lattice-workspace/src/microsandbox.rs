@@ -37,10 +37,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use microsandbox::{NetworkPolicy, Sandbox, Snapshot, SnapshotDestination};
 
 use crate::{
-    Backend, CredentialSpec, DirectoryEntry, EgressPolicy, ExecOutput, ExecRequest, FindRequest,
-    GitStatus, GrepMatch, GrepRequest, MAX_WORKSPACE_WRITE_BYTES, NetPlan, PathFacts, PathIntent,
-    PathKind, Result, UpperHandle, UpperSpec, Workspace, WorkspaceError, WorkspacePath,
-    CandidateExport, plan_egress, validate_baseline_oid,
+    Backend, CandidateExport, CredentialSpec, DirectoryEntry, EgressPolicy, ExecOutput,
+    ExecRequest, FindRequest, GitStatus, GrepMatch, GrepRequest, MAX_WORKSPACE_WRITE_BYTES,
+    NetPlan, PathFacts, PathIntent, PathKind, Result, SnapshotRef, UpperHandle, UpperSpec,
+    Workspace, WorkspaceError, WorkspacePath, plan_egress, validate_baseline_oid,
+    validate_snapshot_name,
 };
 
 /// Fixed shell command that installs `git` inside a Debian/Ubuntu-based Upper.
@@ -93,6 +94,24 @@ pub(crate) fn apply_egress(
             builder.network(move |n| n.policy(p))
         }
     })
+}
+
+/// Extract the session prefix from a D-12 snapshot name for quota counting.
+///
+/// Input:  `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`
+/// Output: `lattice-{session_id}-` (trailing dash included for exact
+/// session-boundary prefix matching, consistent with `list_retained_snapshots`).
+fn extract_session_prefix(snapshot_name: &str) -> String {
+    let parts: Vec<&str> = snapshot_name.rsplitn(3, '-').collect();
+    if parts.len() >= 3 {
+        // WR-03: append the trailing dash so `starts_with` matches the session
+        // boundary exactly, aligning with `list_retained_snapshots`'s
+        // `lattice-{session_id}-` prefix and preventing a shorter session id
+        // (e.g. `abc`) from counting a longer one's (`abc-extended`) snapshots.
+        format!("{}-", parts[2])
+    } else {
+        snapshot_name.to_string()
+    }
 }
 
 /// Drives microsandbox through the `microsandbox` Rust SDK 0.5.6.
@@ -292,7 +311,31 @@ impl MicrosandboxWorkspace {
 
         let guest_pack = Self::upload_baseline_pack(sandbox, pack.path()).await?;
 
-        Self::exec_git_workspace(sandbox, &["index-pack", &guest_pack], "index-pack").await?;
+        // `git index-pack --stdin` stores the pack+idx into .git/objects/pack/
+        // automatically.  Without --stdin, index-pack only creates a sibling .idx
+        // and the objects never enter the store — causing update-ref to fail with
+        // "nonexistent object".  The exec API has no stdin pipe, so we redirect
+        // through the shell with a positional-arg path (no interpolation).
+        let index_out = sandbox
+            .exec_with("sh", |e| {
+                e.args([
+                    "-c",
+                    "git -C /workspace index-pack --stdin < \"$1\"",
+                    "sh",
+                    &guest_pack,
+                ])
+            })
+            .await
+            .map_err(Self::sdk_err)?;
+        if index_out.status().code != 0 {
+            let stderr = index_out
+                .stderr()
+                .map_err(|e| WorkspaceError::Sdk(format!("stderr decode: {e}")))?;
+            return Err(WorkspaceError::Git(format!(
+                "index-pack --stdin failed (exit {}): {stderr}",
+                index_out.status().code
+            )));
+        }
         Self::exec_git_workspace(
             sandbox,
             &[
@@ -316,10 +359,11 @@ impl MicrosandboxWorkspace {
         )
         .await?;
 
-        let actual = Self::exec_git_workspace_stdout(sandbox, &["rev-parse", "HEAD"], "rev-parse HEAD")
-            .await?
-            .trim()
-            .to_string();
+        let actual =
+            Self::exec_git_workspace_stdout(sandbox, &["rev-parse", "HEAD"], "rev-parse HEAD")
+                .await?
+                .trim()
+                .to_string();
         if actual != spec.baseline_oid {
             return Err(WorkspaceError::BaselineIdentityMismatch {
                 expected: spec.baseline_oid.clone(),
@@ -426,7 +470,9 @@ impl MicrosandboxWorkspace {
                 let stderr = out
                     .stderr()
                     .map_err(|e| WorkspaceError::Sdk(format!("dd stderr: {e}")))?;
-                return Err(WorkspaceError::Git(format!("bundle chunk read failed: {stderr}")));
+                return Err(WorkspaceError::Git(format!(
+                    "bundle chunk read failed: {stderr}"
+                )));
             }
             let b64 = out
                 .stdout()
@@ -439,14 +485,15 @@ impl MicrosandboxWorkspace {
             let bytes = STANDARD
                 .decode(b64.as_bytes())
                 .map_err(|e| WorkspaceError::Git(format!("base64 decode failed: {e}")))?;
-            bundle_file
-                .write_all(&bytes)
-                .map_err(WorkspaceError::Io)?;
+            bundle_file.write_all(&bytes).map_err(WorkspaceError::Io)?;
             offset += bytes.len() as u64;
         }
 
         bundle_file.flush().map_err(WorkspaceError::Io)?;
-        bundle_file.as_file().sync_all().map_err(WorkspaceError::Io)?;
+        bundle_file
+            .as_file()
+            .sync_all()
+            .map_err(WorkspaceError::Io)?;
         Ok((bundle_file, artifact_len))
     }
 
@@ -1000,19 +1047,28 @@ impl Workspace for MicrosandboxWorkspace {
         })
     }
 
-    /// Run `git status --porcelain=v1` inside the Upper and return parsed output.
+    /// Run `git status --porcelain=v1 -z` inside the Upper and return parsed entries.
     async fn git_status(&self, handle: &UpperHandle) -> Result<GitStatus> {
         let out = self
             .exec_upper(
                 handle,
                 "git",
-                &["-C", "/workspace", "status", "--porcelain=v1"],
+                &[
+                    "-C",
+                    "/workspace",
+                    "status",
+                    "--porcelain=v1",
+                    "-z",
+                    "--untracked-files=all",
+                    "--ignore-submodules=none",
+                ],
             )
             .await?;
-        Ok(GitStatus {
-            porcelain: out.stdout.clone(),
-            is_clean: out.stdout.trim().is_empty(),
-        })
+        // exec_upper decodes stdout as UTF-8 via the SDK; if the SDK cannot
+        // decode a non-UTF-8 filename, the error propagates as fail-closed.
+        let status = crate::parse_git_status_z(out.stdout.as_bytes())
+            .map_err(|e| WorkspaceError::Git(format!("git status parse failed: {e}")))?;
+        Ok(status)
     }
 
     async fn export_candidate(
@@ -1039,9 +1095,11 @@ impl Workspace for MicrosandboxWorkspace {
             )
             .await?;
         if !status.stdout.is_empty() {
-            return Err(WorkspaceError::UpperDirty {
-                porcelain: status.stdout,
-            });
+            let git_status = crate::parse_git_status_z(status.stdout.as_bytes())
+                .map_err(|e| WorkspaceError::Git(format!("status parse failed: {e}")))?;
+            let summary =
+                crate::git_status::GitStatusEntry::workspace_dirty_fact(&git_status.entries);
+            return Err(WorkspaceError::UpperDirty { summary });
         }
 
         let candidate_oid = Self::exec_git_workspace_stdout(
@@ -1107,20 +1165,20 @@ impl Workspace for MicrosandboxWorkspace {
         )
         .await?;
 
-        let export = match Self::download_guest_bundle(&sandbox, GUEST_BUNDLE, max_artifact_bytes).await
-        {
-            Ok(export) => export,
-            Err(err) => {
-                let _ = sandbox.exec("rm", ["-f", GUEST_BUNDLE]).await;
-                let _ = Self::exec_git_workspace(
-                    &sandbox,
-                    &["update-ref", "-d", &export_ref],
-                    "delete export ref",
-                )
-                .await;
-                return Err(err);
-            }
-        };
+        let export =
+            match Self::download_guest_bundle(&sandbox, GUEST_BUNDLE, max_artifact_bytes).await {
+                Ok(export) => export,
+                Err(err) => {
+                    let _ = sandbox.exec("rm", ["-f", GUEST_BUNDLE]).await;
+                    let _ = Self::exec_git_workspace(
+                        &sandbox,
+                        &["update-ref", "-d", &export_ref],
+                        "delete export ref",
+                    )
+                    .await;
+                    return Err(err);
+                }
+            };
 
         let _ = sandbox.exec("rm", ["-f", GUEST_BUNDLE]).await;
         let _ = Self::exec_git_workspace(
@@ -1279,6 +1337,160 @@ impl Workspace for MicrosandboxWorkspace {
     ) -> Result<Vec<WorkspacePath>> {
         let sandbox = self.clone_sandbox(handle).await?;
         self.find_files_guest(&sandbox, request).await
+    }
+
+    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+
+    /// Retain the Upper's full disk state as a named snapshot via the SDK.
+    ///
+    /// Flow: quota/name preflight → filesystem sync → stop sandbox → SDK snapshot
+    /// → remove from live map. On failure before snapshot success, the sandbox
+    /// is restored to the live map when safe.
+    async fn retain_upper(
+        &self,
+        handle: &UpperHandle,
+        snapshot_name: &str,
+        max_pending_snapshots: u32,
+    ) -> Result<SnapshotRef> {
+        // Validate D-12 name format before any effect (T-36-05).
+        validate_snapshot_name(snapshot_name)?;
+
+        // Quota check: count existing snapshots with the same session prefix.
+        let session_prefix = extract_session_prefix(snapshot_name);
+        let all_handles = Snapshot::list().await.map_err(Self::sdk_err)?;
+        let current_count = all_handles
+            .iter()
+            .filter(|h| h.name().is_some_and(|n| n.starts_with(&session_prefix)))
+            .count() as u32;
+        if current_count >= max_pending_snapshots {
+            return Err(WorkspaceError::SnapshotQuotaExceeded {
+                current: current_count,
+                max: max_pending_snapshots,
+            });
+        }
+
+        // Take the sandbox out of the live map.
+        let sandbox = self
+            .sandboxes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&handle.id)
+            .ok_or_else(|| WorkspaceError::Sdk(format!("no live sandbox for id={}", handle.id)))?;
+
+        // Sync filesystem before stopping.
+        let _ = sandbox.exec("sync", Vec::<String>::new()).await;
+
+        // Stop the sandbox — a snapshot must be taken from a stopped VM (D-15).
+        if let Err(e) = sandbox.stop().await {
+            // Cannot restore: sandbox.stop() consumes the running state.
+            // Log the error but don't put a dead sandbox back in the map.
+            return Err(Self::sdk_err(e));
+        }
+
+        // Create the SDK snapshot.
+        match Snapshot::builder(&handle.id)
+            .destination(SnapshotDestination::Name(snapshot_name.to_string()))
+            .create()
+            .await
+        {
+            Ok(_) => Ok(SnapshotRef {
+                backend: Backend::Microsandbox,
+                name: snapshot_name.to_string(),
+            }),
+            Err(e) => {
+                // Snapshot creation failed. The sandbox is already stopped and
+                // cannot be restored to the live map. Caller owns cleanup via
+                // destroy_upper (idempotent on missing handle).
+                Err(Self::sdk_err(e))
+            }
+        }
+    }
+
+    /// Restore a cold Upper from a retained SDK snapshot.
+    ///
+    /// Uses `Sandbox::builder(new).from_snapshot(name)` with current resource,
+    /// egress, and credential settings. This is a cold process restart (D-15).
+    async fn restore_retained_upper(
+        &self,
+        snapshot_ref: &SnapshotRef,
+        new_name: &str,
+        spec: &UpperSpec,
+    ) -> Result<UpperHandle> {
+        validate_baseline_oid(&spec.baseline_oid)?;
+
+        // Verify the snapshot exists before attempting restore.
+        Snapshot::open(&snapshot_ref.name)
+            .await
+            .map_err(|_| WorkspaceError::SnapshotNotFound {
+                name: snapshot_ref.name.clone(),
+            })?;
+
+        let mut builder = Sandbox::builder(new_name)
+            .from_snapshot(&snapshot_ref.name)
+            .cpus(Self::cpus_u8(spec.cpus)?)
+            .memory(spec.memory_mb)
+            .max_duration(spec.timeout_secs);
+
+        builder = apply_egress(builder, &spec.egress)?;
+
+        // Per-turn env creds on the builder (not baked in the snapshot — T-33-04).
+        for cred in &spec.credentials {
+            if let CredentialSpec::EnvVar { name: k, value: v } = cred {
+                builder = builder.env(k, v);
+            }
+        }
+
+        let sandbox = builder.create().await.map_err(Self::sdk_err)?;
+
+        // File creds injected post-boot.
+        Self::inject_file_credentials(&sandbox, &spec.credentials).await?;
+
+        self.sandboxes
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(new_name.to_string(), sandbox);
+
+        Ok(UpperHandle {
+            id: new_name.to_string(),
+            backend: Backend::Microsandbox,
+        })
+    }
+
+    /// Check whether a retained snapshot exists via SDK `Snapshot::open`.
+    ///
+    /// Security (T-36-15): only the snapshot name and existence boolean are
+    /// exposed; no content or credentials.
+    async fn retained_snapshot_exists(&self, snapshot_ref: &SnapshotRef) -> Result<bool> {
+        match Snapshot::open(&snapshot_ref.name).await {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// List all retained snapshot names matching the session prefix.
+    ///
+    /// Uses `Snapshot::list()` (indexed snapshots) filtered by prefix.
+    /// Security (T-36-15): only names are returned, not content.
+    async fn list_retained_snapshots(&self, session_id_prefix: &str) -> Result<Vec<String>> {
+        let prefix = format!("lattice-{session_id_prefix}-");
+        let handles = Snapshot::list().await.map_err(Self::sdk_err)?;
+        let mut names: Vec<String> = handles
+            .iter()
+            .filter_map(|h| h.name())
+            .filter(|name| name.starts_with(&prefix))
+            .map(|n| n.to_string())
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// Release a retained snapshot via SDK `Snapshot::remove`. Idempotent.
+    async fn release_retained_snapshot(&self, snapshot_ref: &SnapshotRef) -> Result<()> {
+        match Snapshot::remove(&snapshot_ref.name, false).await {
+            Ok(()) => Ok(()),
+            // If the snapshot doesn't exist, treat as success (idempotent).
+            Err(_) => Ok(()),
+        }
     }
 
     async fn exec(&self, handle: &UpperHandle, request: &ExecRequest) -> Result<ExecOutput> {

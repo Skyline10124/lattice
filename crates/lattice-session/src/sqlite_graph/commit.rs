@@ -1,27 +1,65 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Commit creation, log read, and head transcript reconstruction.
+//! Commit creation, log read, head transcript reconstruction, and prepared commit persistence.
 
 use chrono::Utc;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::graph::{
-    GraphMessage, HeadTranscript, TurnCommit, TurnCommitInput, TurnCommitStatus, TurnLogEntry,
-    TurnUsage, canonical_message_id, canonical_turn_commit_id, canonical_turn_seed,
+    GraphMessage, HeadTranscript, PreparedTurnCommit, TurnCommit, TurnCommitInput,
+    TurnCommitStatus, TurnLifecycleEvidence, TurnLogEntry, TurnUsage, WorkspaceDisposition,
 };
 use crate::{Result, SessionError};
 
 use super::SqliteSessionGraphStore;
 
+/// Strict decode a persisted status string, failing closed on unknown values.
+pub(super) fn decode_strict_status(raw: &str) -> Result<TurnCommitStatus> {
+    TurnCommitStatus::parse(raw)
+}
+
+/// Strict decode a persisted disposition string, failing closed on unknown values.
+pub(super) fn decode_strict_disposition(raw: &str) -> Result<WorkspaceDisposition> {
+    WorkspaceDisposition::parse(raw)
+}
+
+/// Decode lifecycle JSON from a persisted string, failing closed on malformed data.
+///
+/// Returns `None` when the stored value is the empty object `{}` (no lifecycle evidence).
+pub(super) fn decode_lifecycle_json(
+    db_path: &std::path::Path,
+    raw: &str,
+) -> Result<Option<TurnLifecycleEvidence>> {
+    if raw == "{}" {
+        return Ok(None);
+    }
+    serde_json::from_str(raw).map_err(|err| SessionError::Database {
+        path: db_path.to_path_buf(),
+        source: rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("malformed JSON in lifecycle_json: {err}"),
+            )),
+        ),
+    })
+}
+
+/// Encode lifecycle evidence to JSON for persistence.
+pub(super) fn encode_lifecycle_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
+    match lifecycle {
+        Some(lc) => serde_json::to_string(lc).unwrap_or_else(|_| "{}".to_string()),
+        None => "{}".to_string(),
+    }
+}
+
 impl SqliteSessionGraphStore {
     pub(super) fn head_transcript_impl(&self, session_id: &str) -> Result<HeadTranscript> {
         let conn = self.conn()?;
-
-        // Resolve the current HEAD commit ID (attached or detached).
         let head_cid = self.current_head_commit_id(&conn, session_id)?;
 
-        // No commits on current HEAD.
         let parent_commit_id = match &head_cid {
             None => {
                 return Ok(HeadTranscript {
@@ -33,13 +71,8 @@ impl SqliteSessionGraphStore {
             Some(cid) => cid.clone(),
         };
 
-        // All reachable commits in topological order (M-11): includes merge
-        // parents, not just first-parent ancestry.
         let commit_ids =
             self.collect_reachable_commits_topological(&conn, session_id, &parent_commit_id)?;
-
-        // Batch-load message IDs per commit, then all messages in two queries
-        // (same pattern as log_impl tool_message_count resolution).
         let commit_message_ids = self.commit_message_ids_batch(&conn, session_id, &commit_ids)?;
         let mut ordered_message_ids: Vec<String> = Vec::new();
         for cid in &commit_ids {
@@ -63,7 +96,6 @@ impl SqliteSessionGraphStore {
             all_messages.push(message.clone());
         }
 
-        // The parent commit ID is the HEAD commit (the last in the chain).
         Ok(HeadTranscript {
             session_id: session_id.to_string(),
             parent_commit_id: Some(parent_commit_id),
@@ -75,7 +107,7 @@ impl SqliteSessionGraphStore {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT commit_id, parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json, usage_json, terminal_reason
+                "SELECT commit_id, parents_json, status, agent_name, profile_snapshot_hash, model, provider, commit_message, created_at, message_ids_json, usage_json, terminal_reason, disposition, lifecycle_json
                  FROM graph_commits WHERE session_id=?1 ORDER BY created_at ASC",
             )
             .map_err(|source| SessionError::Database {
@@ -83,11 +115,11 @@ impl SqliteSessionGraphStore {
                 source,
             })?;
 
-        // Collect raw rows with message_ids for tool count resolution.
         struct RawRow {
             commit_id: String,
             parent_ids: Vec<String>,
             status: TurnCommitStatus,
+            disposition: WorkspaceDisposition,
             agent_name: String,
             profile_snapshot_hash: String,
             model: String,
@@ -99,6 +131,7 @@ impl SqliteSessionGraphStore {
             terminal_reason: Option<String>,
         }
 
+        let db_path = self.db_path.clone();
         let rows: Vec<RawRow> = stmt
             .query_map(params![session_id], |row| {
                 let commit_id: String = row.get(0)?;
@@ -113,6 +146,8 @@ impl SqliteSessionGraphStore {
                 let message_ids_json: String = row.get(9)?;
                 let usage_json: Option<String> = row.get(10)?;
                 let terminal_reason: Option<String> = row.get(11)?;
+                let disposition_str: String = row.get(12)?;
+                let lifecycle_json_str: String = row.get(13)?;
 
                 let parent_ids: Vec<String> =
                     serde_json::from_str(&parents_json).map_err(|err| {
@@ -136,12 +171,38 @@ impl SqliteSessionGraphStore {
                             )),
                         )
                     })?;
-                let status = match status_str.as_str() {
-                    "completed" => TurnCommitStatus::Completed,
-                    "error" => TurnCommitStatus::Error,
-                    "cancelled" => TurnCommitStatus::Cancelled,
-                    _ => TurnCommitStatus::Completed,
-                };
+                let status = decode_strict_status(&status_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("strict decode status: {e}"),
+                        )),
+                    )
+                })?;
+                let disposition = decode_strict_disposition(&disposition_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        12,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("strict decode disposition: {e}"),
+                        )),
+                    )
+                })?;
+                let lifecycle =
+                    decode_lifecycle_json(&db_path, &lifecycle_json_str).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            13,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("strict decode lifecycle_json: {e}"),
+                            )),
+                        )
+                    })?;
+                let _ = lifecycle;
                 let usage: Option<TurnUsage> =
                     usage_json.and_then(|json| serde_json::from_str(&json).ok());
 
@@ -149,6 +210,7 @@ impl SqliteSessionGraphStore {
                     commit_id,
                     parent_ids,
                     status,
+                    disposition,
                     agent_name,
                     profile_snapshot_hash,
                     model,
@@ -170,14 +232,11 @@ impl SqliteSessionGraphStore {
                 source,
             })?;
 
-        // Collect all message IDs across all commits for a single batch query.
         let all_message_ids: Vec<&str> = rows
             .iter()
             .flat_map(|r| r.message_ids.iter().map(|s| s.as_str()))
             .collect();
 
-        // Build a set of tool-role message IDs, chunking the IN clause to
-        // stay within SQLite's bind-parameter limit (M-20).
         let mut tool_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for chunk in all_message_ids.chunks(super::SQLITE_BIND_CHUNK_SIZE) {
             let placeholders: String = std::iter::repeat_n("?", chunk.len())
@@ -213,7 +272,6 @@ impl SqliteSessionGraphStore {
             }
         }
 
-        // Build log entries with accurate tool counts.
         let result = rows
             .into_iter()
             .map(|r| {
@@ -226,6 +284,7 @@ impl SqliteSessionGraphStore {
                     commit_id: r.commit_id,
                     parent_ids: r.parent_ids,
                     status: r.status,
+                    disposition: r.disposition,
                     agent_name: r.agent_name,
                     profile_snapshot_hash: r.profile_snapshot_hash,
                     model: r.model,
@@ -243,18 +302,30 @@ impl SqliteSessionGraphStore {
         Ok(result)
     }
 
+    /// Commit a turn from raw input — convenience that prepares the commit and delegates.
     pub(super) fn commit_turn_outer(&self, input: TurnCommitInput) -> Result<TurnCommit> {
+        let now = Utc::now().to_rfc3339();
+        let prepared = crate::graph::prepare_turn_commit(&input, &now);
+        self.commit_prepared_turn_outer(prepared)
+    }
+
+    /// Persist a precomputed turn commit with prepared identity (T-36-06).
+    ///
+    /// Wraps `commit_prepared_inner` in a `BEGIN IMMEDIATE` transaction so the
+    /// HEAD CAS check and all writes are atomic.
+    pub(super) fn commit_prepared_turn_outer(
+        &self,
+        prepared: PreparedTurnCommit,
+    ) -> Result<TurnCommit> {
         let conn = self.conn()?;
 
-        // Begin immediate transaction for atomicity (T-08-04).
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|source| SessionError::Database {
                 path: self.db_path.clone(),
                 source,
             })?;
 
-        // Run the actual work in a closure so we can rollback on error.
-        let result = self.commit_turn_inner(&conn, &input);
+        let result = self.commit_prepared_inner(&conn, &prepared);
 
         match result {
             Ok(commit) => {
@@ -272,25 +343,47 @@ impl SqliteSessionGraphStore {
         }
     }
 
-    fn commit_turn_inner(&self, conn: &Connection, input: &TurnCommitInput) -> Result<TurnCommit> {
-        let now = Utc::now().to_rfc3339();
+    fn commit_prepared_inner(
+        &self,
+        conn: &Connection,
+        prepared: &PreparedTurnCommit,
+    ) -> Result<TurnCommit> {
+        let commit = &prepared.commit;
+        let now = &commit.created_at;
 
-        // 1. Read current HEAD commit.
-        let current_commit_id = self.current_head_commit_id(conn, &input.session_id)?;
+        // 1. Check if commit already exists (idempotent retry) — before CAS.
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT status FROM graph_commits WHERE commit_id = ?1",
+                params![commit.commit_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
 
-        // 2. Validate expected parent matches current HEAD (T-08-05).
-        if input.parent_ids.is_empty() {
-            // First commit: current HEAD must be None.
+        if existing.is_some() {
+            // Same-ID retry: return the prepared commit unchanged.
+            // The prepared identity is immutable so the stored row is authoritative.
+            return Ok(commit.clone());
+        }
+
+        // 2. Read current HEAD commit.
+        let current_commit_id = self.current_head_commit_id(conn, &commit.session_id)?;
+
+        // 3. Validate expected parent matches current HEAD (CAS).
+        if commit.parent_ids.is_empty() {
             if let Some(ref head) = current_commit_id {
                 return Err(SessionError::Conflict(format!(
                     "expected no parent (first commit) but HEAD is '{head}'"
                 )));
             }
         } else {
-            // Subsequent commit: expected parent must equal current HEAD.
-            let expected_parent = &input.parent_ids[0];
+            let expected_parent = &commit.parent_ids[0];
             match &current_commit_id {
-                Some(head) if head == expected_parent => { /* ok */ }
+                Some(head) if head == expected_parent => {}
                 Some(head) => {
                     return Err(SessionError::Conflict(format!(
                         "expected parent '{}' but HEAD is '{}'",
@@ -306,153 +399,215 @@ impl SqliteSessionGraphStore {
             }
         }
 
-        for parent_id in &input.parent_ids {
-            if !self.commit_exists_in_session(conn, &input.session_id, parent_id)? {
+        for parent_id in &commit.parent_ids {
+            if !self.commit_exists_in_session(conn, &commit.session_id, parent_id)? {
                 return Err(SessionError::MissingCommit(parent_id.clone()));
             }
         }
 
-        // 3. Write message rows and compute message IDs.
-        let turn_seed = canonical_turn_seed(
-            &input.session_id,
-            &input.parent_ids,
-            &now,
-            &input.model,
-            &input.provider,
-            &input.status,
-            &input.commit_message,
-        );
-        let mut message_ids = Vec::new();
-        for (i, msg) in input.messages.iter().enumerate() {
-            let message_id = canonical_message_id(&input.session_id, &turn_seed, msg, i);
+        // 4. Write message rows using prepared message IDs and carried messages.
+        for (i, msg) in prepared.messages.iter().enumerate() {
+            let message_id = &prepared.message_ids[i];
             let tool_calls_json = match &msg.tool_calls {
                 Some(calls) => serde_json::to_string(calls).unwrap_or_else(|_| "[]".to_string()),
                 None => "[]".to_string(),
             };
-
             conn.execute(
                 "INSERT INTO graph_messages (message_id, session_id, role, content, reasoning_content, tool_call_id, name, tool_calls_json, created_at, ordinal)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
-                    message_id,
-                    input.session_id,
-                    msg.role,
-                    msg.content,
-                    msg.reasoning_content,
-                    msg.tool_call_id,
-                    msg.name,
-                    tool_calls_json,
-                    now,
-                    i as i64,
+                    message_id, commit.session_id, msg.role, msg.content,
+                    msg.reasoning_content, msg.tool_call_id, msg.name,
+                    tool_calls_json, now, i as i64,
                 ],
             )
-            .map_err(|source| SessionError::Database {
-                path: self.db_path.clone(),
-                source,
-            })?;
-
-            message_ids.push(message_id);
+            .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
         }
 
-        // 4. Compute canonical commit ID.
-        let commit_id = canonical_turn_commit_id(
-            &input.session_id,
-            &input.parent_ids,
-            &message_ids,
-            &input.agent_name,
-            &input.profile_snapshot_hash,
-            &input.model,
-            &input.provider,
-            &input.status,
-            &input.commit_message,
-            &now,
-        );
-
-        // 5. Insert immutable commit row.
+        // 5. Insert immutable commit row with disposition and lifecycle evidence.
         let parents_json =
-            serde_json::to_string(&input.parent_ids).unwrap_or_else(|_| "[]".to_string());
+            serde_json::to_string(&commit.parent_ids).unwrap_or_else(|_| "[]".to_string());
         let message_ids_json =
-            serde_json::to_string(&message_ids).unwrap_or_else(|_| "[]".to_string());
-
-        let usage_json = input
+            serde_json::to_string(&commit.message_ids).unwrap_or_else(|_| "[]".to_string());
+        let usage_json = commit
             .usage
             .as_ref()
             .map(|u| serde_json::to_string(u).unwrap_or_else(|_| "{}".to_string()));
+        let lifecycle_json = encode_lifecycle_json(&commit.lifecycle);
 
         conn.execute(
-            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, agent_name, profile_snapshot_hash, profile_snapshot_json, model, provider, status, commit_message, usage_json, terminal_reason, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO graph_commits (commit_id, session_id, parents_json, message_ids_json, agent_name, profile_snapshot_hash, profile_snapshot_json, model, provider, status, commit_message, usage_json, terminal_reason, disposition, lifecycle_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
+                commit.commit_id, commit.session_id, parents_json, message_ids_json,
+                commit.agent_name, commit.profile_snapshot_hash, commit.profile_snapshot_json,
+                commit.model, commit.provider, commit.status.as_str(), commit.commit_message,
+                usage_json, commit.terminal_reason, commit.disposition.as_str(),
+                lifecycle_json, now,
+            ],
+        )
+        .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
+
+        // 6. Update branch ref and session head.
+        self.update_refs_after_commit(conn, commit)?;
+
+        Ok(commit.clone())
+    }
+
+    /// Look up a single turn commit by session and commit ID.
+    pub(super) fn get_turn_commit_impl(
+        &self,
+        session_id: &str,
+        commit_id: &str,
+    ) -> Result<Option<TurnCommit>> {
+        let conn = self.conn()?;
+
+        let row = conn
+            .query_row(
+                "SELECT commit_id, session_id, parents_json, message_ids_json, agent_name, profile_snapshot_hash, profile_snapshot_json, model, provider, status, commit_message, usage_json, terminal_reason, disposition, lifecycle_json, created_at
+                 FROM graph_commits WHERE commit_id = ?1 AND session_id = ?2",
+                params![commit_id, session_id],
+                |row| {
+                    let commit_id: String = row.get(0)?;
+                    let session_id: String = row.get(1)?;
+                    let parents_json: String = row.get(2)?;
+                    let message_ids_json: String = row.get(3)?;
+                    let agent_name: String = row.get(4)?;
+                    let profile_snapshot_hash: String = row.get(5)?;
+                    let profile_snapshot_json: String = row.get(6)?;
+                    let model: String = row.get(7)?;
+                    let provider: String = row.get(8)?;
+                    let status_str: String = row.get(9)?;
+                    let commit_message: String = row.get(10)?;
+                    let usage_json: Option<String> = row.get(11)?;
+                    let terminal_reason: Option<String> = row.get(12)?;
+                    let disposition_str: String = row.get(13)?;
+                    let lifecycle_json_str: String = row.get(14)?;
+                    let created_at: String = row.get(15)?;
+                    Ok((
+                        commit_id, session_id, parents_json, message_ids_json, agent_name,
+                        profile_snapshot_hash, profile_snapshot_json, model, provider,
+                        status_str, commit_message, usage_json, terminal_reason,
+                        disposition_str, lifecycle_json_str, created_at,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
+
+        match row {
+            None => Ok(None),
+            Some((
                 commit_id,
-                input.session_id,
+                session_id,
                 parents_json,
                 message_ids_json,
-                input.agent_name,
-                input.profile_snapshot_hash,
-                input.profile_snapshot_json,
-                input.model,
-                input.provider,
-                input.status.as_str(),
-                input.commit_message,
+                agent_name,
+                profile_snapshot_hash,
+                profile_snapshot_json,
+                model,
+                provider,
+                status_str,
+                commit_message,
                 usage_json,
-                input.terminal_reason,
-                now,
-            ],
+                terminal_reason,
+                disposition_str,
+                lifecycle_json_str,
+                created_at,
+            )) => {
+                let parent_ids = self.parse_json_column("parents_json", &parents_json)?;
+                let message_ids = self.parse_json_column("message_ids_json", &message_ids_json)?;
+                let status = decode_strict_status(&status_str)?;
+                let disposition = decode_strict_disposition(&disposition_str)?;
+                let lifecycle = decode_lifecycle_json(&self.db_path, &lifecycle_json_str)?;
+                let usage: Option<TurnUsage> =
+                    usage_json.and_then(|j| serde_json::from_str(&j).ok());
+
+                Ok(Some(TurnCommit {
+                    commit_id,
+                    session_id,
+                    parent_ids,
+                    message_ids,
+                    agent_name,
+                    profile_snapshot_hash,
+                    profile_snapshot_json,
+                    model,
+                    provider,
+                    status,
+                    disposition,
+                    lifecycle,
+                    commit_message,
+                    usage,
+                    terminal_reason,
+                    created_at,
+                }))
+            }
+        }
+    }
+
+    /// Set snapshot-lost operational state (T-36-07).
+    pub(super) fn set_snapshot_lost_impl(&self, commit_id: &str, lost: bool) -> Result<()> {
+        let conn = self.conn()?;
+        let now = Utc::now().to_rfc3339();
+        let lost_int = if lost { 1 } else { 0 };
+
+        conn.execute(
+            "INSERT INTO graph_snapshot_state (commit_id, snapshot_lost, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(commit_id) DO UPDATE SET snapshot_lost = ?2, updated_at = ?3",
+            params![commit_id, lost_int, now],
         )
         .map_err(|source| SessionError::Database {
             path: self.db_path.clone(),
             source,
         })?;
 
-        // 6. Update branch ref (only if HEAD is attached) and session head_commit_id.
-        match self.current_branch_name(conn, &input.session_id)? {
+        Ok(())
+    }
+
+    /// Get snapshot-lost operational state.
+    pub(super) fn get_snapshot_lost_impl(&self, commit_id: &str) -> Result<Option<bool>> {
+        let conn = self.conn()?;
+
+        let result = conn
+            .query_row(
+                "SELECT snapshot_lost FROM graph_snapshot_state WHERE commit_id = ?1",
+                params![commit_id],
+                |row| row.get::<_, i32>(0),
+            )
+            .optional()
+            .map_err(|source| SessionError::Database {
+                path: self.db_path.clone(),
+                source,
+            })?;
+
+        Ok(result.map(|v| v != 0))
+    }
+
+    /// Helper: update branch ref and session head after a commit.
+    fn update_refs_after_commit(&self, conn: &Connection, commit: &TurnCommit) -> Result<()> {
+        let now = &commit.created_at;
+        match self.current_branch_name(conn, &commit.session_id)? {
             Some(branch_name) => {
-                // Attached HEAD: update the branch ref and head_commit_id.
                 conn.execute(
                     "UPDATE graph_refs SET commit_id=?1, updated_at=?2 WHERE session_id=?3 AND kind='branch' AND name=?4",
-                    params![commit_id, now, input.session_id, branch_name],
+                    params![commit.commit_id, now, commit.session_id, branch_name],
                 )
-                .map_err(|source| SessionError::Database {
-                    path: self.db_path.clone(),
-                    source,
-                })?;
+                .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
                 conn.execute(
                     "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3",
-                    params![commit_id, now, input.session_id],
+                    params![commit.commit_id, now, commit.session_id],
                 )
-                .map_err(|source| SessionError::Database {
-                    path: self.db_path.clone(),
-                    source,
-                })?;
+                .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
             }
             None => {
-                // Detached HEAD: only update head_commit_id, preserve head_ref=NULL.
                 conn.execute(
                     "UPDATE graph_sessions SET head_commit_id=?1, updated_at=?2 WHERE session_id=?3",
-                    params![commit_id, now, input.session_id],
+                    params![commit.commit_id, now, commit.session_id],
                 )
-                .map_err(|source| SessionError::Database {
-                    path: self.db_path.clone(),
-                    source,
-                })?;
+                .map_err(|source| SessionError::Database { path: self.db_path.clone(), source })?;
             }
         }
-
-        Ok(TurnCommit {
-            commit_id,
-            session_id: input.session_id.clone(),
-            parent_ids: input.parent_ids.clone(),
-            message_ids,
-            agent_name: input.agent_name.clone(),
-            profile_snapshot_hash: input.profile_snapshot_hash.clone(),
-            profile_snapshot_json: input.profile_snapshot_json.clone(),
-            model: input.model.clone(),
-            provider: input.provider.clone(),
-            status: input.status.clone(),
-            commit_message: input.commit_message.clone(),
-            usage: input.usage.clone(),
-            terminal_reason: input.terminal_reason.clone(),
-            created_at: now,
-        })
+        Ok(())
     }
 }

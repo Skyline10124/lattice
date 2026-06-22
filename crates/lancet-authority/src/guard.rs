@@ -204,9 +204,9 @@ pub fn write_pattern_covers_relative(pattern: &str, relative_path: &str) -> Resu
     }
     let target = normalize_lexical(relative_path)?;
     Ok(match normalize_write_path_pattern(pattern)? {
-        // An empty `DirectoryGlob` base (from the `.` pattern) is a prefix of
-        // every path, so `.` covers the whole workspace.
         WritePathPattern::ExactFile(expected) => target == expected,
+        // The "." sentinel means the entire workspace — it covers every path.
+        WritePathPattern::DirectoryGlob(ref dir) if dir.as_os_str() == "." => true,
         WritePathPattern::DirectoryGlob(dir) => target == dir || target.starts_with(&dir),
     })
 }
@@ -241,6 +241,9 @@ fn normalize_lexical(path: &str) -> Result<PathBuf, CepError> {
                 ));
             }
         }
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
     }
     Ok(result)
 }
@@ -1352,6 +1355,37 @@ mod policy_tests {
         };
         let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
         assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
+    }
+
+    #[test]
+    fn normalize_lexical_dot_returns_dot_sentinel() {
+        let result = normalize_lexical(".").unwrap();
+        assert_eq!(
+            result.to_string_lossy(),
+            ".",
+            "workspace root must normalize to \".\""
+        );
+    }
+
+    #[test]
+    fn normalize_lexical_dotslash_prefix_returns_tail() {
+        let result = normalize_lexical("./src/main.rs").unwrap();
+        assert_eq!(result.to_string_lossy(), "src/main.rs");
+    }
+
+    #[test]
+    fn direct_path_facts_accepts_workspace_root() {
+        use crate::effect::region::AuthorizedEffectRegion;
+        let region = AuthorizedEffectRegion::empty();
+        let facts = DirectPathFacts {
+            normalized_path: ".".into(),
+            exists: true,
+            kind: Some(DirectPathKind::Directory),
+            parent_exists: true,
+            parent_kind: Some(DirectPathKind::Directory),
+            canonical_under_workspace: true,
+        };
+        assert!(validate_direct_path_facts(".", &facts, &region).is_ok());
     }
 
     #[test]

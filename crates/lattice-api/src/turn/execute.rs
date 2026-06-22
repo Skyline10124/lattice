@@ -5,10 +5,13 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lattice_agent::{AgentTurnEvent, AgentTurnResult, AgentTurnStatus};
-use lattice_session::{GraphMessage, TurnCommitInput, derive_commit_message};
+use lattice_session::{
+    GraphMessage, TurnCommitInput, TurnLifecycleEvidence, WorkspaceDisposition,
+    derive_commit_message,
+};
 use sha2::{Digest, Sha256};
 
-use super::cep::build_production_turn_deps;
+use super::cep::{ProductionTurnDepsInput, build_production_turn_deps};
 use super::collector::RunTurnCollector;
 use super::llm::RealLlmClient;
 use super::mapping::resolve_model_and_prompt;
@@ -30,10 +33,17 @@ pub(super) struct TurnCommitContext {
 /// Build a [`TurnCommitInput`] from the user input, commit context, and agent
 /// result. Shared by the live turn path to ensure commit construction stays
 /// consistent.
+///
+/// WR-05: `disposition` and `lifecycle` are required parameters (not hardcoded
+/// defaults) so a new call site cannot silently produce a commit with
+/// `NotApplicable` / no lifecycle evidence. The caller owns the lifecycle
+/// classification (D-25/D-26) and must pass both explicitly.
 pub(super) fn build_commit_input(
     user_input: &str,
     ctx: &TurnCommitContext,
     agent_result: &AgentTurnResult,
+    disposition: WorkspaceDisposition,
+    lifecycle: Option<TurnLifecycleEvidence>,
 ) -> TurnCommitInput {
     let commit_status = map_status(&agent_result.status).to_commit_status();
 
@@ -60,6 +70,8 @@ pub(super) fn build_commit_input(
         model: ctx.model.clone(),
         provider: ctx.provider.clone(),
         status: commit_status,
+        disposition,
+        lifecycle,
         commit_message,
         usage: Some(agent_result.usage.clone()),
         terminal_reason: agent_result.terminal_reason.clone(),
@@ -292,16 +304,17 @@ pub async fn stream_turn(session: SessionApi, request: RunTurnRequest) -> Result
     let loaded = request.loaded_profile.as_ref().expect("checked above");
     let (model_id, _, _) = resolve_model_and_prompt(&request);
     let runtime_version = env!("CARGO_PKG_VERSION");
-    let deps = build_production_turn_deps(
-        &request,
-        &project_root,
-        &enabled_tools(&request),
-        production_llm(&request),
-        cep,
-        &model_id,
+    let enabled_tools = enabled_tools(&request);
+    let deps = build_production_turn_deps(ProductionTurnDepsInput {
+        request: &request,
+        project_root: &project_root,
+        enabled_tools: &enabled_tools,
+        llm: production_llm(&request),
+        lancet: cep,
+        model_id: &model_id,
         runtime_version,
-        loaded,
-    )
+        loaded_profile: loaded,
+    })
     .await?;
     super::live::stream_turn_live_prepared(session, prepared, request, deps).await
 }

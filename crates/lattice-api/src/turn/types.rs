@@ -8,6 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use futures::stream::Stream;
 use lattice_profile::LoadedAgentProfile;
+use lattice_session::WorkspaceDisposition;
 use lattice_workspace::Workspace;
 
 /// Request to run a turn through either [`run_turn`] or [`stream_turn`].
@@ -131,6 +132,7 @@ pub struct RunTurnResult {
     pub commit_id: String,
     pub assistant_output: String,
     pub status: RunTurnStatus,
+    pub disposition: WorkspaceDisposition,
     pub usage: Option<TurnUsageSummary>,
     pub tool_results: Vec<ToolResultSummary>,
     pub stages: Vec<RunTurnStage>,
@@ -203,6 +205,7 @@ pub enum TurnEvent {
         session_id: String,
         commit_id: String,
         status: RunTurnStatus,
+        disposition: WorkspaceDisposition,
     },
     /// Commit persistence failed.
     CommitFailed { reason: String },

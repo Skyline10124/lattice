@@ -220,6 +220,7 @@ fn toml_string(value: &str) -> String {
     escaped
 }
 
+#[cfg(test)]
 const UPPER_BACKED_TOOLS: &[&str] = &[
     "observe.workspace",
     "mutate.create",
@@ -421,7 +422,7 @@ mod tests {
         let toml_str = default_reader_template("r", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("reader template must parse");
-        let expected = vec!["observe.audit", "observe.audit_replay"];
+        let expected = ["observe.audit", "observe.audit_replay"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
@@ -473,7 +474,7 @@ mod tests {
         let toml_str = default_dev_template("d", "sonnet");
         let profile: crate::schema::AgentProfile =
             toml::from_str(&toml_str).expect("dev template must parse");
-        let expected = vec!["fetch.web", "session.todo_write"];
+        let expected = ["fetch.web", "session.todo_write"];
         let mut enabled = profile.tools.enabled.clone();
         enabled.sort();
         let mut expected_sorted: Vec<String> = expected.iter().map(|s| s.to_string()).collect();

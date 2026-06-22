@@ -2339,7 +2339,7 @@ async fn execute_direct_command_inner(
     if effective_impact == EffectiveImpact::HardDenied {
         let cmd = params.argv.first().map(|s| s.as_str()).unwrap_or("<empty>");
         record_command_preflight(
-            &ctx,
+            ctx,
             method,
             &params.argv,
             params.declared_impact.as_ref(),
@@ -2349,7 +2349,7 @@ async fn execute_direct_command_inner(
             false,
             false,
         );
-        emit_denial_metadata(&ctx, "hard_denied", false, method).await;
+        emit_denial_metadata(ctx, "hard_denied", false, method).await;
         return Err(CepError::new(
             CepErrorCode::GuardDenied,
             format!("Command '{cmd}' is hard-denied by policy"),
@@ -2362,7 +2362,7 @@ async fn execute_direct_command_inner(
     }
 
     record_command_preflight(
-        &ctx,
+        ctx,
         method,
         &params.argv,
         params.declared_impact.as_ref(),
@@ -2393,7 +2393,7 @@ async fn execute_direct_command_inner(
         .resolve_path(&cwd, PathIntent::ExecCwd)
         .await
         .map_err(|err| {
-            record_direct_backend_rejection(&ctx, execution);
+            record_direct_backend_rejection(ctx, execution);
             direct_command_backend_error(method, &params.argv, err)
         })?;
 
@@ -2406,7 +2406,7 @@ async fn execute_direct_command_inner(
             rejection_stage: RejectionStage::AdapterPreflight,
             denial_source: "guard_l1".into(),
         });
-        emit_denial_metadata(&ctx, "guard_l1", false, method).await;
+        emit_denial_metadata(ctx, "guard_l1", false, method).await;
         return Err(err);
     }
 
@@ -2429,15 +2429,15 @@ async fn execute_direct_command_inner(
 
     ctx.mark_backend_invoked();
     let output = execution.backend.exec(&request).await.map_err(|err| {
-        record_direct_backend_rejection(&ctx, execution);
+        record_direct_backend_rejection(ctx, execution);
         direct_command_backend_error(method, &params.argv, err)
     })?;
 
-    record_direct_command_effects(&ctx, &effective_impact, &authorized_region);
+    record_direct_command_effects(ctx, &effective_impact, &authorized_region);
 
     if effective_impact == EffectiveImpact::WorkspaceMutation {
         let changed = execution.backend.changed_paths().await.map_err(|err| {
-            record_direct_backend_rejection(&ctx, execution);
+            record_direct_backend_rejection(ctx, execution);
             direct_command_backend_error(method, &params.argv, err)
         })?;
 
@@ -2502,7 +2502,7 @@ async fn execute_direct_command_inner(
                 });
             }
             Err(err) => {
-                record_direct_backend_rejection(&ctx, execution);
+                record_direct_backend_rejection(ctx, execution);
                 return Err(err);
             }
         }
@@ -2524,7 +2524,7 @@ async fn execute_direct_command_inner(
 
     ctx.record_durable_metadata(observation_metadata.clone());
     emit_success_metadata(
-        &ctx,
+        ctx,
         CommandSuccessAudit {
             classification: &effective_impact,
             envelope_id: None,
@@ -2577,27 +2577,22 @@ fn validate_direct_command_cwd(
     facts: &PathFacts,
     authorized_region: &lancet_authority::effect::region::AuthorizedEffectRegion,
 ) -> Result<(), CepError> {
-    let guard_path = if path == "." { "" } else { path };
-    let normalized_facts_path = if guard_path.is_empty() && facts.normalized_path == "." {
-        String::new()
-    } else {
-        facts.normalized_path.clone()
-    };
     let direct_facts = DirectPathFacts {
-        normalized_path: normalized_facts_path,
+        normalized_path: facts.normalized_path.clone(),
         exists: facts.exists,
         kind: facts.kind.map(direct_path_kind_from_backend),
         parent_exists: facts.parent_exists,
         parent_kind: facts.parent_kind.map(direct_path_kind_from_backend),
         canonical_under_workspace: facts.canonical_under_workspace,
     };
+    // Workspace root as cwd is always permitted — skip write-region check.
     let empty_region = lancet_authority::effect::region::AuthorizedEffectRegion::empty();
     let region = if path == "." {
         &empty_region
     } else {
         authorized_region
     };
-    validate_direct_path_facts(guard_path, &direct_facts, region)
+    validate_direct_path_facts(path, &direct_facts, region)
 }
 
 fn direct_path_kind_from_backend(kind: crate::execution_backend::PathKind) -> DirectPathKind {

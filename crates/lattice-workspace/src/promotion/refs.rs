@@ -34,6 +34,9 @@ pub struct RefTransactionRequest {
     pub old_session_oid: Option<String>,
     pub new_candidate_oid: String,
     pub new_session_oid: String,
+    /// If Some, the candidate ref already exists with this OID and the
+    /// transaction verifies it (update old=oid new=oid) instead of creating.
+    pub existing_candidate_oid: Option<String>,
 }
 
 /// Observed ref targets after a successful transaction.
@@ -78,7 +81,8 @@ impl RefComponent {
             });
         }
         static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-        let re = RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$").expect("regex"));
+        let re =
+            RE.get_or_init(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$").expect("regex"));
         if !re.is_match(raw) {
             return Err(RefTransactionError::InvalidComponent {
                 field,
@@ -114,11 +118,7 @@ impl PromotionRefs {
     ) -> Result<Self, RefTransactionError> {
         validate_branch_component(branch)?;
         let project_ref = format!("refs/heads/{branch}");
-        let session_ref = format!(
-            "refs/lattice/sessions/{}/{}",
-            session_id.as_str(),
-            branch
-        );
+        let session_ref = format!("refs/lattice/sessions/{}/{}", session_id.as_str(), branch);
         let candidate_ref = format!(
             "refs/lattice/candidates/{}/{}",
             session_id.as_str(),
@@ -140,6 +140,25 @@ impl RefTransactionRequest {
         new_candidate_oid: impl Into<String>,
         new_session_oid: impl Into<String>,
     ) -> Result<Self, RefTransactionError> {
+        Self::with_existing_candidate(
+            refs,
+            old_project_oid,
+            old_session_oid,
+            new_candidate_oid,
+            new_session_oid,
+            None,
+        )
+    }
+
+    /// Create with an existing candidate OID for verify-in-transaction semantics.
+    pub fn with_existing_candidate(
+        refs: PromotionRefs,
+        old_project_oid: impl Into<String>,
+        old_session_oid: Option<String>,
+        new_candidate_oid: impl Into<String>,
+        new_session_oid: impl Into<String>,
+        existing_candidate_oid: Option<String>,
+    ) -> Result<Self, RefTransactionError> {
         let old_project_oid = old_project_oid.into();
         let new_candidate_oid = new_candidate_oid.into();
         let new_session_oid = new_session_oid.into();
@@ -149,12 +168,16 @@ impl RefTransactionRequest {
         if let Some(old) = old_session_oid.as_deref() {
             validate_git_oid("old_session_oid", old)?;
         }
+        if let Some(existing) = existing_candidate_oid.as_deref() {
+            validate_git_oid("existing_candidate_oid", existing)?;
+        }
         Ok(Self {
             refs,
             old_project_oid,
             old_session_oid,
             new_candidate_oid,
             new_session_oid,
+            existing_candidate_oid,
         })
     }
 }
@@ -175,6 +198,9 @@ pub fn build_update_ref_z_payload(
     }
     if let Some(old) = request.old_session_oid.as_deref() {
         reject_nul(old)?;
+    }
+    if let Some(existing) = request.existing_candidate_oid.as_deref() {
+        reject_nul(existing)?;
     }
 
     let mut payload = Vec::new();
@@ -207,13 +233,23 @@ pub fn build_update_ref_z_payload(
         ),
     }
 
-    push_z(
-        &mut payload,
-        &[
-            &format!("create {}", request.refs.candidate_ref.as_str()),
-            &request.new_candidate_oid,
-        ],
-    );
+    match request.existing_candidate_oid.as_deref() {
+        Some(existing_oid) => push_z(
+            &mut payload,
+            &[
+                &format!("update {}", request.refs.candidate_ref.as_str()),
+                &request.new_candidate_oid,
+                existing_oid,
+            ],
+        ),
+        None => push_z(
+            &mut payload,
+            &[
+                &format!("create {}", request.refs.candidate_ref.as_str()),
+                &request.new_candidate_oid,
+            ],
+        ),
+    }
 
     push_z(&mut payload, &["prepare"]);
     push_z(&mut payload, &["commit"]);
@@ -238,14 +274,10 @@ pub fn run_ref_transaction(
 
     let mut child = output;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(&payload)
-            .map_err(RefTransactionError::Io)?;
+        stdin.write_all(&payload).map_err(RefTransactionError::Io)?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(RefTransactionError::Io)?;
+    let output = child.wait_with_output().map_err(RefTransactionError::Io)?;
 
     if !output.status.success() {
         return Err(RefTransactionError::GitUpdateRef {
@@ -375,12 +407,15 @@ fn validate_branch_component(branch: &str) -> Result<(), RefTransactionError> {
 }
 
 fn validate_git_oid(field: &'static str, oid: &str) -> Result<(), RefTransactionError> {
-    if oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit()) {
+    // WR-06: accept 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
+    let len = oid.len();
+    let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());
+    if is_hex && (len == 40 || len == 64) {
         Ok(())
     } else {
         Err(RefTransactionError::InvalidOid {
             field,
-            reason: "expected 40 hex characters".into(),
+            reason: "expected 40 (SHA-1) or 64 (SHA-256) hex characters".into(),
         })
     }
 }

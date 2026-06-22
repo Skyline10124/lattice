@@ -61,6 +61,7 @@ struct Workspace {
     _state: TempDir,
     root: std::path::PathBuf,
     loaded: LoadedAgentProfile,
+    target_branch: String,
 }
 
 fn setup_workspace() -> Workspace {
@@ -73,6 +74,7 @@ fn setup_workspace() -> Workspace {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join("src/lib.rs"), "pub fn answer() -> i32 { 1 }").unwrap();
     init_git_repo(&root);
+    let target_branch = create_unattached_target_branch(&root, "lattice-target");
 
     let profile_dir = root.join(".lattice/agents/default");
     std::fs::create_dir_all(&profile_dir).unwrap();
@@ -110,6 +112,7 @@ image = "test-template"
         _state: state,
         root,
         loaded,
+        target_branch,
     }
 }
 
@@ -139,6 +142,15 @@ fn init_git_repo(root: &std::path::Path) {
         .current_dir(root)
         .status()
         .expect("git commit");
+}
+
+fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String {
+    std::process::Command::new("git")
+        .args(["branch", name])
+        .current_dir(root)
+        .status()
+        .expect("git branch (create unattached target)");
+    name.to_string()
 }
 
 fn metadata_has_capability(meta: Option<&str>) -> bool {
@@ -227,6 +239,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
+            project_branch: ws.target_branch.clone(),
         })
         .expect("create session")
         .session_id;

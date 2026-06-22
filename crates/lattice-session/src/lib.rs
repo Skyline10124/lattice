@@ -13,16 +13,19 @@ use std::path::{Path, PathBuf};
 
 pub mod graph;
 pub use graph::{
-    GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession, GraphToolCall, HeadTranscript,
-    ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus, TurnCommit,
-    TurnCommitInput, TurnCommitStatus, TurnLogEntry, TurnUsage, canonical_turn_seed,
-    derive_commit_message,
+    COMMIT_PAYLOAD_SCHEMA_VERSION_V2, GraphDiff, GraphHead, GraphMessage, GraphRef, GraphSession,
+    GraphToolCall, HeadTranscript, PreparedTurnCommit, ResetResult, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnCommitStatus,
+    TurnLifecycleEvidence, TurnLogEntry, TurnSnapshotIdentity, TurnSnapshotRef, TurnUsage,
+    TurnVerificationEvidence, WorkspaceDisposition, canonical_turn_seed, derive_commit_message,
+    derive_snapshot_name, prepare_turn_commit, validate_snapshot_name,
 };
 
 pub mod promotion;
 pub use promotion::{
-    PromotedSessionCommitInput, PromotedSessionManifest, PROMOTION_MANIFEST_SCHEMA_VERSION,
-    create_promoted_session_commit,
+    PROMOTION_MANIFEST_SCHEMA_VERSION, PROMOTION_MANIFEST_SCHEMA_VERSION_V2,
+    PromotedSessionCommitInput, PromotedSessionManifest, build_promoted_manifest,
+    create_promoted_session_commit, manifest_json_canonical_bytes,
 };
 
 pub mod sqlite_graph;
@@ -57,6 +60,8 @@ pub enum SessionError {
     MissingCommit(String),
     #[error("git error: {0}")]
     Git(String),
+    #[error("invalid persisted value for field '{field}': '{value}'")]
+    InvalidPersistedValue { field: &'static str, value: String },
 }
 
 pub(crate) fn validate_branch_name(name: &str) -> Result<()> {
