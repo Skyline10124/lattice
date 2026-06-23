@@ -18,7 +18,65 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::executor::supervisor::landlock;
+/// Landlock ABI probe result used by the boundary-credit audit chain.
+///
+/// Extracted from the former `executor::supervisor::landlock` module before the
+/// supervisor directory was deleted. Only the probe survives — the refinement
+/// planning and application types were supervisor-bound and deleted with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LandlockAbiProbe {
+    abi_version: Option<u32>,
+    supported: bool,
+    reason: String,
+}
+
+impl LandlockAbiProbe {
+    fn supported(abi_version: u32) -> Self {
+        Self {
+            abi_version: Some(abi_version),
+            supported: true,
+            reason: format!("landlock ABI v{abi_version}"),
+        }
+    }
+
+    fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            abi_version: None,
+            supported: false,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Landlock `LANDLOCK_CREATE_RULESET_VERSION` flag for the ABI probe syscall.
+const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+
+/// Probe the host Landlock ABI version via `landlock_create_ruleset`.
+#[cfg(target_os = "linux")]
+fn probe_landlock_abi_raw() -> LandlockAbiProbe {
+    let abi = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if abi > 0 {
+        LandlockAbiProbe::supported(abi as u32)
+    } else {
+        LandlockAbiProbe::unsupported(format!(
+            "landlock ABI probe failed: {}",
+            std::io::Error::last_os_error()
+        ))
+    }
+}
+
+/// Probe the host Landlock ABI version (non-Linux stub).
+#[cfg(not(target_os = "linux"))]
+fn probe_landlock_abi_raw() -> LandlockAbiProbe {
+    LandlockAbiProbe::unsupported("unsupported_platform")
+}
 
 /// Runtime mode for command physical-boundary preflight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -540,7 +598,7 @@ fn classify_command_failure(label: &str, output: &Output) -> ProbeOutcome {
 
 #[cfg(target_os = "linux")]
 fn probe_landlock_abi() -> ProbeOutcome {
-    let probe = landlock::probe_landlock_abi();
+    let probe = probe_landlock_abi_raw();
     if let Some(abi) = probe.abi_version {
         ProbeOutcome::new(HostProbeStatus::Available, probe.reason)
             .with_diagnostic("landlock_abi_version", abi.to_string())

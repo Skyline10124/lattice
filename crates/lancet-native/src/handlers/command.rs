@@ -16,7 +16,7 @@ use crate::enforcement::verify::{
 use crate::execution_backend::{
     ExecRequest, ExecutionBackendError, PathFacts, PathIntent, WorkspacePath,
 };
-use crate::executor::shell::BoundedStreamOutput;
+use crate::executor::process::BoundedStreamOutput;
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_audit::{RejectionRecord, RejectionStage};
 use lancet_authority::effect::ledger::{EffectSource, ObservedEffect, ObservedScope};

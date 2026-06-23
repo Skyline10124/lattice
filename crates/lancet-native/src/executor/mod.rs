@@ -11,7 +11,6 @@
 //! wire types in `lancet_protocol`.
 
 pub(crate) mod error;
+pub(crate) mod process;
 pub(crate) mod render;
-pub(crate) mod shell;
-pub(crate) mod supervisor;
 pub(crate) mod web;
