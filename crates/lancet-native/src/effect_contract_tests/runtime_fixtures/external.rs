@@ -12,7 +12,6 @@ use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
 use lancet_protocol::policy::Capability;
-use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
@@ -39,19 +38,13 @@ pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEf
             }
         });
 
-        let fetch_cap = SourcedCapability {
-            capability: Capability::FetchUrl {
-                host: "127.0.0.1".into(),
-            },
-            source: CapabilitySource::Base,
-        };
         let network = NetworkPolicyConfig {
             allow_public_https: true,
             allow_localhost: true,
             allowed_hosts: vec!["127.0.0.1".into()],
             max_web_response_bytes: 10 * 1024 * 1024,
         };
-        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
+        let (ctx, _rx, _) = build_test_context(&root, vec![], network);
 
         let mut kinds = BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
@@ -82,14 +75,8 @@ pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEf
     });
     scenarios.push(scenario("happy_fetch_localhost", happy_effects));
 
-    let fetch_cap = SourcedCapability {
-        capability: Capability::FetchUrl {
-            host: "allowed.example.com".into(),
-        },
-        source: CapabilitySource::Base,
-    };
     let (ctx, _rx, _) =
-        build_test_context(&root, vec![fetch_cap], NetworkPolicyConfig::safe_defaults());
+        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     let mut kinds = BTreeSet::new();
     kinds.insert(ImpactKind::ExternalObservation);
     scenarios.push(scenario(

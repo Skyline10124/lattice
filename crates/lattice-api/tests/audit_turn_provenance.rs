@@ -15,7 +15,6 @@ use lancet_native::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -311,10 +310,7 @@ async fn full_turn_audit_rows_and_replay_fragment() {
                 .and_then(|v| v.as_str())
                 .is_some_and(|id| !id.is_empty());
             let has_direct_routing = parsed
-                .get("authority_mode")
-                .and_then(|v| v.as_str())
-                .is_some_and(|mode| mode == "direct")
-                || parsed.get("routing_upper_workspace_id").is_some();
+                .get("routing_upper_workspace_id").is_some();
             assert!(
                 has_envelope || has_direct_routing,
                 "mutation row should include envelope_id or Direct routing metadata"
@@ -327,8 +323,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
     let root = ws.root.to_str().unwrap();
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::new(audit);
-    config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "audit replay").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     {
         let mut ctx = config.audit_context.write().await;

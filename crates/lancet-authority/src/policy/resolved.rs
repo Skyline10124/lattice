@@ -11,11 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use lancet_catalog::catalog::catalog;
-use lancet_catalog::method::RequiredCapability;
 use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::policy::{
-    EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot,
-    PolicyInput,
+    PolicyAuditContext, PolicyBudgetSnapshot, PolicyInput,
 };
 
 use super::BudgetLimits;
@@ -67,18 +65,6 @@ pub struct ResolvedSessionState {
     pub todo_ops_count: usize,
 }
 
-/// Resolved authority branch — executor-owned, no Serialize/Deserialize.
-#[derive(Clone, Debug)]
-pub enum ResolvedAuthorityInput {
-    /// Envelope-scoped authority with required capability and snapshot.
-    Envelope {
-        required_capability: RequiredCapability,
-        envelope_snapshot: EffectiveEnvelopeSnapshot,
-    },
-    /// Direct immutable authority with no envelope or capability data.
-    Direct,
-}
-
 /// Internal resolved facts table built from [`PolicyInput`].
 ///
 /// Not a public protocol type — executor-owned only.
@@ -92,7 +78,6 @@ pub struct ResolvedPolicyInput {
     pub resolved_network: Option<ResolvedNetwork>,
     pub resolved_session_state: Option<ResolvedSessionState>,
     pub budget_snapshot: PolicyBudgetSnapshot,
-    pub authority: ResolvedAuthorityInput,
     pub audit_context: PolicyAuditContext,
     pub command_error: Option<lancet_protocol::CepError>,
 }
@@ -149,20 +134,6 @@ impl PolicyResolver {
             })?;
 
         let impact_kind = descriptor.impact.clone();
-        let authority = match &input.authority {
-            PolicyAuthorityInput::Envelope { envelope_snapshot } => {
-                let required_capability = required_capability_for_invocation(
-                    &input.method,
-                    &input.params,
-                    descriptor.capability,
-                );
-                ResolvedAuthorityInput::Envelope {
-                    required_capability,
-                    envelope_snapshot: envelope_snapshot.clone(),
-                }
-            }
-            PolicyAuthorityInput::Direct => ResolvedAuthorityInput::Direct,
-        };
 
         let mut invocation_facts = InvocationFacts::default();
         let mut resolved_target = None;
@@ -286,14 +257,6 @@ impl PolicyResolver {
                     todo_ops_count: todo_count,
                 });
             }
-            "session.envelope" => {
-                invocation_facts.session_state_operation =
-                    Some(session_envelope_operation(&input.params));
-                resolved_session_state = Some(ResolvedSessionState {
-                    operation: session_envelope_operation(&input.params),
-                    todo_ops_count: 0,
-                });
-            }
             _ => {}
         }
 
@@ -306,7 +269,6 @@ impl PolicyResolver {
             resolved_network,
             resolved_session_state,
             budget_snapshot: input.audit_context.budget_snapshot.clone(),
-            authority,
             audit_context: input.audit_context.clone(),
             command_error,
         })
@@ -314,21 +276,6 @@ impl PolicyResolver {
 }
 
 // ── Pure param extraction helpers ───────────────────────────────────────
-
-fn required_capability_for_invocation(
-    method: &str,
-    params: &serde_json::Value,
-    descriptor_capability: RequiredCapability,
-) -> RequiredCapability {
-    match method {
-        "observe.workspace" => match params.get("mode").and_then(|v| v.as_str()) {
-            Some("read_file") => RequiredCapability::ReadPath,
-            Some("grep" | "list_directory" | "find_files") => RequiredCapability::Inspect,
-            _ => descriptor_capability,
-        },
-        _ => descriptor_capability,
-    }
-}
 
 fn extract_observe_workspace_path(params: &serde_json::Value) -> Option<String> {
     match params.get("mode").and_then(|v| v.as_str()) {
@@ -338,12 +285,6 @@ fn extract_observe_workspace_path(params: &serde_json::Value) -> Option<String> 
         }
         _ => None,
     }
-}
-
-fn session_envelope_operation(
-    _params: &serde_json::Value,
-) -> super::capability::SessionStateOperation {
-    super::capability::SessionStateOperation::EnvelopeDeclare
 }
 
 fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
@@ -500,28 +441,8 @@ mod tests {
     use lancet_protocol::policy::PolicyAuthorityInput;
     use serde_json::json;
 
-    fn envelope_required_capability(resolved: &ResolvedPolicyInput) -> RequiredCapability {
-        match &resolved.authority {
-            ResolvedAuthorityInput::Envelope {
-                required_capability,
-                ..
-            } => *required_capability,
-            ResolvedAuthorityInput::Direct => {
-                panic!("direct authority input has no required capability")
-            }
-        }
-    }
-
     fn test_resolver() -> PolicyResolver {
         PolicyResolver::defaults_for_project_root("/home/user/project")
-    }
-
-    fn empty_envelope() -> EffectiveEnvelopeSnapshot {
-        EffectiveEnvelopeSnapshot {
-            base_envelope_id: "base".into(),
-            declared_envelope_id: None,
-            capabilities: vec![],
-        }
     }
 
     fn audit_ctx() -> PolicyAuditContext {
@@ -544,17 +465,11 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "src/main.rs"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
         assert_eq!(resolved.method, "observe.workspace");
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::ReadPath
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceObservation);
         let target = resolved.resolved_target.unwrap();
         assert_eq!(target.request_path, "src/main.rs");
@@ -567,16 +482,10 @@ mod tests {
         let input = PolicyInput {
             method: "mutate.create".into(),
             params: json!({"path": "src/new.rs", "content": "fn main() {}"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::WritePath
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceMutation);
         assert!(resolved.resolved_target.is_some());
     }
@@ -591,16 +500,10 @@ mod tests {
                 "expected_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
                 "edits": []
             }),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::WritePath
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::WorkspaceMutation);
         let target = resolved.resolved_target.unwrap();
         assert_eq!(target.request_path, "src/main.rs");
@@ -613,16 +516,10 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "grep", "pattern": "fn main", "path": "src/"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::Inspect
-        );
         assert!(resolved.resolved_target.is_some());
     }
 
@@ -632,16 +529,10 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "list_directory", "path": "src/"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::Inspect
-        );
         assert!(resolved.resolved_target.is_some());
     }
 
@@ -651,16 +542,10 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "find_files", "pattern": "*.rs", "path": "src/"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::Inspect
-        );
     }
 
     #[test]
@@ -674,16 +559,10 @@ mod tests {
                 "env": {"RUST_LOG": "debug"},
                 "declared_impact": "command_execution"
             }),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::RunCommand
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::CommandExecution);
         let cmd = resolved.resolved_command.unwrap();
         assert_eq!(cmd.argv, vec!["cargo", "test"]);
@@ -697,16 +576,10 @@ mod tests {
         let input = PolicyInput {
             method: "fetch.web".into(),
             params: json!({"url": "https://example.com/page"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::FetchUrl
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::ExternalObservation);
         let net = resolved.resolved_network.unwrap();
         assert_eq!(net.host, "example.com");
@@ -721,16 +594,10 @@ mod tests {
         let input = PolicyInput {
             method: "session.todo_write".into(),
             params: json!({"todos": [{"content": "task 1", "status": "pending"}]}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::MutateSessionState
-        );
         assert_eq!(resolved.impact_kind, ImpactKind::SessionStateMutation);
         let ss = resolved.resolved_session_state.unwrap();
         assert_eq!(
@@ -741,46 +608,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_envelope_declare_identifies_operation() {
-        let resolver = test_resolver();
-        let input = PolicyInput {
-            method: "session.envelope".into(),
-            params: json!({
-                "mode": "declare",
-                "envelope": {
-                    "intent": {"description": "test"},
-                    "capabilities": [],
-                    "scope": {},
-                    "impact": [],
-                    "constraints": {}
-                }
-            }),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
-            audit_context: audit_ctx(),
-        };
-        let resolved = resolver.resolve(&input).unwrap();
-        assert_eq!(
-            envelope_required_capability(&resolved),
-            RequiredCapability::MutateSessionState
-        );
-        let ss = resolved.resolved_session_state.unwrap();
-        assert_eq!(
-            ss.operation,
-            super::super::capability::SessionStateOperation::EnvelopeDeclare
-        );
-    }
-
-    #[test]
     fn resolve_unknown_method_errors() {
         let resolver = test_resolver();
         let input = PolicyInput {
             method: "unknown.method".into(),
             params: json!({}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let err = resolver.resolve(&input).unwrap_err();
@@ -793,9 +626,7 @@ mod tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: json!({"mode": "read_file", "path": "../etc/passwd"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: empty_envelope(),
-            },
+            authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
         let err = resolver.resolve(&input).unwrap_err();

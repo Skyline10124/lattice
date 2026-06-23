@@ -8,23 +8,10 @@ use lancet_authority::guard::PolicyEvaluation;
 use lancet_authority::policy::command::EffectiveImpact;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::Capability;
-use lancet_protocol::policy::{
-    CapabilitySource, PolicyAuthorityInput, PolicyDecision, PolicyInput, PolicyReasonCode,
-    SourcedCapability,
-};
+use lancet_protocol::policy::{PolicyDecision, PolicyInput, PolicyReasonCode};
 use serde_json::{Value, json};
 use std::fmt::Debug;
 use std::path::Path;
-
-fn declared_envelope_id(input: &PolicyInput) -> Option<String> {
-    match &input.authority {
-        PolicyAuthorityInput::Envelope { envelope_snapshot } => {
-            envelope_snapshot.declared_envelope_id.clone()
-        }
-        PolicyAuthorityInput::Direct => None,
-    }
-}
 
 /// Build durable policy metadata shared by all native handlers.
 pub(crate) fn policy_metadata(
@@ -33,14 +20,11 @@ pub(crate) fn policy_metadata(
     authorized_region: Option<&AuthorizedEffectRegion>,
 ) -> Value {
     let evidence = evaluation.evidence.as_ref();
-    let capability_match = evidence.and_then(|e| e.capability_match.as_ref());
 
     let mut metadata = json!({
         "cep_policy": {
             "method": method,
             "decision": policy_decision_label(&evaluation.decision),
-            "capability_match": capability_match.is_some(),
-            "capability_match_detail": capability_match.map(capability_match_metadata),
             "budget_remaining": evidence.and_then(|e| e.budget_remaining),
             "network_host": evidence.and_then(|e| e.network_host.as_deref()),
             "resolved_paths": evidence.map(|e| e.resolved_paths.clone()).unwrap_or_default(),
@@ -66,7 +50,7 @@ pub(crate) fn policy_metadata(
 /// Build approval-ready metadata for a human-review policy decision.
 pub(crate) fn approval_request_metadata(
     method: &str,
-    input: &PolicyInput,
+    _input: &PolicyInput,
     evaluation: &PolicyEvaluation,
 ) -> Option<Value> {
     let PolicyDecision::HumanReview {
@@ -77,12 +61,7 @@ pub(crate) fn approval_request_metadata(
         return None;
     };
 
-    let capability = evaluation
-        .evidence
-        .as_ref()
-        .and_then(|e| e.capability_match.as_ref())
-        .map(|m| crate::audit::required_capability_label(m.required))
-        .or_else(|| required_capability_for_method(method));
+    let capability = required_capability_for_method(method);
 
     Some(json!({
         "method": method,
@@ -90,7 +69,6 @@ pub(crate) fn approval_request_metadata(
         "reason_code": debug_label(reason_code),
         "message": message,
         "required_capability": capability,
-        "active_envelope_id": declared_envelope_id(input),
         "retry_hint": "obtain_human_approval_or_replan",
     }))
 }
@@ -121,8 +99,6 @@ pub(crate) fn policy_denial_preflight_metadata(
             "method": method,
             "kind": "workspace_mutation",
             "effective_effect": ["workspace_mutation"],
-            "requires_active_envelope": true,
-            "active_envelope_id": declared_envelope_id(input),
             "changed_paths": paths,
             "write_patterns": [],
             "out_of_scope_paths": paths,
@@ -154,7 +130,6 @@ pub(crate) fn command_preflight_metadata(input: CommandPreflight<'_>) -> Value {
                 input.effective_impact,
                 EffectiveImpact::WorkspaceMutation
             ),
-            "active_envelope_id": input.envelope_id,
             "run_command_capability_present": input.run_command_capability_present,
             "argv_allowlist_matched": input.argv_allowlist_matched,
             "write_region": input.authorized_region.map(authorized_region_metadata),
@@ -163,7 +138,6 @@ pub(crate) fn command_preflight_metadata(input: CommandPreflight<'_>) -> Value {
         "declared_impact": input.declared_impact.map(crate::audit::impact_kind_label),
         "classification": effective_impact_label(input.effective_impact),
         "effective_effect": command_effective_effect_labels(input.effective_impact),
-        "envelope_id": input.envelope_id,
         "backend_invoked": input.backend_invoked,
         "policy_enforced": true,
     })
@@ -174,22 +148,19 @@ pub(crate) struct CommandPreflight<'a> {
     pub(crate) argv: &'a [String],
     pub(crate) declared_impact: Option<&'a ImpactKind>,
     pub(crate) effective_impact: &'a EffectiveImpact,
-    pub(crate) envelope_id: Option<&'a str>,
     pub(crate) run_command_capability_present: bool,
     pub(crate) argv_allowlist_matched: bool,
     pub(crate) authorized_region: Option<&'a AuthorizedEffectRegion>,
     pub(crate) backend_invoked: bool,
 }
 
-/// Build mutation-specific preflight metadata after envelope and scope checks.
+/// Build mutation-specific preflight metadata after scope checks.
 pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value {
     json!({
         "cep_preflight": {
             "method": input.method,
             "kind": "workspace_mutation",
             "effective_effect": ["workspace_mutation"],
-            "requires_active_envelope": true,
-            "active_envelope_id": input.envelope_id,
             "changed_paths": input.changed_paths,
             "write_patterns": input.write_patterns,
             "out_of_scope_paths": input.out_of_scope_paths,
@@ -203,7 +174,6 @@ pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value
         "expected_hash_status": input.expected_hash_status,
         "verify_configured": input.verify_configured,
         "replan_reason": input.replan_reason,
-        "envelope_id": input.envelope_id,
         "backend_invoked": input.backend_invoked,
         "policy_enforced": true,
     })
@@ -211,7 +181,6 @@ pub(crate) fn mutation_preflight_metadata(input: MutationPreflight<'_>) -> Value
 
 pub(crate) struct MutationPreflight<'a> {
     pub(crate) method: &'a str,
-    pub(crate) envelope_id: &'a str,
     pub(crate) changed_paths: &'a [String],
     pub(crate) write_patterns: &'a [String],
     pub(crate) out_of_scope_paths: &'a [String],
@@ -235,35 +204,6 @@ pub(crate) fn authorized_region_metadata(region: &AuthorizedEffectRegion) -> Val
         "hosts": region.hosts,
         "session_state_allowed": region.session_state_allowed,
         "command_allowed": region.command_allowed,
-    })
-}
-
-fn capability_match_metadata(
-    capability_match: &lancet_authority::policy::capability::CapabilityMatch,
-) -> Value {
-    json!({
-        "required": crate::audit::required_capability_label(capability_match.required),
-        "verdict": debug_label(&capability_match.verdict),
-        "source_allowed": capability_match.source_allowed,
-        "matched": capability_match
-            .matched
-            .as_ref()
-            .map(sourced_capability_metadata),
-        "failure_reason": capability_match
-            .failure_reason
-            .as_ref()
-            .map(debug_label),
-        "action_required": capability_match
-            .action_required
-            .as_ref()
-            .map(debug_label),
-    })
-}
-
-fn sourced_capability_metadata(capability: &SourcedCapability) -> Value {
-    json!({
-        "kind": capability_kind_label(&capability.capability),
-        "source": capability_source_label(&capability.source),
     })
 }
 
@@ -363,26 +303,6 @@ fn effective_impact_label(effective_impact: &EffectiveImpact) -> &'static str {
         EffectiveImpact::Diagnostic => "diagnostic",
         EffectiveImpact::WorkspaceMutation => "workspace_mutation",
         EffectiveImpact::HardDenied => "hard_denied",
-    }
-}
-
-fn capability_kind_label(capability: &Capability) -> &'static str {
-    match capability {
-        Capability::ReadPath { .. } => "read_path",
-        Capability::WritePath { .. } => "write_path",
-        Capability::RunCommand { .. } => "run_command",
-        Capability::FetchUrl { .. } => "fetch_url",
-        Capability::MutateSessionState => "mutate_session_state",
-        Capability::Inspect => "inspect",
-        Capability::ReadAudit => "read_audit",
-    }
-}
-
-fn capability_source_label(source: &CapabilitySource) -> &'static str {
-    match source {
-        CapabilitySource::Base => "base",
-        CapabilitySource::Declared { .. } => "declared",
-        CapabilitySource::Both { .. } => "both",
     }
 }
 

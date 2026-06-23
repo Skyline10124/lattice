@@ -278,11 +278,6 @@ async fn v1_4_command_artifact_dogfood() {
     )
     .expect("command metadata JSON");
     assert_eq!(
-        command_meta["authority_mode"].as_str(),
-        Some("direct"),
-        "command metadata must record Direct authority mode: {command_meta}"
-    );
-    assert_eq!(
         command_meta["classification"].as_str(),
         Some("workspace_mutation"),
         "command metadata must record the effective declared workspace mutation"
@@ -374,7 +369,6 @@ async fn replay_turn(
 
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
-    config.base_envelope = replay_base;
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     config.audit_context = replay_audit_ctx;
     config.policy_hook = hook.clone();

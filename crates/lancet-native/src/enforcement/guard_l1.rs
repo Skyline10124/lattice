@@ -9,8 +9,7 @@
 
 pub use lancet_authority::guard::{
     PolicyEvaluation, WritePathPattern, check_write_scope,
-    decision_to_guard_verdict, evaluate_policy, extract_write_path_patterns,
-    has_run_command_capability, map_decision_to_cep_error, normalize_write_path_pattern,
+    decision_to_guard_verdict, evaluate_policy, map_decision_to_cep_error, normalize_write_path_pattern,
 };
 
 use crate::enforcement::preflight::{
@@ -32,7 +31,7 @@ pub async fn build_policy_input(
     method: &str,
     params: &impl Serialize,
 ) -> Result<PolicyInput, CepError> {
-    let authority = PolicyAuthorityInput::Direct;
+    let authority = PolicyAuthorityInput;
 
     let audit_snapshot = ctx.audit_context.read().await;
     let budget = ctx.cep_context.budget.snapshot();
@@ -158,7 +157,6 @@ mod tests {
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use lancet_protocol::policy::BaseExecutionEnvelope;
     use lancet_protocol::policy::{PolicyHook, PolicyReasonCode};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -177,28 +175,11 @@ mod tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "policy test"),
                 cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-                active_envelope: Arc::new(
-                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::Direct,
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

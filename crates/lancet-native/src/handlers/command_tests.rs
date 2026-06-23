@@ -20,11 +20,9 @@ fn matches_argv_allowlist(argv: &[String], allowlist: &[String]) -> bool {
 
 use super::*;
 use crate::server::registry::{Cancellation, EventSink};
-use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, Intent, OnFailure, Scope, VerifyCommand};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -50,9 +48,7 @@ fn test_ctx(
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "command handler test"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -68,7 +64,6 @@ fn test_ctx(
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -631,9 +626,7 @@ async fn test_ctx_with_artifact_caps(
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "artifact handler test"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: effect_ledger.clone(),
@@ -649,7 +642,6 @@ async fn test_ctx_with_artifact_caps(
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1757,9 +1749,7 @@ async fn test_ctx_with_run_command(
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "command handler test"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: store,
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -1775,7 +1765,6 @@ async fn test_ctx_with_run_command(
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1910,9 +1899,7 @@ async fn workspace_mutation_with_envelope_succeeds() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -1932,7 +1919,6 @@ async fn workspace_mutation_with_envelope_succeeds() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1996,9 +1982,7 @@ async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "allowlist test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -2018,7 +2002,6 @@ async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2085,9 +2068,7 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "multi run cap test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -2107,7 +2088,6 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2191,9 +2171,7 @@ async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_req
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "hidden path test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger,
@@ -2213,7 +2191,6 @@ async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_req
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2313,9 +2290,7 @@ async fn workspace_mutation_timeout_checks_out_of_scope_changes() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "timeout guard test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger,
@@ -2335,7 +2310,6 @@ async fn workspace_mutation_timeout_checks_out_of_scope_changes() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2419,9 +2393,7 @@ async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "supersede race test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: Arc::clone(&store),
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger,
@@ -2441,7 +2413,6 @@ async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2711,9 +2682,7 @@ async fn command_cancel_returns_execution_failed() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: cancel,
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "cancel test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -2733,7 +2702,6 @@ async fn command_cancel_returns_execution_failed() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2821,9 +2789,7 @@ async fn workspace_mutation_inside_scope_succeeds() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -2843,7 +2809,6 @@ async fn workspace_mutation_inside_scope_succeeds() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2911,9 +2876,7 @@ async fn workspace_mutation_verify_failure_records_backend_invoked() {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "verify failure test"),
         cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-        active_envelope: store,
         turn_id: "test-turn".into(),
         durable_metadata: durable_metadata.clone(),
         effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -2933,7 +2896,6 @@ async fn workspace_mutation_verify_failure_records_backend_invoked() {
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -3206,7 +3168,6 @@ mod phase34_direct_command {
         ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, PathFacts,
         PathIntent, UpperContext, WorkspacePath,
     };
-    use lancet_protocol::policy::AuthorityMode;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};

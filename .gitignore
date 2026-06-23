@@ -9,6 +9,7 @@ target/
 .planning/
 .sisyphus/
 .codegraph/
+.devin/
 .mcp.json
 opencode.jsonc
 .pytest_cache/

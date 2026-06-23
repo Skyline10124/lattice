@@ -7,12 +7,11 @@ use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
 use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting, RoutingInvocationState};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use lancet_audit::{CepAuditContext, CepAuditStore, RejectionRecord};
-use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::DefaultPolicyHook;
 pub use lancet_dispatch::{Cancellation, EventSink};
-use lancet_protocol::policy::{BaseExecutionEnvelope, CepMode};
-use lancet_protocol::policy::{AuthorityMode, PolicyHook};
+use lancet_protocol::policy::CepMode;
+use lancet_protocol::policy::PolicyHook;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -23,13 +22,11 @@ pub type MethodRegistry = lancet_dispatch::MethodRegistry<HandlerContext>;
 /// Default routing-related [`HandlerContext`] fields for construction sites.
 #[allow(dead_code)]
 pub fn handler_routing_defaults() -> (
-    AuthorityMode,
     Option<ExecutionRouting>,
     Option<DirectVerifyConfig>,
     RoutingInvocationState,
 ) {
     (
-        AuthorityMode::default(),
         None,
         None,
         RoutingInvocationState::default(),
@@ -42,9 +39,7 @@ pub struct HandlerContext {
     pub call_id: u64,
     pub events: EventSink,
     pub cancellation: Cancellation,
-    pub base_envelope: BaseExecutionEnvelope,
     pub cep_context: Arc<CepTurnContext>,
-    pub active_envelope: Arc<ActiveEnvelopeStore>,
     pub turn_id: String,
     pub(crate) durable_metadata: CallDurableMetadata,
     pub effect_ledger: lancet_authority::effect::ledger::EffectLedger,
@@ -55,9 +50,7 @@ pub struct HandlerContext {
     pub audit: Arc<CepAuditStore>,
     pub cep_mode: CepMode,
     pub command_isolation: CommandIsolationRuntimeConfig,
-    /// How authority is sourced for this call — never inferred from backend presence.
-    pub authority_mode: AuthorityMode,
-    /// Optional Upper execution routing; `None` for host-only or Envelope compatibility.
+    /// Optional Upper execution routing; `None` for host-only.
     pub execution: Option<ExecutionRouting>,
     /// Immutable Direct-mode verify configuration from runtime setup.
     pub direct_verify: Option<DirectVerifyConfig>,
@@ -71,9 +64,7 @@ impl std::fmt::Debug for HandlerContext {
             .field("call_id", &self.call_id)
             .field("events", &self.events)
             .field("cancellation", &self.cancellation)
-            .field("base_envelope", &self.base_envelope)
             .field("cep_context", &self.cep_context)
-            .field("active_envelope", &self.active_envelope)
             .field("turn_id", &self.turn_id)
             .field("effect_ledger", &self.effect_ledger)
             .field("authorized_region", &self.authorized_region)
@@ -82,7 +73,6 @@ impl std::fmt::Debug for HandlerContext {
             .field("audit_context", &self.audit_context)
             .field("cep_mode", &self.cep_mode)
             .field("command_isolation", &self.command_isolation)
-            .field("authority_mode", &self.authority_mode)
             .field(
                 "execution",
                 &self.execution.as_ref().map(|_| "<ExecutionRouting>"),
@@ -94,15 +84,10 @@ impl std::fmt::Debug for HandlerContext {
 }
 
 pub(crate) fn build_routing_metadata(
-    authority_mode: AuthorityMode,
     execution: Option<&ExecutionRouting>,
     routing: &RoutingInvocationState,
 ) -> Value {
     let mut obj = serde_json::Map::new();
-    obj.insert(
-        "authority_mode".into(),
-        serde_json::to_value(authority_mode).expect("authority_mode serializes"),
-    );
     obj.insert(
         "adapter_preflight_invoked".into(),
         routing.adapter_preflight_invoked().into(),
@@ -130,7 +115,6 @@ impl HandlerContext {
     /// Record routing identity and accurate invocation flags for durable audit metadata.
     pub fn record_routing_metadata(&self) {
         self.record_durable_metadata(build_routing_metadata(
-            self.authority_mode,
             self.execution.as_ref(),
             &self.routing_invocation,
         ));
@@ -184,7 +168,6 @@ mod tests {
             UpperContext, WorkspacePath,
         };
         use lancet_audit::{RejectionRecord, RejectionStage};
-        use lancet_protocol::policy::AuthorityMode;
         use serde_json::Value;
         use std::future::Future;
         use std::pin::Pin;
@@ -320,7 +303,6 @@ mod tests {
         }
 
         fn test_ctx(
-            authority_mode: AuthorityMode,
             execution: Option<ExecutionRouting>,
         ) -> HandlerContext {
             let default_hook = Arc::new(DefaultPolicyHook::new(
@@ -332,9 +314,7 @@ mod tests {
                 call_id: 1,
                 events: EventSink::new(tokio::sync::mpsc::channel(1).0, 1),
                 cancellation: Cancellation::new(tokio::sync::watch::channel(false).1),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "phase34"),
                 cep_context: Arc::new(CepTurnContext::defaults_for_project_root(".")),
-                active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "turn".into(),
                 durable_metadata: CallDurableMetadata::default(),
                 effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -345,7 +325,6 @@ mod tests {
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
                 command_isolation: CommandIsolationRuntimeConfig::default(),
-                authority_mode,
                 execution,
                 direct_verify: None,
                 routing_invocation: RoutingInvocationState::default(),
@@ -369,7 +348,7 @@ mod tests {
 
         #[test]
         fn phase34_policy_denial_precedes_adapter() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::PolicyGate,
                 denial_source: "cep_policy".into(),
@@ -384,7 +363,7 @@ mod tests {
 
         #[test]
         fn phase34_path_denial_records_preflight_only() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::AdapterPreflight,
@@ -398,7 +377,7 @@ mod tests {
 
         #[test]
         fn phase34_backend_failure_records_both_invocations() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.record_rejection(RejectionRecord {
@@ -413,7 +392,7 @@ mod tests {
 
         #[test]
         fn phase34_verification_failure_after_backend() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.record_rejection(RejectionRecord {
@@ -428,7 +407,7 @@ mod tests {
 
         #[test]
         fn phase34_success_has_no_rejection_fields() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             let meta = metadata(&ctx);
@@ -438,9 +417,8 @@ mod tests {
 
         #[test]
         fn phase34_host_only_omits_backend_identity() {
-            let ctx = test_ctx(AuthorityMode::Envelope, None);
+            let ctx = test_ctx(None);
             let meta = metadata(&ctx);
-            assert_eq!(meta["authority_mode"], "envelope");
             assert_eq!(meta["adapter_preflight_invoked"], false);
             assert_eq!(meta["backend_invoked"], false);
             assert!(meta.get("execution_backend").is_none());
@@ -449,7 +427,7 @@ mod tests {
 
         #[test]
         fn phase34_invocation_flags_are_monotonic() {
-            let ctx = test_ctx(AuthorityMode::Direct, Some(execution_routing()));
+            let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
             ctx.mark_adapter_preflight_invoked();

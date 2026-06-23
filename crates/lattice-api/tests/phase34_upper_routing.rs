@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 use git2::{IndexAddOption, Repository, Signature};
-use lancet_api::{AuditBacking, AuthorityMode, LancetRuntime, LancetRuntimeConfig};
+use lancet_api::{AuditBacking, LancetRuntime, LancetRuntimeConfig};
 use lancet_authority::policy::default::{PolicyConfig, WorkspacePolicy};
 use lancet_catalog::CepMethod;
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
@@ -228,7 +228,6 @@ async fn direct_runtime_fixture(
         audit: AuditBacking::File(audit_dir.path().join("audit.db")),
         model_id: "test".into(),
         runtime_version: "test".into(),
-        authority_mode: AuthorityMode::Direct,
         execution: Some(execution),
         direct_verify: None,
     })

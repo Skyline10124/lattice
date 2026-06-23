@@ -18,7 +18,6 @@ use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
 use lancet_protocol::policy::Capability;
-use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 #[test]
 fn malicious_handler_caught() {
@@ -48,7 +47,7 @@ fn malicious_handler_caught() {
         .to_string();
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![read_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     let authority = observation_region(&root);
@@ -95,16 +94,8 @@ fn create_glob_pattern_within_region() {
     std::fs::create_dir_all(std::path::Path::new(&root).join("src")).unwrap();
 
     let registry = test_registry();
-    let glob_cap = SourcedCapability {
-        capability: Capability::WritePath {
-            path_pattern: "src/**".to_string(),
-        },
-        source: CapabilitySource::Declared {
-            envelope_id: "test-envelope".into(),
-        },
-    };
     let (ctx, _rx, _) =
-        build_test_context(&root, vec![glob_cap], NetworkPolicyConfig::safe_defaults());
+        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     declare_active_envelope(&ctx, &root);
 
     let authority = {
@@ -155,7 +146,7 @@ fn command_run_composite_mutation_success() {
     let registry = test_registry();
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![run_cap(), write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);

@@ -126,7 +126,6 @@ mod tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
-    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
@@ -152,29 +151,11 @@ mod tests {
                 call_id: 9,
                 events: EventSink::new(event_tx, 9),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(".", "todo test")
-                    .with_session_state(),
                 cep_context,
-                active_envelope: Arc::new(
-                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::Direct,
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

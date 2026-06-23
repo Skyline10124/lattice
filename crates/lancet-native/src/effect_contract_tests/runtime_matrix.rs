@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::runtime_fixtures::{
     RuntimeEffectFixture, audit_observe_runtime_effects, audit_replay_runtime_effects,
     batch_runtime_effects, command_run_runtime_effects, create_runtime_effects,
-    edit_runtime_effects, envelope_runtime_effects, fetch_runtime_effects,
+    edit_runtime_effects, fetch_runtime_effects,
     observe_workspace_runtime_effects, todo_write_runtime_effects,
 };
 use lancet_authority::effect::ledger::EffectSource;
@@ -33,10 +33,6 @@ fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     fixtures.insert(
         TodoWrite::NAME,
         todo_write_runtime_effects as RuntimeEffectFixture,
-    );
-    fixtures.insert(
-        Envelope::NAME,
-        envelope_runtime_effects as RuntimeEffectFixture,
     );
     fixtures.insert(
         AuditObserve::NAME,

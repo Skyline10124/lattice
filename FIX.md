@@ -4,6 +4,52 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## 37-05: Remove legacy overlay and envelope authority concepts — 2026-06-14
+
+Severity: MEDIUM (architectural simplification; phase 37-overlay-and-envelope-removal).
+
+**Problem:** The codebase carried legacy `AuthorityMode` (Direct/Envelope), `Capability` enums,
+`SourcedCapability`, `CapabilitySource`, `ExecutionEnvelope`, `BaseExecutionEnvelope`,
+`EffectiveEnvelopeSnapshot`, envelope composition, and `ActiveEnvelopeStore` — all of which
+were no longer needed in the direct-authority-only runtime.
+
+**Fix:**
+
+- **Task 1** (`da1b174`): Deleted `AuthorityMode`, `Capability`, `SourcedCapability`,
+  `CapabilitySource`, `EffectiveEnvelopeSnapshot`, `ExecutionEnvelope`, `BaseExecutionEnvelope`,
+  `Constraints`, `Intent`, `Scope`, `Impact`, `ImpactConfidence`, `OnFailure`, `VerifyCommand`
+  from `lancet-protocol/src/policy.rs`. Simplified `PolicyAuthorityInput` to a unit struct.
+- **Task 2** (`da1b174`): Deleted `lancet-authority/src/envelope_store.rs`. Rewrote
+  `lancet-authority/src/policy/capability.rs` to keep only `InvocationFacts` and
+  `SessionStateOperation`. Simplified `policy/default.rs` (removed `decide_resolved_envelope`,
+  `allowed_outcome_envelope`, `capability_failure_hint`, `map_cap_action`). Updated
+  `guard.rs`, `effect/region.rs`, `effect/checker.rs`, `effect/mod.rs`, `policy/resolved.rs`,
+  `lib.rs`. Updated test files (`direct_policy.rs`, `policy_coverage.rs`, `guard_decide_fuzz.rs`).
+- **Task 3** (`0871770`): Removed `base_envelope`, `active_envelope`, `authority_mode` from
+  `HandlerContext` and `ServerRunConfig`. Updated `transport.rs`, `preflight.rs`, `mutation.rs`
+  (simplified `MutationAuthorization` to direct-only), `verify.rs` (removed
+  `extract_verify_command`), `command.rs`. Updated effect_contract_tests fixtures and support.
+- **Task 4** (`2a9feef`): Removed `LegacyEnvelopeGate` and `AuthorityModeRejection` from
+  `RejectionStage` enum in `lancet-audit`.
+- **Task 5** (`df48601`): Removed `authority_mode` from `LancetRuntimeConfig`. Removed
+  `base_envelope`/`active_envelope` from `LancetRuntime::build`. Removed
+  `from_catalog_enabled_for_authority_mode` from `ToolExposure`. Removed `AuthorityMode`
+  re-exports. Updated `lattice-api/turn/cep.rs` to remove `AuthorityMode` usage.
+- Integration test fixes (`104d15d`, `a3c55f`): Updated test imports and removed
+  envelope-specific test code across `lattice-api` integration tests.
+
+**Verification:**
+
+- `cargo build --workspace` — passes (2 pre-existing warnings in lancet-native).
+- `cargo test -p lancet-protocol -p lancet-cep -p lancet-audit -p lancet-authority -p lancet-api --lib` — all pass.
+- `lancet-native` lib compiles; test compilation has pre-existing Wave 7 errors (supervisor/shell).
+- `lattice-api` integration tests were already not compiling before this change (pre-existing).
+
+**Changed files:** 25+ files across `lancet-protocol`, `lancet-authority`, `lancet-audit`,
+`lancet-cep`, `lancet-api`, `lancet-native`, `lattice-api`.
+
+---
+
 ## M-33-05: git-ready warm template replaces per-Upper apt-get install git — 2026-06-14
 
 Severity: MEDIUM (performance + correctness; gap-closure Plan 33-06).

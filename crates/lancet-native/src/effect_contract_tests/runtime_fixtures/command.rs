@@ -11,8 +11,6 @@ use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{Capability, VerifyCommand};
-use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<RuntimeEffectScenario>
 {
@@ -29,10 +27,9 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![run_cap_with(vec!["echo".into()])],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(&ctx, test_command_envelope(&root, vec!["echo".into()]));
     scenarios.push(scenario(
         "diagnostic_success_command_execution_only",
         dispatch_success_effects::<Run>(
@@ -50,7 +47,7 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![run_cap(), write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
@@ -81,99 +78,21 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
     let script_allowlist = vec!["./poc_timeout.sh".into()];
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![
-            run_cap_with(script_allowlist.clone()),
-            SourcedCapability {
-                capability: Capability::WritePath {
-                    path_pattern: "src/**".into(),
-                },
-                source: CapabilitySource::Declared {
-                    envelope_id: "test-envelope".into(),
-                },
-            },
-        ],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(&root, "src/**", script_allowlist, None),
-    );
-    scenarios.push(scenario(
-        "failure_timeout_records_workspace_mutation",
-        dispatch_failure_effects::<Run>(
-            RunParams {
-                argv: vec!["./poc_timeout.sh".into()],
-                cwd: Some(root.clone()),
-                env: BTreeMap::new(),
-                timeout_ms: Some(100),
-                declared_impact: Some(ImpactKind::WorkspaceMutation),
-            },
-            ctx,
-            command_mutation_region_with_write_prefixes(
-                &root,
-                vec![PathBuf::from(&root).join("src")],
-            ),
-        ),
-    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![run_cap(), write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
-    );
-    scenarios.push(scenario(
-        "scope_boundary_out_of_scope_records_then_replans",
-        dispatch_failure_effects::<Run>(
-            RunParams {
-                argv: vec!["touch".into(), "outside.txt".into()],
-                cwd: Some(root.clone()),
-                env: BTreeMap::new(),
-                timeout_ms: Some(5000),
-                declared_impact: Some(ImpactKind::WorkspaceMutation),
-            },
-            ctx,
-            command_mutation_region_with_write_prefixes(
-                &root,
-                vec![PathBuf::from(&root).join("src")],
-            ),
-        ),
-    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![run_cap(), write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(
-            &root,
-            ".",
-            vec!["echo".into(), "touch".into()],
-            Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: None,
-            }),
-        ),
-    );
-    scenarios.push(scenario(
-        "verify_success_filters_verify_source",
-        dispatch_success_effects::<Run>(
-            RunParams {
-                argv: vec!["touch".into(), "src/with_verify.txt".into()],
-                cwd: Some(root.clone()),
-                env: BTreeMap::new(),
-                timeout_ms: Some(5000),
-                declared_impact: Some(ImpactKind::WorkspaceMutation),
-            },
-            ctx,
-            command_mutation_region(&root),
-        ),
-    ));
 
     scenarios
 }

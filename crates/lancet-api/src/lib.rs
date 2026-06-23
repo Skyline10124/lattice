@@ -77,7 +77,6 @@ pub use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, DirectVerifyConfig, ExecutionRouting,
     MethodRegistry, MissingRequiredBoundary, ServerRunConfig, register_production_method_registry,
 };
-pub use lancet_protocol::policy::AuthorityMode;
 pub use lancet_protocol::{
     BoundaryDimension, BoundaryPrimitive, CepError, EffectiveBoundaryStatus, HostProbeEntry,
     HostProbeReport, HostProbeStatus,

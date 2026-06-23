@@ -7,11 +7,10 @@ use std::sync::Arc;
 
 use lancet_audit::{CepAuditContext, CepAuditStore};
 use lancet_authority::policy::default::DefaultPolicyHook;
-use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
+use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
-use lancet_protocol::policy::BaseExecutionEnvelope;
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};
@@ -130,24 +129,11 @@ impl LancetRuntime {
             audit,
             model_id,
             runtime_version,
-            authority_mode,
             execution,
             direct_verify,
         } = config;
 
-        let project_root_str = project_root
-            .to_str()
-            .ok_or_else(|| LancetError::Config("project root path is not valid UTF-8".into()))?
-            .to_string();
-        // Best-effort canonicalization so the base envelope's capability patterns
-        // match the canonical targets the guard compares against (e.g. symlinked
-        // temp roots). Falls back to the raw path on failure.
-        let workspace_root = std::fs::canonicalize(&project_root)
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_owned))
-            .unwrap_or(project_root_str);
-
-        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools, authority_mode)?;
+        let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools)?;
         let tool_definitions = tool_exposure.definitions().to_vec();
 
         let cep_policy = CepPolicyConfig {
@@ -158,8 +144,6 @@ impl LancetRuntime {
             command: policy.command.clone(),
             denied_effect_kinds: policy.denied_effect_kinds.clone(),
         };
-        let base_envelope =
-            BaseExecutionEnvelope::for_workspace_root(&workspace_root, "cep_context turn observation");
 
         let audit = match audit {
             AuditBacking::InMemory => Arc::new(
@@ -187,20 +171,16 @@ impl LancetRuntime {
             ..Default::default()
         }));
         let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
-        let active_envelope = Arc::new(ActiveEnvelopeStore::new());
         let default_hook = Arc::new(DefaultPolicyHook::new(policy));
 
         let server_config = ServerRunConfig {
             audit: Arc::clone(&audit),
             audit_context: Arc::clone(&audit_context),
-            base_envelope,
             cep_context,
-            active_envelope,
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode,
             command_isolation,
-            authority_mode,
             execution,
             direct_verify,
         };
@@ -255,9 +235,8 @@ impl LancetRuntime {
 
 fn resolve_catalog_tool_exposure(
     enabled: &[String],
-    mode: lancet_protocol::policy::AuthorityMode,
 ) -> Result<ToolExposure, LancetError> {
-    ToolExposure::from_catalog_enabled_for_authority_mode(enabled, mode)
+    ToolExposure::from_catalog_enabled(enabled)
         .map_err(map_tool_exposure_err)
 }
 
@@ -273,12 +252,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_config_authority_mode_defaults_to_envelope() {
+    fn runtime_config_defaults_have_no_execution() {
         let config = LancetRuntimeConfig::new(".");
-        assert_eq!(
-            config.authority_mode,
-            lancet_protocol::policy::AuthorityMode::Envelope
-        );
         assert!(config.execution.is_none());
         assert!(config.direct_verify.is_none());
     }

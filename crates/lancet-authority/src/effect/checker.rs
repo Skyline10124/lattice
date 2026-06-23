@@ -12,12 +12,10 @@ use std::collections::BTreeSet;
 
 use lancet_protocol::effect_types::{EffectDecl, ImpactKind};
 use lancet_protocol::error::{CepErrorData, EffectErrorData};
-use lancet_protocol::policy::SourcedCapability;
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 
 use super::ledger::{EffectSource, ObservedEffect};
 use super::region::AuthorizedEffectRegion;
-use crate::policy::CepPolicyConfig;
 
 /// Check observed effects against a pre-built authorized region.
 ///
@@ -163,37 +161,14 @@ fn effect_violation_error(
     )
 }
 
-/// Check whether observed effects are within the authorized effect region,
-/// computing the region from the matched capability and policy config.
-///
-/// Convenience wrapper around [`check_effects_against_region`] for callers
-/// that hold a matched capability rather than a pre-built region.
-pub fn check_effects(
-    method: &str,
-    observed: &[ObservedEffect],
-    matched_cap: Option<&SourcedCapability>,
-    policy: &CepPolicyConfig,
-    effect_decl: &EffectDecl,
-) -> Result<(), CepError> {
-    let authorized = AuthorizedEffectRegion::from_matched_capability(matched_cap, policy);
-    check_effects_against_region_with_denies(
-        method,
-        observed,
-        &authorized,
-        effect_decl,
-        &policy.denied_effect_kinds,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::effect::ledger::{EffectSource, ObservedScope};
+    use crate::effect::region::AuthorizedEffectRegion;
     use lancet_catalog::method::RequiredCapability;
     use lancet_protocol::effect_types::{EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior};
-
-    use lancet_protocol::policy::Capability;
-    use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     fn observation_decl() -> EffectDecl {
@@ -206,26 +181,42 @@ mod tests {
         }
     }
 
-    fn inspect_cap() -> SourcedCapability {
-        SourcedCapability {
-            capability: Capability::Inspect,
-            source: CapabilitySource::Base,
+    fn inspect_region() -> AuthorizedEffectRegion {
+        let mut kinds = BTreeSet::new();
+        kinds.insert(ImpactKind::WorkspaceObservation);
+        AuthorizedEffectRegion {
+            kinds,
+            read_paths: Vec::new(),
+            observation_roots: vec![PathBuf::from("/project")],
+            write_paths: Vec::new(),
+            write_path_prefixes: Vec::new(),
+            hosts: Vec::new(),
+            session_state_allowed: false,
+            command_allowed: false,
         }
     }
 
-    fn read_cap(pattern: &str) -> SourcedCapability {
-        SourcedCapability {
-            capability: Capability::ReadPath {
-                path_pattern: pattern.to_string(),
-            },
-            source: CapabilitySource::Base,
+    fn read_region(pattern: &str) -> AuthorizedEffectRegion {
+        let mut kinds = BTreeSet::new();
+        kinds.insert(ImpactKind::WorkspaceObservation);
+        AuthorizedEffectRegion {
+            kinds,
+            read_paths: vec![PathBuf::from(pattern)],
+            observation_roots: Vec::new(),
+            write_paths: Vec::new(),
+            write_path_prefixes: Vec::new(),
+            hosts: Vec::new(),
+            session_state_allowed: false,
+            command_allowed: false,
         }
+    }
+
+    fn empty_denied() -> BTreeSet<ImpactKind> {
+        BTreeSet::new()
     }
 
     #[test]
     fn observation_within_region_returns_ok() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Root("/project".to_string()),
@@ -233,23 +224,20 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &empty_denied(),
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn denied_effect_kind_rejects_authorized_handler_effect() {
-        let mut policy = crate::effect::shared_test_policy();
-        policy
-            .denied_effect_kinds
-            .insert(ImpactKind::WorkspaceObservation);
-        let cap = inspect_cap();
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::WorkspaceObservation);
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Root("/project".to_string()),
@@ -257,12 +245,12 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &denied,
         );
 
         let err = result.expect_err("denied effect kind must hard fail");
@@ -284,8 +272,6 @@ mod tests {
 
     #[test]
     fn mutation_in_observation_method_returns_effect_violation() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
             scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs")),
@@ -293,12 +279,12 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &empty_denied(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -315,14 +301,9 @@ mod tests {
 
     #[test]
     fn probe_and_guard_effects_are_not_charged() {
-        let mut policy = crate::effect::shared_test_policy();
-        policy
-            .denied_effect_kinds
-            .insert(ImpactKind::WorkspaceMutation);
-        policy
-            .denied_effect_kinds
-            .insert(ImpactKind::WorkspaceObservation);
-        let cap = inspect_cap();
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::WorkspaceMutation);
+        denied.insert(ImpactKind::WorkspaceObservation);
         let observed = vec![
             ObservedEffect {
                 kind: ImpactKind::WorkspaceMutation,
@@ -338,23 +319,20 @@ mod tests {
             },
         ];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &denied,
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn verify_effect_is_not_charged() {
-        let mut policy = crate::effect::shared_test_policy();
-        policy
-            .denied_effect_kinds
-            .insert(ImpactKind::CommandExecution);
-        let cap = inspect_cap();
+        let mut denied = empty_denied();
+        denied.insert(ImpactKind::CommandExecution);
         let observed = vec![ObservedEffect {
             kind: ImpactKind::CommandExecution,
             scope: ObservedScope::Root("/project".to_string()),
@@ -362,19 +340,18 @@ mod tests {
             source: EffectSource::Verify,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &denied,
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn empty_region_with_any_handler_effect_returns_violation() {
-        let policy = crate::effect::shared_test_policy();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceObservation,
             scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs")),
@@ -382,12 +359,12 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            None,
-            &policy,
+            &AuthorizedEffectRegion::empty(),
             &observation_decl(),
+            &empty_denied(),
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -396,8 +373,6 @@ mod tests {
 
     #[test]
     fn read_within_readpath_region_returns_ok() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = read_cap("/project/src");
         let decl = EffectDecl {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
             scope: EffectScopeKind::PathRead,
@@ -412,14 +387,18 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects("observe.workspace", &observed, Some(&cap), &policy, &decl);
+        let result = check_effects_against_region_with_denies(
+            "observe.workspace",
+            &observed,
+            &read_region("/project/src"),
+            &decl,
+            &empty_denied(),
+        );
         assert!(result.is_ok());
     }
 
     #[test]
     fn read_outside_readpath_region_returns_violation() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = read_cap("/project/src");
         let decl = EffectDecl {
             kinds: EffectKindSet::from_static(&[ImpactKind::WorkspaceObservation]),
             scope: EffectScopeKind::PathRead,
@@ -434,14 +413,18 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects("observe.workspace", &observed, Some(&cap), &policy, &decl);
+        let result = check_effects_against_region_with_denies(
+            "observe.workspace",
+            &observed,
+            &read_region("/project/src"),
+            &decl,
+            &empty_denied(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn mixed_charged_and_uncharged_only_charged_matters() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = inspect_cap();
         let observed = vec![
             ObservedEffect {
                 kind: ImpactKind::WorkspaceMutation,
@@ -457,20 +440,18 @@ mod tests {
             },
         ];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &empty_denied(),
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn violation_populates_all_effect_error_data_fields() {
-        let policy = crate::effect::shared_test_policy();
-        let cap = inspect_cap();
         let observed = vec![ObservedEffect {
             kind: ImpactKind::WorkspaceMutation,
             scope: ObservedScope::Path(PathBuf::from("/project/src/main.rs")),
@@ -478,12 +459,12 @@ mod tests {
             source: EffectSource::HandlerBackend,
         }];
 
-        let result = check_effects(
+        let result = check_effects_against_region_with_denies(
             "observe.workspace",
             &observed,
-            Some(&cap),
-            &policy,
+            &inspect_region(),
             &observation_decl(),
+            &empty_denied(),
         );
         let err = result.unwrap_err();
 

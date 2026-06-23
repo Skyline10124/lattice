@@ -27,17 +27,17 @@ pub use lancet_dispatch::{
     ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    BoundaryDimension, BoundaryPrimitive, CEP_TURN_ATTESTATION_PREDICATE_TYPE, Capability,
-    CapabilitySource, CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode, Constraints,
+    BoundaryDimension, BoundaryPrimitive, CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+    CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode,
     EffectDecl, EffectKindSet, EffectScopeKind, EffectiveBoundaryEntry, EffectiveBoundaryReport,
-    EffectiveBoundaryStatus, EffectiveEnvelopeSnapshot, ErrorObject, ExecutionEnvelope,
-    FailureSemantics, GuardVerdict, HostProbeEntry, HostProbeReport, HostProbeStatus, Id, Impact,
-    ImpactConfidence, ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Intent, Notification,
-    OnFailure, OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
+    EffectiveBoundaryStatus, ErrorObject,
+    FailureSemantics, GuardVerdict, HostProbeEntry, HostProbeReport, HostProbeStatus, Id,
+    ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Notification,
+    OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
     PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,
     ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
-    Request, Response, Retriability, Scope, SourcedCapability, ToolCall, ToolError, ToolEvent,
-    ToolResult, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace, VerifyCommand,
+    Request, Response, Retriability, ToolCall, ToolError, ToolEvent,
+    ToolResult, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace,
 };
 
 pub mod methods {

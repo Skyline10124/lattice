@@ -37,7 +37,6 @@ use lancet_native::{
 use lancet_protocol::error::{
     CepErrorData, invalid_params, jsonrpc, method_not_found, parse_error,
 };
-use lancet_protocol::policy::AuthorityMode;
 use lancet_protocol::{CepError, Retriability, ToolEvent};
 use lattice_agent::{
     AgentLoop, AgentLoopConfig, AgentTurnEvent, ToolCallExecutor, ToolExecutionError,
@@ -711,7 +710,6 @@ pub(crate) async fn build_production_turn_deps(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        authority_mode: AuthorityMode::Direct,
         execution,
         direct_verify: lancet
             .map(|section| direct_verify_from_profile(section, Path::new(project_root)))
@@ -796,7 +794,6 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
         audit,
         model_id: model_id.to_string(),
         runtime_version: runtime_version.to_string(),
-        authority_mode: AuthorityMode::Envelope,
         execution: None,
         direct_verify: None,
     })
@@ -1267,7 +1264,7 @@ mod cep_context_profile_policy {
         let mutate = PolicyInput {
             method: "mutate.create".into(),
             params: json!({"path": "src/new.rs", "content": "x"}),
-            authority: PolicyAuthorityInput::Direct,
+            authority: PolicyAuthorityInput,
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
@@ -1450,15 +1447,12 @@ mod phase34_turn_wiring {
     }
 
     #[test]
-    fn direct_mode_definitions_omit_session_envelope() {
-        let exposure = ToolExposure::from_catalog_enabled_for_authority_mode(
-            &[
-                ObserveWorkspace::NAME.to_string(),
-                "session.envelope".to_string(),
-            ],
-            AuthorityMode::Direct,
-        )
-        .expect("catalog");
+    fn catalog_exposure_omits_unknown_envelope_method() {
+        let exposure = ToolExposure::from_catalog_enabled(&[
+            ObserveWorkspace::NAME.to_string(),
+            "session.envelope".to_string(),
+        ])
+        .expect("catalog resolves known tools");
         assert!(!exposure.contains("session.envelope"));
         assert!(exposure.contains(ObserveWorkspace::NAME));
     }

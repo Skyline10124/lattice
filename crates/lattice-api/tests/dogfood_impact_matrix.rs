@@ -37,7 +37,6 @@ use lancet_native::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Intent, Scope};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
@@ -70,10 +69,9 @@ async fn spawn_echo_server(status_line: &str, body: &str) -> String {
     format!("http://127.0.0.1:{}/", addr.port())
 }
 
-/// Build a production server config with a fixed turn_id and the given base envelope.
+/// Build a production server config with a fixed turn_id.
 async fn build_production_config(
     canonical_root: &str,
-    base_envelope: BaseExecutionEnvelope,
     audit: Arc<CepAuditStore>,
     allow_localhost: bool,
 ) -> ServerRunConfig {
@@ -89,7 +87,6 @@ async fn build_production_config(
 
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
-    config.base_envelope = base_envelope;
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
@@ -120,11 +117,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
 
     // Build base envelope: ReadPath(root) + FetchUrl(*) + MutateSessionState + ReadAudit
-    let base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(canonical_str, "dog04 impact matrix")
-            .with_fetch_host("127.0.0.1")
-            .with_session_state()
-            .with_read_audit();
 
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit store"));
 
@@ -136,7 +128,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let fetch_url = spawn_echo_server("200 OK", "dog04-fetch-body").await;
 
     let config =
-        build_production_config(canonical_str, base_envelope, Arc::clone(&audit), true).await;
+        build_production_config(canonical_str, Arc::clone(&audit), true).await;
     let (client1, server1) = CepTransport::pair(32);
     let server_task1 = tokio::spawn(async move {
         let _ = server1.run(registry, config).await;
@@ -381,9 +373,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
     let mut replay_registry = MethodRegistry::new();
     register_production_method_registry(&mut replay_registry).expect("replay registry");
 
-    let replay_base =
-        BaseExecutionEnvelope::for_workspace_root(canonical_str, "dog04 replay").with_read_audit();
-
     let replay_audit_ctx = Arc::new(RwLock::new(CepAuditContext {
         turn_id: "dog04-replay-turn".into(),
         session_id: FIXED_SESSION_ID.to_string(),
@@ -395,7 +384,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     let mut replay_config = ServerRunConfig::in_memory_for_tests();
     replay_config.audit = Arc::clone(&audit);
-    replay_config.base_envelope = replay_base;
     replay_config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(canonical_str));
     replay_config.audit_context = replay_audit_ctx;
     replay_config.policy_hook = hook2.clone();

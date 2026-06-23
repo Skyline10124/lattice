@@ -21,7 +21,7 @@ pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<R
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![audit_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -38,7 +38,7 @@ pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<R
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![audit_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -106,7 +106,7 @@ pub(in crate::effect_contract_tests) fn audit_replay_runtime_effects() -> Vec<Ru
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![audit_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     seed_audit_replay_row(&ctx);
@@ -123,7 +123,7 @@ pub(in crate::effect_contract_tests) fn audit_replay_runtime_effects() -> Vec<Ru
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![audit_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(

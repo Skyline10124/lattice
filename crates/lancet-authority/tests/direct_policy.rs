@@ -1,17 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct authority policy semantics: determinism, envelope independence, and
-//! workspace write-region behavior.
+//! Direct authority policy semantics: determinism and workspace write-region
+//! behavior.
 
 use std::path::PathBuf;
 
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
-use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{
-    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
-    PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
-    SourcedCapability,
+    PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
+    PolicyInput, PolicyReasonCode,
 };
 use serde_json::json;
 
@@ -25,7 +23,7 @@ fn direct_input(method: &str, params: serde_json::Value) -> PolicyInput {
     PolicyInput {
         method: method.into(),
         params,
-        authority: PolicyAuthorityInput::Direct,
+        authority: PolicyAuthorityInput,
         audit_context: PolicyAuditContext {
             turn_id: "turn-1".into(),
             session_id: "session-1".into(),
@@ -38,55 +36,6 @@ fn direct_input(method: &str, params: serde_json::Value) -> PolicyInput {
             },
         },
     }
-}
-
-fn envelope_input(
-    method: &str,
-    params: serde_json::Value,
-    snapshot: EffectiveEnvelopeSnapshot,
-) -> PolicyInput {
-    PolicyInput {
-        method: method.into(),
-        params,
-        authority: PolicyAuthorityInput::Envelope {
-            envelope_snapshot: snapshot,
-        },
-        audit_context: PolicyAuditContext {
-            turn_id: "turn-1".into(),
-            session_id: "session-1".into(),
-            call_id: Some(1),
-            budget_snapshot: PolicyBudgetSnapshot {
-                turn_observation_bytes_used: 0,
-                turn_observation_bytes_limit: 65536,
-                todo_ops_used: 0,
-                todo_ops_limit: 10,
-            },
-        },
-    }
-}
-
-fn active_envelope_snapshot() -> EffectiveEnvelopeSnapshot {
-    EffectiveEnvelopeSnapshot {
-        base_envelope_id: "base".into(),
-        declared_envelope_id: Some("declared".into()),
-        capabilities: vec![SourcedCapability {
-            capability: Capability::WritePath {
-                path_pattern: "other/**".into(),
-            },
-            source: CapabilitySource::Declared {
-                envelope_id: "declared".into(),
-            },
-        }],
-    }
-}
-
-#[test]
-fn direct_policy_input_has_no_envelope_snapshot_field() {
-    let input = direct_input(
-        "observe.workspace",
-        json!({"mode": "read_file", "path": "src/a.rs"}),
-    );
-    assert!(matches!(input.authority, PolicyAuthorityInput::Direct));
 }
 
 #[test]
@@ -233,24 +182,6 @@ fn direct_decision_is_deterministic() {
     assert_eq!(
         first.evidence.resolved_paths,
         second.evidence.resolved_paths
-    );
-}
-
-#[test]
-fn direct_decision_invariant_under_envelope_mutation() {
-    let hook = DefaultPolicyHook::new(project_config());
-    let input = direct_input(
-        "mutate.create",
-        json!({"path": "src/new.rs", "content": "fn main() {}"}),
-    );
-    let baseline = hook.decide_with_evidence(&input);
-
-    let _envelope_only = envelope_input("session.envelope", json!({}), active_envelope_snapshot());
-    let after_envelope_context = hook.decide_with_evidence(&input);
-    assert_eq!(baseline.decision, after_envelope_context.decision);
-    assert_eq!(
-        baseline.evidence.resolved_paths,
-        after_envelope_context.evidence.resolved_paths
     );
 }
 

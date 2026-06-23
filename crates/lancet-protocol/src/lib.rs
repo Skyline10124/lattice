@@ -36,11 +36,8 @@ pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriabili
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
-    AuthorityMode, BaseExecutionEnvelope, Capability, CapabilitySource, CepMode, Constraints,
-    EffectiveEnvelopeSnapshot, ExecutionEnvelope, GuardVerdict, Impact, ImpactConfidence, Intent,
-    OnFailure, PolicyActionRequired, PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot,
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, Scope, SourcedCapability,
-    VerifyCommand,
+    CepMode, GuardVerdict, PolicyActionRequired, PolicyAuditContext, PolicyAuthorityInput,
+    PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
 };
 pub use provenance::{
     CEP_TURN_ATTESTATION_PREDICATE_TYPE, InTotoStatement, InTotoSubjectDescriptor, ProvActivity,

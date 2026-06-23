@@ -382,8 +382,6 @@ async fn production_adapter(
 ) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::{CepPolicyConfig, CepTurnContext};
-    use lancet_catalog::methods::session::TodoWrite;
-    use lancet_protocol::policy::BaseExecutionEnvelope;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
     let root = canonical_root.to_str().expect("utf-8 production root");
@@ -402,22 +400,10 @@ async fn production_adapter(
         policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
 
-    let mut base_envelope = BaseExecutionEnvelope::for_workspace_root(
-        root,
-        "cep_context round-trip without workspace tools",
-    );
-    if enabled.contains(&Fetch::NAME) {
-        base_envelope = base_envelope.with_fetch_host("*");
-    }
-    if enabled.contains(&TodoWrite::NAME) {
-        base_envelope = base_envelope.with_session_state();
-    }
-
     let (client, server) = CepTransport::pair(16);
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = Arc::clone(&audit);
-    config.base_envelope = base_envelope;
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
     config.policy_hook = default_hook.clone();

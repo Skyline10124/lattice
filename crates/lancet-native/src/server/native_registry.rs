@@ -68,7 +68,6 @@ mod cep_native_registry_tests {
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
-    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
@@ -112,9 +111,7 @@ mod cep_native_registry_tests {
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "native error test"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -134,7 +131,6 @@ mod cep_native_registry_tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -249,9 +245,7 @@ mod cep_native_registry_tests {
             call_id: 2,
             events: EventSink::new(event_tx, 2),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "safety net"),
             cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -271,7 +265,6 @@ mod cep_native_registry_tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

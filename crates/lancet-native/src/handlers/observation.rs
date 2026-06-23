@@ -3,8 +3,6 @@
 
 //! Native CEP workspace observation CEP handlers.
 
-use std::path::{Path, PathBuf};
-
 use crate::edit::content_hash;
 use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::execution_backend::{
@@ -795,7 +793,6 @@ mod tests {
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::observation::reject_parent_traversal;
-    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::fs;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -852,28 +849,11 @@ mod tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: base,
                 cep_context,
-                active_envelope: Arc::new(
-                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1018,9 +998,7 @@ mod tests {
             call_id: 2,
             events: EventSink::new(event_tx, 2),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "budget test"),
             cep_context,
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -1040,7 +1018,6 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1071,9 +1048,7 @@ mod tests {
             call_id: 3,
             events: EventSink::new(event_tx, 3),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "turn budget"),
             cep_context,
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -1093,7 +1068,6 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1333,9 +1307,7 @@ mod tests {
             call_id: 4,
             events: EventSink::new(event_tx, 4),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "grep cap"),
             cep_context: Arc::new(CepTurnContext::from_policy(policy)),
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
@@ -1355,7 +1327,6 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1382,7 +1353,6 @@ mod tests {
             DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
             GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
         };
-        use lancet_protocol::policy::AuthorityMode;
         use std::future::Future;
         use std::pin::Pin;
         use std::sync::{Arc, Mutex};
@@ -1548,28 +1518,11 @@ mod tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "phase34 obs"),
                 cep_context,
-                active_envelope: Arc::new(
-                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: AuthorityMode::Direct,
                 execution: Some(ExecutionRouting {
                     backend,
                     upper: UpperContext {

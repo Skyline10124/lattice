@@ -13,144 +13,15 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, Intent, Scope as EnvScope, VerifyCommand};
-use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
-
 pub(super) fn test_registry() -> crate::MethodRegistry {
     let mut registry = crate::MethodRegistry::new();
     crate::register_production_method_registry(&mut registry).unwrap();
     registry
 }
 
-pub(super) fn read_cap(root: &str) -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::ReadPath {
-            path_pattern: root.to_string(),
-        },
-        source: CapabilitySource::Base,
-    }
-}
-
-pub(super) fn inspect_cap() -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::Inspect,
-        source: CapabilitySource::Base,
-    }
-}
-
-pub(super) fn write_cap(_root: &str) -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::WritePath {
-            path_pattern: ".".to_string(),
-        },
-        source: CapabilitySource::Declared {
-            envelope_id: "test-envelope".into(),
-        },
-    }
-}
-
-pub(super) fn run_cap() -> SourcedCapability {
-    run_cap_with(vec!["echo".into(), "touch".into()])
-}
-
-pub(super) fn run_cap_with(argv_allowlist: Vec<String>) -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::RunCommand { argv_allowlist },
-        source: CapabilitySource::Declared {
-            envelope_id: "test-envelope".into(),
-        },
-    }
-}
-
-pub(super) fn test_mutation_envelope(root: &str) -> ExecutionEnvelope {
-    test_mutation_envelope_with(root, ".", vec!["echo".into(), "touch".into()], None)
-}
-
-pub(super) fn test_command_envelope(root: &str, argv_allowlist: Vec<String>) -> ExecutionEnvelope {
-    let mut caps = BTreeSet::new();
-    caps.insert(Capability::RunCommand { argv_allowlist });
-    ExecutionEnvelope {
-        intent: Intent {
-            description: "test command envelope".into(),
-        },
-        capabilities: caps,
-        scope: EnvScope {
-            workspace_root: Some(root.into()),
-            extensions: serde_json::Map::new(),
-        },
-        impact: vec![EnvImpact {
-            kind: ImpactKind::CommandExecution,
-            target: root.into(),
-            scope: None,
-            confidence: ImpactConfidence::Conservative,
-            unknowns: vec![],
-        }],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: None,
-        extensions: serde_json::Map::new(),
-    }
-}
-
-pub(super) fn test_mutation_envelope_with(
-    root: &str,
-    write_path_pattern: &str,
-    argv_allowlist: Vec<String>,
-    verify: Option<VerifyCommand>,
-) -> ExecutionEnvelope {
-    let mut caps = BTreeSet::new();
-    caps.insert(Capability::WritePath {
-        path_pattern: write_path_pattern.to_string(),
-    });
-    caps.insert(Capability::RunCommand { argv_allowlist });
-    ExecutionEnvelope {
-        intent: Intent {
-            description: "test mutation envelope".into(),
-        },
-        capabilities: caps,
-        scope: EnvScope {
-            workspace_root: Some(root.into()),
-            extensions: serde_json::Map::new(),
-        },
-        impact: vec![EnvImpact {
-            kind: ImpactKind::WorkspaceMutation,
-            target: root.into(),
-            scope: None,
-            confidence: ImpactConfidence::Conservative,
-            unknowns: vec![],
-        }],
-        constraints: Constraints::default(),
-        verify,
-        on_failure: None,
-        extensions: serde_json::Map::new(),
-    }
-}
-
-pub(super) fn declare_active_envelope(ctx: &crate::server::registry::HandlerContext, root: &str) {
-    let envelope = test_mutation_envelope(root);
-    declare_envelope(ctx, envelope);
-}
-
-pub(super) fn declare_envelope(
-    ctx: &crate::server::registry::HandlerContext,
-    envelope: ExecutionEnvelope,
-) {
-    rt().block_on(ctx.active_envelope.declare(envelope, 0, "test-turn"))
-        .unwrap();
-}
-
-pub(super) fn session_cap() -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::MutateSessionState,
-        source: CapabilitySource::Base,
-    }
-}
-
-pub(super) fn audit_cap() -> SourcedCapability {
-    SourcedCapability {
-        capability: Capability::ReadAudit,
-        source: CapabilitySource::Base,
-    }
+/// No-op: envelope declaration is no longer needed in direct authority mode.
+pub(super) fn declare_active_envelope(_ctx: &crate::server::registry::HandlerContext, _root: &str) {
+    // Envelope authority removed; this is now a no-op.
 }
 
 pub(super) fn observation_region(root: &str) -> AuthorizedEffectRegion {

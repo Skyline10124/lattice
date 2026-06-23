@@ -18,7 +18,6 @@ use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_p
 use lancet_authority::policy::command::{
     CommandPolicy, EffectiveImpact, build_allowed_params_env, classify_command,
 };
-use lancet_protocol::policy::ExecutionEnvelope;
 use lancet_protocol::error::{
     CepErrorData, ExecutionErrorData, GuardErrorData, ValidationErrorData,
 };
@@ -68,16 +67,6 @@ pub fn verify_failed_error(spec: &VerifyCommandSpec, outcome: &VerifyOutcome) ->
         // Not RequiresReplan: the active envelope remains valid for same-scope repair.
         Retriability::Unknown,
     )
-}
-
-/// Extract verify command from envelope, if configured.
-pub fn extract_verify_command(envelope: &ExecutionEnvelope) -> Option<VerifyCommandSpec> {
-    envelope.verify.as_ref().map(|vc| VerifyCommandSpec {
-        argv: vc.command.split_whitespace().map(String::from).collect(),
-        cwd: None,        // defaults to project root
-        timeout_ms: None, // defaults to min(default, 60000)
-        expected_exit_code: vc.expected_exit_code,
-    })
 }
 
 /// Validate a verify command at declare-time.

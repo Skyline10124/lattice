@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e5e4e6359569ea2fca06c132a0efa0636da9af817bc806613d19ae949284b38c # shrinks to input = PolicyInput { method: "mutate.create", params: Object {"content": String("x"), "path": String("other/new.rs")}, authority: PolicyAuthorityInput, audit_context: PolicyAuditContext { turn_id: "fuzz-turn", session_id: "fuzz-session", call_id: Some(10), budget_snapshot: PolicyBudgetSnapshot { turn_observation_bytes_used: 0, turn_observation_bytes_limit: 65536, todo_ops_used: 0, todo_ops_limit: 10 } } }

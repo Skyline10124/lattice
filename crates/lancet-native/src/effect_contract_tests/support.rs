@@ -19,8 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::CepError;
-use lancet_protocol::policy::BaseExecutionEnvelope;
-use lancet_protocol::policy::{PolicyHook, SourcedCapability};
+use lancet_protocol::policy::PolicyHook;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::runtime::Runtime;
@@ -33,7 +32,6 @@ use lancet_authority::effect::ledger::{
     AuthorizedRegionSlot, EffectLedger, EffectSource, ObservedEffect,
 };
 use lancet_authority::effect::region::AuthorizedEffectRegion;
-use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::policy::network::NetworkPolicyConfig;
 use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
@@ -167,7 +165,7 @@ pub fn assert_negative_no_backend_effects(outcome: &HarnessOutcome) {
 /// paths so that region containment checks match the paths handlers record.
 pub fn build_test_context(
     root: &str,
-    caps: Vec<SourcedCapability>,
+    _caps: Vec<()>,
     network: NetworkPolicyConfig,
 ) -> (
     HandlerContext,
@@ -185,17 +183,11 @@ pub fn build_test_context(
     cep_policy.network = network;
     let cep_context = Arc::new(CepTurnContext::from_policy(cep_policy));
 
-    let mut base =
-        BaseExecutionEnvelope::for_workspace_root(&canonical_root, "effect-contract-test");
-    base.inner.capabilities = caps.iter().map(|sc| sc.capability.clone()).collect();
-
     let ctx = HandlerContext {
         call_id: 1,
         events: EventSink::new(event_tx, 1),
         cancellation: Cancellation::new(cancel_rx),
-        base_envelope: base,
         cep_context,
-        active_envelope: Arc::new(ActiveEnvelopeStore::new()),
         turn_id: "test-turn".into(),
         durable_metadata: CallDurableMetadata::default(),
         effect_ledger: EffectLedger::new(),
@@ -211,7 +203,6 @@ pub fn build_test_context(
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        authority_mode: lancet_protocol::policy::AuthorityMode::default(),
         execution: None,
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

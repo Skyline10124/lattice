@@ -3,25 +3,20 @@
 
 //! Guard L1 path scope enforcement for workspace mutations.
 //!
-//! Guard L1 checks whether a target path falls within the active envelope's
-//! `WritePath` capability scope. It distinguishes between:
+//! Guard L1 checks whether a target path falls within the authorized
+//! write-path scope. It distinguishes between:
 //! - `ReplanRequired`: target is inside project root but outside active scope
 //! - `GuardDenied`: target escapes project root or violates hard security boundary
-//! - `EnvelopeMissing`: no active envelope authority exists
 
-use crate::envelope_store::EnvelopeRecord;
 use crate::policy::default::{DefaultPolicyHook, PolicyEvidence};
-use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, GuardVerdict};
+use lancet_protocol::policy::GuardVerdict;
 use lancet_protocol::error::{
     CepErrorData, GuardErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
 };
-#[allow(unused_imports)]
 use lancet_protocol::policy::{
-    CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
-    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, SourcedCapability,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,
 };
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
-use std::collections::{BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 /// Normalized write path pattern for scope matching.
@@ -246,37 +241,6 @@ fn normalize_lexical(path: &str) -> Result<PathBuf, CepError> {
         result.push(".");
     }
     Ok(result)
-}
-
-/// Extract all WritePath path_patterns from a capability set.
-pub fn extract_write_path_patterns(capabilities: &BTreeSet<Capability>) -> Vec<String> {
-    capabilities
-        .iter()
-        .filter_map(|cap| match cap {
-            Capability::WritePath { path_pattern } => Some(path_pattern.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Check if any RunCommand capability's argv_allowlist matches the given argv (prefix match).
-pub fn has_run_command_capability(capabilities: &BTreeSet<Capability>, argv: &[String]) -> bool {
-    for cap in capabilities {
-        if let Capability::RunCommand { argv_allowlist } = cap {
-            for entry in argv_allowlist {
-                let tokens: Vec<&str> = entry.split_whitespace().collect();
-                if argv.len() >= tokens.len()
-                    && argv
-                        .iter()
-                        .zip(tokens.iter())
-                        .all(|(a, t)| a.as_str() == *t)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Check whether a target path is within the WritePath scope of the active envelope.
@@ -598,70 +562,6 @@ fn is_denied_direct_path(path: &str) -> bool {
         || path.contains("/.lattice/")
 }
 
-/// Build a layered effective envelope snapshot from base + declared envelopes.
-///
-/// The base envelope is the turn-level observation floor; a declared envelope
-/// is the task-level authority extension. Capabilities present in both get
-/// `Both` source.
-pub fn build_effective_envelope_snapshot(
-    base: &BaseExecutionEnvelope,
-    active: Option<&EnvelopeRecord>,
-) -> EffectiveEnvelopeSnapshot {
-    let base_envelope_id = "base".to_string();
-    let declared_envelope_id = active.map(|r| r.envelope_id.clone());
-    let base_caps: &BTreeSet<Capability> = &base.inner.capabilities;
-    let declared_caps: Option<&BTreeSet<Capability>> = active.map(|r| &r.envelope.capabilities);
-
-    let mut capabilities = Vec::new();
-    let mut matched_declared: HashSet<usize> = HashSet::new();
-
-    for base_cap in base_caps {
-        let source = if let Some(d_caps) = declared_caps {
-            let matching_idx = d_caps.iter().enumerate().find_map(|(idx, d_cap)| {
-                if d_cap == base_cap && !matched_declared.contains(&idx) {
-                    Some(idx)
-                } else {
-                    None
-                }
-            });
-            match matching_idx {
-                Some(idx) => {
-                    matched_declared.insert(idx);
-                    CapabilitySource::Both {
-                        envelope_id: declared_envelope_id.clone().unwrap_or_default(),
-                    }
-                }
-                None => CapabilitySource::Base,
-            }
-        } else {
-            CapabilitySource::Base
-        };
-        capabilities.push(SourcedCapability {
-            capability: base_cap.clone(),
-            source,
-        });
-    }
-
-    if let Some(d_caps) = declared_caps {
-        for (idx, d_cap) in d_caps.iter().enumerate() {
-            if !matched_declared.contains(&idx) {
-                capabilities.push(SourcedCapability {
-                    capability: d_cap.clone(),
-                    source: CapabilitySource::Declared {
-                        envelope_id: declared_envelope_id.clone().unwrap_or_default(),
-                    },
-                });
-            }
-        }
-    }
-
-    EffectiveEnvelopeSnapshot {
-        base_envelope_id,
-        declared_envelope_id,
-        capabilities,
-    }
-}
-
 /// Result of evaluating a policy hook.
 pub struct PolicyEvaluation {
     pub decision: PolicyDecision,
@@ -706,7 +606,7 @@ pub fn map_decision_to_cep_error(decision: &PolicyDecision, method: &str) -> Res
             action_required: _,
         } => {
             let (code, data, retriability) = match reason_code {
-                PolicyReasonCode::MissingCapability | PolicyReasonCode::EnvelopeRequired => (
+                PolicyReasonCode::MissingCapability => (
                     CepErrorCode::CapabilityNotGranted,
                     CepErrorData::Permission(PermissionErrorData {
                         required_capability: method.into(),
@@ -1041,138 +941,13 @@ mod guard_l1_tests {
         let result = check_write_scope("src/new_file.rs", root, &["src/**".into()]);
         assert!(result.is_ok());
     }
-
-    // --- extract_write_path_patterns tests ---
-
-    #[test]
-    fn extracts_write_path_patterns() {
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-        caps.insert(Capability::ReadPath {
-            path_pattern: ".".into(),
-        });
-        caps.insert(Capability::WritePath {
-            path_pattern: "tests/**".into(),
-        });
-
-        let patterns = extract_write_path_patterns(&caps);
-        assert_eq!(patterns.len(), 2);
-        assert!(patterns.contains(&"src/**".to_string()));
-        assert!(patterns.contains(&"tests/**".to_string()));
-    }
-
-    // --- has_run_command_capability tests ---
-
-    #[test]
-    fn has_run_command_prefix_match() {
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::RunCommand {
-            argv_allowlist: vec!["cargo test".into(), "cargo check".into()],
-        });
-
-        assert!(has_run_command_capability(
-            &caps,
-            &["cargo".into(), "test".into(), "--nocapture".into()]
-        ));
-        assert!(has_run_command_capability(
-            &caps,
-            &["cargo".into(), "check".into()]
-        ));
-        assert!(!has_run_command_capability(
-            &caps,
-            &["cargo".into(), "fmt".into()]
-        ));
-    }
-
-    #[test]
-    fn no_run_command_capability() {
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-
-        assert!(!has_run_command_capability(
-            &caps,
-            &["cargo".into(), "test".into()]
-        ));
-    }
 }
 
 #[cfg(test)]
 mod policy_tests {
     use super::*;
     use crate::policy::default::PolicyConfig;
-    use lancet_protocol::policy::{BaseExecutionEnvelope, ExecutionEnvelope, Intent, Scope};
-    use lancet_protocol::policy::{PolicyAuditContext, PolicyBudgetSnapshot};
-
-    fn base_only_envelope() -> BaseExecutionEnvelope {
-        BaseExecutionEnvelope::for_workspace_root(".", "test")
-    }
-
-    fn envelope_record(envelope_id: &str) -> EnvelopeRecord {
-        EnvelopeRecord {
-            envelope_id: envelope_id.into(),
-            envelope_hash: "hash".into(),
-            envelope: ExecutionEnvelope {
-                intent: Intent {
-                    description: "test".into(),
-                },
-                capabilities: BTreeSet::from([Capability::WritePath {
-                    path_pattern: "src/**".into(),
-                }]),
-                scope: Scope::default(),
-                impact: vec![],
-                constraints: Default::default(),
-                verify: None,
-                on_failure: None,
-                extensions: Default::default(),
-            },
-            declared_at_call_id: 0,
-            supersedes: None,
-            reason: None,
-        }
-    }
-
-    #[test]
-    fn snapshot_base_only() {
-        let base = base_only_envelope();
-        let snapshot = build_effective_envelope_snapshot(&base, None);
-        assert_eq!(snapshot.base_envelope_id, "base");
-        assert!(snapshot.declared_envelope_id.is_none());
-        for sc in &snapshot.capabilities {
-            assert_eq!(sc.source, CapabilitySource::Base);
-        }
-    }
-
-    #[test]
-    fn snapshot_base_plus_declared_no_overlap() {
-        let base = base_only_envelope();
-        let record = envelope_record("declared-1");
-        let snapshot = build_effective_envelope_snapshot(&base, Some(&record));
-        assert_eq!(snapshot.declared_envelope_id, Some("declared-1".into()));
-        let has_declared = snapshot
-            .capabilities
-            .iter()
-            .any(|sc| matches!(sc.source, CapabilitySource::Declared { .. }));
-        assert!(has_declared, "should have declared-only capability");
-    }
-
-    #[test]
-    fn snapshot_both_overlap() {
-        let mut base = base_only_envelope();
-        base.inner.capabilities.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-        let record = envelope_record("declared-1");
-        let snapshot = build_effective_envelope_snapshot(&base, Some(&record));
-        let has_both = snapshot
-            .capabilities
-            .iter()
-            .any(|sc| matches!(sc.source, CapabilitySource::Both { .. }));
-        assert!(has_both, "overlapping capability should have Both source");
-    }
+    use lancet_protocol::policy::{PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot};
 
     #[test]
     fn evaluate_with_default_hook_returns_evidence() {
@@ -1182,13 +957,7 @@ mod policy_tests {
         let input = PolicyInput {
             method: "observe.workspace".into(),
             params: serde_json::json!({"mode": "read_file", "path": "src/lib.rs"}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: EffectiveEnvelopeSnapshot {
-                    base_envelope_id: "base".into(),
-                    declared_envelope_id: None,
-                    capabilities: vec![],
-                },
-            },
+            authority: PolicyAuthorityInput,
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
@@ -1220,13 +989,7 @@ mod policy_tests {
         let input = PolicyInput {
             method: "test".into(),
             params: serde_json::json!({}),
-            authority: PolicyAuthorityInput::Envelope {
-                envelope_snapshot: EffectiveEnvelopeSnapshot {
-                    base_envelope_id: "base".into(),
-                    declared_envelope_id: None,
-                    capabilities: vec![],
-                },
-            },
+            authority: PolicyAuthorityInput,
             audit_context: PolicyAuditContext {
                 turn_id: "t".into(),
                 session_id: "s".into(),
@@ -1443,17 +1206,6 @@ mod policy_tests {
         let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
         assert_eq!(err.retriability, Retriability::Permanent);
-    }
-
-    #[test]
-    fn map_envelope_required_to_capability_not_granted() {
-        let decision = PolicyDecision::Denied {
-            reason_code: PolicyReasonCode::EnvelopeRequired,
-            message: "need envelope".into(),
-            action_required: None,
-        };
-        let err = map_decision_to_cep_error(&decision, "test").unwrap_err();
-        assert_eq!(err.code, CepErrorCode::CapabilityNotGranted);
     }
 
     #[test]

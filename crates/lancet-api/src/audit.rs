@@ -15,7 +15,7 @@ use lancet_dispatch::CepClient;
 use lancet_native::ServerRunConfig;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::BaseExecutionEnvelope;
+
 use lancet_protocol::provenance::ProvGraphFragment;
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -216,8 +216,6 @@ where
 
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.audit = audit;
-    config.base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(root, "lancet audit").with_read_audit();
     config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
     config.audit_context = Arc::new(RwLock::new(CepAuditContext {
         session_id: session_id.to_string(),

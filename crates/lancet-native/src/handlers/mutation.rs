@@ -17,11 +17,10 @@ use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::storage::EditStorage;
-use crate::enforcement::guard_l1::{evaluate_and_enforce_policy, extract_write_path_patterns};
+use crate::enforcement::guard_l1::evaluate_and_enforce_policy;
 use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
 use crate::enforcement::verify::{
-    VerifyCommandSpec, extract_verify_command, run_verify, run_verify_with_backend,
-    validate_verify_command, verify_failed_error,
+    VerifyCommandSpec, run_verify_with_backend, verify_failed_error,
 };
 use crate::execution_backend::{ExecutionRouting, PathIntent, WorkspacePath};
 use crate::server::registry::{HandlerContext, MethodRegistry};
@@ -40,7 +39,6 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::ExecutionEnvelope;
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
@@ -56,8 +54,6 @@ pub fn register_mutation_methods(registry: &mut MethodRegistry) -> Result<(), Ce
 }
 
 struct MutationAuthorization {
-    envelope_id: Option<String>,
-    envelope: Option<ExecutionEnvelope>,
     project_root: Option<String>,
     direct: Option<DirectMutationAuth>,
 }
@@ -68,18 +64,6 @@ struct DirectMutationAuth {
 }
 
 impl MutationAuthorization {
-    fn envelope_id(&self) -> &str {
-        self.envelope_id
-            .as_deref()
-            .expect("envelope_id required in Envelope mode")
-    }
-
-    fn envelope(&self) -> &ExecutionEnvelope {
-        self.envelope
-            .as_ref()
-            .expect("envelope required in Envelope mode")
-    }
-
     fn project_root(&self) -> &str {
         self.project_root
             .as_deref()
@@ -158,7 +142,7 @@ async fn handle_create_as(
     let written_hash = content_hash(params.content.as_bytes());
     ctx.record_durable_metadata(json!({
         "method": method,
-        "envelope_id": auth.envelope_id.as_deref(),
+        "envelope_id": null,
         "bytes_written": create.bytes_written,
         "content_hash": written_hash,
         "created_dirs": create.created_dirs.clone(),
@@ -200,7 +184,7 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
 
     ctx.record_durable_metadata(json!({
         "method": Edit::NAME,
-        "envelope_id": auth.envelope_id.as_deref(),
+        "envelope_id": null,
         "compiled_patch_backend": "hashline_patch",
         "changed_files": result.changed_files.clone(),
         "backend_invoked": true,
@@ -319,7 +303,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
 
     ctx.record_durable_metadata(json!({
         "method": Batch::NAME,
-        "envelope_id": auth.envelope_id.as_deref(),
+        "envelope_id": null,
         "compiled_patch_backend": "hashline_patch",
         "created_files": created_files.clone(),
         "edited_files": edited_files.clone(),
@@ -438,8 +422,6 @@ async fn authorize_direct_mutation(
     }
 
     Ok(MutationAuthorization {
-        envelope_id: None,
-        envelope: None,
         project_root: None,
         direct: Some(DirectMutationAuth {
             execution,
@@ -477,7 +459,6 @@ fn direct_mutation_backend_error(
 fn record_mutation_preflight(
     ctx: &HandlerContext,
     method: &str,
-    envelope_id: &str,
     changed_paths: &[String],
     write_patterns: &[String],
     out_of_scope_paths: &[String],
@@ -488,7 +469,6 @@ fn record_mutation_preflight(
 ) {
     ctx.record_durable_metadata(mutation_preflight_metadata(MutationPreflight {
         method,
-        envelope_id,
         changed_paths,
         write_patterns,
         out_of_scope_paths,
@@ -502,46 +482,22 @@ fn record_mutation_preflight(
 fn record_mutation_replan_metadata(
     ctx: &HandlerContext,
     method: &str,
-    auth: &MutationAuthorization,
+    _auth: &MutationAuthorization,
     changed_paths: &[String],
     expected_hash_status: Option<&str>,
     replan_reason: Option<&str>,
 ) {
-    if auth.is_direct() {
-        record_mutation_preflight(
-            ctx,
-            method,
-            auth.envelope_id.as_deref().unwrap_or(""),
-            changed_paths,
-            &[],
-            &[],
-            expected_hash_status,
-            ctx.direct_verify.is_some(),
-            replan_reason,
-            false,
-        );
-    } else {
-        let patterns = extract_write_path_patterns(&auth.envelope().capabilities);
-        record_mutation_preflight(
-            ctx,
-            method,
-            auth.envelope_id(),
-            changed_paths,
-            &patterns,
-            &[],
-            expected_hash_status,
-            extract_verify_command(auth.envelope()).is_some(),
-            replan_reason,
-            false,
-        );
-    }
-}
-
-fn expected_hash_success_status(method: &str) -> Option<&'static str> {
-    match method {
-        "mutate.edit" | "mutate.batch" => Some("matched"),
-        _ => None,
-    }
+    record_mutation_preflight(
+        ctx,
+        method,
+        changed_paths,
+        &[],
+        &[],
+        expected_hash_status,
+        ctx.direct_verify.is_some(),
+        replan_reason,
+        false,
+    );
 }
 
 fn expected_hash_replan_status(err: &CepError) -> Option<&'static str> {
@@ -566,76 +522,61 @@ fn replan_reason_for_error(err: &CepError) -> Option<&'static str> {
 async fn run_mutation_verify_if_configured(
     ctx: &HandlerContext,
     method: &str,
-    auth: &MutationAuthorization,
+    _auth: &MutationAuthorization,
 ) -> Result<(), CepError> {
-    if auth.is_direct() {
-        let Some(verify_config) = ctx.direct_verify.as_ref() else {
-            return Ok(());
-        };
-        let policy = &ctx.cep_context.policy.command;
-        let mut cancellation = ctx.cancellation.clone();
-        let direct = auth.direct();
-        ctx.mark_backend_invoked();
-        match run_verify_with_backend(
-            verify_config,
-            &direct.execution,
-            policy,
-            &mut cancellation,
-            &ctx.routing_invocation,
-            &direct.authorized_region,
+    let Some(verify_config) = ctx.direct_verify.as_ref() else {
+        return Ok(());
+    };
+    let policy = &ctx.cep_context.policy.command;
+    let mut cancellation = ctx.cancellation.clone();
+    ctx.mark_backend_invoked();
+    let execution = ctx.execution.as_ref().ok_or_else(|| {
+        CepError::new(
+            CepErrorCode::ExecutionFailed,
+            "verify requires an Upper execution backend",
+            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
+                command: method.into(),
+                exit_code: None,
+                stderr: Some("missing execution backend".into()),
+            }),
+            Retriability::Permanent,
         )
-        .await
-        {
-            Ok(outcome) if !outcome.success => {
-                ctx.record_rejection(RejectionRecord {
-                    rejection_stage: RejectionStage::VerificationFailure,
-                    denial_source: "direct_verify".into(),
-                });
-                emit_verify_failed(ctx, method, "", outcome.exit_code).await;
-                let spec = direct_verify_spec(verify_config);
-                Err(verify_failed_error(&spec, &outcome))
-            }
-            Ok(_) => {
-                ctx.record_effect(ObservedEffect {
-                    kind: ImpactKind::CommandExecution,
-                    scope: ObservedScope::Root(String::new()),
-                    required_capability: RequiredCapability::RunCommand,
-                    source: EffectSource::Verify,
-                });
-                Ok(())
-            }
-            Err(err) => {
-                emit_verify_failed(ctx, method, "", -1).await;
-                Err(err)
-            }
+    })?;
+    let authorized_region = ctx
+        .authorized_region
+        .get()
+        .unwrap_or_else(AuthorizedEffectRegion::empty);
+    match run_verify_with_backend(
+        verify_config,
+        execution,
+        policy,
+        &mut cancellation,
+        &ctx.routing_invocation,
+        &authorized_region,
+    )
+    .await
+    {
+        Ok(outcome) if !outcome.success => {
+            ctx.record_rejection(RejectionRecord {
+                rejection_stage: RejectionStage::VerificationFailure,
+                denial_source: "direct_verify".into(),
+            });
+            emit_verify_failed(ctx, method, "", outcome.exit_code).await;
+            let spec = direct_verify_spec(verify_config);
+            Err(verify_failed_error(&spec, &outcome))
         }
-    } else {
-        let Some(verify_cmd) = extract_verify_command(auth.envelope()) else {
-            return Ok(());
-        };
-
-        let policy = &ctx.cep_context.policy.command;
-        validate_verify_command(&verify_cmd, policy, auth.project_root())?;
-
-        let mut cancellation = ctx.cancellation.clone();
-        match run_verify(&verify_cmd, auth.project_root(), policy, &mut cancellation).await {
-            Ok(outcome) if !outcome.success => {
-                emit_verify_failed(ctx, method, auth.envelope_id(), outcome.exit_code).await;
-                Err(verify_failed_error(&verify_cmd, &outcome))
-            }
-            Ok(_) => {
-                ctx.record_effect(ObservedEffect {
-                    kind: ImpactKind::CommandExecution,
-                    scope: ObservedScope::Root(auth.project_root().to_string()),
-                    required_capability: RequiredCapability::RunCommand,
-                    source: EffectSource::Verify,
-                });
-                Ok(())
-            }
-            Err(err) => {
-                emit_verify_failed(ctx, method, auth.envelope_id(), -1).await;
-                Err(err)
-            }
+        Ok(_) => {
+            ctx.record_effect(ObservedEffect {
+                kind: ImpactKind::CommandExecution,
+                scope: ObservedScope::Root(String::new()),
+                required_capability: RequiredCapability::RunCommand,
+                source: EffectSource::Verify,
+            });
+            Ok(())
+        }
+        Err(err) => {
+            emit_verify_failed(ctx, method, "", -1).await;
+            Err(err)
         }
     }
 }
@@ -1725,51 +1666,6 @@ async fn create_file_secure(
     })
 }
 
-fn envelope_missing_error(method: &str) -> CepError {
-    CepError::new(
-        CepErrorCode::EnvelopeMissing,
-        format!(
-            "{method} requires an active ExecutionEnvelope. \
-             Declare an envelope with WritePath capability first."
-        ),
-        CepErrorData::Guard(GuardErrorData {
-            method: method.into(),
-            reason: "EnvelopeMissing: no active envelope for workspace mutation".into(),
-        }),
-        Retriability::Permanent,
-    )
-}
-
-async fn emit_envelope_missing(ctx: &HandlerContext, method: &str, required_for: &str) {
-    ctx.events
-        .emit(
-            "cep.envelope_missing",
-            json!({
-                "method": method,
-                "required_for": required_for,
-            }),
-        )
-        .await;
-}
-
-async fn emit_replan_required(
-    ctx: &HandlerContext,
-    method: &str,
-    envelope_id: &str,
-    out_of_scope_paths: &[String],
-) {
-    ctx.events
-        .emit(
-            "cep.replan_required",
-            json!({
-                "method": method,
-                "active_envelope_id": envelope_id,
-                "out_of_scope_paths": out_of_scope_paths,
-            }),
-        )
-        .await;
-}
-
 async fn emit_verify_failed(
     ctx: &HandlerContext,
     method: &str,
@@ -1792,13 +1688,9 @@ async fn emit_verify_failed(
 #[cfg(test)]
 mod create_tests {
     use super::*;
-    use crate::handlers::register_envelope_methods;
     use crate::server::registry::{Cancellation, EventSink};
-    use lancet_authority::envelope_store::ActiveEnvelopeStore;
-    use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
     use lancet_protocol::effect_types::ImpactKind;
 
-    use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1817,12 +1709,9 @@ mod create_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
-                    .with_session_state(),
                 cep_context: Arc::new(
                     lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
                 ),
-                active_envelope: Arc::new(ActiveEnvelopeStore::new()),
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -1839,7 +1728,6 @@ mod create_tests {
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -1872,12 +1760,9 @@ mod create_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "mutation test")
-                    .with_session_state(),
                 cep_context: Arc::new(
                     lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
                 ),
-                active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -1894,7 +1779,6 @@ mod create_tests {
                 cep_mode,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2269,10 +2153,8 @@ mod create_tests {
 mod edit_tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
-    use lancet_authority::envelope_store::ActiveEnvelopeStore;
     use lancet_protocol::effect_types::ImpactKind;
 
-    use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -2294,11 +2176,9 @@ mod edit_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "edit test"),
                 cep_context: Arc::new(
                     lancet_authority::policy::CepTurnContext::defaults_for_project_root(root),
                 ),
-                active_envelope: store,
                 turn_id: "test-turn".into(),
                 durable_metadata:
                     crate::server::call_durable_metadata::CallDurableMetadata::default(),
@@ -2315,7 +2195,6 @@ mod edit_tests {
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: lancet_protocol::policy::AuthorityMode::default(),
                 execution: None,
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
@@ -2589,7 +2468,6 @@ mod edit_tests {
         };
         use lancet_authority::policy::CepTurnContext;
         use lancet_authority::policy::default::WorkspacePolicy;
-        use lancet_protocol::policy::AuthorityMode;
         use std::collections::BTreeMap;
         use std::future::Future;
         use std::pin::Pin;
@@ -2768,28 +2646,11 @@ mod edit_tests {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
-                base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "phase34 mut"),
                 cep_context,
-                active_envelope: Arc::new(
-                    lancet_authority::envelope_store::ActiveEnvelopeStore::new(),
-                ),
-                turn_id: "test-turn".into(),
-                durable_metadata:
-                    crate::server::call_durable_metadata::CallDurableMetadata::default(),
-                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
-                default_policy_hook: Some(default_hook),
-                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                    turn_id: "test-turn".into(),
-                    session_id: "test-session".into(),
-                    ..Default::default()
-                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                authority_mode: AuthorityMode::Direct,
                 execution: Some(ExecutionRouting {
                     backend,
                     upper: UpperContext {

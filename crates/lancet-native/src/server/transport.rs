@@ -12,14 +12,13 @@ use lancet_audit::{
     SEMANTIC_STAGE_SCAFFOLD, SEMANTIC_STAGE_UNROUTED, impact_kind_for_method, impact_kind_label,
     merge_finalize_metadata,
 };
-use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     CepError, CepErrorCode, CepErrorData, Retriability,
-    policy::{AuthorityMode, BaseExecutionEnvelope, CepMode},
+    policy::CepMode,
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -32,10 +31,7 @@ use tokio::sync::RwLock;
 pub struct ServerRunConfig {
     pub audit: Arc<CepAuditStore>,
     pub audit_context: Arc<RwLock<CepAuditContext>>,
-    pub base_envelope: BaseExecutionEnvelope,
     pub cep_context: Arc<CepTurnContext>,
-    /// Turn-scoped active envelope store for CEP envelope lifecycle.
-    pub active_envelope: Arc<ActiveEnvelopeStore>,
     /// Pluggable policy hook for capability/command/network/budget decisions.
     pub policy_hook: Arc<dyn PolicyHook>,
     /// Executor-owned default hook for evidence capture when the default implementation is installed.
@@ -44,9 +40,7 @@ pub struct ServerRunConfig {
     pub cep_mode: CepMode,
     /// Independent command physical-boundary runtime configuration.
     pub command_isolation: CommandIsolationRuntimeConfig,
-    /// How authority is sourced for this turn — never inferred from backend presence.
-    pub authority_mode: AuthorityMode,
-    /// Optional Upper execution routing; `None` for host-only or Envelope compatibility.
+    /// Optional Upper execution routing; `None` for host-only.
     pub execution: Option<ExecutionRouting>,
     /// Immutable Direct-mode verify configuration from runtime setup.
     pub direct_verify: Option<DirectVerifyConfig>,
@@ -55,7 +49,6 @@ pub struct ServerRunConfig {
 impl ServerRunConfig {
     /// In-memory audit store with stable test identifiers and safe CEP policy/budget defaults.
     pub fn in_memory_for_tests() -> Self {
-        let base_envelope = BaseExecutionEnvelope::for_workspace_root(".", "test turn observation");
         let cep_context = Arc::new(CepTurnContext::defaults_for_project_root("."));
         let default_hook = Arc::new(DefaultPolicyHook::new(
             PolicyConfig::defaults_for_project_root(std::path::PathBuf::from(".")),
@@ -67,14 +60,11 @@ impl ServerRunConfig {
                 session_id: "test-session".into(),
                 ..Default::default()
             })),
-            base_envelope,
             cep_context,
-            active_envelope: Arc::new(ActiveEnvelopeStore::new()),
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
             command_isolation: CommandIsolationRuntimeConfig::default(),
-            authority_mode: lancet_protocol::policy::AuthorityMode::default(),
             execution: None,
             direct_verify: None,
         }
@@ -124,14 +114,11 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     let ServerRunConfig {
         audit,
         audit_context,
-        base_envelope,
         cep_context,
-        active_envelope,
         policy_hook,
         default_policy_hook,
         cep_mode,
         command_isolation,
-        authority_mode,
         execution,
         direct_verify,
     } = config;
@@ -162,7 +149,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     let turn_id = ctx_snapshot.turn_id.clone();
 
     durable_metadata.record(build_routing_metadata(
-        authority_mode,
         execution.as_ref(),
         &routing_invocation,
     ));
@@ -171,9 +157,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         call_id: id,
         events: events.clone(),
         cancellation,
-        base_envelope,
         cep_context: Arc::clone(&cep_context),
-        active_envelope: Arc::clone(&active_envelope),
         turn_id,
         durable_metadata: durable_metadata.clone(),
         effect_ledger: effect_ledger.clone(),
@@ -184,7 +168,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit: Arc::clone(&audit),
         cep_mode: cep_mode.clone(),
         command_isolation,
-        authority_mode,
         execution: execution.clone(),
         direct_verify: direct_verify.clone(),
         routing_invocation: routing_invocation.clone(),
@@ -194,7 +177,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     let observed_effects = effect_ledger.snapshot();
 
     durable_metadata.record(build_routing_metadata(
-        authority_mode,
         execution.as_ref(),
         &routing_invocation,
     ));
@@ -210,7 +192,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
     );
 
     let durable_metadata_json = durable_metadata.take_json();
-    let active_envelope_id = active_envelope.active_envelope().await.map(|(id, _)| id);
     let observed_capabilities: Vec<_> = observed_effects
         .iter()
         .map(|effect| effect.required_capability)
@@ -219,7 +200,7 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         durable_metadata_json.as_deref(),
         &method,
         &observed_capabilities,
-        active_envelope_id.as_deref(),
+        None,
     );
 
     finalize_audit_for_dispatch(

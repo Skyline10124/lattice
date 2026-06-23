@@ -9,7 +9,6 @@
 
 pub mod boundary_credit;
 pub mod effect;
-pub mod envelope_store;
 pub mod guard;
 pub mod policy;
 
@@ -19,7 +18,6 @@ pub use boundary_credit::{
     NetworkCreditRequiresNetnsEvidence, OverlayfsApplied, allowed_primitives_for,
     validate_credit_attribution,
 };
-pub use envelope_store::ActiveEnvelopeStore;
 pub use policy::{
     BudgetLimits, CepPolicyConfig, CepTurnContext, NetworkPolicyConfig, ObservationPolicyConfig,
     command::CommandPolicy,

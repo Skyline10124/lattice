@@ -347,84 +347,11 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 mod cep_native_registry {
     use super::*;
     use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
-    use lancet_catalog::methods::envelope::Envelope;
     use lancet_catalog::methods::external::Fetch;
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::SEMANTIC_STAGE_NATIVE;
-    use lancet_protocol::policy::Capability;
     use lattice_profile::LancetNetworkSection;
     use tempfile::TempDir;
-
-    use crate::turn::cep::production_base_envelope;
-
-    #[test]
-    fn cep_native_registry_production_envelope_has_no_fetch_wildcard() {
-        let dir = TempDir::new().unwrap();
-        let enabled = vec![Fetch::NAME.to_string(), TodoWrite::NAME.to_string()];
-        let envelope =
-            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
-        assert!(
-            envelope
-                .inner
-                .capabilities
-                .iter()
-                .all(|cap| !matches!(cap, Capability::FetchUrl { host } if host == "*")),
-            "production envelope must not grant FetchUrl(\"*\")"
-        );
-    }
-
-    #[test]
-    fn production_base_envelope_grants_read_audit() {
-        let dir = TempDir::new().unwrap();
-        for method in [AuditObserve::NAME, AuditReplay::NAME] {
-            let enabled = vec![method.to_string()];
-            let envelope =
-                production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
-            assert!(
-                envelope
-                    .inner
-                    .capabilities
-                    .iter()
-                    .any(|c| matches!(c, Capability::ReadAudit)),
-                "base envelope must grant ReadAudit for {method}"
-            );
-        }
-    }
-
-    #[test]
-    fn production_base_envelope_grants_session_state_for_envelope_methods() {
-        let dir = TempDir::new().unwrap();
-        let enabled = vec![Envelope::NAME.to_string()];
-        let envelope =
-            production_base_envelope(dir.path().to_str().unwrap(), &enabled, None).unwrap();
-        assert!(
-            envelope
-                .inner
-                .capabilities
-                .iter()
-                .any(|c| matches!(c, Capability::MutateSessionState)),
-            "base envelope must grant MutateSessionState for session.envelope"
-        );
-    }
-
-    #[test]
-    fn cep_native_registry_allowed_hosts_become_fetch_capabilities() {
-        let dir = TempDir::new().unwrap();
-        let cep = lattice_profile::LancetSection {
-            network: Some(LancetNetworkSection {
-                allowed_hosts: vec!["api.example.com".into()],
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let enabled = vec![Fetch::NAME.to_string()];
-        let envelope =
-            production_base_envelope(dir.path().to_str().unwrap(), &enabled, Some(&cep)).unwrap();
-        assert!(envelope.inner.capabilities.iter().any(|cap| matches!(
-            cap,
-            Capability::FetchUrl { host } if host == "api.example.com"
-        )));
-    }
 
     #[tokio::test]
     async fn cep_native_registry_production_runtime_uses_native_audit_stage() {
@@ -479,12 +406,10 @@ mod cep_native_registry {
 mod attestation_and_dispatch {
     use super::*;
     use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
-    use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
     use lancet_protocol::effect_types::ImpactKind;
 
-    use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Impact, ImpactScope, Intent, Scope};
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_llm::{FunctionCall, ToolCall};
@@ -492,76 +417,6 @@ mod attestation_and_dispatch {
 
     use crate::turn::cep::{CepExecutorAdapter, build_envelope_turn_deps_for_test};
     use lancet_api::store_turn_attestation;
-
-    #[tokio::test]
-    async fn dispatch_typed_routes_envelope_declare() {
-        let dir = TempDir::new().unwrap();
-        let llm: Arc<dyn LlmClient> = Arc::new(
-            FakeStreamingLlmClient::builder()
-                .push_events(vec![lattice_llm::LlmEvent::Done {
-                    finish_reason: "stop".to_string(),
-                    usage: None,
-                }])
-                .build(),
-        );
-        let deps = build_envelope_turn_deps_for_test(
-            dir.path().to_str().unwrap(),
-            &[Envelope::NAME.to_string()],
-            llm,
-            true,
-            None,
-            "test-model",
-            "0.0.0-test",
-        )
-        .await
-        .expect("deps");
-
-        let adapter =
-            CepExecutorAdapter::new(deps.cep_client.clone(), [Envelope::NAME.to_string()]);
-        let call = ToolCall {
-            id: "call_declare".into(),
-            function: FunctionCall {
-                name: Envelope::NAME.to_string(),
-                arguments: serde_json::to_string(&EnvelopeParams::Declare(DeclareParams {
-                    envelope: ExecutionEnvelope {
-                        intent: Intent {
-                            description: "adapter envelope declare test".into(),
-                        },
-                        capabilities: [Capability::ReadPath {
-                            path_pattern: "Cargo.toml".into(),
-                        }]
-                        .into_iter()
-                        .collect(),
-                        scope: Scope {
-                            workspace_root: Some("Cargo.toml".into()),
-                            extensions: serde_json::Map::new(),
-                        },
-                        impact: vec![Impact {
-                            kind: ImpactKind::WorkspaceObservation,
-                            target: "Cargo.toml".into(),
-                            scope: Some(ImpactScope::ExactFile("Cargo.toml".into())),
-                            confidence: Default::default(),
-                            unknowns: vec![],
-                        }],
-                        constraints: Constraints::default(),
-                        verify: None,
-                        on_failure: None,
-                        extensions: serde_json::Map::new(),
-                    },
-                    supersede: false,
-                    reason: Some("adapter route test".into()),
-                }))
-                .unwrap(),
-            },
-        };
-        let output = adapter
-            .execute(&call)
-            .await
-            .expect("session.envelope declare must route through the typed CEP adapter");
-        let result: serde_json::Value = serde_json::from_str(&output).expect("json result");
-        assert_eq!(result["mode"], "declare");
-        assert_eq!(result["result"]["accepted"], true);
-    }
 
     #[tokio::test]
     async fn attestation_matches_replay_statement() {

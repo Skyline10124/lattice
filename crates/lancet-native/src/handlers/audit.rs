@@ -313,7 +313,6 @@ mod tests {
     use crate::{CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
-    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
 

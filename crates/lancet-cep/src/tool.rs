@@ -8,7 +8,6 @@ use std::error::Error;
 use std::fmt;
 
 use lancet_catalog::{BaseAuthorityRequirement, MethodDescriptor, catalog};
-use lancet_protocol::policy::AuthorityMode;
 use serde::{Deserialize, Serialize};
 
 /// A CEP method projected as an LLM-facing tool definition.
@@ -46,26 +45,6 @@ impl ToolExposure {
     /// Resolve enabled method names against the production CEP catalog.
     pub fn from_catalog_enabled(enabled: &[String]) -> Result<Self, ToolExposureError> {
         Self::from_descriptors(enabled, catalog())
-    }
-
-    /// Resolve enabled method names for a specific authority mode.
-    ///
-    /// In [`AuthorityMode::Direct`], `session.envelope` is removed from the
-    /// enabled set before catalog projection. Envelope mode is unchanged.
-    pub fn from_catalog_enabled_for_authority_mode(
-        enabled: &[String],
-        mode: AuthorityMode,
-    ) -> Result<Self, ToolExposureError> {
-        let filtered = if mode == AuthorityMode::Direct {
-            enabled
-                .iter()
-                .filter(|name| name.as_str() != "session.envelope")
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            enabled.to_vec()
-        };
-        Self::from_catalog_enabled(&filtered)
     }
 
     /// Resolve enabled method names against catalog descriptors.
@@ -246,37 +225,6 @@ mod tests {
     }
 
     #[test]
-    fn direct_mode_exposure_omits_session_envelope() {
-        let exposure = ToolExposure::from_catalog_enabled_for_authority_mode(
-            &[
-                "observe.workspace".to_string(),
-                "session.envelope".to_string(),
-                "session.todo_write".to_string(),
-            ],
-            AuthorityMode::Direct,
-        )
-        .expect("known tools resolve");
-        assert!(!exposure.contains("session.envelope"));
-        assert!(exposure.contains("observe.workspace"));
-        assert!(exposure.contains("session.todo_write"));
-        assert_eq!(exposure.definitions().len(), 2);
-    }
-
-    #[test]
-    fn envelope_mode_exposure_includes_session_envelope() {
-        let exposure = ToolExposure::from_catalog_enabled_for_authority_mode(
-            &[
-                "session.envelope".to_string(),
-                "session.todo_write".to_string(),
-            ],
-            AuthorityMode::Envelope,
-        )
-        .expect("known tools resolve");
-        assert!(exposure.contains("session.envelope"));
-        assert_eq!(exposure.definitions().len(), 2);
-    }
-
-    #[test]
     fn enabled_filter_uses_exact_names() {
         let exposure = ToolExposure::from_catalog_enabled(&["observe.workspace".to_string()])
             .expect("known tool resolves");
@@ -289,13 +237,11 @@ mod tests {
     #[test]
     fn catalog_exposure_collects_base_authority_from_descriptors() {
         let exposure = ToolExposure::from_catalog_enabled(&[
-            "session.envelope".to_string(),
             "fetch.web".to_string(),
             "observe.audit_replay".to_string(),
         ])
         .expect("known tools resolve");
         let authority = exposure.base_authority();
-        assert!(authority.session_state);
         assert!(authority.fetch_hosts);
         assert!(authority.read_audit);
     }

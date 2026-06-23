@@ -9,7 +9,6 @@ use lancet_catalog::methods::workspace::{
     GrepParams, ListDirectoryParams, ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
-use lancet_protocol::policy::VerifyCommand;
 
 pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
 -> Vec<RuntimeEffectScenario> {
@@ -21,10 +20,9 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
         .to_string();
     let mut scenarios = Vec::new();
 
-    let observe_caps = vec![read_cap(&root), inspect_cap()];
     let (ctx, _rx, _) = build_test_context(
         &root,
-        observe_caps.clone(),
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -43,7 +41,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        observe_caps.clone(),
+        vec![].clone(),
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -61,7 +59,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        observe_caps.clone(),
+        vec![].clone(),
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -78,7 +76,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        observe_caps.clone(),
+        vec![].clone(),
         NetworkPolicyConfig::safe_defaults(),
     );
     scenarios.push(scenario(
@@ -95,7 +93,7 @@ pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
     ));
 
     let (ctx, _rx, _) =
-        build_test_context(&root, observe_caps, NetworkPolicyConfig::safe_defaults());
+        build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
         "failure_missing_file_no_backend_effect",
         dispatch_failure_effects::<ObserveWorkspace>(
@@ -124,7 +122,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
@@ -143,7 +141,7 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
@@ -162,85 +160,21 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(&root, "src/**", vec!["echo".into(), "touch".into()], None),
-    );
-    scenarios.push(scenario(
-        "scope_boundary_out_of_scope_no_backend_effect",
-        dispatch_failure_effects::<Create>(
-            CreateParams {
-                path: "outside.txt".into(),
-                content: "outside\n".into(),
-                create_parents: false,
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root), run_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(
-            &root,
-            ".",
-            vec!["echo".into(), "touch".into()],
-            Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: None,
-            }),
-        ),
-    );
-    scenarios.push(scenario(
-        "verify_success_filters_verify_source",
-        dispatch_success_effects::<Create>(
-            CreateParams {
-                path: "created_with_verify.txt".into(),
-                content: "created\n".into(),
-                create_parents: false,
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root), run_cap()],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
-    declare_envelope(
-        &ctx,
-        test_mutation_envelope_with(
-            &root,
-            ".",
-            vec!["echo".into(), "touch".into()],
-            Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: Some(1),
-            }),
-        ),
-    );
-    scenarios.push(scenario(
-        "failure_verify_failed_retains_backend_mutation",
-        dispatch_failure_effects::<Create>(
-            CreateParams {
-                path: "created_then_verify_failed.txt".into(),
-                content: "created\n".into(),
-                create_parents: false,
-            },
-            ctx,
-            mutation_region(&root),
-        ),
-    ));
 
     scenarios
 }
@@ -257,7 +191,7 @@ pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEff
     let before = "hello\nworld\n";
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
@@ -280,7 +214,7 @@ pub(in crate::effect_contract_tests) fn edit_runtime_effects() -> Vec<RuntimeEff
 
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);
@@ -317,7 +251,7 @@ pub(in crate::effect_contract_tests) fn batch_runtime_effects() -> Vec<RuntimeEf
     let before = "some data content\n";
     let (ctx, _rx, _) = build_test_context(
         &root,
-        vec![write_cap(&root)],
+        vec![],
         NetworkPolicyConfig::safe_defaults(),
     );
     declare_active_envelope(&ctx, &root);

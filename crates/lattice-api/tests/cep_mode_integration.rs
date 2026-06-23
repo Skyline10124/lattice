@@ -40,7 +40,7 @@ use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepErrorCode;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact as EnvelopeImpact, ImpactConfidence, Intent, Scope};
+use lancet_protocol::policy::CepMode;
 use lattice_profile::LancetSection;
 use tempfile::TempDir;
 
@@ -239,36 +239,6 @@ async fn cep_mode_integration_off_still_runs_production_command_isolation_gate()
             "test host probe unavailable",
         )])),
     };
-    let mut capabilities = std::collections::BTreeSet::new();
-    capabilities.insert(Capability::RunCommand {
-        argv_allowlist: vec!["echo".into()],
-    });
-    config
-        .active_envelope
-        .declare(
-            ExecutionEnvelope {
-                intent: Intent {
-                    description: "command isolation gate test".into(),
-                },
-                capabilities,
-                scope: Scope::default(),
-                impact: vec![EnvelopeImpact {
-                    kind: ImpactKind::CommandExecution,
-                    target: ".".into(),
-                    scope: None,
-                    confidence: ImpactConfidence::Conservative,
-                    unknowns: vec![],
-                }],
-                constraints: Constraints::default(),
-                verify: None,
-                on_failure: None,
-                extensions: serde_json::Map::new(),
-            },
-            0,
-            "test-turn",
-        )
-        .await
-        .expect("declare command envelope");
     let audit = Arc::clone(&config.audit);
 
     let (client, server) = CepTransport::pair(8);
@@ -506,12 +476,9 @@ async fn cep_mode_off_policy_deny_still_enforced() {
     register_production_method_registry(&mut registry).expect("production registry");
 
     // Base envelope: ReadPath only — no WritePath or RunCommand.
-    let base_envelope =
-        BaseExecutionEnvelope::for_workspace_root(canonical_str, "off mode policy test");
 
     let mut config = ServerRunConfig::in_memory_for_tests();
     config.cep_mode = CepMode::Off; // Off: effect check skipped, but policy still runs.
-    config.base_envelope = base_envelope;
 
     // Set up a proper policy hook for the workspace root.
     {

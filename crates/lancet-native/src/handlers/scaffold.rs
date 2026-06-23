@@ -74,7 +74,7 @@ mod scaffold_tests {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_catalog::methods::scaffold::InspectParams;
     use lancet_protocol::ToolEvent;
-    use lancet_protocol::policy::{BaseExecutionEnvelope, CepMode};
+    use lancet_protocol::policy::CepMode;
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::policy::PolicyHook;
     use std::sync::Arc;
@@ -97,9 +97,7 @@ mod scaffold_tests {
             call_id: 1,
             events: EventSink::new(event_tx, 1),
             cancellation: Cancellation::new(cancel_rx),
-            base_envelope: BaseExecutionEnvelope::for_workspace_root(root, "scaffold test"),
             cep_context,
-            active_envelope: Arc::new(lancet_authority::envelope_store::ActiveEnvelopeStore::new()),
             turn_id: "test-turn".into(),
             durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
             effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),

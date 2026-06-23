@@ -838,11 +838,9 @@ fn rejection_stage_serializes_stable_snake_case_labels() {
     let stages = [
         RejectionStage::SchemaValidation,
         RejectionStage::PolicyGate,
-        RejectionStage::LegacyEnvelopeGate,
         RejectionStage::AdapterPreflight,
         RejectionStage::BackendExecution,
         RejectionStage::VerificationFailure,
-        RejectionStage::AuthorityModeRejection,
     ];
     for stage in stages {
         let label = serde_json::to_string(&stage).unwrap();
@@ -877,7 +875,7 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         )
         .unwrap();
 
-    let legacy_start = store
+    let adapter_start = store
         .start_call(
             &ctx,
             2,
@@ -887,13 +885,13 @@ fn rejection_stage_filters_rows_by_metadata_json() {
         .unwrap();
     store
         .finalize_call(
-            legacy_start,
+            adapter_start,
             AuditOutcome::Error {
-                code: "EnvelopeDenied".into(),
-                summary: "legacy".into(),
+                code: "GuardDenied".into(),
+                summary: "adapter".into(),
             },
             Some("native_handler_denied"),
-            Some(r#"{"rejection_stage":"legacy_envelope_gate","denial_source":"cep_envelope"}"#),
+            Some(r#"{"rejection_stage":"adapter_preflight","denial_source":"guard_l1"}"#),
         )
         .unwrap();
 
@@ -906,14 +904,14 @@ fn rejection_stage_filters_rows_by_metadata_json() {
     assert_eq!(policy_rows.len(), 1);
     assert_eq!(policy_rows[0].method, ObserveWorkspace::NAME);
 
-    let legacy_rows = store
+    let adapter_rows = store
         .query_rows(&AuditQueryFilters {
-            rejection_stage: Some(RejectionStage::LegacyEnvelopeGate),
+            rejection_stage: Some(RejectionStage::AdapterPreflight),
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(legacy_rows.len(), 1);
-    assert_eq!(legacy_rows[0].method, Create::NAME);
+    assert_eq!(adapter_rows.len(), 1);
+    assert_eq!(adapter_rows[0].method, Create::NAME);
 }
 
 fn write_legacy_audit_fixture(path: &std::path::Path) {

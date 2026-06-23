@@ -137,11 +137,9 @@ pub struct CepAuditContext {
 pub enum RejectionStage {
     SchemaValidation,
     PolicyGate,
-    LegacyEnvelopeGate,
     AdapterPreflight,
     BackendExecution,
     VerificationFailure,
-    AuthorityModeRejection,
 }
 
 impl RejectionStage {
@@ -150,11 +148,9 @@ impl RejectionStage {
         match self {
             Self::SchemaValidation => "schema_validation",
             Self::PolicyGate => "policy_gate",
-            Self::LegacyEnvelopeGate => "legacy_envelope_gate",
             Self::AdapterPreflight => "adapter_preflight",
             Self::BackendExecution => "backend_execution",
             Self::VerificationFailure => "verification_failure",
-            Self::AuthorityModeRejection => "authority_mode_rejection",
         }
     }
 }

@@ -9,7 +9,6 @@ use lancet_authority::policy::default::PolicyConfig;
 use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 use lancet_native::{DirectVerifyConfig, ExecutionRouting};
 use lancet_protocol::policy::CepMode;
-use lancet_protocol::policy::AuthorityMode;
 use sha2::{Digest, Sha256};
 
 /// Failure resolving the external project-keyed CEP audit store path.
@@ -130,9 +129,7 @@ pub struct LancetRuntimeConfig {
     pub model_id: String,
     /// Runtime version string recorded in the audit context and attestations.
     pub runtime_version: String,
-    /// How authority is sourced for the runtime — never inferred from backend presence.
-    pub authority_mode: AuthorityMode,
-    /// Optional Upper execution routing; `None` for host-only or Envelope compatibility.
+    /// Optional Upper execution routing; `None` for host-only.
     pub execution: Option<ExecutionRouting>,
     /// Immutable Direct-mode verify configuration from runtime setup.
     pub direct_verify: Option<DirectVerifyConfig>,
@@ -155,7 +152,6 @@ impl LancetRuntimeConfig {
             audit: AuditBacking::InMemory,
             model_id: String::new(),
             runtime_version: String::new(),
-            authority_mode: AuthorityMode::default(),
             execution: None,
             direct_verify: None,
         }

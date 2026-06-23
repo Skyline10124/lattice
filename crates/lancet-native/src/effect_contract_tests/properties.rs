@@ -22,7 +22,6 @@ use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
 use lancet_protocol::policy::Capability;
-use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 proptest! {
     #[test]
@@ -30,7 +29,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: "hello.txt".into(),
@@ -52,7 +51,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let authority = observation_region(&root);
         let params = ObserveWorkspaceParams::Grep(GrepParams {
             pattern,
@@ -73,7 +72,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = mutation_region(&root);
         let params = CreateParams {
@@ -100,7 +99,7 @@ proptest! {
         let hash = blake3::hash(&content);
         let hash_hex = hash.to_hex();
 
-        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = mutation_region(&root);
         let params = EditParams {
@@ -126,7 +125,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         declare_active_envelope(&ctx, &root);
         let authority = command_region();
         let params = RunParams {
@@ -169,19 +168,13 @@ fn fetch_effect_contract_positive() {
             }
         });
 
-        let fetch_cap = SourcedCapability {
-            capability: Capability::FetchUrl {
-                host: "127.0.0.1".into(),
-            },
-            source: CapabilitySource::Base,
-        };
         let network = NetworkPolicyConfig {
             allow_public_https: true,
             allow_localhost: true,
             allowed_hosts: vec!["127.0.0.1".into()],
             max_web_response_bytes: 10 * 1024 * 1024,
         };
-        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], network);
+        let (ctx, _rx, _) = build_test_context(&root, vec![], network);
 
         let mut kinds = std::collections::BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
@@ -215,7 +208,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![session_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let authority = session_region();
         let params = TodoWriteParams {
             todos: vec![TodoItem {
@@ -239,7 +232,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![read_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = ObserveWorkspaceParams::ReadFile(ReadFileParams {
             path: format!("/outside-scope/{name}"),
             offset: None,
@@ -260,7 +253,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![inspect_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = ObserveWorkspaceParams::Grep(GrepParams {
             pattern,
             path: Some("/outside-scope".into()),
@@ -280,7 +273,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = CreateParams {
             path: "/outside-scope/evil.txt".into(),
             content,
@@ -300,7 +293,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![write_cap(&root)], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = EditParams {
             path: "../outside/evil.txt".into(),
             expected_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
@@ -324,7 +317,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let (ctx, _rx, _) = build_test_context(&root, vec![run_cap()], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let params = RunParams {
             argv: vec!["echo".into(), msg],
             cwd: Some("/outside-scope".into()),
@@ -346,11 +339,7 @@ proptest! {
         let dir = setup_tempdir_with_files();
         let root = std::fs::canonicalize(dir.path()).unwrap().to_str().unwrap().to_string();
         let registry = test_registry();
-        let fetch_cap = SourcedCapability {
-            capability: Capability::FetchUrl { host: "allowed.com".into() },
-            source: CapabilitySource::Base,
-        };
-        let (ctx, _rx, _) = build_test_context(&root, vec![fetch_cap], NetworkPolicyConfig::safe_defaults());
+        let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
         let mut kinds = std::collections::BTreeSet::new();
         kinds.insert(ImpactKind::ExternalObservation);
         let authority = AuthorizedEffectRegion {
