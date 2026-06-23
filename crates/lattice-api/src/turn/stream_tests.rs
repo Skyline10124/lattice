@@ -8,7 +8,7 @@ use futures::StreamExt;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::{SessionGraphStore, TurnCommitStatus};
+use lattice_session::TurnCommitStatus;
 
 use super::execute::stream_turn;
 use super::test_support::*;
@@ -134,7 +134,7 @@ async fn stream_turn_error_still_commits_error() {
         })
         .unwrap();
     assert_eq!(
-        last_log_entry(&fixture.store, &session_id).status,
+        last_log_entry(fixture.store.as_ref(), &session_id).status,
         TurnCommitStatus::Error
     );
 }
@@ -202,7 +202,7 @@ async fn stream_turn_cancelled_commits_cancelled() {
     } = &events[committed_pos]
     {
         assert_eq!(*status, RunTurnStatus::Cancelled);
-        let entry = last_log_entry(&fixture.store, session_id);
+        let entry = last_log_entry(fixture.store.as_ref(), session_id);
         assert_eq!(entry.status, TurnCommitStatus::Cancelled);
     }
 
@@ -260,14 +260,14 @@ async fn stream_turn_error_after_partial_commits_error() {
     } = committed
     {
         assert_eq!(*status, RunTurnStatus::Error);
-        let transcript = fixture.store.head_transcript(session_id).unwrap();
+        let transcript = fixture.store.as_ref().head_transcript(session_id).unwrap();
         let assistant = transcript
             .messages
             .iter()
             .find(|m| m.role == "assistant")
             .expect("assistant message in commit");
         assert_eq!(assistant.content, "partial output before error");
-        let entry = last_log_entry(&fixture.store, session_id);
+        let entry = last_log_entry(fixture.store.as_ref(), session_id);
         assert_eq!(entry.status, TurnCommitStatus::Error);
         assert!(
             entry

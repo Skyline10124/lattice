@@ -9,7 +9,7 @@ use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::WorkspaceSection;
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_session::SessionGraphStore;
 use lattice_workspace::testing::DeterministicWorkspace;
 
 use super::types::RunTurnRequest;
@@ -74,7 +74,7 @@ pub(super) struct TestFixture {
     pub(super) project_root: String,
     pub(super) sessions_path: std::path::PathBuf,
     pub(super) session_api: SessionApi,
-    pub(super) store: SqliteSessionGraphStore,
+    pub(super) store: Box<dyn SessionGraphStore>,
     pub(super) llm: Arc<dyn LlmClient>,
     pub(super) enabled_tools: Vec<String>,
 }
@@ -104,7 +104,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
 
     let sessions_path = root.join("sessions");
     let session_api = SessionApi::sqlite(&sessions_path);
-    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let store: Box<dyn SessionGraphStore> = Box::new(lattice_session::SqliteSessionGraphStore::new(&sessions_path));
     store
         .create_session(TEST_SESSION_ID, None, "test", "main")
         .expect("create default test session");
@@ -256,7 +256,7 @@ pub(super) fn with_test_llm(
 }
 
 pub(super) fn last_log_entry(
-    store: &SqliteSessionGraphStore,
+    store: &dyn SessionGraphStore,
     session_id: &str,
 ) -> lattice_session::TurnLogEntry {
     store

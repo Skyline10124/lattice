@@ -14,7 +14,7 @@ use futures::StreamExt;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_agent::{AgentLoop, AgentLoopConfig, LlmClient};
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::{SessionGraphStore, WorkspaceDisposition};
+use lattice_session::WorkspaceDisposition;
 
 use super::types::{RunTurnRequest, RunTurnStatus, TurnEvent, TurnEventStream};
 use crate::session::SessionApi;

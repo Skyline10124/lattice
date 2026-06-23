@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_llm::{LlmEvent, TokenUsage};
-use lattice_session::{SessionGraphStore, TurnCommitStatus};
+use lattice_session::TurnCommitStatus;
 
 use super::execute::run_turn;
 use super::test_support::*;
@@ -145,7 +145,7 @@ async fn run_turn_failed_outcome_is_committed() {
 
     assert_eq!(result.status, RunTurnStatus::Error);
     assert_eq!(result.assistant_output, "");
-    let entry = last_log_entry(&fixture.store, &result.session_id);
+    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.status, TurnCommitStatus::Error);
     assert!(
         entry
@@ -198,7 +198,7 @@ async fn run_turn_cancelled_outcome_is_committed() {
     .unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Cancelled);
-    let entry = last_log_entry(&fixture.store, &result.session_id);
+    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.status, TurnCommitStatus::Cancelled);
     assert!(
         entry
@@ -232,7 +232,7 @@ async fn run_cutover_uses_loaded_profile_model() {
     let result = run_turn(fixture.session_api, request).await.unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let entry = last_log_entry(&fixture.store, &result.session_id);
+    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.model, "profile-model");
 }
 
@@ -261,7 +261,7 @@ async fn run_turn_plumbs_stable_provider_to_agent_request_and_commit_metadata() 
     let result = run_turn(fixture.session_api, request).await.unwrap();
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let entry = last_log_entry(&fixture.store, &result.session_id);
+    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.provider, "openai_compatible");
 }
 
@@ -295,6 +295,6 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let result = run_turn(session_api, request).await.unwrap();
 
     assert_eq!(result.status, RunTurnStatus::Completed);
-    let entry = last_log_entry(&fixture.store, &result.session_id);
+    let entry = last_log_entry(fixture.store.as_ref(), &result.session_id);
     assert_eq!(entry.parent_ids, vec![first_commit_id]);
 }

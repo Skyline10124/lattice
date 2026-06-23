@@ -3,14 +3,14 @@
 
 //! API session types.
 //!
-//! `SessionApi` wraps [`SqliteSessionGraphStore`] to provide an explicit
-//! durable session API for create/open/status/list/log/checkout/branch/diff/
-//! reset operations.
+//! `SessionApi` wraps a [`SessionGraphStore`] trait object to provide an
+//! explicit durable session API for create/open/status/list/log/checkout/branch/
+//! diff/reset operations. Both SQLite and Git-backed stores are supported.
 
 use lattice_session::{
-    GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult,
-    SessionGraphStore, SessionGraphSummary, SessionStatus, SqliteSessionGraphStore, TurnCommit,
-    TurnCommitInput, TurnLogEntry,
+    GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
+    PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
+    SqliteSessionGraphStore, TurnCommit, TurnCommitInput, TurnLogEntry,
 };
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -56,23 +56,29 @@ pub struct OpenSessionRequest {
 }
 
 pub struct SessionApi {
-    store: SqliteSessionGraphStore,
+    store: Box<dyn SessionGraphStore>,
 }
 
 impl SessionApi {
-    pub fn new(store: SqliteSessionGraphStore) -> Self {
+    pub fn new(store: Box<dyn SessionGraphStore>) -> Self {
         Self { store }
     }
 
     pub fn sqlite(dir: impl Into<PathBuf>) -> Self {
         Self {
-            store: SqliteSessionGraphStore::new(dir),
+            store: Box::new(SqliteSessionGraphStore::new(dir)),
+        }
+    }
+
+    pub fn git(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            store: Box::new(GitSessionGraphStore::new(dir)),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn store(&self) -> &SqliteSessionGraphStore {
-        &self.store
+    pub(crate) fn store(&self) -> &dyn SessionGraphStore {
+        &*self.store
     }
 
     /// Resolve a possibly-abbreviated session ID to the full session ID.
@@ -216,6 +222,13 @@ impl SessionApi {
     ///
     /// Thin wrapper over the session store's prepared commit path.
     /// Uses the prepared commit ID for idempotent retry (D-23).
+    ///
+    /// NOTE (IN-02): Unlike `commit_turn`, this does not resolve abbreviated
+    /// session ID prefixes via `resolve_id`. The prepared commit must carry the
+    /// canonical (full) session ID; callers are responsible for resolving
+    /// prefixes before constructing the `PreparedTurnCommit`. This is
+    /// intentional because prepared commits are built internally after the
+    /// session has already been resolved for turn execution.
     pub(crate) fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> Result<TurnCommit> {
         self.store
             .commit_prepared_turn(prepared)
