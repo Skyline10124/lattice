@@ -3,7 +3,6 @@
 
 //! Native CEP workspace observation CEP handlers.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::edit::content_hash;
@@ -20,9 +19,6 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_path_facts};
 use lancet_authority::policy::CepPolicyConfig;
 use lancet_authority::policy::budget::BudgetExhausted;
-use lancet_authority::policy::observation::{
-    ResolvedObservationTarget, resolve_observation_target,
-};
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::workspace::{
@@ -32,7 +28,6 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_protocol::envelope::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
-use lancet_protocol::policy::AuthorityMode;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use regex::Regex;
 use serde::Serialize;
@@ -102,87 +97,7 @@ async fn handle_read_file_as(
 ) -> Result<ReadFileResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    if ctx.authority_mode == AuthorityMode::Direct {
-        return handle_direct_read_file(params, ctx, method).await;
-    }
-
-    let policy = &ctx.cep_context.policy;
-    let target = match resolve_observation_target(policy, &params.path).await {
-        Ok(t) => t,
-        Err(err) => {
-            emit_denial_metadata(&ctx, method, "cep_policy", false).await;
-            return Err(err);
-        }
-    };
-    #[cfg(test)]
-    if let Some(err) = check_backend_safety_net(&params.path) {
-        emit_denial_metadata(&ctx, method, "backend_safety_net", true).await;
-        return Err(err);
-    }
-
-    let meta = tokio::fs::metadata(&target.canonical_target)
-        .await
-        .map_err(|_| path_not_found(&params.path))?;
-    if !meta.is_file() {
-        return Err(path_not_found(&params.path));
-    }
-    if meta.len() as usize > policy.observation.max_single_read_bytes {
-        return Err(single_read_budget_exceeded(meta.len() as usize, policy));
-    }
-
-    let content = tokio::fs::read_to_string(&target.canonical_target)
-        .await
-        .map_err(|e| io_validation_error(&params.path, e))?;
-    if content.len() > policy.observation.max_single_read_bytes {
-        return Err(single_read_budget_exceeded(content.len(), policy));
-    }
-
-    let offset = params
-        .offset
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(1)
-        .max(1);
-    let limit = params
-        .limit
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(2000)
-        .max(1);
-    let line_numbers = params.line_numbers.unwrap_or(true);
-
-    let hash = content_hash(content.as_bytes());
-    let rendered = render_file_slice(&content, offset, limit, line_numbers);
-    let truncated = rendered.contains("[TRUNCATED:");
-    let bytes_returned = rendered.len();
-
-    charge_observation_bytes(&ctx, bytes_returned)?;
-
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceObservation,
-        scope: ObservedScope::Path(target.canonical_target.clone()),
-        required_capability: RequiredCapability::ReadPath,
-        source: EffectSource::HandlerBackend,
-    });
-
-    emit_success_metadata(
-        &ctx,
-        method,
-        &target,
-        json!({
-            "observation_source": "workspace",
-            "bytes_read": content.len(),
-            "bytes_returned": bytes_returned,
-            "content_hash": hash,
-            "truncated": truncated,
-            "policy_enforced": true,
-            "backend_invoked": true,
-        }),
-    )
-    .await;
-
-    Ok(ReadFileResult {
-        content: rendered,
-        content_hash: Some(hash),
-    })
+    handle_direct_read_file(params, ctx, method).await
 }
 
 async fn handle_grep_as(
@@ -193,10 +108,7 @@ async fn handle_grep_as(
 ) -> Result<GrepResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
     let path = params.path.clone().unwrap_or_else(|| ".".into());
-    if ctx.authority_mode == AuthorityMode::Direct {
-        return handle_direct_grep(params, ctx, &path, method).await;
-    }
-    run_grep(params, ctx, &path, method).await
+    handle_direct_grep(params, ctx, &path, method).await
 }
 
 async fn handle_list_directory_as(
@@ -207,60 +119,7 @@ async fn handle_list_directory_as(
 ) -> Result<ListDirectoryResult, CepError> {
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    if ctx.authority_mode == AuthorityMode::Direct {
-        return handle_direct_list_directory(params, ctx, method).await;
-    }
-
-    let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, &params.path, method, &ctx).await?;
-    backend_or_continue(&params.path, method, &ctx).await?;
-
-    let limit = params
-        .limit
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(DEFAULT_LIST_LIMIT)
-        .clamp(1, policy.observation.max_list_entries);
-
-    let mut entries = list_directory_entries(&target.canonical_target).await?;
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let total = entries.len();
-    let truncated = total > limit;
-    if truncated {
-        entries.truncate(limit);
-    }
-
-    let bytes_returned = serde_json::to_string(&entries)
-        .map(|s| s.len())
-        .unwrap_or(0);
-    charge_observation_bytes(&ctx, bytes_returned)?;
-
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceObservation,
-        scope: ObservedScope::Root(observation_root_scope(&target)),
-        required_capability: RequiredCapability::Inspect,
-        source: EffectSource::HandlerBackend,
-    });
-
-    emit_success_metadata(
-        &ctx,
-        method,
-        &target,
-        json!({
-            "observation_source": "workspace",
-            "entry_count": total,
-            "bytes_returned": bytes_returned,
-            "truncated": truncated,
-            "policy_enforced": true,
-            "backend_invoked": true,
-        }),
-    )
-    .await;
-
-    Ok(ListDirectoryResult {
-        entries,
-        truncated: truncated.then_some(true),
-    })
+    handle_direct_list_directory(params, ctx, method).await
 }
 
 async fn handle_find_files_as(
@@ -272,167 +131,7 @@ async fn handle_find_files_as(
     let path = params.path.clone().unwrap_or_else(|| ".".into());
     let _evaluation = evaluate_and_enforce_policy(&ctx, method, policy_params).await?;
 
-    if ctx.authority_mode == AuthorityMode::Direct {
-        return handle_direct_find_files(params, ctx, &path, method).await;
-    }
-
-    let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, &path, method, &ctx).await?;
-    backend_or_continue(&path, method, &ctx).await?;
-
-    let limit = params
-        .limit
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(DEFAULT_LIST_LIMIT)
-        .clamp(1, policy.observation.max_find_paths);
-
-    let (paths, paths_visited, truncated) = find_files_at(
-        &target.canonical_target,
-        &target.allowed_root,
-        &params.pattern,
-        limit,
-    )
-    .await;
-
-    let bytes_returned = paths.iter().map(|p| p.len()).sum::<usize>();
-    charge_observation_bytes(&ctx, bytes_returned)?;
-
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceObservation,
-        scope: ObservedScope::Root(observation_root_scope(&target)),
-        required_capability: RequiredCapability::Inspect,
-        source: EffectSource::HandlerBackend,
-    });
-
-    emit_success_metadata(
-        &ctx,
-        method,
-        &target,
-        json!({
-            "observation_source": "workspace",
-            "paths_visited": paths_visited,
-            "path_count": paths.len(),
-            "bytes_returned": bytes_returned,
-            "truncated": truncated,
-            "policy_enforced": true,
-            "backend_invoked": true,
-        }),
-    )
-    .await;
-
-    Ok(FindFilesResult {
-        paths,
-        truncated: truncated.then_some(true),
-    })
-}
-
-async fn run_grep(
-    params: GrepParams,
-    ctx: HandlerContext,
-    path: &str,
-    method: &'static str,
-) -> Result<GrepResult, CepError> {
-    let policy = &ctx.cep_context.policy;
-    let target = resolve_target_or_deny(policy, path, method, &ctx).await?;
-    backend_or_continue(path, method, &ctx).await?;
-
-    let re = Regex::new(&params.pattern).map_err(|e| {
-        CepError::new(
-            CepErrorCode::TypeError,
-            format!("invalid regex: {e}"),
-            CepErrorData::Validation(ValidationErrorData {
-                field: "pattern".into(),
-                reason: e.to_string(),
-            }),
-            Retriability::Permanent,
-        )
-    })?;
-
-    let max_results = params
-        .max_results
-        .and_then(|v| usize::try_from(v).ok())
-        .unwrap_or(DEFAULT_GREP_LIMIT)
-        .clamp(1, policy.observation.max_grep_matches);
-
-    let (matches, bytes_scanned, truncated) = grep_at(
-        &target.canonical_target,
-        &target.allowed_root,
-        &re,
-        max_results,
-        policy.observation.max_single_read_bytes,
-    )
-    .await;
-
-    let bytes_returned = matches
-        .iter()
-        .map(|m| m.path.len() + m.text.len() + 16)
-        .sum::<usize>();
-    charge_observation_bytes(&ctx, bytes_returned)?;
-
-    ctx.record_effect(ObservedEffect {
-        kind: ImpactKind::WorkspaceObservation,
-        scope: ObservedScope::Root(observation_root_scope(&target)),
-        required_capability: RequiredCapability::Inspect,
-        source: EffectSource::HandlerBackend,
-    });
-
-    emit_success_metadata(
-        &ctx,
-        method,
-        &target,
-        json!({
-            "observation_source": "workspace",
-            "bytes_scanned": bytes_scanned,
-            "match_count": matches.len(),
-            "bytes_returned": bytes_returned,
-            "truncated": truncated,
-            "policy_enforced": true,
-            "backend_invoked": true,
-        }),
-    )
-    .await;
-
-    Ok(GrepResult {
-        matches,
-        truncated: truncated.then_some(true),
-    })
-}
-
-async fn resolve_target_or_deny(
-    policy: &CepPolicyConfig,
-    path: &str,
-    method: &str,
-    ctx: &HandlerContext,
-) -> Result<ResolvedObservationTarget, CepError> {
-    match resolve_observation_target(policy, path).await {
-        Ok(t) => Ok(t),
-        Err(err) => {
-            emit_denial_metadata(ctx, method, "cep_policy", false).await;
-            Err(err)
-        }
-    }
-}
-
-#[cfg(test)]
-async fn backend_or_continue(
-    path: &str,
-    method: &str,
-    ctx: &HandlerContext,
-) -> Result<(), CepError> {
-    if let Some(err) = check_backend_safety_net(path) {
-        emit_denial_metadata(ctx, method, "backend_safety_net", true).await;
-        return Err(err);
-    }
-    Ok(())
-}
-
-#[cfg(not(test))]
-async fn backend_or_continue(
-    _path: &str,
-    _method: &str,
-    _ctx: &HandlerContext,
-) -> Result<(), CepError> {
-    Ok(())
+    handle_direct_find_files(params, ctx, &path, method).await
 }
 
 fn charge_observation_bytes(ctx: &HandlerContext, bytes: usize) -> Result<(), CepError> {
@@ -442,9 +141,6 @@ fn charge_observation_bytes(ctx: &HandlerContext, bytes: usize) -> Result<(), Ce
         .map_err(|e: BudgetExhausted| e.to_cep_error())
 }
 
-fn observation_root_scope(target: &ResolvedObservationTarget) -> String {
-    target.canonical_target.to_string_lossy().to_string()
-}
 
 fn single_read_budget_exceeded(actual: usize, policy: &CepPolicyConfig) -> CepError {
     BudgetExhausted {
@@ -458,6 +154,7 @@ fn single_read_budget_exceeded(actual: usize, policy: &CepPolicyConfig) -> CepEr
     .to_cep_error()
 }
 
+
 fn path_not_found(path: &str) -> CepError {
     CepError::new(
         CepErrorCode::TypeError,
@@ -470,294 +167,6 @@ fn path_not_found(path: &str) -> CepError {
     )
 }
 
-fn io_validation_error(path: &str, err: std::io::Error) -> CepError {
-    CepError::new(
-        CepErrorCode::TypeError,
-        format!("io error reading '{path}': {err}"),
-        CepErrorData::Validation(ValidationErrorData {
-            field: "path".into(),
-            reason: err.to_string(),
-        }),
-        Retriability::Permanent,
-    )
-}
-
-async fn list_directory_entries(dir: &Path) -> Result<Vec<DirectoryEntry>, CepError> {
-    let mut out = Vec::new();
-    let mut entries = tokio::fs::read_dir(dir)
-        .await
-        .map_err(|e| io_validation_error(&dir.display().to_string(), e))?;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| io_validation_error(&dir.display().to_string(), e))?
-    {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let kind = match entry.file_type().await {
-            Ok(ft) if ft.is_dir() => DirectoryEntryKind::Directory,
-            Ok(ft) if ft.is_symlink() => DirectoryEntryKind::Symlink,
-            Ok(ft) if ft.is_file() => DirectoryEntryKind::File,
-            _ => DirectoryEntryKind::Other,
-        };
-        out.push(DirectoryEntry { name, kind });
-    }
-    Ok(out)
-}
-
-async fn grep_at(
-    root: &Path,
-    allowed_root: &Path,
-    pattern: &Regex,
-    max_results: usize,
-    max_read_bytes: usize,
-) -> (Vec<GrepMatch>, usize, bool) {
-    let mut matches = Vec::new();
-    let mut visited = HashSet::new();
-    let mut bytes_scanned = 0usize;
-    let mut truncated = false;
-    let mut ctx = GrepWalkContext {
-        root,
-        pattern,
-        allowed_root,
-        matches: &mut matches,
-        visited: &mut visited,
-        max_results,
-        max_read_bytes,
-        bytes_scanned: &mut bytes_scanned,
-        truncated: &mut truncated,
-    };
-    grep_recursive(&mut ctx, root, 0).await;
-    (matches, bytes_scanned, truncated)
-}
-
-struct GrepWalkContext<'a> {
-    root: &'a Path,
-    pattern: &'a Regex,
-    allowed_root: &'a Path,
-    matches: &'a mut Vec<GrepMatch>,
-    visited: &'a mut HashSet<PathBuf>,
-    max_results: usize,
-    max_read_bytes: usize,
-    bytes_scanned: &'a mut usize,
-    truncated: &'a mut bool,
-}
-
-async fn grep_recursive(ctx: &mut GrepWalkContext<'_>, path: &Path, depth: u32) {
-    if depth > GREP_MAX_DEPTH || ctx.matches.len() >= ctx.max_results {
-        if ctx.matches.len() >= ctx.max_results {
-            *ctx.truncated = true;
-        }
-        return;
-    }
-
-    let resolved = match tokio::fs::canonicalize(path).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if !ctx.visited.insert(resolved.clone()) {
-        return;
-    }
-    if resolved != ctx.allowed_root && !resolved.starts_with(ctx.allowed_root) {
-        return;
-    }
-
-    let meta = match tokio::fs::metadata(&resolved).await {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-
-    if meta.is_file() {
-        if meta.len() as usize > ctx.max_read_bytes {
-            return;
-        }
-        if let Ok(content) = tokio::fs::read_to_string(&resolved).await {
-            if content.contains('\0') {
-                return;
-            }
-            *ctx.bytes_scanned += content.len();
-            let rel = path_relative(&resolved, ctx.root);
-            for (line_num, line) in content.lines().enumerate() {
-                if ctx.pattern.is_match(line) {
-                    if ctx.matches.len() >= ctx.max_results {
-                        *ctx.truncated = true;
-                        return;
-                    }
-                    ctx.matches.push(GrepMatch {
-                        path: rel.clone(),
-                        line: (line_num + 1) as u64,
-                        text: line.to_string(),
-                    });
-                }
-            }
-        }
-    } else if meta.is_dir() {
-        let children = collect_sorted_children(&resolved).await;
-        for child in children {
-            if ctx.matches.len() >= ctx.max_results {
-                *ctx.truncated = true;
-                return;
-            }
-            Box::pin(grep_recursive(ctx, &child, depth + 1)).await;
-        }
-    }
-}
-
-async fn find_files_at(
-    root: &Path,
-    allowed_root: &Path,
-    pattern: &str,
-    max_results: usize,
-) -> (Vec<String>, usize, bool) {
-    let mut matches = Vec::new();
-    let mut visited = HashSet::new();
-    let mut paths_visited = 0usize;
-    let mut truncated = false;
-    let mut ctx = FindWalkContext {
-        root,
-        allowed_root,
-        matches: &mut matches,
-        pattern,
-        visited: &mut visited,
-        max_results,
-        paths_visited: &mut paths_visited,
-        truncated: &mut truncated,
-    };
-    find_files_recursive(&mut ctx, root, 0).await;
-    (matches, paths_visited, truncated)
-}
-
-struct FindWalkContext<'a> {
-    root: &'a Path,
-    allowed_root: &'a Path,
-    matches: &'a mut Vec<String>,
-    pattern: &'a str,
-    visited: &'a mut HashSet<PathBuf>,
-    max_results: usize,
-    paths_visited: &'a mut usize,
-    truncated: &'a mut bool,
-}
-
-async fn find_files_recursive(ctx: &mut FindWalkContext<'_>, path: &Path, depth: u32) {
-    if depth > GREP_MAX_DEPTH || ctx.matches.len() >= ctx.max_results {
-        if ctx.matches.len() >= ctx.max_results {
-            *ctx.truncated = true;
-        }
-        return;
-    }
-
-    let resolved = match tokio::fs::canonicalize(path).await {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if !ctx.visited.insert(resolved.clone()) {
-        return;
-    }
-    *ctx.paths_visited += 1;
-    if resolved != ctx.allowed_root && !resolved.starts_with(ctx.allowed_root) {
-        return;
-    }
-
-    if resolved != ctx.root {
-        let relative = resolved
-            .strip_prefix(ctx.root)
-            .unwrap_or(&resolved)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if glob_like_matches(ctx.pattern, &relative) {
-            ctx.matches.push(relative);
-            if ctx.matches.len() >= ctx.max_results {
-                *ctx.truncated = true;
-                return;
-            }
-        }
-    }
-
-    let meta = match tokio::fs::metadata(&resolved).await {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    if !meta.is_dir() {
-        return;
-    }
-
-    for child in collect_sorted_children(&resolved).await {
-        if ctx.matches.len() >= ctx.max_results {
-            *ctx.truncated = true;
-            return;
-        }
-        Box::pin(find_files_recursive(ctx, &child, depth + 1)).await;
-    }
-}
-
-async fn collect_sorted_children(dir: &Path) -> Vec<PathBuf> {
-    let mut children = Vec::new();
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
-        return children;
-    };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if matches!(name_str.as_ref(), ".git" | "target" | "node_modules") {
-            continue;
-        }
-        if name_str.starts_with('.') && name_str != "." && name_str != ".." {
-            continue;
-        }
-        children.push(entry.path());
-    }
-    children.sort();
-    children
-}
-
-fn path_relative(resolved: &Path, project_root: &Path) -> String {
-    resolved
-        .strip_prefix(project_root)
-        .unwrap_or(resolved)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-fn glob_like_matches(pattern: &str, candidate: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    if wildcard_match(pattern, candidate) {
-        return true;
-    }
-    let name = candidate.rsplit('/').next().unwrap_or(candidate);
-    wildcard_match(pattern, name)
-}
-
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.as_bytes();
-    let text = text.as_bytes();
-    let (mut p, mut t) = (0usize, 0usize);
-    let mut star = None;
-    let mut star_text = 0usize;
-
-    while t < text.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
-            star = Some(p);
-            p += 1;
-            star_text = t;
-        } else if let Some(star_pos) = star {
-            p = star_pos + 1;
-            star_text += 1;
-            t = star_text;
-        } else {
-            return false;
-        }
-    }
-
-    while p < pattern.len() && pattern[p] == b'*' {
-        p += 1;
-    }
-
-    p == pattern.len()
-}
 
 fn direct_execution(ctx: &HandlerContext) -> Result<&ExecutionRouting, CepError> {
     ctx.execution.as_ref().ok_or_else(|| {
@@ -1358,31 +767,6 @@ async fn handle_direct_find_files(
     })
 }
 
-async fn emit_success_metadata(
-    ctx: &HandlerContext,
-    method: &str,
-    target: &ResolvedObservationTarget,
-    mut metadata: serde_json::Value,
-) {
-    if let Some(obj) = metadata.as_object_mut() {
-        obj.insert("request_target".to_string(), json!(target.request_target));
-        obj.insert(
-            "canonical_target".to_string(),
-            json!(target.canonical_target.display().to_string()),
-        );
-        obj.insert(
-            "allowed_root".to_string(),
-            json!(target.allowed_root.display().to_string()),
-        );
-    }
-    ctx.record_durable_metadata(metadata.clone());
-    ctx.events
-        .emit(
-            "cep.native_observation_metadata",
-            json!({ "method": method, "metadata": metadata }),
-        )
-        .await;
-}
 
 async fn emit_denial_metadata(
     ctx: &HandlerContext,

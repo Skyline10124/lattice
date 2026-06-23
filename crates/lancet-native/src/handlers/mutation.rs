@@ -17,9 +17,7 @@ use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
 use crate::edit::storage::EditStorage;
-use crate::enforcement::guard_l1::{
-    check_write_scope, evaluate_and_enforce_policy, extract_write_path_patterns,
-};
+use crate::enforcement::guard_l1::{evaluate_and_enforce_policy, extract_write_path_patterns};
 use crate::enforcement::preflight::{MutationPreflight, mutation_preflight_metadata};
 use crate::enforcement::verify::{
     VerifyCommandSpec, extract_verify_command, run_verify, run_verify_with_backend,
@@ -42,7 +40,6 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_protocol::envelope::{ExecutionEnvelope, ImpactKind};
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
-use lancet_protocol::policy::AuthorityMode;
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
 use std::collections::HashSet;
@@ -357,89 +354,7 @@ async fn authorize_workspace_mutation(
 ) -> Result<MutationAuthorization, CepError> {
     let _evaluation = evaluate_and_enforce_policy(ctx, method, params).await?;
 
-    if ctx.authority_mode == AuthorityMode::Direct {
-        return authorize_direct_mutation(ctx, method, changed_paths).await;
-    }
-
-    let (envelope_id, envelope) = match ctx.active_envelope.active_envelope().await {
-        Some((id, env)) => (id, env),
-        None => {
-            emit_envelope_missing(ctx, method, "workspace_mutation").await;
-            return Err(envelope_missing_error(method));
-        }
-    };
-
-    let patterns = extract_write_path_patterns(&envelope.capabilities);
-    if patterns.is_empty() {
-        emit_envelope_missing(ctx, method, "workspace_mutation").await;
-        return Err(envelope_missing_error(method));
-    }
-
-    let project_root = ctx
-        .cep_context
-        .policy
-        .project_root
-        .to_string_lossy()
-        .to_string();
-
-    let mut out_of_scope = Vec::new();
-    for path in changed_paths {
-        if let Err(err) = check_write_scope(path, &project_root, &patterns) {
-            if err.code == CepErrorCode::ReplanRequired {
-                out_of_scope.push(path.clone());
-            } else {
-                return Err(err);
-            }
-        }
-    }
-
-    if !out_of_scope.is_empty() {
-        record_mutation_preflight(
-            ctx,
-            method,
-            &envelope_id,
-            changed_paths,
-            &patterns,
-            &out_of_scope,
-            None,
-            extract_verify_command(&envelope).is_some(),
-            Some("out_of_scope_paths"),
-            false,
-        );
-        emit_replan_required(ctx, method, &envelope_id, &out_of_scope).await;
-        return Err(CepError::new(
-            CepErrorCode::ReplanRequired,
-            format!(
-                "{method} contains out-of-scope paths: {:?}; mutation not applied",
-                out_of_scope
-            ),
-            CepErrorData::Guard(GuardErrorData {
-                method: method.into(),
-                reason: format!("ReplanRequired: out-of-scope paths {:?}", out_of_scope),
-            }),
-            Retriability::RequiresReplan,
-        ));
-    }
-
-    record_mutation_preflight(
-        ctx,
-        method,
-        &envelope_id,
-        changed_paths,
-        &patterns,
-        &[],
-        expected_hash_success_status(method),
-        extract_verify_command(&envelope).is_some(),
-        None,
-        false,
-    );
-
-    Ok(MutationAuthorization {
-        envelope_id: Some(envelope_id),
-        envelope: Some(envelope),
-        project_root: Some(project_root),
-        direct: None,
-    })
+    authorize_direct_mutation(ctx, method, changed_paths).await
 }
 
 async fn authorize_direct_mutation(
@@ -590,19 +505,34 @@ fn record_mutation_replan_metadata(
     expected_hash_status: Option<&str>,
     replan_reason: Option<&str>,
 ) {
-    let patterns = extract_write_path_patterns(&auth.envelope().capabilities);
-    record_mutation_preflight(
-        ctx,
-        method,
-        auth.envelope_id(),
-        changed_paths,
-        &patterns,
-        &[],
-        expected_hash_status,
-        extract_verify_command(auth.envelope()).is_some(),
-        replan_reason,
-        false,
-    );
+    if auth.is_direct() {
+        record_mutation_preflight(
+            ctx,
+            method,
+            auth.envelope_id.as_deref().unwrap_or(""),
+            changed_paths,
+            &[],
+            &[],
+            expected_hash_status,
+            ctx.direct_verify.is_some(),
+            replan_reason,
+            false,
+        );
+    } else {
+        let patterns = extract_write_path_patterns(&auth.envelope().capabilities);
+        record_mutation_preflight(
+            ctx,
+            method,
+            auth.envelope_id(),
+            changed_paths,
+            &patterns,
+            &[],
+            expected_hash_status,
+            extract_verify_command(auth.envelope()).is_some(),
+            replan_reason,
+            false,
+        );
+    }
 }
 
 fn expected_hash_success_status(method: &str) -> Option<&'static str> {
