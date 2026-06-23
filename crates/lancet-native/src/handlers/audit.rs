@@ -364,8 +364,6 @@ mod tests {
         let registry = registry_with_audit();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope =
-            BaseExecutionEnvelope::for_workspace_root(root, "audit query test").with_read_audit();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
@@ -417,8 +415,6 @@ mod tests {
         let registry = registry_with_audit();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope =
-            BaseExecutionEnvelope::for_workspace_root(root, "audit replay test").with_read_audit();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
@@ -463,8 +459,6 @@ mod tests {
         let registry = registry_with_audit();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope =
-            BaseExecutionEnvelope::for_workspace_root(root, "audit replay empty").with_read_audit();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;
@@ -531,8 +525,6 @@ mod tests {
         let registry = registry_with_audit();
 
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope =
-            BaseExecutionEnvelope::for_workspace_root(root, "audit tail test").with_read_audit();
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
         {
             let mut snap = config.audit_context.write().await;

@@ -11,8 +11,6 @@ use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::Capability;
-
 pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEffectScenario> {
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())

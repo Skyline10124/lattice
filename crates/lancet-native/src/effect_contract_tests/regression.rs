@@ -17,8 +17,6 @@ use lancet_catalog::methods::workspace::{
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::Capability;
-
 #[test]
 fn malicious_handler_caught() {
     let mut registry = crate::MethodRegistry::new();
@@ -106,7 +104,7 @@ fn create_glob_pattern_within_region() {
             read_paths: Vec::new(),
             observation_roots: Vec::new(),
             write_paths: Vec::new(),
-            write_path_prefixes: vec![PathBuf::from(&root).join("src")],
+            write_path_prefixes: vec![PathBuf::from("src")],
             hosts: Vec::new(),
             session_state_allowed: false,
             command_allowed: false,
@@ -160,7 +158,7 @@ fn command_run_composite_mutation_success() {
         read_paths: Vec::new(),
         observation_roots: Vec::new(),
         write_paths: Vec::new(),
-        write_path_prefixes: vec![PathBuf::from(&root)],
+        write_path_prefixes: vec![PathBuf::from(".")],
         hosts: Vec::new(),
         session_state_allowed: false,
         command_allowed: true,
@@ -169,7 +167,7 @@ fn command_run_composite_mutation_success() {
 
     let params = RunParams {
         argv: vec!["touch".into(), "src/composite.txt".into()],
-        cwd: Some(root.clone()),
+        cwd: Some(".".into()),
         env: BTreeMap::new(),
         timeout_ms: Some(5000),
         declared_impact: Some(ImpactKind::WorkspaceMutation),

@@ -113,6 +113,9 @@ mod scaffold_tests {
             cep_mode: CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
+            execution: None,
+            direct_verify: None,
+            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         }
     }
 
@@ -170,7 +173,6 @@ mod scaffold_tests {
         let root = dir.path().to_str().unwrap();
         let registry = scaffold_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "scaffold audit");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
 
         let (client, server) = CepTransport::pair(8);

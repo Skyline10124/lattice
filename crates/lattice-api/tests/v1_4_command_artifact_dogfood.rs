@@ -22,7 +22,6 @@ use lancet_native::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::BaseExecutionEnvelope;
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
@@ -357,8 +356,6 @@ async fn replay_turn(
     register_production_method_registry(&mut registry).expect("production registry");
 
     let root = ws.canonical_root.to_str().expect("workspace root string");
-    let replay_base = BaseExecutionEnvelope::for_workspace_root(root, "v1.4 observe.audit_replay")
-        .with_read_audit();
     let replay_audit_ctx = Arc::new(RwLock::new(CepAuditContext {
         turn_id: "v1_4-replay-turn".into(),
         session_id: session_id.to_string(),

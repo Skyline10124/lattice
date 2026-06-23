@@ -478,85 +478,9 @@ async fn run_verify_at_project_root(
 mod verify_tests {
     use super::*;
     use lancet_authority::policy::CommandPolicy;
-    use std::collections::BTreeSet;
-    use tempfile::TempDir;
-
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     fn default_policy() -> CommandPolicy {
         CommandPolicy::defaults()
-    }
-
-    fn diagnostic_envelope() -> ExecutionEnvelope {
-        use lancet_protocol::effect_types::*;
-    use lancet_protocol::policy::*;
-        use std::collections::BTreeSet;
-        let mut caps = BTreeSet::new();
-        caps.insert(Capability::WritePath {
-            path_pattern: "src/**".into(),
-        });
-        ExecutionEnvelope {
-            intent: Intent {
-                description: "test".into(),
-            },
-            capabilities: caps,
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: Some(VerifyCommand {
-                command: "echo ok".into(),
-                expected_exit_code: Some(0),
-            }),
-            on_failure: Some(OnFailure::RetainDiff),
-            extensions: serde_json::Map::new(),
-        }
-    }
-
-    #[cfg(unix)]
-    fn executable_script(temp: &TempDir, name: &str, body: &str) -> String {
-        let path = temp.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-        path.to_string_lossy().to_string()
-    }
-
-    fn policy_allowing(script: &str) -> CommandPolicy {
-        let mut policy = default_policy();
-        policy
-            .allowed_diagnostic_commands
-            .push(vec![script.to_string()]);
-        policy
-    }
-
-    #[test]
-    fn extract_verify_command_from_envelope() {
-        let env = diagnostic_envelope();
-        let spec = extract_verify_command(&env).unwrap();
-        assert_eq!(spec.argv, vec!["echo", "ok"]);
-        assert_eq!(spec.expected_exit_code, Some(0));
-    }
-
-    #[test]
-    fn extract_verify_command_returns_none_when_not_configured() {
-        use lancet_protocol::effect_types::*;
-    use lancet_protocol::policy::*;
-        use std::collections::BTreeSet;
-        let env = ExecutionEnvelope {
-            intent: Intent {
-                description: "no verify".into(),
-            },
-            capabilities: BTreeSet::new(),
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: None,
-            on_failure: None,
-            extensions: serde_json::Map::new(),
-        };
-        assert!(extract_verify_command(&env).is_none());
     }
 
     #[test]

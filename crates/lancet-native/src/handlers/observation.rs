@@ -790,13 +790,337 @@ async fn emit_denial_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution_backend::{
+        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+    };
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::observation::reject_parent_traversal;
     use std::fs;
+    use std::future::Future;
+    use std::path::Path;
+    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
+
+    /// A host-filesystem-backed `ExecutionBackend` for observation tests.
+    /// Reads from the real filesystem rooted at `root`.
+    struct HostFsBackend {
+        root: std::path::PathBuf,
+    }
+
+    impl HostFsBackend {
+        fn new(root: impl Into<std::path::PathBuf>) -> Self {
+            let raw = root.into();
+            Self {
+                root: std::fs::canonicalize(&raw).unwrap_or(raw),
+            }
+        }
+
+        fn resolve(&self, path: &WorkspacePath) -> std::path::PathBuf {
+            if path.is_project_root() {
+                self.root.clone()
+            } else {
+                self.root.join(path.as_str())
+            }
+        }
+    }
+
+    impl ExecutionBackend for HostFsBackend {
+        fn backend_name(&self) -> &str {
+            "host-fs"
+        }
+
+        fn resolve_path(
+            &self,
+            path: &WorkspacePath,
+            _intent: PathIntent,
+        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+        {
+            let full = self.resolve(path);
+            let path_str = path.as_str().to_string();
+            let exists = full.exists();
+            let kind = if full.is_dir() {
+                crate::execution_backend::PathKind::Directory
+            } else if full.is_symlink() {
+                crate::execution_backend::PathKind::Symlink
+            } else {
+                crate::execution_backend::PathKind::File
+            };
+            // Check canonical containment: canonicalize the resolved path and
+            // verify it falls under the workspace root. Symlinks pointing
+            // outside the workspace root have canonical_under_workspace = false.
+            let canonical_under_workspace = if full.is_symlink() {
+                full.canonicalize()
+                    .map(|canonical| canonical.starts_with(&self.root))
+                    .unwrap_or(false)
+            } else {
+                true
+            };
+            let parent_exists = full.parent().map(|p| p.exists()).unwrap_or(false);
+            let parent_kind = full
+                .parent()
+                .and_then(|p| if p.is_dir() { Some(crate::execution_backend::PathKind::Directory) } else { None });
+            let byte_size = if full.is_file() {
+                Some(full.metadata().map(|m| m.len() as u64).unwrap_or(0))
+            } else {
+                None
+            };
+            Box::pin(async move {
+                Ok(PathFacts {
+                    normalized_path: path_str,
+                    exists,
+                    kind: Some(kind),
+                    parent_exists,
+                    parent_kind,
+                    byte_size,
+                    canonical_under_workspace,
+                })
+            })
+        }
+
+        fn read_file(
+            &self,
+            path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+        {
+            let full = self.resolve(path);
+            Box::pin(async move {
+                std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                    message: e.to_string(),
+                })
+            })
+        }
+
+        fn write_file(
+            &self,
+            _path: &WorkspacePath,
+            _content: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "write not supported".into(),
+                })
+            })
+        }
+
+        fn remove_file(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Err(ExecutionBackendError::Unavailable {
+                    message: "remove not supported".into(),
+                })
+            })
+        }
+
+        fn list_dir(
+            &self,
+            path: &WorkspacePath,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let full = self.resolve(path);
+            Box::pin(async move {
+                let mut entries = Vec::new();
+                if full.is_dir() {
+                    for e in std::fs::read_dir(&full).map_err(|e| {
+                        ExecutionBackendError::Unavailable {
+                            message: e.to_string(),
+                        }
+                    })? {
+                        if let Ok(entry) = e {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            let kind = if entry.path().is_dir() {
+                                crate::execution_backend::PathKind::Directory
+                            } else {
+                                crate::execution_backend::PathKind::File
+                            };
+                            entries.push(DirectoryEntry { name, kind });
+                        }
+                    }
+                }
+                Ok(entries)
+            })
+        }
+
+        fn grep(
+            &self,
+            request: &GrepRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>,
+        > {
+            let root = self.root.clone();
+            let pattern = request.pattern.clone();
+            let search_path = request.path.as_str().to_string();
+            Box::pin(async move {
+                let search_root = if search_path.is_empty() {
+                    root.clone()
+                } else {
+                    root.join(&search_path)
+                };
+                let mut matches = Vec::new();
+                let regex = regex::Regex::new(&pattern).map_err(|e| {
+                    ExecutionBackendError::Unavailable {
+                        message: e.to_string(),
+                    }
+                })?;
+                fn walk_dir(
+                    dir: &std::path::Path,
+                    search_root: &std::path::Path,
+                    regex: &regex::Regex,
+                    matches: &mut Vec<GrepMatch>,
+                ) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                // Skip symlinks to avoid following them outside the workspace.
+                                if path.is_symlink() {
+                                    continue;
+                                }
+                                walk_dir(&path, search_root, regex, matches);
+                            } else if path.is_file() && !path.is_symlink() {
+                                if let Ok(content) = std::fs::read_to_string(&path) {
+                                    for (line_num, line) in content.lines().enumerate() {
+                                        if regex.is_match(line) {
+                                            let rel = path.strip_prefix(search_root)
+                                                .unwrap_or(&path)
+                                                .to_string_lossy()
+                                                .to_string();
+                                            matches.push(GrepMatch {
+                                                path: WorkspacePath::parse(&rel).unwrap_or_else(|_| {
+                                                    WorkspacePath::parse(".").unwrap()
+                                                }),
+                                                line_number: (line_num + 1) as u64,
+                                                line: line.to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                walk_dir(&search_root, &search_root, &regex, &mut matches);
+                Ok(matches)
+            })
+        }
+
+        fn find_files(
+            &self,
+            request: &FindRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            let root = self.root.clone();
+            let pattern = request.pattern.clone();
+            let search_path = request.path.as_str().to_string();
+            Box::pin(async move {
+                let search_root = if search_path.is_empty() {
+                    root.clone()
+                } else {
+                    root.join(&search_path)
+                };
+                let mut results = Vec::new();
+                // Convert glob pattern to regex: * → .*, ? → .
+                let regex_src = pattern
+                    .chars()
+                    .map(|c| match c {
+                        '*' => ".*".to_string(),
+                        '?' => ".".to_string(),
+                        c if c.is_alphanumeric() => c.to_string(),
+                        c => format!("\\{}", c),
+                    })
+                    .collect::<String>();
+                let regex_str = format!("^{}$", regex_src);
+                let regex = regex::Regex::new(&regex_str).map_err(|e| {
+                    ExecutionBackendError::Unavailable {
+                        message: e.to_string(),
+                    }
+                })?;
+                fn walk_dir(
+                    dir: &std::path::Path,
+                    root: &std::path::Path,
+                    regex: &regex::Regex,
+                    results: &mut Vec<WorkspacePath>,
+                ) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                if path.is_symlink() {
+                                    continue;
+                                }
+                                walk_dir(&path, root, regex, results);
+                            } else if path.is_file() && !path.is_symlink() {
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if regex.is_match(&name) {
+                                    let rel = path.strip_prefix(root)
+                                        .unwrap_or(&path)
+                                        .to_string_lossy()
+                                        .to_string();
+                                    if let Ok(wp) = WorkspacePath::parse(&rel) {
+                                        results.push(wp);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                walk_dir(&search_root, &root, &regex, &mut results);
+                Ok(results)
+            })
+        }
+
+        fn exec(
+            &self,
+            _request: &crate::execution_backend::ExecRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            crate::execution_backend::ExecOutput,
+                            ExecutionBackendError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async {
+                Ok(crate::execution_backend::ExecOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        fn changed_paths(
+            &self,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
 
     fn native_registry(root: &str) -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -811,7 +1135,7 @@ mod tests {
 
     fn ctx_for_policy(
         policy: CepPolicyConfig,
-        envelope_root: &str,
+        root: &str,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -830,31 +1154,35 @@ mod tests {
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             policy_cfg,
         ));
-        let mut base = BaseExecutionEnvelope::for_workspace_root(envelope_root, "native obs test");
-        base.inner.capabilities = base
-            .inner
-            .capabilities
-            .into_iter()
-            .map(|cap| match cap {
-                lancet_protocol::policy::Capability::ReadPath { .. } => {
-                    lancet_protocol::policy::Capability::ReadPath {
-                        path_pattern: ".".into(),
-                    }
-                }
-                other => other,
-            })
-            .collect();
+        let backend = Arc::new(HostFsBackend::new(root));
         (
             HandlerContext {
                 call_id: 1,
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context,
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                    ..Default::default()
+                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-                execution: None,
+                execution: Some(ExecutionRouting {
+                    backend,
+                    upper: UpperContext {
+                        execution_backend: "host-fs".into(),
+                        upper_workspace_id: "test-upper".into(),
+                    },
+                }),
                 direct_verify: None,
                 routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
             },
@@ -1018,7 +1346,13 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            execution: None,
+            execution: Some(ExecutionRouting {
+                backend: Arc::new(HostFsBackend::new(root)),
+                upper: UpperContext {
+                    execution_backend: "host-fs".into(),
+                    upper_workspace_id: "test-upper".into(),
+                },
+            }),
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
@@ -1068,7 +1402,13 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            execution: None,
+            execution: Some(ExecutionRouting {
+                backend: Arc::new(HostFsBackend::new(root)),
+                upper: UpperContext {
+                    execution_backend: "host-fs".into(),
+                    upper_workspace_id: "test-upper".into(),
+                },
+            }),
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
@@ -1082,35 +1422,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, CepErrorCode::Reserved);
-    }
-
-    #[tokio::test]
-    async fn backend_safety_net_denial_records_backend_invoked() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join(BACKEND_SAFETY_NET_TEST_PATH), "probe").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = native_registry(root);
-        let (ctx, mut events) = ctx_for(root);
-
-        let params = ReadFileParams {
-            path: BACKEND_SAFETY_NET_TEST_PATH.into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        };
-        let err = dispatch_read_file(&registry, params, ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ProjectRootViolation);
-
-        let guard_event = events.recv().await.unwrap();
-        assert_eq!(guard_event.method, "cep.guard_verdict");
-        let event = events.recv().await.unwrap();
-        assert_eq!(
-            event.params["metadata"]["denial_source"],
-            "backend_safety_net"
-        );
-        assert_eq!(event.params["metadata"]["backend_invoked"], true);
     }
 
     #[tokio::test]
@@ -1211,14 +1522,13 @@ mod tests {
         assert_eq!(grep.matches.len(), 1);
         assert_eq!(grep.matches[0].path, "allowed.txt");
 
-        let src_scope = src.canonicalize().unwrap().to_string_lossy().to_string();
         let effects = ctx.effect_ledger.snapshot();
         assert!(
             effects.iter().any(|effect| matches!(
                 &effect.scope,
-                ObservedScope::Root(root) if root == &src_scope
+                ObservedScope::Root(root) if root == "src"
             )),
-            "expected observation effect scoped to {src_scope}, got {effects:?}"
+            "expected observation effect scoped to src, got {effects:?}"
         );
     }
 
@@ -1229,17 +1539,23 @@ mod tests {
         let src = dir.path().join("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("allowed.txt"), "SECRET_ALLOWED=yes\n").unwrap();
-        fs::write(dir.path().join("secret.txt"), "SECRET_FORBIDDEN=yes\n").unwrap();
-        std::os::unix::fs::symlink("../secret.txt", src.join("link_to_secret.txt")).unwrap();
+        // Create a symlink inside src that points outside the workspace root.
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "SECRET_FORBIDDEN=yes\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            src.join("link_to_secret.txt"),
+        )
+        .unwrap();
 
         let root = dir.path().to_str().unwrap();
         let registry = native_registry(root);
-        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
-        policy.observation.allowed_roots = vec![src.canonicalize().unwrap()];
-        let (ctx, _events) = ctx_for_policy(policy, root);
+        let (ctx, _events) = ctx_for(root);
 
+        // Reading through the symlink should fail because the canonical target
+        // is outside the workspace root.
         let read_params = ReadFileParams {
-            path: "secret.txt".into(),
+            path: "src/link_to_secret.txt".into(),
             offset: None,
             limit: None,
             line_numbers: None,
@@ -1247,8 +1563,16 @@ mod tests {
         let read_err = dispatch_read_file(&registry, read_params, ctx.clone())
             .await
             .unwrap_err();
-        assert_eq!(read_err.code, CepErrorCode::ProjectRootViolation);
+        assert!(
+            matches!(
+                read_err.code,
+                CepErrorCode::GuardDenied | CepErrorCode::ProjectRootViolation
+            ),
+            "expected guard denial for symlink escaping workspace, got {:?}",
+            read_err.code
+        );
 
+        // Grep in src should only find allowed.txt, not the symlink target.
         let grep_params = GrepParams {
             pattern: "SECRET".into(),
             path: Some("src".into()),
@@ -1327,7 +1651,13 @@ mod tests {
             cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            execution: None,
+            execution: Some(ExecutionRouting {
+                backend: Arc::new(HostFsBackend::new(root)),
+                upper: UpperContext {
+                    execution_backend: "host-fs".into(),
+                    upper_workspace_id: "test-upper".into(),
+                },
+            }),
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
         };
@@ -1509,7 +1839,7 @@ mod tests {
             let cep_context = Arc::new(CepTurnContext::from_policy(policy));
             let policy_cfg =
                 lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                    PathBuf::from(root),
+                    std::path::PathBuf::from(root),
                 );
             let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
                 policy_cfg,
@@ -1519,6 +1849,17 @@ mod tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context,
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                    ..Default::default()
+                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:

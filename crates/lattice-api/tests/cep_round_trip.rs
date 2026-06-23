@@ -4,23 +4,24 @@
 //! Impact matrix: one representative method per `ImpactKind` round-trips
 //! from catalog-derived LLM tool shape through `CepExecutorAdapter` and back.
 
-use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{Create, ObserveWorkspace};
 use lancet_native::{
-    CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
-    register_production_method_registry,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+    ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
+    PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
+    WorkspacePath, register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Intent, Scope};
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, jsonrpc};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
@@ -28,6 +29,173 @@ use lattice_api::CepExecutorAdapter;
 use lattice_llm::{FunctionCall, ToolCall};
 use serde_json::Value;
 use tempfile::TempDir;
+
+/// Minimal host-filesystem backend for integration tests.
+struct TestFsBackend {
+    root: std::path::PathBuf,
+}
+
+impl TestFsBackend {
+    fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        let raw = root.into();
+        Self {
+            root: std::fs::canonicalize(&raw).unwrap_or(raw),
+        }
+    }
+}
+
+impl ExecutionBackend for TestFsBackend {
+    fn backend_name(&self) -> &str {
+        "test-fs"
+    }
+
+    fn resolve_path(
+        &self,
+        path: &WorkspacePath,
+        _intent: PathIntent,
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let path_str = path.as_str().to_string();
+        let exists = full.exists();
+        let kind = if full.is_dir() {
+            PathKind::Directory
+        } else {
+            PathKind::File
+        };
+        Box::pin(async move {
+            Ok(PathFacts {
+                normalized_path: path_str,
+                exists,
+                kind: Some(kind),
+                parent_exists: true,
+                parent_kind: Some(PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace: true,
+            })
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn write_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let content = content.to_vec();
+        Box::pin(async move {
+            std::fs::write(&full, &content).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn remove_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::remove_file(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn list_dir(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn grep(
+        &self,
+        _request: &GrepRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn find_files(
+        &self,
+        _request: &FindRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn exec(
+        &self,
+        request: &ExecRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
+    {
+        let cwd = if request.cwd.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(request.cwd.as_str())
+        };
+        let argv = request.argv.clone();
+        let env = request.env.clone();
+        Box::pin(async move {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            cmd.current_dir(&cwd);
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+            let output = cmd
+                .output()
+                .map_err(|e| ExecutionBackendError::Unavailable {
+                    message: e.to_string(),
+                })?;
+            Ok(ExecOutput {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
 
 struct ImpactRow {
     impact: ImpactKind,
@@ -83,33 +251,6 @@ fn llm_tool_call(method: &str, arguments: Value) -> ToolCall {
     }
 }
 
-fn envelope_declare_call(
-    description: &str,
-    capabilities: BTreeSet<Capability>,
-    supersede: bool,
-) -> ToolCall {
-    let params = DeclareParams {
-        envelope: ExecutionEnvelope {
-            intent: Intent {
-                description: description.to_string(),
-            },
-            capabilities,
-            scope: Scope::default(),
-            impact: vec![],
-            constraints: Constraints::default(),
-            verify: None,
-            on_failure: None,
-            extensions: serde_json::Map::new(),
-        },
-        supersede,
-        reason: Some(description.to_string()),
-    };
-    llm_tool_call(
-        Envelope::NAME,
-        serde_json::to_value(EnvelopeParams::Declare(params)).expect("serialize declare params"),
-    )
-}
-
 fn assert_cep_payload(err: &ToolExecutionError, expected_code: i32) {
     let payload = err
         .cep_error
@@ -134,7 +275,6 @@ async fn cep_round_trip_impact_matrix() {
             Create::NAME,
             Run::NAME,
             TodoWrite::NAME,
-            Envelope::NAME,
         ],
         false,
     )
@@ -200,33 +340,6 @@ async fn cep_round_trip_impact_matrix() {
     ];
 
     for row in rows {
-        if row.method == Run::NAME {
-            let declare_run = envelope_declare_call(
-                "cep round-trip command",
-                BTreeSet::from([Capability::RunCommand {
-                    argv_allowlist: vec!["echo".into()],
-                }]),
-                true,
-            );
-            adapter
-                .execute(&declare_run)
-                .await
-                .expect("declare RunCommand envelope");
-        }
-        if row.method == Create::NAME {
-            let declare_write = envelope_declare_call(
-                "cep round-trip write",
-                BTreeSet::from([Capability::WritePath {
-                    path_pattern: "created.txt".into(),
-                }]),
-                true,
-            );
-            adapter
-                .execute(&declare_write)
-                .await
-                .expect("declare WritePath envelope");
-        }
-
         let call = llm_tool_call(row.method, row.arguments);
         let result_json = adapter
             .execute(&call)
@@ -380,7 +493,7 @@ async fn production_adapter(
     enabled: &[&str],
     allow_localhost: bool,
 ) -> (CepExecutorAdapter, Arc<CepAuditStore>) {
-    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+    use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
     use lancet_authority::{CepPolicyConfig, CepTurnContext};
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
@@ -399,6 +512,11 @@ async fn production_adapter(
     if allow_localhost {
         policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
+    // Direct mode: allow writes under the project root and echo as a diagnostic command.
+    policy_config.workspace = WorkspacePolicy {
+        allowed_write_paths: vec![".".into()],
+    };
+    policy_config.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
 
     let (client, server) = CepTransport::pair(16);
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit"));
@@ -408,6 +526,13 @@ async fn production_adapter(
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_config));
     config.policy_hook = default_hook.clone();
     config.default_policy_hook = Some(default_hook);
+    config.execution = Some(ExecutionRouting {
+        backend: Arc::new(TestFsBackend::new(root)),
+        upper: UpperContext {
+            execution_backend: "test-fs".into(),
+            upper_workspace_id: "test-upper".into(),
+        },
+    });
 
     let server_task = tokio::spawn(async move {
         let _ = server.run(registry, config).await;

@@ -10,7 +10,7 @@
 //!
 //! ## Update path (`LATTICE_UPDATE_WARN_REPORT=1`)
 //!
-//! Runs each of the 10 CATALOG methods through `CepMode::Warn`, collects
+//! Runs each of the 9 CATALOG methods through `CepMode::Warn`, collects
 //! `effect_warning` from the `CepAuditStore`, and
 //! writes a fresh `docs/lancet-warn-report.md` at the repo root.
 //!
@@ -37,7 +37,6 @@ use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditQueryParams, AuditReplay, AuditReplayParams,
 };
 use lancet_catalog::methods::command::{Run, RunParams, RunResult};
-use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams, EnvelopeResult};
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
 use lancet_catalog::methods::session::{TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -52,7 +51,7 @@ use lancet_native::{
 };
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact, ImpactScope, Intent, Scope};
+use lancet_protocol::policy::CepMode;
 use tempfile::TempDir;
 
 // ── Shared overreach builder ─────────────────────────────────────────────────
@@ -220,29 +219,6 @@ fn overreach_registry_run() -> MethodRegistry {
     r
 }
 
-fn overreach_registry_envelope() -> MethodRegistry {
-    let mut r = MethodRegistry::new();
-    r.register_method::<Envelope, _, _>(|_params: EnvelopeParams, ctx| async move {
-        ctx.authorized_region.set(AuthorizedEffectRegion::empty());
-        ctx.record_effect(ObservedEffect {
-            kind: ImpactKind::SessionStateMutation,
-            scope: ObservedScope::Path(PathBuf::from("/out/of/scope/envelope")),
-            required_capability: RequiredCapability::MutateSessionState,
-            source: EffectSource::HandlerBackend,
-        });
-        Ok(EnvelopeResult::Declare(
-            lancet_catalog::methods::envelope::DeclareResult {
-                envelope_id: "mock-id".into(),
-                envelope_hash: "mock-hash".into(),
-                accepted: true,
-                superseded_envelope_id: None,
-            },
-        ))
-    })
-    .expect("overreach Envelope");
-    r
-}
-
 // ── Overreach sample runner ──────────────────────────────────────────────────
 
 struct OverreachResult {
@@ -384,27 +360,6 @@ async fn generate_warn_report() -> String {
                 },
             )
             .await,
-            run_overreach::<Envelope>(
-                "session.envelope",
-                overreach_registry_envelope(),
-                EnvelopeParams::Declare(DeclareParams {
-                    envelope: ExecutionEnvelope {
-                        intent: Intent {
-                            description: "overreach test".into(),
-                        },
-                        capabilities: BTreeSet::new(),
-                        scope: Scope::default(),
-                        impact: vec![],
-                        constraints: Constraints::default(),
-                        verify: None,
-                        on_failure: None,
-                        extensions: serde_json::Map::new(),
-                    },
-                    supersede: false,
-                    reason: None,
-                }),
-            )
-            .await,
         ];
 
     // ── Success-only methods via production registry ─────────────────────
@@ -417,17 +372,13 @@ async fn generate_warn_report() -> String {
     let canonical_root = std::fs::canonicalize(ws_root).unwrap_or_else(|_| ws_root.to_path_buf());
     let canonical_str = canonical_root.to_str().unwrap().to_string();
 
-    // Single production server for all 5 success-only methods.
+    // Single production server for all 4 success-only methods.
     let audit_success = Arc::new(CepAuditStore::in_memory().expect("audit"));
-    let base = BaseExecutionEnvelope::for_workspace_root(&canonical_str, "warn harness success")
-        .with_session_state()
-        .with_read_audit();
 
     let mut production_registry = MethodRegistry::new();
     register_production_method_registry(&mut production_registry).expect("production registry");
 
     let mut success_config = warn_server_config(Arc::clone(&audit_success));
-    success_config.base_envelope = base;
     success_config.cep_context =
         Arc::new(CepTurnContext::defaults_for_project_root(&canonical_str));
 
@@ -439,47 +390,13 @@ async fn generate_warn_report() -> String {
     });
     tokio::task::yield_now().await;
 
-    // session.todo_write — base MutateSessionState
+    // session.todo_write
     let todo_ok = success_client
         .call::<TodoWrite>(TodoWriteParams { todos: vec![] })
         .await
         .is_ok();
 
-    // session.envelope declare — base MutateSessionState
-    let si_ok = success_client
-        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
-            envelope: ExecutionEnvelope {
-                intent: Intent {
-                    description: "warn harness envelope smoke".into(),
-                },
-                capabilities: [Capability::ReadPath {
-                    path_pattern: "src/lib.rs".into(),
-                }]
-                .into_iter()
-                .collect(),
-                scope: Scope {
-                    workspace_root: Some("src/lib.rs".into()),
-                    extensions: serde_json::Map::new(),
-                },
-                impact: vec![Impact {
-                    kind: ImpactKind::WorkspaceObservation,
-                    target: "src/lib.rs".into(),
-                    scope: Some(ImpactScope::ExactFile("src/lib.rs".into())),
-                    confidence: Default::default(),
-                    unknowns: vec![],
-                }],
-                constraints: Constraints::default(),
-                verify: None,
-                on_failure: None,
-                extensions: serde_json::Map::new(),
-            },
-            supersede: false,
-            reason: None,
-        }))
-        .await
-        .is_ok();
-
-    // observe.audit query — base ReadAudit
+    // observe.audit query
     let aq_ok = success_client
         .call::<AuditObserve>(AuditObserveParams {
             stream: false,
@@ -488,7 +405,7 @@ async fn generate_warn_report() -> String {
         .await
         .is_ok();
 
-    // observe.audit tail — base ReadAudit
+    // observe.audit tail
     let at_ok = success_client
         .call::<AuditObserve>(AuditObserveParams {
             stream: true,
@@ -500,7 +417,7 @@ async fn generate_warn_report() -> String {
         .await
         .is_ok();
 
-    // observe.audit_replay — base ReadAudit; replaying an empty turn returns an empty trace
+    // observe.audit_replay — replaying an empty turn returns an empty trace
     let ar_ok = success_client
         .call::<AuditReplay>(AuditReplayParams {
             turn_id: "test-turn".into(),
@@ -515,7 +432,6 @@ async fn generate_warn_report() -> String {
 
     let success_results = [
         ("session.todo_write", todo_ok),
-        ("session.envelope", si_ok),
         ("observe.audit query", aq_ok),
         ("observe.audit tail", at_ok),
         ("observe.audit_replay", ar_ok),
@@ -594,7 +510,7 @@ async fn generate_warn_report() -> String {
 /// **Default CI path:** reads `docs/lancet-warn-report.md` and asserts no
 /// `fix-now` entries are present.
 ///
-/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 10 CATALOG methods
+/// **Update path** (`LATTICE_UPDATE_WARN_REPORT=1`): runs all 9 CATALOG methods
 /// in `CepMode::Warn`, checks audit metadata, and rewrites the committed report.
 #[tokio::test]
 async fn cep_warn_harness() {

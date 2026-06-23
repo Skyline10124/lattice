@@ -5,6 +5,7 @@ use super::super::fixtures::*;
 use super::super::support::{build_test_context, rt};
 use lancet_audit::{AuditOutcome, CallAuditMetadata};
 use lancet_authority::NetworkPolicyConfig;
+use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::CepMethod;
 use lancet_catalog::methods::audit::{AuditObserveParams, AuditQueryParams, AuditReplayParams};
 use lancet_catalog::methods::*;
@@ -55,14 +56,14 @@ pub(in crate::effect_contract_tests) fn audit_observe_runtime_effects() -> Vec<R
 
     let (ctx, _rx, _) = build_test_context(&root, vec![], NetworkPolicyConfig::safe_defaults());
     scenarios.push(scenario(
-        "failure_missing_read_audit_cap_no_backend_effect",
-        dispatch_failure_effects::<AuditObserve>(
+        "happy_query_no_caps",
+        dispatch_success_effects::<AuditObserve>(
             AuditObserveParams {
                 stream: false,
                 query: AuditQueryParams::default(),
             },
             ctx,
-            audit_region(),
+            AuthorizedEffectRegion::empty(),
         ),
     ));
 

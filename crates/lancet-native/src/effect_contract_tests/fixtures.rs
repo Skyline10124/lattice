@@ -29,8 +29,8 @@ pub(super) fn observation_region(root: &str) -> AuthorizedEffectRegion {
     kinds.insert(ImpactKind::WorkspaceObservation);
     AuthorizedEffectRegion {
         kinds,
-        read_paths: vec![PathBuf::from(root)],
-        observation_roots: vec![PathBuf::from(root)],
+        read_paths: vec![PathBuf::from(".")],
+        observation_roots: vec![PathBuf::from(".")],
         write_paths: Vec::new(),
         write_path_prefixes: Vec::new(),
         hosts: Vec::new(),
@@ -47,7 +47,7 @@ pub(super) fn mutation_region(root: &str) -> AuthorizedEffectRegion {
         read_paths: Vec::new(),
         observation_roots: Vec::new(),
         write_paths: Vec::new(),
-        write_path_prefixes: vec![PathBuf::from(root)],
+        write_path_prefixes: vec![PathBuf::from(".")],
         hosts: Vec::new(),
         session_state_allowed: false,
         command_allowed: false,
@@ -70,7 +70,7 @@ pub(super) fn command_region() -> AuthorizedEffectRegion {
 }
 
 pub(super) fn command_mutation_region(root: &str) -> AuthorizedEffectRegion {
-    command_mutation_region_with_write_prefixes(root, vec![PathBuf::from(root)])
+    command_mutation_region_with_write_prefixes(root, vec![PathBuf::from(".")])
 }
 
 pub(super) fn command_mutation_region_with_write_prefixes(

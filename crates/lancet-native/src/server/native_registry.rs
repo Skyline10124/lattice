@@ -57,7 +57,10 @@ pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Res
 mod cep_native_registry_tests {
     use super::*;
     use crate::audit::{GUARD_STAGE_NATIVE, SEMANTIC_STAGE_NATIVE};
-    use crate::handlers::observation::BACKEND_SAFETY_NET_TEST_PATH;
+    use crate::execution_backend::{
+        DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+        GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+    };
     use crate::server::registry::{Cancellation, EventSink, HandlerContext};
     use crate::{CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
@@ -68,9 +71,158 @@ mod cep_native_registry_tests {
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
+
+    /// Minimal host-filesystem backend for native registry tests.
+    struct TestFsBackend {
+        root: std::path::PathBuf,
+    }
+
+    impl TestFsBackend {
+        fn new(root: impl Into<std::path::PathBuf>) -> Self {
+            let raw = root.into();
+            Self {
+                root: std::fs::canonicalize(&raw).unwrap_or(raw),
+            }
+        }
+    }
+
+    impl ExecutionBackend for TestFsBackend {
+        fn backend_name(&self) -> &str {
+            "test-fs"
+        }
+
+        fn resolve_path(
+            &self,
+            path: &WorkspacePath,
+            _intent: PathIntent,
+        ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+        {
+            let full = if path.is_project_root() {
+                self.root.clone()
+            } else {
+                self.root.join(path.as_str())
+            };
+            let path_str = path.as_str().to_string();
+            let exists = full.exists();
+            let kind = if full.is_dir() {
+                crate::execution_backend::PathKind::Directory
+            } else {
+                crate::execution_backend::PathKind::File
+            };
+            let canonical_under_workspace = if full.is_symlink() {
+                full.canonicalize()
+                    .map(|c| c.starts_with(&self.root))
+                    .unwrap_or(false)
+            } else {
+                true
+            };
+            Box::pin(async move {
+                Ok(PathFacts {
+                    normalized_path: path_str,
+                    exists,
+                    kind: Some(kind),
+                    parent_exists: true,
+                    parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                    byte_size: None,
+                    canonical_under_workspace,
+                })
+            })
+        }
+
+        fn read_file(
+            &self,
+            path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+        {
+            let full = if path.is_project_root() {
+                self.root.clone()
+            } else {
+                self.root.join(path.as_str())
+            };
+            Box::pin(async move {
+                std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                    message: e.to_string(),
+                })
+            })
+        }
+
+        fn write_file(
+            &self,
+            _path: &WorkspacePath,
+            _content: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "ro".into() }) })
+        }
+
+        fn remove_file(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Err(ExecutionBackendError::Unavailable { message: "ro".into() }) })
+        }
+
+        fn list_dir(
+            &self,
+            _path: &WorkspacePath,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn grep(
+            &self,
+            _request: &GrepRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn find_files(
+            &self,
+            _request: &FindRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn exec(
+            &self,
+            _request: &crate::execution_backend::ExecRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<crate::execution_backend::ExecOutput, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async {
+                Ok(crate::execution_backend::ExecOutput {
+                    exit_code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            })
+        }
+
+        fn changed_paths(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+        {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    fn test_execution(root: &str) -> ExecutionRouting {
+        ExecutionRouting {
+            backend: Arc::new(TestFsBackend::new(root)),
+            upper: UpperContext {
+                execution_backend: "test-fs".into(),
+                upper_workspace_id: "test-upper".into(),
+            },
+        }
+    }
 
     fn production_registry() -> MethodRegistry {
         let mut registry = MethodRegistry::new();
@@ -160,8 +312,8 @@ mod cep_native_registry_tests {
         let root = dir.path().to_str().unwrap();
         let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "audit routing");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
+        config.execution = Some(test_execution(root));
         let default_hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
             lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
                 std::path::PathBuf::from(root),
@@ -203,7 +355,6 @@ mod cep_native_registry_tests {
         let root = dir.path().to_str().unwrap();
         let registry = production_registry();
         let mut config = ServerRunConfig::in_memory_for_tests();
-        config.base_envelope = BaseExecutionEnvelope::for_workspace_root(root, "command audit");
         config.cep_context = Arc::new(CepTurnContext::defaults_for_project_root(root));
 
         let (client, server) = CepTransport::pair(8);
@@ -233,57 +384,6 @@ mod cep_native_registry_tests {
         server_task.abort();
     }
 
-    #[tokio::test]
-    async fn cep_native_registry_backend_safety_net_stays_native() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join(BACKEND_SAFETY_NET_TEST_PATH), "probe").unwrap();
-        let root = dir.path().to_str().unwrap();
-        let registry = production_registry();
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let ctx = HandlerContext {
-            call_id: 2,
-            events: EventSink::new(event_tx, 2),
-            cancellation: Cancellation::new(cancel_rx),
-            cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
-            turn_id: "test-turn".into(),
-            durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
-            effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
-            authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
-            policy_hook: Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
-                lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
-                    std::path::PathBuf::from(root),
-                ),
-            )) as Arc<dyn lancet_protocol::policy::PolicyHook>,
-            default_policy_hook: None,
-            audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
-                turn_id: "test-turn".into(),
-                session_id: "test-session".into(),
-                ..Default::default()
-            })),
-            audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::policy::CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
-            execution: None,
-            direct_verify: None,
-            routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
-        };
-
-        let params = ReadFileParams {
-            path: BACKEND_SAFETY_NET_TEST_PATH.into(),
-            offset: None,
-            limit: None,
-            line_numbers: None,
-        };
-        let err = registry
-            .dispatch(
-                ObserveWorkspace::NAME,
-                serde_json::to_value(ObserveWorkspaceParams::ReadFile(params)).unwrap(),
-                ctx,
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, CepErrorCode::ProjectRootViolation);
-    }
+    // The backend_safety_net test was removed: the safety net was an
+    // envelope-era concept that is no longer wired in Direct mode.
 }

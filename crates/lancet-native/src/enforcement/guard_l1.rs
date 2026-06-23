@@ -153,7 +153,6 @@ pub async fn evaluate_and_enforce_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::CepAuditContext;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
@@ -176,6 +175,17 @@ mod tests {
                 events: EventSink::new(event_tx, 1),
                 cancellation: Cancellation::new(cancel_rx),
                 cep_context: Arc::new(CepTurnContext::defaults_for_project_root(root)),
+                turn_id: "test-turn".into(),
+                durable_metadata: crate::server::call_durable_metadata::CallDurableMetadata::default(),
+                effect_ledger: lancet_authority::effect::ledger::EffectLedger::new(),
+                authorized_region: lancet_authority::effect::ledger::AuthorizedRegionSlot::new(),
+                policy_hook: default_hook.clone() as Arc<dyn lancet_protocol::policy::PolicyHook>,
+                default_policy_hook: Some(default_hook),
+                audit_context: Arc::new(tokio::sync::RwLock::new(crate::audit::CepAuditContext {
+                    turn_id: "test-turn".into(),
+                    session_id: "test-session".into(),
+                    ..Default::default()
+                })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:

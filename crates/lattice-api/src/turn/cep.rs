@@ -1448,12 +1448,13 @@ mod phase34_turn_wiring {
 
     #[test]
     fn catalog_exposure_omits_unknown_envelope_method() {
-        let exposure = ToolExposure::from_catalog_enabled(&[
+        // session.envelope was removed from the catalog; attempting to enable
+        // it now produces a ToolExposureError listing it as unknown.
+        let err = ToolExposure::from_catalog_enabled(&[
             ObserveWorkspace::NAME.to_string(),
             "session.envelope".to_string(),
         ])
-        .expect("catalog resolves known tools");
-        assert!(!exposure.contains("session.envelope"));
-        assert!(exposure.contains(ObserveWorkspace::NAME));
+        .expect_err("session.envelope is no longer a catalog method");
+        assert!(err.unknown.contains(&"session.envelope".to_string()));
     }
 }

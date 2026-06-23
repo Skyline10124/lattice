@@ -21,8 +21,6 @@ use lancet_catalog::methods::workspace::{
 use lancet_catalog::methods::*;
 use lancet_protocol::effect_types::ImpactKind;
 
-use lancet_protocol::policy::Capability;
-
 proptest! {
     #[test]
     fn read_file_effect_contract_positive(offset in 0u64..100, limit in 1u64..50) {
@@ -130,7 +128,7 @@ proptest! {
         let authority = command_region();
         let params = RunParams {
             argv: vec!["echo".into(), msg],
-            cwd: Some(root.clone()),
+            cwd: Some(".".into()),
             env: BTreeMap::new(),
             timeout_ms: Some(5000),
             declared_impact: None,

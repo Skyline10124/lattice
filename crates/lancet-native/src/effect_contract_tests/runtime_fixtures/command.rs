@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use super::super::fixtures::*;
 use super::super::support::build_test_context;
@@ -35,7 +34,7 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
         dispatch_success_effects::<Run>(
             RunParams {
                 argv: vec!["echo".into(), "diagnostic".into()],
-                cwd: Some(root.clone()),
+                cwd: Some(".".into()),
                 env: BTreeMap::new(),
                 timeout_ms: Some(5000),
                 declared_impact: None,
@@ -56,7 +55,7 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
         dispatch_success_effects::<Run>(
             RunParams {
                 argv: vec!["touch".into(), "src/composite.txt".into()],
-                cwd: Some(root.clone()),
+                cwd: Some(".".into()),
                 env: BTreeMap::new(),
                 timeout_ms: Some(5000),
                 declared_impact: Some(ImpactKind::WorkspaceMutation),
@@ -75,7 +74,7 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
     let mut perms = std::fs::metadata(&timeout_script).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&timeout_script, perms).unwrap();
-    let script_allowlist = vec!["./poc_timeout.sh".into()];
+    let script_allowlist: Vec<String> = vec!["./poc_timeout.sh".into()];
     let (ctx, _rx, _) = build_test_context(
         &root,
         vec![],

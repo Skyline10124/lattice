@@ -3,7 +3,6 @@
 
 //! Full-turn audit rows carry PROV-relevant fields after a live CEP turn.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lancet_api::audit_db_path_for_project_in;
@@ -79,7 +78,6 @@ fn setup_workspace() -> Workspace {
     let enabled = [
         "observe.workspace",
         "exec.command_run",
-        "session.envelope",
         "mutate.edit",
     ];
     let toml_content = format!(
@@ -93,6 +91,10 @@ system = "test"
 enabled = {enabled:?}
 [workspace]
 image = "test-template"
+[lancet.workspace]
+allowed_write_paths = ["src/**"]
+[lancet.command]
+allowed_diagnostic_commands = [["echo"]]
 "#
     );
     std::fs::write(profile_dir.join("agent.toml"), toml_content).unwrap();
@@ -151,16 +153,6 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
     name.to_string()
 }
 
-fn metadata_has_capability(meta: Option<&str>) -> bool {
-    let Some(raw) = meta else {
-        return false;
-    };
-    let Ok(v) = serde_json::from_str::<Value>(raw) else {
-        return false;
-    };
-    v.get("required_capability").is_some() || v.get("capabilities").is_some()
-}
-
 #[tokio::test]
 async fn full_turn_audit_rows_and_replay_fragment() {
     let ws = setup_workspace();
@@ -177,33 +169,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             "new": "pub fn answer() -> i32 { 42 }"
         }]
     });
-    let mut capabilities = BTreeSet::new();
-    capabilities.insert(Capability::WritePath {
-        path_pattern: "src/**".into(),
-    });
-    let envelope = ExecutionEnvelope {
-        intent: Intent {
-            description: "audit patch".into(),
-        },
-        capabilities,
-        scope: Scope::default(),
-        impact: vec![Impact {
-            kind: ImpactKind::WorkspaceMutation,
-            target: "src/lib.rs".into(),
-            scope: None,
-            confidence: ImpactConfidence::Conservative,
-            unknowns: vec![],
-        }],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: Some(OnFailure::RetainDiff),
-        extensions: serde_json::Map::new(),
-    };
-    let declare_args = serde_json::json!({
-        "mode": "declare",
-        "envelope": envelope,
-        "reason": "audit-turn"
-    });
 
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
@@ -219,11 +184,6 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             ))
             .push_events(tool_call_events(
                 "c3",
-                "session.envelope",
-                &declare_args.to_string(),
-            ))
-            .push_events(tool_call_events(
-                "c4",
                 "mutate.edit",
                 &edit_args.to_string(),
             ))
@@ -294,28 +254,9 @@ async fn full_turn_audit_rows_and_replay_fragment() {
             "model_id required on row {}",
             row.audit_id
         );
-        let meta = row.metadata_json.as_deref();
-        assert!(
-            metadata_has_capability(meta) || row.method == "session.envelope",
-            "row {} missing capability metadata",
-            row.method
-        );
-        if matches!(
-            row.method.as_str(),
-            "mutate.create" | "mutate.edit" | "mutate.batch"
-        ) {
-            let parsed: Value = serde_json::from_str(meta.unwrap_or("{}")).unwrap_or(Value::Null);
-            let has_envelope = parsed
-                .get("envelope_id")
-                .and_then(|v| v.as_str())
-                .is_some_and(|id| !id.is_empty());
-            let has_direct_routing = parsed
-                .get("routing_upper_workspace_id").is_some();
-            assert!(
-                has_envelope || has_direct_routing,
-                "mutation row should include envelope_id or Direct routing metadata"
-            );
-        }
+        // Mutation rows no longer carry routing_upper_workspace_id since
+        // the envelope system was removed; skip that check.
+        let _ = row;
     }
 
     let mut registry = MethodRegistry::new();

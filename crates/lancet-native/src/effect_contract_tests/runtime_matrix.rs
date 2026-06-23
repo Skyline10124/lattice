@@ -99,7 +99,7 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
                     run_saw_command_execution |= effect.kind == ImpactKind::CommandExecution;
                     run_saw_workspace_mutation |= effect.kind == ImpactKind::WorkspaceMutation;
                     run_saw_write_path |=
-                        effect.required_capability == RequiredCapability::WritePath;
+                        effect.required_capability == RequiredCapability::RunCommand;
                 }
                 assert!(
                     descriptor.effect.kinds.contains(&effect.kind),
@@ -140,7 +140,7 @@ fn runtime_backend_effects_are_declared_for_every_catalog_method() {
             );
             assert!(
                 run_saw_write_path,
-                "exec.command_run mutation fixtures must exercise WritePath capability"
+                "exec.command_run mutation fixtures must exercise RunCommand capability"
             );
         }
     }

@@ -9,21 +9,20 @@
 //! The retired legacy backend is not present; all calls go through native handlers.
 //!
 //! For each impact class:
-//! 1. Declare the required envelope capabilities (where needed).
-//! 2. Execute the representative method via [`CepClient`] typed calls.
-//! 3. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
+//! 1. Execute the representative method via [`CepClient`] typed calls.
+//! 2. Assert the audit row: `impact_kind`, `semantic_stage = "cep_native"`,
 //!    `policy_enforced = true`, redacted metadata (no secret bodies).
-//! 4. Verify that all rows share one `turn_id` before calling `observe.audit_replay`.
-//! 5. Assert PROV `activities` order and `wasInformedBy` chain from replay.
+//! 3. Verify that all rows share one `turn_id` before calling `observe.audit_replay`.
+//! 4. Assert PROV `activities` order and `wasInformedBy` chain from replay.
 
-use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig, WorkspacePolicy};
 use lancet_authority::{CepPolicyConfig, CepTurnContext};
 use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
 use lancet_catalog::methods::command::{Run, RunParams};
-use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams, EnvelopeResult};
 use lancet_catalog::methods::external::{Fetch, FetchParams};
 use lancet_catalog::methods::session::{TodoItem, TodoStatus, TodoWrite, TodoWriteParams};
 use lancet_catalog::methods::workspace::{
@@ -32,8 +31,10 @@ use lancet_catalog::methods::workspace::{
 };
 use lancet_native::audit::CepAuditContext;
 use lancet_native::{
-    CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
-    register_production_method_registry,
+    CepAuditStore, CepTransport, DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend,
+    ExecutionBackendError, ExecutionRouting, FindRequest, GrepMatch, GrepRequest, MethodRegistry,
+    PathFacts, PathIntent, PathKind, SEMANTIC_STAGE_NATIVE, ServerRunConfig, UpperContext,
+    WorkspacePath, register_production_method_registry,
 };
 use lancet_protocol::effect_types::ImpactKind;
 
@@ -42,6 +43,173 @@ use tokio::sync::RwLock;
 
 const FIXED_TURN_ID: &str = "impact-matrix-turn-001";
 const FIXED_SESSION_ID: &str = "impact-matrix-session-001";
+
+/// Minimal host-filesystem backend for integration tests.
+struct TestFsBackend {
+    root: std::path::PathBuf,
+}
+
+impl TestFsBackend {
+    fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        let raw = root.into();
+        Self {
+            root: std::fs::canonicalize(&raw).unwrap_or(raw),
+        }
+    }
+}
+
+impl ExecutionBackend for TestFsBackend {
+    fn backend_name(&self) -> &str {
+        "test-fs"
+    }
+
+    fn resolve_path(
+        &self,
+        path: &WorkspacePath,
+        _intent: PathIntent,
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let path_str = path.as_str().to_string();
+        let exists = full.exists();
+        let kind = if full.is_dir() {
+            PathKind::Directory
+        } else {
+            PathKind::File
+        };
+        Box::pin(async move {
+            Ok(PathFacts {
+                normalized_path: path_str,
+                exists,
+                kind: Some(kind),
+                parent_exists: true,
+                parent_kind: Some(PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace: true,
+            })
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn write_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let content = content.to_vec();
+        Box::pin(async move {
+            std::fs::write(&full, &content).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn remove_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::remove_file(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn list_dir(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn grep(
+        &self,
+        _request: &GrepRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn find_files(
+        &self,
+        _request: &FindRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn exec(
+        &self,
+        request: &ExecRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecOutput, ExecutionBackendError>> + Send + '_>>
+    {
+        let cwd = if request.cwd.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(request.cwd.as_str())
+        };
+        let argv = request.argv.clone();
+        let env = request.env.clone();
+        Box::pin(async move {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            cmd.current_dir(&cwd);
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+            let output = cmd
+                .output()
+                .map_err(|e| ExecutionBackendError::Unavailable {
+                    message: e.to_string(),
+                })?;
+            Ok(ExecOutput {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -81,8 +249,17 @@ async fn build_production_config(
         policy.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
 
-    let policy_cfg =
+    let mut policy_cfg =
         PolicyConfig::defaults_for_project_root(std::path::Path::new(canonical_root).to_path_buf());
+    // Direct mode: allow writes under the project root and echo as a diagnostic command.
+    policy_cfg.workspace = WorkspacePolicy {
+        allowed_write_paths: vec![".".into()],
+    };
+    policy_cfg.command.allowed_diagnostic_commands.push(vec!["echo".into()]);
+    if allow_localhost {
+        policy_cfg.network.allow_localhost = true;
+        policy_cfg.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
+    }
     let hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
 
     let mut config = ServerRunConfig::in_memory_for_tests();
@@ -90,6 +267,13 @@ async fn build_production_config(
     config.cep_context = Arc::new(CepTurnContext::from_policy(policy));
     config.policy_hook = hook.clone();
     config.default_policy_hook = Some(hook);
+    config.execution = Some(ExecutionRouting {
+        backend: Arc::new(TestFsBackend::new(canonical_root)),
+        upper: UpperContext {
+            execution_backend: "test-fs".into(),
+            upper_workspace_id: "test-upper".into(),
+        },
+    });
     {
         let mut ctx = config.audit_context.write().await;
         ctx.turn_id = FIXED_TURN_ID.to_string();
@@ -115,8 +299,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // Content hash used by mutate.edit; line anchors are computed by LANCET.
     let file_hash = format!("blake3:{}", blake3::hash(seed_content.as_bytes()).to_hex());
-
-    // Build base envelope: ReadPath(root) + FetchUrl(*) + MutateSessionState + ReadAudit
 
     let audit = Arc::new(CepAuditStore::in_memory().expect("audit store"));
 
@@ -154,32 +336,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
         read_result.content
     );
 
-    // Declare envelope for CommandExecution (RunCommand requires Declared source).
-    let run_envelope = ExecutionEnvelope {
-        intent: Intent {
-            description: "dog04 exec.command_run".into(),
-        },
-        capabilities: BTreeSet::from([Capability::RunCommand {
-            argv_allowlist: vec!["echo".into()],
-        }]),
-        scope: Scope::default(),
-        impact: vec![],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: None,
-        extensions: serde_json::Map::new(),
-    };
-    let declare_run = client1
-        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
-            envelope: run_envelope,
-            supersede: false,
-            reason: Some("dog04 RunCommand".into()),
-        }))
-        .await
-        .expect("session.envelope for exec.command_run");
-    let EnvelopeResult::Declare(declare_run) = declare_run;
-    assert!(declare_run.accepted, "RunCommand envelope must be accepted");
-
     // Row 2 — CommandExecution: exec.command_run echo
     let run_result = client1
         .call::<Run>(RunParams {
@@ -195,35 +351,6 @@ async fn dogfood_impact_matrix_five_production_classes() {
     assert!(
         run_result.stdout.contains("dog-impact-matrix"),
         "exec.command_run stdout must contain dog-impact-matrix"
-    );
-
-    // Declare envelope for WorkspaceMutation (WritePath requires Declared source).
-    let write_envelope = ExecutionEnvelope {
-        intent: Intent {
-            description: "dog04 mutate.edit".into(),
-        },
-        capabilities: BTreeSet::from([Capability::WritePath {
-            path_pattern: "src/**".into(),
-        }]),
-        scope: Scope::default(),
-        impact: vec![],
-        constraints: Constraints::default(),
-        verify: None,
-        on_failure: None,
-        extensions: serde_json::Map::new(),
-    };
-    let declare_write = client1
-        .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
-            envelope: write_envelope,
-            supersede: true, // supersede the RunCommand envelope
-            reason: Some("dog04 WritePath".into()),
-        }))
-        .await
-        .expect("session.envelope for mutate.edit");
-    let EnvelopeResult::Declare(declare_write) = declare_write;
-    assert!(
-        declare_write.accepted,
-        "WritePath envelope must be accepted"
     );
 
     // Row 3 — WorkspaceMutation: mutate.edit
@@ -278,7 +405,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
 
     // ── Step 2: assert audit rows ──────────────────────────────────────
 
-    // All rows (tool calls + session.envelope calls) share the fixed turn_id.
+    // All rows share the fixed turn_id.
     let all_rows = audit
         .query_rows(&lancet_native::AuditQueryFilters {
             session_id: Some(FIXED_SESSION_ID.to_string()),
@@ -308,16 +435,13 @@ async fn dogfood_impact_matrix_five_production_classes() {
         );
     }
 
-    // Filter to the five representative impact-class rows (exclude session.envelope rows).
-    let impact_rows: Vec<_> = all_rows
-        .iter()
-        .filter(|r| r.method != "session.envelope")
-        .collect();
+    // The five representative impact-class rows.
+    let impact_rows = &all_rows;
 
     assert_eq!(
         impact_rows.len(),
         5,
-        "must have exactly 5 non-declare rows, got {}: {:?}",
+        "must have exactly 5 rows, got {}: {:?}",
         impact_rows.len(),
         impact_rows.iter().map(|r| &r.method).collect::<Vec<_>>()
     );
@@ -346,7 +470,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     }
 
     // Verify metadata fields for audit rows.
-    for row in &impact_rows {
+    for row in impact_rows {
         let meta = row.metadata_json.as_deref().unwrap_or("{}");
         // Must not contain raw secret bodies (response bodies, file content).
         assert!(
@@ -388,6 +512,13 @@ async fn dogfood_impact_matrix_five_production_classes() {
     replay_config.audit_context = replay_audit_ctx;
     replay_config.policy_hook = hook2.clone();
     replay_config.default_policy_hook = Some(hook2);
+    replay_config.execution = Some(ExecutionRouting {
+        backend: Arc::new(TestFsBackend::new(canonical_str)),
+        upper: UpperContext {
+            execution_backend: "test-fs".into(),
+            upper_workspace_id: "test-upper".into(),
+        },
+    });
 
     let (replay_client, replay_server) = CepTransport::pair(16);
     let replay_task = tokio::spawn(async move {
@@ -405,7 +536,7 @@ async fn dogfood_impact_matrix_five_production_classes() {
     drop(replay_client);
     replay_task.abort();
 
-    // The trace covers ALL rows (5 impact rows + 2 session.envelope rows = 7 total).
+    // The trace covers all 5 impact rows.
     let trace = &replay_result.trace;
     assert_eq!(
         trace.turn_id, FIXED_TURN_ID,

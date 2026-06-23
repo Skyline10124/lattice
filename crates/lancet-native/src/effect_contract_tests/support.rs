@@ -15,6 +15,8 @@
 //! This module is crate-private test support so effect-contract tests can reuse
 //! registry and ledger scaffolding without exposing it as public API.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use lancet_catalog::CatalogMethod;
@@ -26,6 +28,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 
 use crate::audit::CepAuditContext;
+use crate::execution_backend::{
+    DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
+    GrepMatch, GrepRequest, PathFacts, PathIntent, UpperContext, WorkspacePath,
+};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{Cancellation, EventSink, HandlerContext, MethodRegistry};
 use lancet_authority::effect::ledger::{
@@ -35,6 +41,227 @@ use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
 use lancet_authority::policy::network::NetworkPolicyConfig;
 use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
+
+/// Minimal host-filesystem backend for effect contract tests.
+struct SupportFsBackend {
+    root: std::path::PathBuf,
+    pre_exec_snapshot: Arc<std::sync::Mutex<Option<std::collections::HashSet<String>>>>,
+}
+
+impl SupportFsBackend {
+    fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        let raw = root.into();
+        Self {
+            root: std::fs::canonicalize(&raw).unwrap_or(raw),
+            pre_exec_snapshot: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn snapshot_files(root: &std::path::Path) -> std::collections::HashSet<String> {
+        let mut files = std::collections::HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        files.insert(rel.to_string_lossy().to_string());
+                    }
+                } else if path.is_dir() {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        let prefix = rel.to_string_lossy().to_string();
+                        if let Ok(sub) = std::fs::read_dir(&path) {
+                            for se in sub.flatten() {
+                                let sp = se.path();
+                                if sp.is_file() {
+                                    let srel = sp.strip_prefix(root).unwrap_or(&sp);
+                                    files.insert(srel.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                        let _ = prefix;
+                    }
+                }
+            }
+        }
+        files
+    }
+}
+
+impl ExecutionBackend for SupportFsBackend {
+    fn backend_name(&self) -> &str {
+        "support-fs"
+    }
+
+    fn resolve_path(
+        &self,
+        path: &WorkspacePath,
+        _intent: PathIntent,
+    ) -> Pin<Box<dyn Future<Output = Result<PathFacts, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let path_str = path.as_str().to_string();
+        let exists = full.exists();
+        let kind = if full.is_dir() {
+            crate::execution_backend::PathKind::Directory
+        } else {
+            crate::execution_backend::PathKind::File
+        };
+        let canonical_under_workspace = if full.is_symlink() {
+            full.canonicalize()
+                .map(|c| c.starts_with(&self.root))
+                .unwrap_or(false)
+        } else {
+            true
+        };
+        Box::pin(async move {
+            Ok(PathFacts {
+                normalized_path: path_str,
+                exists,
+                kind: Some(kind),
+                parent_exists: true,
+                parent_kind: Some(crate::execution_backend::PathKind::Directory),
+                byte_size: None,
+                canonical_under_workspace,
+            })
+        })
+    }
+
+    fn read_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::read(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn write_file(
+        &self,
+        path: &WorkspacePath,
+        content: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        let content = content.to_vec();
+        Box::pin(async move {
+            std::fs::write(&full, &content).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn remove_file(
+        &self,
+        path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ExecutionBackendError>> + Send + '_>>
+    {
+        let full = if path.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(path.as_str())
+        };
+        Box::pin(async move {
+            std::fs::remove_file(&full).map_err(|e| ExecutionBackendError::Unavailable {
+                message: e.to_string(),
+            })
+        })
+    }
+
+    fn list_dir(
+        &self,
+        _path: &WorkspacePath,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<DirectoryEntry>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn grep(
+        &self,
+        _request: &GrepRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GrepMatch>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn find_files(
+        &self,
+        _request: &FindRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn exec(
+        &self,
+        request: &crate::execution_backend::ExecRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::execution_backend::ExecOutput, ExecutionBackendError>> + Send + '_>>
+    {
+        let cwd = if request.cwd.is_project_root() {
+            self.root.clone()
+        } else {
+            self.root.join(request.cwd.as_str())
+        };
+        let argv = request.argv.clone();
+        let env = request.env.clone();
+        // Take a pre-execution snapshot of workspace files.
+        let snapshot = Self::snapshot_files(&self.root);
+        *self.pre_exec_snapshot.lock().unwrap() = Some(snapshot);
+        Box::pin(async move {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            cmd.current_dir(&cwd);
+            for (k, v) in &env {
+                cmd.env(k, v);
+            }
+            let output = cmd
+                .output()
+                .map_err(|e| ExecutionBackendError::Unavailable {
+                    message: e.to_string(),
+                })?;
+            Ok(crate::execution_backend::ExecOutput {
+                exit_code: output.status.code().unwrap_or(-1),
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
+        })
+    }
+
+    fn changed_paths(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<WorkspacePath>, ExecutionBackendError>> + Send + '_>>
+    {
+        let pre = self.pre_exec_snapshot.lock().unwrap().take();
+        let post = Self::snapshot_files(&self.root);
+        Box::pin(async move {
+            let changed: Vec<WorkspacePath> = match pre {
+                Some(pre_set) => {
+                    post.iter()
+                        .filter(|p| !pre_set.contains(*p))
+                        .filter_map(|p| WorkspacePath::parse(p).ok())
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            Ok(changed)
+        })
+    }
+}
 
 /// Module-level Tokio runtime for bridging sync `proptest!` bodies to async dispatch.
 ///
@@ -176,7 +403,8 @@ pub fn build_test_context(
     let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     let root_path = std::path::Path::new(root);
-    let policy_cfg = PolicyConfig::defaults_for_project_root(root_path.to_path_buf());
+    let mut policy_cfg = PolicyConfig::defaults_for_project_root(root_path.to_path_buf());
+    policy_cfg.workspace.allowed_write_paths = vec![".".into()];
     let canonical_root = policy_cfg.project_root.to_string_lossy().to_string();
     let default_hook = Arc::new(DefaultPolicyHook::new(policy_cfg));
     let mut cep_policy = CepPolicyConfig::defaults_for_project_root(root_path);
@@ -203,7 +431,13 @@ pub fn build_test_context(
         cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
-        execution: None,
+        execution: Some(ExecutionRouting {
+            backend: Arc::new(SupportFsBackend::new(root)),
+            upper: UpperContext {
+                execution_backend: "support-fs".into(),
+                upper_workspace_id: "test-upper".into(),
+            },
+        }),
         direct_verify: None,
         routing_invocation: crate::execution_backend::RoutingInvocationState::default(),
     };
