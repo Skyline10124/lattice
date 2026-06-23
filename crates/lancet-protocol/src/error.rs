@@ -6,7 +6,7 @@
 //! Error codes live in JSON-RPC reserved range `-32000..-32099`, segmented by
 //! family. Every error carries typed `data` and a mandatory `Retriability` hint.
 
-use crate::envelope::ImpactKind;
+use crate::effect_types::ImpactKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn effect_error_data_carries_rich_violation_evidence() {
-        use crate::envelope::ImpactKind;
+        use crate::effect_types::ImpactKind;
 
         let data = EffectErrorData {
             method: "observe.workspace".into(),

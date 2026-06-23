@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 
 use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-use lancet_protocol::envelope::Capability;
+use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{
     CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
     PolicyBudgetSnapshot, PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode,

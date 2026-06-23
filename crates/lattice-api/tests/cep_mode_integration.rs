@@ -38,10 +38,9 @@ use lancet_native::{
 };
 use lancet_protocol::BoundaryDimension;
 use lancet_protocol::CepErrorCode;
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope,
-    Impact as EnvelopeImpact, ImpactConfidence, ImpactKind, Intent, Scope,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact as EnvelopeImpact, ImpactConfidence, Intent, Scope};
 use lattice_profile::LancetSection;
 use tempfile::TempDir;
 

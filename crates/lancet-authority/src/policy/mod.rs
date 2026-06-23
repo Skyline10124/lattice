@@ -23,7 +23,7 @@ pub use command::{
     CommandPolicy, EffectiveImpact, build_effective_env, classify_command, classify_command_line,
     validate_timeout,
 };
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 pub use network::NetworkPolicyConfig;
 pub use observation::ObservationPolicyConfig;
 pub use shell_ast::{CommandLine, ShellExpansion, resolve_command_line};

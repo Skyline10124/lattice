@@ -74,7 +74,7 @@ mod scaffold_tests {
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_catalog::methods::scaffold::InspectParams;
     use lancet_protocol::ToolEvent;
-    use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
+    use lancet_protocol::policy::{BaseExecutionEnvelope, CepMode};
     use lancet_protocol::error::jsonrpc;
     use lancet_protocol::policy::PolicyHook;
     use std::sync::Arc;

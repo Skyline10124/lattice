@@ -22,10 +22,9 @@ use super::*;
 use crate::server::registry::{Cancellation, EventSink};
 use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::{CepPolicyConfig, CepTurnContext};
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence,
-    ImpactKind, Intent, OnFailure, Scope, VerifyCommand,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{BaseExecutionEnvelope, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, Intent, OnFailure, Scope, VerifyCommand};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -66,7 +65,7 @@ fn test_ctx(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -615,7 +614,7 @@ async fn test_ctx_with_artifact_caps(
     let mut region = lancet_authority::effect::region::AuthorizedEffectRegion::empty();
     region
         .kinds
-        .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
+        .insert(lancet_protocol::effect_types::ImpactKind::WorkspaceMutation);
     if let Some((path, is_prefix)) = lancet_authority::effect::region::normalize_write_region_path(
         write_path_pattern,
         &std::path::PathBuf::from(root),
@@ -647,7 +646,7 @@ async fn test_ctx_with_artifact_caps(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1221,7 +1220,7 @@ async fn artifact_adjudication_scope_denies_effect_region_before_verify() {
         let mut region = lancet_authority::effect::region::AuthorizedEffectRegion::empty();
         region
             .kinds
-            .insert(lancet_protocol::envelope::ImpactKind::WorkspaceMutation);
+            .insert(lancet_protocol::effect_types::ImpactKind::WorkspaceMutation);
         region.write_path_prefixes.push(dir.path().join("src"));
         region
     });
@@ -1735,19 +1734,19 @@ async fn test_ctx_with_run_command(
     let mut caps = std::collections::BTreeSet::new();
     caps.insert(Capability::RunCommand { argv_allowlist });
     let envelope = ExecutionEnvelope {
-        intent: lancet_protocol::envelope::Intent {
+        intent: lancet_protocol::policy::Intent {
             description: "command test".into(),
         },
         capabilities: caps,
-        scope: lancet_protocol::envelope::Scope::default(),
-        impact: vec![lancet_protocol::envelope::Impact {
-            kind: lancet_protocol::envelope::ImpactKind::CommandExecution,
+        scope: lancet_protocol::policy::Scope::default(),
+        impact: vec![lancet_protocol::policy::Impact {
+            kind: lancet_protocol::effect_types::ImpactKind::CommandExecution,
             target: root.into(),
             scope: None,
-            confidence: lancet_protocol::envelope::ImpactConfidence::Conservative,
+            confidence: lancet_protocol::policy::ImpactConfidence::Conservative,
             unknowns: vec![],
         }],
-        constraints: lancet_protocol::envelope::Constraints::default(),
+        constraints: lancet_protocol::policy::Constraints::default(),
         verify: None,
         on_failure: None,
         extensions: serde_json::Map::new(),
@@ -1773,7 +1772,7 @@ async fn test_ctx_with_run_command(
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1930,7 +1929,7 @@ async fn workspace_mutation_with_envelope_succeeds() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2016,7 +2015,7 @@ async fn workspace_mutation_argv_not_in_allowlist_returns_guard_denied() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2105,7 +2104,7 @@ async fn workspace_mutation_allows_matching_later_run_command_capability() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2211,7 +2210,7 @@ async fn workspace_mutation_hidden_project_path_outside_scope_returns_replan_req
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2333,7 +2332,7 @@ async fn workspace_mutation_timeout_checks_out_of_scope_changes() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2439,7 +2438,7 @@ async fn workspace_mutation_post_check_rejects_out_of_scope_after_supersede() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2731,7 +2730,7 @@ async fn command_cancel_returns_execution_failed() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2841,7 +2840,7 @@ async fn workspace_mutation_inside_scope_succeeds() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2931,7 +2930,7 @@ async fn workspace_mutation_verify_failure_records_backend_invoked() {
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -3395,13 +3394,13 @@ mod phase34_direct_command {
     }
 
     fn direct_ctx_with_policy(root: &str, routing: ExecutionRouting) -> HandlerContext {
-        direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Off)
+        direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Off)
     }
 
     fn direct_ctx_with_policy_mode(
         root: &str,
         routing: ExecutionRouting,
-        cep_mode: lancet_protocol::envelope::CepMode,
+        cep_mode: lancet_protocol::policy::CepMode,
     ) -> HandlerContext {
         let (mut ctx, _, _) = test_ctx(root);
         ctx.authority_mode = AuthorityMode::Direct;
@@ -3758,7 +3757,7 @@ mod phase34_direct_command {
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["tests/out.rs"]);
         let mut ctx =
-            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
         ctx.direct_verify = Some(DirectVerifyConfig {
             argv: vec!["echo".into(), "verify-should-not-run".into()],
             cwd: WorkspacePath::project_root(),
@@ -3801,7 +3800,7 @@ mod phase34_direct_command {
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
         let mut ctx =
-            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
         ctx.direct_verify = Some(DirectVerifyConfig {
             argv: vec!["echo".into(), "verify-ok".into()],
             cwd: WorkspacePath::project_root(),
@@ -3834,7 +3833,7 @@ mod phase34_direct_command {
         let (routing, spy) = routing_with_spy();
         set_spy_changed_paths(&spy, vec!["src/lib.rs"]);
         let ctx =
-            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
         let ledger = ctx.effect_ledger.clone();
         let authorized = ctx.authorized_region.clone();
 
@@ -3879,7 +3878,7 @@ mod phase34_direct_command {
         let registry = native_command_registry(root);
         let (routing, _spy) = routing_with_spy();
         let ctx =
-            direct_ctx_with_policy_mode(root, routing, lancet_protocol::envelope::CepMode::Enforce);
+            direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
         let ledger = ctx.effect_ledger.clone();
 
         dispatch_direct(

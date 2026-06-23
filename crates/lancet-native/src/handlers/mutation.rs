@@ -38,7 +38,9 @@ use lancet_catalog::methods::workspace::{
     Batch, BatchOperation, BatchParams, BatchResult, Create, CreateParams, CreateResult, Edit,
     EditOperation, EditParams, EditResult,
 };
-use lancet_protocol::envelope::{ExecutionEnvelope, ImpactKind};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::ExecutionEnvelope;
 use lancet_protocol::error::{CepErrorData, GuardErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use serde_json::json;
@@ -1794,10 +1796,9 @@ mod create_tests {
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::envelope_store::ActiveEnvelopeStore;
     use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
-    use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
-        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
-    };
+    use lancet_protocol::effect_types::ImpactKind;
+
+    use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1835,7 +1836,7 @@ mod create_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1851,13 +1852,13 @@ mod create_tests {
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
-        test_ctx_with_store_and_mode(root, store, lancet_protocol::envelope::CepMode::Off)
+        test_ctx_with_store_and_mode(root, store, lancet_protocol::policy::CepMode::Off)
     }
 
     fn test_ctx_with_store_and_mode(
         root: &str,
         store: Arc<ActiveEnvelopeStore>,
-        cep_mode: lancet_protocol::envelope::CepMode,
+        cep_mode: lancet_protocol::policy::CepMode,
     ) -> (HandlerContext, mpsc::Receiver<lancet_protocol::ToolEvent>) {
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1997,7 +1998,7 @@ mod create_tests {
         let store = Arc::new(ActiveEnvelopeStore::new());
 
         let mut envelope = envelope_with_write_path(".");
-        envelope.verify = Some(lancet_protocol::envelope::VerifyCommand {
+        envelope.verify = Some(lancet_protocol::policy::VerifyCommand {
             command: "echo ok".into(),
             expected_exit_code: Some(1),
         });
@@ -2269,10 +2270,9 @@ mod edit_tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::envelope_store::ActiveEnvelopeStore;
-    use lancet_protocol::envelope::{
-        BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact,
-        ImpactConfidence, ImpactKind, Intent, OnFailure, Scope,
-    };
+    use lancet_protocol::effect_types::ImpactKind;
+
+    use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -2312,7 +2312,7 @@ mod edit_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -2786,7 +2786,7 @@ mod edit_tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: AuthorityMode::Direct,

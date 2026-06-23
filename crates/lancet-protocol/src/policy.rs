@@ -19,8 +19,247 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
-use crate::envelope::Capability;
+// ── Relocated from envelope.rs (D-01/D-05) ──────────────────────────────────
+
+/// CEP enforcement mode.
+///
+/// Retained as effect-region mode control, independent of `AuthorityMode`.
+/// It survives the Envelope removal because effect-region checking is a
+/// separate axis from authority mode (D-05).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CepMode {
+    Enforce,
+    Warn,
+    Off,
+}
+
+/// A closed enumeration of capabilities an envelope can grant.
+///
+/// Temporarily retained here until Wave 5 removes it with the envelope
+/// authority path (D-04).
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub enum Capability {
+    ReadPath { path_pattern: String },
+    WritePath { path_pattern: String },
+    RunCommand { argv_allowlist: Vec<String> },
+    FetchUrl { host: String },
+    MutateSessionState,
+    Inspect,
+    ReadAudit,
+}
+
+/// Guard verdict on an execution envelope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardVerdict {
+    Allowed,
+    Denied { reason: String },
+    HumanReview { reason: String },
+}
+
+// ── Envelope-only types temporarily retained (deleted in Wave 5) ────────────
+//
+// These types are part of the envelope authority concept being retired.
+// They remain here because HandlerContext/ServerRunConfig still carry
+// base_envelope/active_envelope fields (removed in Wave 5, plan 37-05).
+
+/// The intent of an execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Intent {
+    pub description: String,
+}
+
+/// The scope of an execution.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Scope {
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Constraints on execution behavior.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Constraints {
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub max_mutations: Option<u32>,
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+/// An impact declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Impact {
+    pub kind: crate::effect_types::ImpactKind,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ImpactScope>,
+    #[serde(default)]
+    pub confidence: ImpactConfidence,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknowns: Vec<ImpactUnknown>,
+}
+
+/// Structural scope of an impact.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactScope {
+    ExactFile(PathBuf),
+    Directory(PathBuf),
+    FileSet(Vec<PathBuf>),
+    Host(String),
+    SessionState,
+}
+
+impl Default for ImpactScope {
+    fn default() -> Self {
+        Self::Directory(PathBuf::new())
+    }
+}
+
+/// Confidence level of an impact assessment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImpactConfidence {
+    Complete,
+    #[default]
+    Conservative,
+    Partial,
+}
+
+/// An unknown or unclassified impact that the static analyzer could not resolve.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImpactUnknown {
+    pub kind: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+}
+
+/// A verification command to run after execution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct VerifyCommand {
+    pub command: String,
+    pub expected_exit_code: Option<i32>,
+}
+
+/// What to do on verification failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    Abort,
+    RetainDiff,
+    Continue,
+}
+
+/// The full CEP execution envelope.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionEnvelope {
+    pub intent: Intent,
+    pub capabilities: BTreeSet<Capability>,
+    pub scope: Scope,
+    pub impact: Vec<Impact>,
+    pub constraints: Constraints,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailure>,
+    #[serde(default, flatten)]
+    pub extensions: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A base execution envelope restricted to non-mutation, non-command capabilities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BaseExecutionEnvelope {
+    pub inner: ExecutionEnvelope,
+}
+
+impl BaseExecutionEnvelope {
+    /// Create a base envelope for a workspace root with read-only capabilities.
+    pub fn for_workspace_root(root: &str, intent_description: &str) -> Self {
+        let mut capabilities = BTreeSet::new();
+        capabilities.insert(Capability::ReadPath {
+            path_pattern: root.to_string(),
+        });
+        capabilities.insert(Capability::Inspect);
+
+        Self {
+            inner: ExecutionEnvelope {
+                intent: Intent {
+                    description: intent_description.to_string(),
+                },
+                capabilities,
+                scope: Scope {
+                    workspace_root: Some(root.to_string()),
+                    extensions: serde_json::Map::new(),
+                },
+                impact: vec![Impact {
+                    kind: crate::effect_types::ImpactKind::WorkspaceObservation,
+                    target: root.to_string(),
+                    scope: None,
+                    confidence: ImpactConfidence::Conservative,
+                    unknowns: vec![],
+                }],
+                constraints: Constraints::default(),
+                verify: None,
+                on_failure: None,
+                extensions: serde_json::Map::new(),
+            },
+        }
+    }
+
+    /// Add a `MutateSessionState` capability to this base envelope.
+    pub fn with_session_state(mut self) -> Self {
+        self.inner
+            .capabilities
+            .insert(Capability::MutateSessionState);
+        self
+    }
+
+    /// Add a `FetchUrl(host)` capability to this base envelope.
+    pub fn with_fetch_host(mut self, host: impl Into<String>) -> Self {
+        self.inner
+            .capabilities
+            .insert(Capability::FetchUrl { host: host.into() });
+        self
+    }
+
+    /// Add session-scoped `ReadAudit` for provenance query/replay.
+    pub fn with_read_audit(mut self) -> Self {
+        self.inner.capabilities.insert(Capability::ReadAudit);
+        self
+    }
+
+    /// Verify that this base envelope never grants `WritePath` or `RunCommand`.
+    pub fn validate_no_write_or_command(&self) -> Result<(), &'static str> {
+        for cap in &self.inner.capabilities {
+            match cap {
+                Capability::WritePath { .. } => {
+                    return Err("BaseExecutionEnvelope cannot contain WritePath");
+                }
+                Capability::RunCommand { .. } => {
+                    return Err("BaseExecutionEnvelope cannot contain RunCommand");
+                }
+                Capability::ReadPath { .. }
+                | Capability::Inspect
+                | Capability::FetchUrl { .. }
+                | Capability::MutateSessionState
+                | Capability::ReadAudit => {}
+            }
+        }
+        Ok(())
+    }
+}
 
 /// How CEP authority is sourced for a turn — independent of backend presence.
 ///

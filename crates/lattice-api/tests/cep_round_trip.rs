@@ -18,9 +18,9 @@ use lancet_native::{
     CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
     register_production_method_registry,
 };
-use lancet_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Intent, Scope};
 use lancet_protocol::error::{CepErrorData, ExecutionErrorData, jsonrpc};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use lattice_agent::{ToolCallExecutor, ToolExecutionError};
@@ -383,7 +383,7 @@ async fn production_adapter(
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
     use lancet_authority::{CepPolicyConfig, CepTurnContext};
     use lancet_catalog::methods::session::TodoWrite;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
 
     let canonical_root = std::fs::canonicalize(root).expect("canonicalize production root");
     let root = canonical_root.to_str().expect("utf-8 production root");

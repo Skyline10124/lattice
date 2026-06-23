@@ -11,7 +11,7 @@ use lancet_authority::envelope_store::ActiveEnvelopeStore;
 use lancet_authority::policy::CepTurnContext;
 use lancet_authority::policy::default::DefaultPolicyHook;
 pub use lancet_dispatch::{Cancellation, EventSink};
-use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
+use lancet_protocol::policy::{BaseExecutionEnvelope, CepMode};
 use lancet_protocol::policy::{AuthorityMode, PolicyHook};
 use serde_json::{Value, json};
 use std::sync::Arc;

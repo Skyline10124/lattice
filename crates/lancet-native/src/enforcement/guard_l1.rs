@@ -158,7 +158,7 @@ mod tests {
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use lancet_protocol::policy::{PolicyHook, PolicyReasonCode};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -195,7 +195,7 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::Direct,

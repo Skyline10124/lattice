@@ -14,7 +14,7 @@ use lancet_catalog::CepMethod;
 use lancet_catalog::catalog;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::*;
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 
 fn runtime_effect_fixtures() -> BTreeMap<&'static str, RuntimeEffectFixture> {
     let mut fixtures = BTreeMap::new();

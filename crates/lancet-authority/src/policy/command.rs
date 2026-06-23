@@ -6,7 +6,7 @@
 //! Classifies commands into three tiers: Diagnostic, WorkspaceMutation, HardDenied.
 //! Enforces env and timeout policy with typed CEP errors.
 
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::{CepErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use std::collections::BTreeMap;

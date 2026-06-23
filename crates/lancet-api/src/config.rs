@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use lancet_authority::policy::default::PolicyConfig;
 use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 use lancet_native::{DirectVerifyConfig, ExecutionRouting};
-use lancet_protocol::envelope::CepMode;
+use lancet_protocol::policy::CepMode;
 use lancet_protocol::policy::AuthorityMode;
 use sha2::{Digest, Sha256};
 

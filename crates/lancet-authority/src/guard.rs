@@ -11,7 +11,7 @@
 
 use crate::envelope_store::EnvelopeRecord;
 use crate::policy::default::{DefaultPolicyHook, PolicyEvidence};
-use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability, GuardVerdict};
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, GuardVerdict};
 use lancet_protocol::error::{
     CepErrorData, GuardErrorData, PermissionErrorData, ReservedErrorData, ValidationErrorData,
 };
@@ -1104,7 +1104,7 @@ mod guard_l1_tests {
 mod policy_tests {
     use super::*;
     use crate::policy::default::PolicyConfig;
-    use lancet_protocol::envelope::{BaseExecutionEnvelope, ExecutionEnvelope, Intent, Scope};
+    use lancet_protocol::policy::{BaseExecutionEnvelope, ExecutionEnvelope, Intent, Scope};
     use lancet_protocol::policy::{PolicyAuditContext, PolicyBudgetSnapshot};
 
     fn base_only_envelope() -> BaseExecutionEnvelope {

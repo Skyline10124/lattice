@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use lancet_protocol::envelope::{EffectDecl, ImpactKind};
+use lancet_protocol::effect_types::{EffectDecl, ImpactKind};
 use lancet_protocol::error::{CepErrorData, EffectErrorData};
 use lancet_protocol::policy::SourcedCapability;
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
@@ -190,9 +190,9 @@ mod tests {
     use super::*;
     use crate::effect::ledger::{EffectSource, ObservedScope};
     use lancet_catalog::method::RequiredCapability;
-    use lancet_protocol::envelope::{
-        Capability, EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior,
-    };
+    use lancet_protocol::effect_types::{EffectKindSet, EffectScopeKind, FailureSemantics, OverlayBehavior};
+
+    use lancet_protocol::policy::Capability;
     use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
     use std::path::PathBuf;
 

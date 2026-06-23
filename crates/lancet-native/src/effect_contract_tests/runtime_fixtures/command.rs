@@ -9,7 +9,9 @@ use super::super::support::build_test_context;
 use lancet_authority::NetworkPolicyConfig;
 use lancet_catalog::methods::command::RunParams;
 use lancet_catalog::methods::*;
-use lancet_protocol::envelope::{Capability, ImpactKind, VerifyCommand};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{Capability, VerifyCommand};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<RuntimeEffectScenario>

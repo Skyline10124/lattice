@@ -11,7 +11,7 @@ use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
 use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
-use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::policy::BaseExecutionEnvelope;
 use tokio::sync::RwLock;
 
 use crate::config::{AuditBacking, LancetRuntimeConfig};

@@ -50,10 +50,9 @@ use lancet_native::{
     CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact, ImpactKind,
-    ImpactScope, Intent, Scope,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, CepMode, Constraints, ExecutionEnvelope, Impact, ImpactScope, Intent, Scope};
 use tempfile::TempDir;
 
 // ── Shared overreach builder ─────────────────────────────────────────────────

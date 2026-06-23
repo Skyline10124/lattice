@@ -16,7 +16,7 @@
 
 pub mod boundary;
 pub mod capability;
-pub mod envelope;
+pub mod effect_types;
 pub mod error;
 pub mod frame;
 pub mod jsonrpc;
@@ -28,19 +28,19 @@ pub use boundary::{
     BoundaryDimension, BoundaryPrimitive, EffectiveBoundaryEntry, EffectiveBoundaryReport,
     EffectiveBoundaryStatus, HostProbeEntry, HostProbeReport, HostProbeStatus,
 };
-pub use capability::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
-pub use envelope::{
-    BaseExecutionEnvelope, Capability, CepMode, Constraints, EffectDecl, EffectKindSet,
-    EffectScopeKind, ExecutionEnvelope, FailureSemantics, GuardVerdict, Impact, ImpactConfidence,
-    ImpactKind, Intent, OnFailure, OverlayBehavior, Scope, VerifyCommand,
+pub use capability::RequiredCapability;
+pub use effect_types::{
+    EffectDecl, EffectKindSet, EffectScopeKind, FailureSemantics, ImpactKind, OverlayBehavior,
 };
 pub use error::{CepError, CepErrorCode, CepErrorData, CepErrorFamily, Retriability};
 pub use frame::{ToolCall, ToolError, ToolEvent, ToolResult};
 pub use jsonrpc::{ErrorObject, Id, Notification, Request, Response};
 pub use policy::{
-    AuthorityMode, CapabilitySource, EffectiveEnvelopeSnapshot, PolicyActionRequired,
-    PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
-    PolicyInput, PolicyReasonCode, SourcedCapability,
+    AuthorityMode, BaseExecutionEnvelope, Capability, CapabilitySource, CepMode, Constraints,
+    EffectiveEnvelopeSnapshot, ExecutionEnvelope, GuardVerdict, Impact, ImpactConfidence, Intent,
+    OnFailure, PolicyActionRequired, PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, Scope, SourcedCapability,
+    VerifyCommand,
 };
 pub use provenance::{
     CEP_TURN_ATTESTATION_PREDICATE_TYPE, InTotoStatement, InTotoSubjectDescriptor, ProvActivity,

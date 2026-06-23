@@ -19,7 +19,9 @@ use lancet_catalog::methods::workspace::{
     CreateParams, EditOperation, EditParams, GrepParams, ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
-use lancet_protocol::envelope::{Capability, ImpactKind};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 proptest! {

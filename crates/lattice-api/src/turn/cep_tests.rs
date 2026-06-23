@@ -11,7 +11,7 @@ use lancet_catalog::methods::workspace::{
     ObserveWorkspace, ObserveWorkspaceParams, ObserveWorkspaceResult, ReadFileResult,
 };
 use lancet_native::{CepTransport, MethodRegistry, ServerRunConfig};
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::{
     CepErrorData, EffectErrorData, ExecutionErrorData, GuardErrorData, PermissionErrorData,
     StateErrorData, ValidationErrorData, jsonrpc,
@@ -351,7 +351,7 @@ mod cep_native_registry {
     use lancet_catalog::methods::external::Fetch;
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::SEMANTIC_STAGE_NATIVE;
-    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::policy::Capability;
     use lattice_profile::LancetNetworkSection;
     use tempfile::TempDir;
 
@@ -482,9 +482,9 @@ mod attestation_and_dispatch {
     use lancet_catalog::methods::envelope::{DeclareParams, Envelope, EnvelopeParams};
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
-    use lancet_protocol::envelope::{
-        Capability, Constraints, ExecutionEnvelope, Impact, ImpactKind, ImpactScope, Intent, Scope,
-    };
+    use lancet_protocol::effect_types::ImpactKind;
+
+    use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Impact, ImpactScope, Intent, Scope};
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_llm::{FunctionCall, ToolCall};

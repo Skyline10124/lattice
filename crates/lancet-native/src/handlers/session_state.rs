@@ -11,7 +11,7 @@ use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::session::{
     TodoItem, TodoStatus, TodoWrite, TodoWriteParams, TodoWriteResult,
 };
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use serde_json::json;
@@ -126,7 +126,7 @@ mod tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
@@ -171,7 +171,7 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::Direct,

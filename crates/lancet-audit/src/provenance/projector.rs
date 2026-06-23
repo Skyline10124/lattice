@@ -4,7 +4,7 @@
 //! Project flat [`AuditRow`] records into PROV-DM fragments.
 
 use crate::audit::{AuditRow, impact_kind_from_label};
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::provenance::{
     ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment, ProvUsed, ProvWasAssociatedWith,
     ProvWasGeneratedBy, ProvWasInformedBy, TurnCallSummary, TurnExecutionTrace,

@@ -68,7 +68,7 @@ fn mask_object_timestamps(obj: &mut serde_json::Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::envelope::ImpactKind;
+    use lancet_protocol::effect_types::ImpactKind;
     use lancet_protocol::provenance::{
         ProvActivity, ProvAgent, ProvGraphFragment, TurnCallSummary, TurnExecutionTrace,
     };

@@ -11,10 +11,9 @@ use super::support::{effect_contract_harness, rt};
 use lancet_authority::effect::ledger::ObservedEffect;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::CatalogMethod;
-use lancet_protocol::envelope::{
-    Capability, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, ImpactKind,
-    Intent, Scope as EnvScope, VerifyCommand,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{Capability, Constraints, ExecutionEnvelope, Impact as EnvImpact, ImpactConfidence, Intent, Scope as EnvScope, VerifyCommand};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 pub(super) fn test_registry() -> crate::MethodRegistry {

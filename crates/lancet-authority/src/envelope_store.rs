@@ -9,7 +9,7 @@
 //! dropped when the turn ends, enforcing turn-scoped lifetime.
 
 use crate::guard::normalize_write_path_pattern;
-use lancet_protocol::envelope::{Capability, ExecutionEnvelope};
+use lancet_protocol::policy::{Capability, ExecutionEnvelope};
 use lancet_protocol::error::{CepErrorData, GuardErrorData, ValidationErrorData};
 use lancet_protocol::{CepError, CepErrorCode, Retriability};
 use std::fmt;
@@ -272,9 +272,9 @@ fn validate_write_path_pattern(pattern: &str) -> Result<(), CepError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::envelope::{
-        Constraints, Impact, ImpactConfidence, ImpactKind, Intent, Scope,
-    };
+    use lancet_protocol::effect_types::ImpactKind;
+
+    use lancet_protocol::policy::{Constraints, Impact, ImpactConfidence, Intent, Scope};
     use std::collections::BTreeSet;
 
     fn sample_envelope(description: &str) -> ExecutionEnvelope {
@@ -553,7 +553,7 @@ mod tests {
     async fn store_rejects_empty_verify_command() {
         let store = ActiveEnvelopeStore::new();
         let mut env = sample_envelope("with verify");
-        env.verify = Some(lancet_protocol::envelope::VerifyCommand {
+        env.verify = Some(lancet_protocol::policy::VerifyCommand {
             command: String::new(),
             expected_exit_code: Some(0),
         });

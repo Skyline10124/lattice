@@ -9,7 +9,9 @@ use lancet_authority::NetworkPolicyConfig;
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_catalog::methods::external::FetchParams;
 use lancet_catalog::methods::*;
-use lancet_protocol::envelope::{Capability, ImpactKind};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 pub(in crate::effect_contract_tests) fn fetch_runtime_effects() -> Vec<RuntimeEffectScenario> {

@@ -7,7 +7,7 @@
 //! types are the stable serialization surface (PROV-01 forward-compat: no
 //! `deny_unknown_fields` on fragment roots).
 
-use crate::envelope::ImpactKind;
+use crate::effect_types::ImpactKind;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

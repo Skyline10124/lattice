@@ -26,7 +26,7 @@ use lancet_catalog::methods::workspace::{
     GrepResult, ListDirectoryParams, ListDirectoryResult, ObserveWorkspace, ObserveWorkspaceParams,
     ObserveWorkspaceResult, ReadFileParams, ReadFileResult,
 };
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use regex::Regex;
@@ -795,7 +795,7 @@ mod tests {
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
     use lancet_authority::policy::observation::reject_parent_traversal;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::fs;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -839,8 +839,8 @@ mod tests {
             .capabilities
             .into_iter()
             .map(|cap| match cap {
-                lancet_protocol::envelope::Capability::ReadPath { .. } => {
-                    lancet_protocol::envelope::Capability::ReadPath {
+                lancet_protocol::policy::Capability::ReadPath { .. } => {
+                    lancet_protocol::policy::Capability::ReadPath {
                         path_pattern: ".".into(),
                     }
                 }
@@ -870,7 +870,7 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1037,7 +1037,7 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1090,7 +1090,7 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1352,7 +1352,7 @@ mod tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -1566,7 +1566,7 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: AuthorityMode::Direct,

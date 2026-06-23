@@ -663,7 +663,7 @@ pub(crate) async fn build_production_turn_deps(
     let (policy, command_isolation) = resolve_lancet_policy(lancet, project_root)?;
     let cep_mode = lancet
         .map(|c| c.mode.clone())
-        .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
+        .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
     let in_memory_audit = request.test_llm.is_some() && request.test_persist_audit != Some(false);
     let audit = if in_memory_audit {
         AuditBacking::InMemory
@@ -781,7 +781,7 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
     let (policy, command_isolation) = resolve_lancet_policy(lancet, project_root)?;
     let cep_mode = lancet
         .map(|c| c.mode.clone())
-        .unwrap_or(lancet_protocol::envelope::CepMode::Enforce);
+        .unwrap_or(lancet_protocol::policy::CepMode::Enforce);
     let audit = if in_memory_audit {
         AuditBacking::InMemory
     } else {
@@ -969,7 +969,7 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 mod cep_context_profile_policy {
     use super::*;
     use lancet_catalog::methods::command::RunParams;
-    use lancet_protocol::envelope::CepMode;
+    use lancet_protocol::policy::CepMode;
     use lancet_protocol::policy::{
         PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
         PolicyInput,

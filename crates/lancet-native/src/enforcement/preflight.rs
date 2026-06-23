@@ -6,7 +6,9 @@
 use lancet_authority::effect::region::AuthorizedEffectRegion;
 use lancet_authority::guard::PolicyEvaluation;
 use lancet_authority::policy::command::EffectiveImpact;
-use lancet_protocol::envelope::{Capability, ImpactKind};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{
     CapabilitySource, PolicyAuthorityInput, PolicyDecision, PolicyInput, PolicyReasonCode,
     SourcedCapability,

@@ -14,7 +14,7 @@ use lancet_authority::policy::network::validate_fetch_url;
 use lancet_catalog::CepMethod;
 use lancet_catalog::method::RequiredCapability;
 use lancet_catalog::methods::external::{Fetch, FetchParams, FetchResult};
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::ExecutionErrorData;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 use reqwest::redirect::Policy;
@@ -207,7 +207,7 @@ mod tests {
     use super::*;
     use crate::server::registry::{Cancellation, EventSink};
     use lancet_authority::policy::CepTurnContext;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -263,7 +263,7 @@ mod tests {
                     ..Default::default()
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-                cep_mode: lancet_protocol::envelope::CepMode::Off,
+                cep_mode: lancet_protocol::policy::CepMode::Off,
                 command_isolation:
                     crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 authority_mode: lancet_protocol::policy::AuthorityMode::Direct,

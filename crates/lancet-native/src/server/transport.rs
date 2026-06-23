@@ -19,8 +19,7 @@ use lancet_dispatch::{CepServer, ServerCall, ServerRuntime};
 use lancet_protocol::policy::PolicyHook;
 use lancet_protocol::{
     CepError, CepErrorCode, CepErrorData, Retriability,
-    envelope::{BaseExecutionEnvelope, CepMode},
-    policy::AuthorityMode,
+    policy::{AuthorityMode, BaseExecutionEnvelope, CepMode},
 };
 use serde_json::{Value, json};
 use std::future::Future;
@@ -266,7 +265,7 @@ fn apply_effect_check(
     authorized_region_slot: &lancet_authority::effect::ledger::AuthorizedRegionSlot,
     cep_mode: CepMode,
     durable_metadata: &CallDurableMetadata,
-    denied_effect_kinds: &std::collections::BTreeSet<lancet_protocol::envelope::ImpactKind>,
+    denied_effect_kinds: &std::collections::BTreeSet<lancet_protocol::effect_types::ImpactKind>,
 ) -> Result<Value, CepError> {
     if is_incomplete_dispatch(&dispatch_result) {
         if !observed_effects.is_empty() {

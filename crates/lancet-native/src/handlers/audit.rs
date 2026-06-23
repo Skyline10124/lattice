@@ -13,7 +13,7 @@ use lancet_catalog::methods::audit::{
     AuditObserve, AuditObserveParams, AuditObserveResult, AuditQueryParams, AuditQueryResult,
     AuditReplay, AuditReplayParams, AuditReplayResult, AuditTailParams, AuditTailResult,
 };
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use lancet_protocol::error::ValidationErrorData;
 use lancet_protocol::provenance::InTotoStatement;
 use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
@@ -313,7 +313,7 @@ mod tests {
     use crate::{CepTransport, ServerRunConfig};
     use lancet_authority::policy::CepTurnContext;
     use lancet_catalog::methods::workspace::ObserveWorkspace;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
 

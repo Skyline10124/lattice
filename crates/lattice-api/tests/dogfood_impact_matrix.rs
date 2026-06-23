@@ -35,9 +35,9 @@ use lancet_native::{
     CepAuditStore, CepTransport, MethodRegistry, SEMANTIC_STAGE_NATIVE, ServerRunConfig,
     register_production_method_registry,
 };
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Intent, Scope};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 

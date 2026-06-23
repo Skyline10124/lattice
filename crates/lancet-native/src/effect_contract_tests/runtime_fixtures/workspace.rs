@@ -9,7 +9,7 @@ use lancet_catalog::methods::workspace::{
     GrepParams, ListDirectoryParams, ObserveWorkspaceParams, ReadFileParams,
 };
 use lancet_catalog::methods::*;
-use lancet_protocol::envelope::VerifyCommand;
+use lancet_protocol::policy::VerifyCommand;
 
 pub(in crate::effect_contract_tests) fn observe_workspace_runtime_effects()
 -> Vec<RuntimeEffectScenario> {

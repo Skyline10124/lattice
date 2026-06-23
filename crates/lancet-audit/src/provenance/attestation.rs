@@ -119,7 +119,7 @@ pub fn build_in_toto_statement(
 mod tests {
     use super::*;
     use crate::audit::{AuditRow, impact_kind_label};
-    use lancet_protocol::envelope::ImpactKind;
+    use lancet_protocol::effect_types::ImpactKind;
 
     fn row(audit_id: i64, method: &str, meta: &str) -> AuditRow {
         AuditRow {

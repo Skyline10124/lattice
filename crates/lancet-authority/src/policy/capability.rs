@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use lancet_catalog::method::RequiredCapability;
-use lancet_protocol::envelope::Capability;
+use lancet_protocol::policy::Capability;
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 use super::default::CapabilitySourcePolicy;
@@ -527,7 +527,7 @@ fn pattern_action_for(required: RequiredCapability) -> CapabilityActionRequired 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::policy::Capability;
 
     fn base_source() -> CapabilitySource {
         CapabilitySource::Base

@@ -18,7 +18,7 @@ use lancet_authority::guard::{DirectPathFacts, DirectPathKind, validate_direct_p
 use lancet_authority::policy::command::{
     CommandPolicy, EffectiveImpact, build_allowed_params_env, classify_command,
 };
-use lancet_protocol::envelope::ExecutionEnvelope;
+use lancet_protocol::policy::ExecutionEnvelope;
 use lancet_protocol::error::{
     CepErrorData, ExecutionErrorData, GuardErrorData, ValidationErrorData,
 };
@@ -500,7 +500,8 @@ mod verify_tests {
     }
 
     fn diagnostic_envelope() -> ExecutionEnvelope {
-        use lancet_protocol::envelope::*;
+        use lancet_protocol::effect_types::*;
+    use lancet_protocol::policy::*;
         use std::collections::BTreeSet;
         let mut caps = BTreeSet::new();
         caps.insert(Capability::WritePath {
@@ -551,7 +552,8 @@ mod verify_tests {
 
     #[test]
     fn extract_verify_command_returns_none_when_not_configured() {
-        use lancet_protocol::envelope::*;
+        use lancet_protocol::effect_types::*;
+    use lancet_protocol::policy::*;
         use std::collections::BTreeSet;
         let env = ExecutionEnvelope {
             intent: Intent {

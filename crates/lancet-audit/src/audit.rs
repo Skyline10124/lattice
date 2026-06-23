@@ -4,7 +4,7 @@
 //! Flat append-only SQLite audit store for CEP execution records.
 
 use lancet_catalog::{RequiredCapability, catalog};
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

@@ -24,7 +24,7 @@ use super::command::{CommandPolicy, EffectiveImpact};
 use super::network::NetworkPolicyConfig;
 use super::observation::ObservationPolicyConfig;
 use super::resolved::PolicyResolver;
-use lancet_protocol::envelope::ImpactKind;
+use lancet_protocol::effect_types::ImpactKind;
 
 // ── Config-friendly source class ───────────────────────────────────────
 
@@ -121,7 +121,7 @@ impl WorkspacePolicy {
         policy: &super::CepPolicyConfig,
     ) -> crate::effect::region::AuthorizedEffectRegion {
         use crate::effect::region::AuthorizedEffectRegion;
-        use lancet_protocol::envelope::ImpactKind;
+        use lancet_protocol::effect_types::ImpactKind;
 
         let mut region = AuthorizedEffectRegion::empty();
         match method {
@@ -534,11 +534,11 @@ fn parse_required_capability(
 // ── Rich outcome and evidence (executor-owned) ─────────────────────────
 
 fn capability_kind_matches(
-    cap: &lancet_protocol::envelope::Capability,
+    cap: &lancet_protocol::policy::Capability,
     kind: lancet_catalog::method::RequiredCapability,
 ) -> bool {
     use lancet_catalog::method::RequiredCapability;
-    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::policy::Capability;
     matches!(
         (cap, kind),
         (Capability::ReadPath { .. }, RequiredCapability::ReadPath)
@@ -1115,7 +1115,7 @@ fn map_cap_action(action: super::capability::CapabilityActionRequired) -> Policy
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::policy::Capability;
     use lancet_protocol::policy::{
         CapabilitySource, EffectiveEnvelopeSnapshot, PolicyAuditContext, PolicyAuthorityInput,
         PolicyBudgetSnapshot, SourcedCapability,

@@ -13,10 +13,9 @@ use lancet_native::{
     AuditQueryFilters, CepAuditStore, CepTransport, MethodRegistry, ServerRunConfig,
     register_production_method_registry,
 };
-use lancet_protocol::envelope::{
-    BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence,
-    ImpactKind, Intent, OnFailure, Scope,
-};
+use lancet_protocol::effect_types::ImpactKind;
+
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability, Constraints, ExecutionEnvelope, Impact, ImpactConfidence, Intent, OnFailure, Scope};
 use lattice_agent::LlmClient;
 use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};

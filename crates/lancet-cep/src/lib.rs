@@ -17,7 +17,7 @@ pub use tool::{
 };
 
 pub use lancet_catalog::{
-    BaseAuthorityRequirement, CATALOG, CapabilityPatterns, CapabilityResolveError, CatalogMethod,
+    BaseAuthorityRequirement, CATALOG, CatalogMethod,
     CepMethod, MethodDescriptor, RequiredCapability, catalog,
 };
 #[cfg(feature = "inspect-scaffold")]

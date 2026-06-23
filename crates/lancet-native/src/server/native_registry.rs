@@ -68,7 +68,7 @@ mod cep_native_registry_tests {
         ObserveWorkspace, ObserveWorkspaceParams, ReadFileParams,
     };
     use lancet_protocol::CepErrorCode;
-    use lancet_protocol::envelope::BaseExecutionEnvelope;
+    use lancet_protocol::policy::BaseExecutionEnvelope;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::{mpsc, watch};
@@ -131,7 +131,7 @@ mod cep_native_registry_tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),
@@ -268,7 +268,7 @@ mod cep_native_registry_tests {
                 ..Default::default()
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-            cep_mode: lancet_protocol::envelope::CepMode::Off,
+            cep_mode: lancet_protocol::policy::CepMode::Off,
             command_isolation:
                 crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             authority_mode: lancet_protocol::policy::AuthorityMode::default(),

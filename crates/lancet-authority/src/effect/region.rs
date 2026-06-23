@@ -15,7 +15,7 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
-use lancet_protocol::envelope::{EffectKindSet, ImpactKind};
+use lancet_protocol::effect_types::{EffectKindSet, ImpactKind};
 
 /// Normalize a path pattern for region containment, aligning with Guard L1 semantics.
 ///
@@ -179,7 +179,7 @@ impl AuthorizedEffectRegion {
             return Self::empty();
         };
 
-        use lancet_protocol::envelope::Capability;
+        use lancet_protocol::policy::Capability;
         match &sc.capability {
             Capability::ReadPath { path_pattern } => {
                 let mut kinds = BTreeSet::new();
@@ -406,7 +406,7 @@ fn relative_observation_root_within(observed: &Path, authorized_root: &Path) -> 
 mod tests {
     use super::*;
     use lancet_catalog::method::RequiredCapability;
-    use lancet_protocol::envelope::Capability;
+    use lancet_protocol::policy::Capability;
     use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
     use std::path::PathBuf;
 

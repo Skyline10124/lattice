@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-pub use lancet_protocol::{CapabilityPatterns, CapabilityResolveError, RequiredCapability};
+pub use lancet_protocol::RequiredCapability;
 
 pub(crate) mod sealed {
     pub trait Sealed {}

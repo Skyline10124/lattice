@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 
 use lancet_catalog::CatalogMethod;
 use lancet_protocol::CepError;
-use lancet_protocol::envelope::BaseExecutionEnvelope;
+use lancet_protocol::policy::BaseExecutionEnvelope;
 use lancet_protocol::policy::{PolicyHook, SourcedCapability};
 use serde::Serialize;
 use serde_json::Value;
@@ -208,7 +208,7 @@ pub fn build_test_context(
             ..Default::default()
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
-        cep_mode: lancet_protocol::envelope::CepMode::Off,
+        cep_mode: lancet_protocol::policy::CepMode::Off,
         command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         authority_mode: lancet_protocol::policy::AuthorityMode::default(),

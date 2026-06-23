@@ -7,7 +7,7 @@
 //! coverage and that adding a new method without coverage fails the build.
 
 use lancet_catalog::method::RequiredCapability;
-use lancet_protocol::envelope::{BaseExecutionEnvelope, Capability};
+use lancet_protocol::policy::{BaseExecutionEnvelope, Capability};
 use lancet_protocol::policy::{CapabilitySource, SourcedCapability};
 
 use lancet_authority::policy::capability::{
