@@ -558,6 +558,7 @@ fn trusted_helper(paths: &'static [&'static str]) -> Option<&'static str> {
 
 /// Absolute path of the trusted POSIX shell used to run canonical
 /// re-emissions of validated inline-shell expansions.
+#[allow(dead_code)]
 pub(crate) fn trusted_sh_path() -> Option<&'static str> {
     trusted_helper(TRUSTED_SH_PATHS)
 }

@@ -4,6 +4,33 @@ Applied fixes across code review phases. Entries are append-only; never delete o
 
 ---
 
+## Phase 38 code review fixes: git session backend hardening — 2026-06-23
+
+Severity: 1 CRITICAL, 8 WARNING, 3 INFO (all fixed via `--fix --all`).
+
+Review artifact: `.planning/phases/38-git-session-backend/38-REVIEW.md` (gitignored).
+
+Verified: `cargo build -p lattice-session -p lattice-api` ✓; `cargo test -p lattice-session` ✓ (169 lib + 4 promotion = 173 passed; 0 failed); `cargo test -p lattice-api` ✓ (117 lib + all integration suites green; 0 failed).
+
+| # | Severity | Problem | Fix |
+|---|----------|---------|-----|
+| CR-01 | CRITICAL | `commit_prepared_turn_impl` performed a non-atomic CAS check (read HEAD OID) followed by a force-update ref write (`repo.reference(..., force=true)`). A concurrent process could move the ref between check and write, and the force update would silently overwrite the other writer's commit. | Replaced the force update with an atomic compare-and-set: `find_reference` → re-verify `target() == head_oid` → `set_target` (fails if ref moved). First-commit path uses `reference(..., force=false)` and errors if the ref unexpectedly exists. Returns `SessionError::Conflict` on any movement. |
+| WR-01 | WARNING | `messages_to_jsonl` used `unwrap_or_else(|_| String::new())`, silently emitting empty lines on serialization failure; `parse_messages_jsonl` would then fail on readback, losing the original message. | Changed signature to `Result<String>` and propagate `serde_json::to_string` errors as `SessionError::Git`. Updated the single caller in `commit_prepared_turn_impl`. |
+| WR-02 | WARNING | `collect_unique_commits` did `let _ = revwalk.hide(oid);`, silently discarding hide failures. A failed hide would include merge-base ancestors in the diff, producing incorrect `only_in_from`/`only_in_to`. | Propagate `revwalk.hide(oid)` errors as `SessionError::Git`. |
+| WR-03 | WARNING | `resolve_session_id_for_commit` did `let _ = revwalk.push(tip);`, silently discarding push failures. A failed push would yield an empty revwalk, returning `Ok(None)` for commits that exist. | Changed to `if revwalk.push(tip).is_err() { continue; }` — the scan is best-effort across sessions, so we skip the session on push failure rather than silently producing a wrong empty result. |
+| WR-04 | WARNING | `session_ops_path` joined `commit_oid` directly into a filesystem path without validating it. Safety depended on upstream `git2::Oid::from_str` rejection, but `write_ops_state`/`read_ops_state` call it directly. | Added defense-in-depth validation: reject `commit_oid` that is empty or contains non-hex characters. |
+| WR-05 | WARNING | `get_turn_commit_impl` took `_session_id: &str` but never used it. A commit from session A would be returned when queried with session B's ID, violating session isolation. | After parsing the manifest, compare `manifest.session_id != session_id` and return `Ok(None)` on mismatch. |
+| WR-06 | WARNING | `diff_impl` used `repo.merge_base(...).ok()`, converting all git errors (not just "no common ancestor") to `None`. A transient git error would produce incorrect diff results instead of propagating. | Match on `git2::ErrorCode::NotFound` → `None`; all other errors propagate as `SessionError::Git`. |
+| WR-07 | WARNING | `turn_commit_from_manifest_and_oid` set `profile_snapshot_json: String::new()`. The full profile JSON is stored as `turn/profile.json` in the commit tree but never read back, so consumers relying on the field (replay, audit) got an empty string. | `get_turn_commit_impl` now reads the `turn/profile.json` blob and populates `profile_snapshot_json` with the real payload. |
+| WR-08 | WARNING | `atomic_write` used a deterministic temp path (`path.with_extension("tmp")`). Concurrent writers to the same target would collide on the same temp file, corrupting data. | Temp file name now includes PID + a per-process atomic counter: `.{file_name}.{pid}.{seq}.tmp`, making concurrent writes non-colliding while staying deterministic per-process. |
+| IN-01 | INFO | `enumerate_session_branches` set `updated_at: Utc::now()` — the enumeration time, not the ref's last-update time. Misleading for callers expecting the actual last-update timestamp. | Documented in a comment that `updated_at` reflects enumeration time, not ref update time; callers needing the true last-update time should read the commit's committer timestamp via `commit_id`. |
+| IN-02 | INFO | `SessionApi::commit_prepared_turn` did not call `resolve_id` while `commit_turn` did. An abbreviated session ID in a prepared commit would fail with `NotFound` from the store. | Documented in the doc comment that prepared commits must carry the canonical session ID; this is intentional because prepared commits are built internally after session resolution. |
+| IN-03 | INFO | `read_session_meta` and `read_ops_state` mapped JSON parse errors to `SessionError::Git(...)`, a semantic mismatch — sidecar JSON corruption is not a git error. | Changed both to use `SessionError::InvalidPersistedValue { field, value }`. |
+
+Files: `crates/lattice-session/src/git_graph/{commit,helpers,refs,session}.rs`, `crates/lattice-api/src/session.rs`.
+
+---
+
 ## 37-05: Remove legacy overlay and envelope authority concepts — 2026-06-14
 
 Severity: MEDIUM (architectural simplification; phase 37-overlay-and-envelope-removal).

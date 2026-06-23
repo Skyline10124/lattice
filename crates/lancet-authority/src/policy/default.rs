@@ -825,7 +825,6 @@ impl DefaultPolicyHook {
                     .as_ref()
                     .filter(|c| !c.sub_argvs.is_empty())
                     .map(|c| c.sub_argvs.clone()),
-                ..Default::default()
             },
         }
     }

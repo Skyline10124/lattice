@@ -31,6 +31,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 
+#[allow(dead_code)]
 const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
