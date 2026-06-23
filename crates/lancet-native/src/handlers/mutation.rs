@@ -9,10 +9,6 @@
 //! perform all-or-nothing scope preflight before applying changes.
 
 use crate::edit::apply::{PatchApplyLimits, apply_parsed_patch};
-use crate::edit::commit_baseline::{
-    CommitBaselineFailureReason, CommitBaselineReport, CommitBaselineValidation,
-    commit_baseline_details_json,
-};
 use crate::edit::content_hash;
 use crate::edit::hash::line_hash;
 use crate::edit::parser::parse_patch_document;
@@ -179,7 +175,7 @@ async fn handle_edit(params: EditParams, ctx: HandlerContext) -> Result<EditResu
             return Err(err);
         }
     };
-    let result = apply_compiled_patch(&ctx, Edit::NAME, &auth, &patch).await?;
+    let result = apply_compiled_patch(&ctx, &auth, &patch).await?;
     run_mutation_verify_if_configured(&ctx, Edit::NAME, &auth).await?;
 
     ctx.record_durable_metadata(json!({
@@ -260,7 +256,7 @@ async fn handle_batch(params: BatchParams, ctx: HandlerContext) -> Result<BatchR
 
     let mut edited_files = Vec::new();
     if let Some(patch) = patch.as_deref() {
-        edited_files = apply_compiled_patch(&ctx, Batch::NAME, &auth, patch)
+        edited_files = apply_compiled_patch(&ctx, &auth, patch)
             .await?
             .changed_files;
     }
@@ -1223,7 +1219,6 @@ fn patch_lines(content: &str) -> (Vec<String>, bool) {
 
 async fn apply_compiled_patch(
     ctx: &HandlerContext,
-    method: &str,
     auth: &MutationAuthorization,
     patch: &str,
 ) -> Result<CompiledPatchApply, CepError> {
@@ -1243,17 +1238,7 @@ async fn apply_compiled_patch(
     let storage = auth.edit_storage();
     let result = apply_parsed_patch(&storage, &limits, document).await;
 
-    if let Some(report) = result.commit_baseline_report.as_ref() {
-        let metadata = commit_baseline_metadata_json(report);
-        ctx.record_durable_metadata(metadata);
-    }
-
     if !result.ok {
-        if let Some(report) = result.commit_baseline_report.as_ref()
-            && let CommitBaselineValidation::Failed(reason) = report.validation
-        {
-            return Err(commit_baseline_replan_error(method, report, reason));
-        }
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
             format!("compiled patch application failed: {}", result.summary),
@@ -1344,53 +1329,6 @@ fn semantic_replan_error(reason: impl Into<String>) -> CepError {
         CepErrorData::Guard(GuardErrorData {
             method: Edit::NAME.into(),
             reason,
-        }),
-        Retriability::RequiresReplan,
-    )
-}
-
-fn commit_baseline_metadata_json(report: &CommitBaselineReport) -> serde_json::Value {
-    let details = commit_baseline_details_json(report);
-    json!({
-        "commit_baseline_validation": details["commit_baseline_validation"].clone(),
-        "commit_baseline_failure_reason": details["commit_baseline_failure_reason"].clone(),
-        "commit_baseline_details": details,
-    })
-}
-
-fn commit_baseline_replan_error(
-    method: &str,
-    report: &CommitBaselineReport,
-    reason: CommitBaselineFailureReason,
-) -> CepError {
-    let file_path = report
-        .hunks
-        .iter()
-        .find(|hunk| hunk.match_result.as_str() == reason.as_str())
-        .map(|hunk| hunk.file_path.clone())
-        .or_else(|| report.lower_drift_paths.first().cloned())
-        .unwrap_or_else(|| "<unknown>".into());
-    let hunk_index = report
-        .hunks
-        .iter()
-        .find(|hunk| hunk.match_result.as_str() == reason.as_str())
-        .map(|hunk| hunk.hunk_index);
-    let coordinate = hunk_index
-        .map(|index| format!("file={file_path}, hunk_index={index}"))
-        .unwrap_or_else(|| format!("file={file_path}"));
-
-    CepError::new(
-        CepErrorCode::ReplanRequired,
-        format!(
-            "patch commit baseline validation failed: {} ({coordinate})",
-            reason.as_str()
-        ),
-        CepErrorData::Guard(GuardErrorData {
-            method: method.into(),
-            reason: format!(
-                "ReplanRequired: commit_baseline_failure_reason={} ({coordinate})",
-                reason.as_str()
-            ),
         }),
         Retriability::RequiresReplan,
     )

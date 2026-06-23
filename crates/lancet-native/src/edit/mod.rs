@@ -7,7 +7,6 @@
 //! recovery-oriented diagnostics used by the `patch` tool.
 
 pub mod apply;
-pub mod commit_baseline;
 pub mod diagnostics;
 pub mod hash;
 pub mod parser;
