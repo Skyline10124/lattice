@@ -5,7 +5,6 @@
 
 pub mod audit;
 pub mod command;
-pub mod envelope;
 pub mod external;
 pub mod mutation;
 pub mod observation;
@@ -15,7 +14,6 @@ pub mod session_state;
 
 pub use audit::register_audit_methods;
 pub use command::register_command_methods;
-pub use envelope::register_envelope_methods;
 pub use external::register_external_methods;
 pub use mutation::register_mutation_methods;
 pub use observation::register_workspace_observation_methods;

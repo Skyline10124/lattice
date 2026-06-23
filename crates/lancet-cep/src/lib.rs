@@ -9,10 +9,8 @@
 //! transport layer. `lancet-cep` collects those interfaces and owns the
 //! agent-visible tool exposure and base authority planning helpers.
 
-mod authority;
 mod tool;
 
-pub use authority::{BaseAuthorityError, BaseAuthorityPlan};
 pub use tool::{
     ToolDefinition, ToolExposure, ToolExposureError, project_tool_definitions,
     resolve_catalog_tool_definitions, resolve_enabled_tools,
@@ -29,18 +27,17 @@ pub use lancet_dispatch::{
     ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    BaseExecutionEnvelope, BoundaryDimension, BoundaryPrimitive,
-    CEP_TURN_ATTESTATION_PREDICATE_TYPE, Capability, CapabilitySource, CepError, CepErrorCode,
-    CepErrorData, CepErrorFamily, CepMode, Constraints, EffectDecl, EffectKindSet, EffectScopeKind,
-    EffectiveBoundaryEntry, EffectiveBoundaryReport, EffectiveBoundaryStatus,
-    EffectiveEnvelopeSnapshot, ErrorObject, ExecutionEnvelope, FailureSemantics, GuardVerdict,
-    HostProbeEntry, HostProbeReport, HostProbeStatus, Id, Impact, ImpactConfidence, ImpactKind,
-    InTotoStatement, InTotoSubjectDescriptor, Intent, Notification, OnFailure, OverlayBehavior,
-    PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
-    PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity, ProvGraphFragment,
-    ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy, Request, Response,
-    Retriability, Scope, SourcedCapability, ToolCall, ToolError, ToolEvent, ToolResult,
-    TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace, VerifyCommand,
+    BoundaryDimension, BoundaryPrimitive, CEP_TURN_ATTESTATION_PREDICATE_TYPE, Capability,
+    CapabilitySource, CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode, Constraints,
+    EffectDecl, EffectKindSet, EffectScopeKind, EffectiveBoundaryEntry, EffectiveBoundaryReport,
+    EffectiveBoundaryStatus, EffectiveEnvelopeSnapshot, ErrorObject, ExecutionEnvelope,
+    FailureSemantics, GuardVerdict, HostProbeEntry, HostProbeReport, HostProbeStatus, Id, Impact,
+    ImpactConfidence, ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Intent, Notification,
+    OnFailure, OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
+    PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,
+    ProvGraphFragment, ProvUsed, ProvWasAssociatedWith, ProvWasGeneratedBy, ProvWasInformedBy,
+    Request, Response, Retriability, Scope, SourcedCapability, ToolCall, ToolError, ToolEvent,
+    ToolResult, TurnAttestationPredicate, TurnCallSummary, TurnExecutionTrace, VerifyCommand,
 };
 
 pub mod methods {

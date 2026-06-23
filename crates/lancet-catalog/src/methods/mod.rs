@@ -5,7 +5,6 @@
 
 pub mod audit;
 pub mod command;
-pub mod envelope;
 pub mod external;
 #[cfg(feature = "inspect-scaffold")]
 pub mod scaffold;
@@ -14,7 +13,6 @@ pub mod workspace;
 
 pub use audit::{AuditObserve, AuditReplay};
 pub use command::Run;
-pub use envelope::Envelope;
 pub use external::Fetch;
 pub use session::TodoWrite;
 pub use workspace::{
@@ -30,7 +28,6 @@ mod sealed {
     use super::{
         audit::{AuditObserve, AuditReplay},
         command::Run,
-        envelope::Envelope,
         external::Fetch,
         session::TodoWrite,
         workspace::{Batch, Create, Edit, ObserveWorkspace},
@@ -44,7 +41,6 @@ mod sealed {
     impl Sealed for Fetch {}
     impl Sealed for TodoWrite {}
     impl Sealed for Run {}
-    impl Sealed for Envelope {}
     impl Sealed for AuditObserve {}
     impl Sealed for AuditReplay {}
 }
@@ -64,7 +60,6 @@ mod tests {
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            Envelope::NAME,
             AuditObserve::NAME,
             AuditReplay::NAME,
         ];
@@ -84,7 +79,6 @@ mod tests {
             Fetch::NAME,
             TodoWrite::NAME,
             Run::NAME,
-            Envelope::NAME,
             AuditObserve::NAME,
             AuditReplay::NAME,
         ];

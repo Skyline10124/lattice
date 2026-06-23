@@ -227,7 +227,6 @@ const UPPER_BACKED_TOOLS: &[&str] = &[
     "mutate.edit",
     "mutate.batch",
     "exec.command_run",
-    "session.envelope",
 ];
 
 #[cfg(test)]
@@ -244,7 +243,6 @@ mod tests {
                 | "exec.command_run"
                 | "fetch.web"
                 | "session.todo_write"
-                | "session.envelope"
                 | "observe.audit"
                 | "observe.audit_replay"
         )

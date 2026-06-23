@@ -55,12 +55,10 @@ pub use config::{
 };
 pub use doctor::{
     LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
-    run_envelope_declare_smoke_for_project_root,
 };
 pub use error::{LancetError, LancetResult};
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
-    base_observation_envelope, cep_policy_from_policy_config,
 };
 pub use status::{
     LancetRecentCallEntry, LancetStatusOutput, collect_status, collect_status_with_probe,
@@ -79,7 +77,6 @@ pub use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, DirectVerifyConfig, ExecutionRouting,
     MethodRegistry, MissingRequiredBoundary, ServerRunConfig, register_production_method_registry,
 };
-pub use lancet_protocol::envelope::{BaseExecutionEnvelope, CepMode};
 pub use lancet_protocol::policy::AuthorityMode;
 pub use lancet_protocol::{
     BoundaryDimension, BoundaryPrimitive, CepError, EffectiveBoundaryStatus, HostProbeEntry,

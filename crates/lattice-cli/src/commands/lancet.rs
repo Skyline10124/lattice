@@ -4,10 +4,9 @@
 //! `lattice lancet` — LANCET inspection and self-check subcommands.
 //!
 //! - `lancet status`: reads the external project-keyed audit store via
-//!   `audit_db_path_for_project` (no CEP server) and shows the latest
-//!   session.envelope fields, recent calls, and last guard verdict.
-//! - `lancet doctor`: catalog count, transport smoke, invariant-card parse, and an
-//!   isolated explicit `session.envelope` declaration smoke.
+//!   `audit_db_path_for_project` (no CEP server) and shows recent calls and
+//!   the last guard verdict.
+//! - `lancet doctor`: catalog count, transport smoke, and invariant-card parse.
 
 use std::path::{Path, PathBuf};
 
@@ -69,8 +68,6 @@ fn run_status(json: bool) -> Result<()> {
 fn status_json_value(output: &LancetStatusOutput) -> serde_json::Value {
     serde_json::json!({
         "host_probe": host_probe_json_value(&output.host_probe),
-        "active_envelope": output.active_envelope,
-        "no_active_envelope_observed": output.no_active_envelope_observed,
         "recent_calls": output.recent_calls.iter().map(|c| serde_json::json!({
             "audit_id": c.audit_id,
             "method": c.method,
@@ -108,21 +105,6 @@ fn status_text_lines(output: &LancetStatusOutput) -> Vec<String> {
             host_probe_status_label(entry.status),
             host_probe_reason(entry)
         ));
-    }
-    match &output.active_envelope {
-        Some(env) => {
-            lines.push(format!("{}: {}", "Active Envelope".bold(), "found".green()));
-            for key in &["intent", "capabilities", "scope", "impact"] {
-                if let Some(val) = env.get(*key) {
-                    lines.push(format!("  {} {}", format!("{key}:").green(), val));
-                }
-            }
-        }
-        None => lines.push(format!(
-            "{}: {}",
-            "Active Envelope".bold(),
-            "no active envelope observed".yellow()
-        )),
     }
     lines.push(String::new());
     lines.push("Recent CEP Calls:".bold().to_string());
@@ -520,12 +502,12 @@ mod tests {
             model_id: "test-model".into(),
             runtime_version: "test".into(),
         };
-        // session.envelope row with intent/capabilities in metadata_json.
+        // A session.todo_write row with metadata.
         let start = audit
             .start_call(
                 &ctx,
                 1,
-                "session.envelope",
+                "session.todo_write",
                 &CallAuditMetadata::native_policy_enforced(Some("started")),
             )
             .unwrap();
@@ -533,10 +515,10 @@ mod tests {
             .finalize_call(
                 start,
                 AuditOutcome::Success {
-                    summary: "declared".into(),
+                    summary: "todo written".into(),
                 },
                 Some("native_handler"),
-                Some(r#"{"intent":"smoke test","capabilities":["read"],"scope":"."}"#),
+                Some(r#"{"todo_ops":1}"#),
             )
             .unwrap();
         // A regular call row
@@ -565,8 +547,6 @@ mod tests {
         let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         let output = collect_status(dir.path()).unwrap();
-        assert!(output.no_active_envelope_observed);
-        assert!(output.active_envelope.is_none());
         assert!(output.recent_calls.is_empty());
         assert!(output.last_guard_verdict.is_none());
     }
@@ -579,11 +559,6 @@ mod tests {
 
         let output = collect_status(dir.path()).unwrap();
 
-        // Should have parsed the declare row's metadata_json
-        assert!(
-            output.active_envelope.is_some() || !output.no_active_envelope_observed,
-            "should observe envelope from declare row"
-        );
         // Should have at least the two seeded rows
         assert!(!output.recent_calls.is_empty(), "should have recent calls");
         // Last guard verdict derived from newest row
@@ -593,8 +568,6 @@ mod tests {
         );
         // Check JSON schema keys
         let json = serde_json::json!({
-            "active_envelope": output.active_envelope,
-            "no_active_envelope_observed": output.no_active_envelope_observed,
             "recent_calls": output.recent_calls.iter().map(|c| serde_json::json!({
                 "audit_id": c.audit_id,
                 "method": c.method,
@@ -604,14 +577,6 @@ mod tests {
             })).collect::<Vec<_>>(),
             "last_guard_verdict": output.last_guard_verdict,
         });
-        assert!(
-            json.get("active_envelope").is_some(),
-            "JSON must have active_envelope"
-        );
-        assert!(
-            json.get("no_active_envelope_observed").is_some(),
-            "JSON must have no_active_envelope_observed"
-        );
         assert!(
             json.get("recent_calls").is_some(),
             "JSON must have recent_calls"
@@ -623,12 +588,12 @@ mod tests {
 
         // Verify method values in recent_calls
         let calls = json["recent_calls"].as_array().unwrap();
-        let has_declare = calls
+        let has_todo = calls
             .iter()
-            .any(|c| c["method"].as_str() == Some("session.envelope"));
+            .any(|c| c["method"].as_str() == Some("session.todo_write"));
         assert!(
-            has_declare,
-            "recent_calls should include session.envelope row"
+            has_todo,
+            "recent_calls should include session.todo_write row"
         );
     }
 
@@ -646,21 +611,6 @@ mod tests {
         assert!(
             result.is_ok(),
             "doctor should pass on repo root: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn cep_doctor_envelope_declare_smoke_succeeds() {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/")
-            .parent()
-            .expect("workspace root");
-        let result = lancet_api::run_envelope_declare_smoke_for_project_root(workspace_root);
-        assert!(
-            result.is_ok(),
-            "envelope declare smoke should succeed: {:?}",
             result
         );
     }

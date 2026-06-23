@@ -5,13 +5,12 @@
 
 use crate::method::MethodDescriptor;
 use crate::methods::{
-    AuditObserve, AuditReplay, Batch, Create, Edit, Envelope, Fetch, ObserveWorkspace, Run,
-    TodoWrite,
+    AuditObserve, AuditReplay, Batch, Create, Edit, Fetch, ObserveWorkspace, Run, TodoWrite,
 };
 use std::sync::LazyLock;
 
 /// Exhaustive CEP method descriptor list in stable registration order.
-pub static CATALOG: LazyLock<[MethodDescriptor; 10]> = LazyLock::new(|| {
+pub static CATALOG: LazyLock<[MethodDescriptor; 9]> = LazyLock::new(|| {
     [
         MethodDescriptor::for_method::<ObserveWorkspace>(),
         MethodDescriptor::for_method::<Create>(),
@@ -20,7 +19,6 @@ pub static CATALOG: LazyLock<[MethodDescriptor; 10]> = LazyLock::new(|| {
         MethodDescriptor::for_method::<Run>(),
         MethodDescriptor::for_method::<Fetch>(),
         MethodDescriptor::for_method::<TodoWrite>(),
-        MethodDescriptor::for_method::<Envelope>(),
         MethodDescriptor::for_method::<AuditObserve>(),
         MethodDescriptor::for_method::<AuditReplay>(),
     ]
@@ -56,12 +54,11 @@ mod tests {
     use super::*;
     use crate::method::CepMethod;
     use crate::methods::{
-        AuditObserve, AuditReplay, Batch, Create, Edit, Envelope, Fetch, ObserveWorkspace, Run,
-        TodoWrite,
+        AuditObserve, AuditReplay, Batch, Create, Edit, Fetch, ObserveWorkspace, Run, TodoWrite,
     };
     use lancet_protocol::{ImpactKind, RequiredCapability};
 
-    const EXPECTED_ORDER: [&str; 10] = [
+    const EXPECTED_ORDER: [&str; 9] = [
         "observe.workspace",
         "mutate.create",
         "mutate.edit",
@@ -69,7 +66,6 @@ mod tests {
         "exec.command_run",
         "fetch.web",
         "session.todo_write",
-        "session.envelope",
         "observe.audit",
         "observe.audit_replay",
     ];
@@ -132,7 +128,7 @@ mod tests {
     fn catalog_descriptors_declare_base_authority_requirements() {
         for descriptor in catalog() {
             match descriptor.name {
-                "session.todo_write" | "session.envelope" => {
+                "session.todo_write" => {
                     assert!(descriptor.base_authority.session_state);
                     assert!(!descriptor.base_authority.fetch_hosts);
                     assert!(!descriptor.base_authority.read_audit);
@@ -160,7 +156,7 @@ mod tests {
     #[test]
     fn catalog_impact_and_capability_match_method_constants() {
         let catalog = catalog();
-        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 10] = [
+        let checks: [(&MethodDescriptor, ImpactKind, RequiredCapability); 9] = [
             (
                 &catalog[0],
                 ObserveWorkspace::IMPACT,
@@ -172,9 +168,8 @@ mod tests {
             (&catalog[4], Run::IMPACT, Run::CAPABILITY),
             (&catalog[5], Fetch::IMPACT, Fetch::CAPABILITY),
             (&catalog[6], TodoWrite::IMPACT, TodoWrite::CAPABILITY),
-            (&catalog[7], Envelope::IMPACT, Envelope::CAPABILITY),
-            (&catalog[8], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
-            (&catalog[9], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
+            (&catalog[7], AuditObserve::IMPACT, AuditObserve::CAPABILITY),
+            (&catalog[8], AuditReplay::IMPACT, AuditReplay::CAPABILITY),
         ];
 
         for (descriptor, impact, capability) in checks {
@@ -192,8 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_len_is_10() {
-        assert_eq!(catalog().len(), 10);
+    fn catalog_len_is_9() {
+        assert_eq!(catalog().len(), 9);
     }
 
     #[test]
@@ -258,7 +253,7 @@ mod catalog_default_snapshot {
 
     #[test]
     fn catalog_default_snapshot_unchanged_with_all_features() {
-        assert_eq!(catalog().len(), 10);
+        assert_eq!(catalog().len(), 9);
         let names: Vec<_> = catalog().iter().map(|d| d.name).collect();
         assert_eq!(
             names,
@@ -270,7 +265,6 @@ mod catalog_default_snapshot {
                 "exec.command_run",
                 "fetch.web",
                 "session.todo_write",
-                "session.envelope",
                 "observe.audit",
                 "observe.audit_replay",
             ]

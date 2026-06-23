@@ -4,8 +4,8 @@
 //! CEP/22 native catalog method registration.
 
 use crate::handlers::{
-    register_audit_methods, register_command_methods, register_envelope_methods,
-    register_external_methods, register_mutation_methods, register_session_state_methods,
+    register_audit_methods, register_command_methods, register_external_methods,
+    register_mutation_methods, register_session_state_methods,
     register_workspace_observation_methods,
 };
 use crate::server::registry::MethodRegistry;
@@ -36,11 +36,6 @@ pub fn register_native_session_state(registry: &mut MethodRegistry) -> Result<()
     register_session_state_methods(registry)
 }
 
-/// Register native CEP `session.envelope` handler.
-pub fn register_native_envelope(registry: &mut MethodRegistry) -> Result<(), CepError> {
-    register_envelope_methods(registry)
-}
-
 /// Register native CEP `exec.command_run` handler.
 pub fn register_native_command(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_command_methods(registry)
@@ -53,7 +48,6 @@ pub fn register_native_mutation(registry: &mut MethodRegistry) -> Result<(), Cep
 
 pub fn register_production_method_registry(registry: &mut MethodRegistry) -> Result<(), CepError> {
     register_cep_native_methods(registry)?;
-    register_native_envelope(registry)?;
     register_native_command(registry)?;
     register_native_mutation(registry)?;
     register_audit_methods(registry)

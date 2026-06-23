@@ -20,8 +20,6 @@ use crate::error::{LancetError, LancetResult};
 #[derive(Clone, Debug)]
 pub struct LancetStatusOutput {
     pub host_probe: HostProbeReport,
-    pub active_envelope: Option<Value>,
-    pub no_active_envelope_observed: bool,
     pub recent_calls: Vec<LancetRecentCallEntry>,
     pub last_guard_verdict: Option<String>,
 }
@@ -57,8 +55,6 @@ pub fn collect_status_with_probe(
     if !db_path.exists() {
         return Ok(LancetStatusOutput {
             host_probe,
-            active_envelope: None,
-            no_active_envelope_observed: true,
             recent_calls: vec![],
             last_guard_verdict: None,
         });
@@ -66,20 +62,6 @@ pub fn collect_status_with_probe(
 
     let store = CepAuditStore::open(&db_path)
         .map_err(|err| LancetError::Internal(format!("open audit store: {err}")))?;
-
-    let declare_rows = store
-        .query_rows(&AuditQueryFilters {
-            method: Some("session.envelope".to_string()),
-            ..Default::default()
-        })
-        .map_err(|err| LancetError::Internal(format!("query session.envelope rows: {err}")))?;
-
-    let active_envelope = declare_rows.last().and_then(|row| {
-        row.metadata_json
-            .as_deref()
-            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
-    });
-    let no_active_envelope_observed = active_envelope.is_none();
 
     let all_rows = store
         .query_rows(&AuditQueryFilters::default())
@@ -114,8 +96,6 @@ pub fn collect_status_with_probe(
 
     Ok(LancetStatusOutput {
         host_probe,
-        active_envelope,
-        no_active_envelope_observed,
         recent_calls,
         last_guard_verdict,
     })

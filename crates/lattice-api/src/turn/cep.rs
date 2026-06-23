@@ -22,7 +22,6 @@ use lancet_authority::{
 use lancet_catalog::catalog;
 use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
 use lancet_catalog::methods::command::Run;
-use lancet_catalog::methods::envelope::Envelope;
 use lancet_catalog::methods::external::Fetch;
 use lancet_catalog::methods::session::TodoWrite;
 use lancet_catalog::methods::workspace::{Batch, Create, Edit, ObserveWorkspace};
@@ -124,7 +123,6 @@ impl CepExecutorAdapter {
             Fetch::NAME => self.call_typed::<Fetch>(params).await,
             TodoWrite::NAME => self.call_typed::<TodoWrite>(params).await,
             Run::NAME => self.call_typed::<Run>(params).await,
-            Envelope::NAME => self.call_typed::<Envelope>(params).await,
             AuditObserve::NAME => self.call_typed::<AuditObserve>(params).await,
             AuditReplay::NAME => self.call_typed::<AuditReplay>(params).await,
             other => Err(method_not_found(other)),
@@ -617,21 +615,6 @@ fn canonicalize_existing(path: &Path, field: &str) -> Result<PathBuf, ApiError> 
     })
 }
 
-/// Build the production turn base envelope from profile policy and enabled tools.
-#[cfg(test)]
-pub(crate) fn production_base_envelope(
-    project_root: &str,
-    enabled_tools: &[String],
-    lancet: Option<&LancetSection>,
-) -> Result<lancet_protocol::envelope::BaseExecutionEnvelope, ApiError> {
-    let policy = match lancet {
-        Some(lancet_section) => cep_policy_from_profile(lancet_section, Path::new(project_root))?,
-        None => CepPolicyConfig::defaults_for_project_root(project_root),
-    };
-    lancet_api::base_observation_envelope(project_root, enabled_tools, &policy)
-        .map_err(map_lancet_err)
-}
-
 /// Translate the optional profile `[lancet]` section into a fully-resolved
 /// LANCET policy and command-isolation configuration.
 ///
@@ -985,21 +968,15 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
-    use lancet_api::cep_policy_from_policy_config;
     use lancet_catalog::methods::command::RunParams;
-    use lancet_catalog::methods::envelope::{
-        DeclareParams, Envelope, EnvelopeParams, EnvelopeResult,
-    };
-    use lancet_protocol::envelope::{
-        Capability, CepMode, Constraints, ExecutionEnvelope, ImpactKind, Intent, Scope,
-    };
+    use lancet_protocol::envelope::CepMode;
     use lancet_protocol::policy::{
         PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,
         PolicyInput,
     };
     use lattice_profile::LancetSection;
     use serde_json::json;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     #[test]
@@ -1217,119 +1194,6 @@ mod cep_context_profile_policy {
             config.unsupported_host,
             lancet_native::enforcement::isolation::CommandIsolationUnsupportedHostBehavior::FailClosed
         );
-    }
-
-    #[test]
-    fn cep_policy_from_policy_config_preserves_external_command_overrides() {
-        let dir = TempDir::new().unwrap();
-        let external_path = dir.path().join("policy.toml");
-        std::fs::write(
-            &external_path,
-            r#"
-[command]
-default_timeout_ms = 1000
-max_timeout_ms = 1000
-max_output_bytes = 64
-allowed_env = []
-inherited_env = []
-"#,
-        )
-        .unwrap();
-
-        let cep = LancetSection {
-            policy: Some(lattice_profile::LancetPolicySection {
-                path: Some("policy.toml".into()),
-            }),
-            ..Default::default()
-        };
-        let policy_config = load_policy_config(&cep, dir.path()).expect("external policy");
-        let cep_policy = cep_policy_from_policy_config(&policy_config);
-
-        assert_eq!(cep_policy.command.max_timeout_ms, 1000);
-        assert_eq!(cep_policy.command.max_output_bytes, 64);
-        assert!(cep_policy.command.allowed_env.is_empty());
-        assert!(cep_policy.command.inherited_env.is_empty());
-    }
-
-    #[tokio::test]
-    async fn command_run_enforces_external_timeout_policy() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("policy.toml"),
-            r#"
-[command]
-max_timeout_ms = 1
-allowed_diagnostic_commands = [["echo"]]
-"#,
-        )
-        .unwrap();
-
-        let cep = LancetSection {
-            mode: CepMode::Off,
-            policy: Some(lattice_profile::LancetPolicySection {
-                path: Some("policy.toml".into()),
-            }),
-            ..Default::default()
-        };
-        let enabled = vec![Run::NAME.to_string(), Envelope::NAME.to_string()];
-        let fake_llm = Arc::new(lattice_agent::testing::FakeStreamingLlmClient::builder().build());
-        let mut deps = build_envelope_turn_deps_for_test(
-            dir.path().to_str().unwrap(),
-            &enabled,
-            fake_llm,
-            true,
-            Some(&cep),
-            "test-model",
-            "test-runtime",
-        )
-        .await
-        .expect("turn deps");
-
-        deps.cep_client
-            .call::<Envelope>(EnvelopeParams::Declare(DeclareParams {
-                envelope: ExecutionEnvelope {
-                    intent: Intent {
-                        description: "external policy command timeout test".into(),
-                    },
-                    capabilities: BTreeSet::from([Capability::RunCommand {
-                        argv_allowlist: vec!["echo".into()],
-                    }]),
-                    scope: Scope::default(),
-                    impact: vec![],
-                    constraints: Constraints::default(),
-                    verify: None,
-                    on_failure: None,
-                    extensions: serde_json::Map::new(),
-                },
-                supersede: false,
-                reason: Some("external policy command timeout test".into()),
-            }))
-            .await
-            .map(|result| {
-                let EnvelopeResult::Declare(result) = result;
-                result
-            })
-            .expect("declare RunCommand envelope");
-
-        let params = RunParams {
-            argv: vec!["echo".into(), "external-policy-timeout".into()],
-            cwd: None,
-            env: BTreeMap::new(),
-            timeout_ms: Some(150_000),
-            declared_impact: Some(ImpactKind::CommandExecution),
-        };
-        let err = deps
-            .cep_client
-            .call::<Run>(params)
-            .await
-            .expect_err("external max_timeout_ms must be enforced");
-        assert!(
-            err.message.contains("timeout") || err.message.contains("exceeds"),
-            "unexpected error: {}",
-            err.message
-        );
-
-        deps.runtime.shutdown().await;
     }
 
     #[test]
@@ -1583,12 +1447,6 @@ mod phase34_turn_wiring {
         .await
         .expect("host-only direct deps");
         assert!(deps.upper_lease.is_none());
-        assert!(
-            !deps
-                .tool_definitions
-                .iter()
-                .any(|tool| tool.name == Envelope::NAME)
-        );
     }
 
     #[test]
@@ -1596,12 +1454,12 @@ mod phase34_turn_wiring {
         let exposure = ToolExposure::from_catalog_enabled_for_authority_mode(
             &[
                 ObserveWorkspace::NAME.to_string(),
-                Envelope::NAME.to_string(),
+                "session.envelope".to_string(),
             ],
             AuthorityMode::Direct,
         )
         .expect("catalog");
-        assert!(!exposure.contains(Envelope::NAME));
+        assert!(!exposure.contains("session.envelope"));
         assert!(exposure.contains(ObserveWorkspace::NAME));
     }
 }

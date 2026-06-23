@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use lancet_audit::{CepAuditContext, CepAuditStore};
-use lancet_authority::policy::default::{DefaultPolicyHook, PolicyConfig};
+use lancet_authority::policy::default::DefaultPolicyHook;
 use lancet_authority::{ActiveEnvelopeStore, CepPolicyConfig, CepTurnContext};
-use lancet_cep::{BaseAuthorityPlan, ToolDefinition, ToolExposure, ToolExposureError};
+use lancet_cep::{ToolDefinition, ToolExposure, ToolExposureError};
 use lancet_dispatch::{CepClient, CepTransport};
 use lancet_native::{MethodRegistry, ServerRunConfig, register_production_method_registry};
 use lancet_protocol::envelope::BaseExecutionEnvelope;
@@ -150,9 +150,16 @@ impl LancetRuntime {
         let tool_exposure = resolve_catalog_tool_exposure(&enabled_tools, authority_mode)?;
         let tool_definitions = tool_exposure.definitions().to_vec();
 
-        let cep_policy = cep_policy_from_policy_config(&policy);
+        let cep_policy = CepPolicyConfig {
+            project_root: policy.project_root.clone(),
+            observation: policy.observation.clone(),
+            network: policy.network.clone(),
+            budget: policy.budget.clone(),
+            command: policy.command.clone(),
+            denied_effect_kinds: policy.denied_effect_kinds.clone(),
+        };
         let base_envelope =
-            base_observation_envelope_from_exposure(&workspace_root, &tool_exposure, &cep_policy)?;
+            BaseExecutionEnvelope::for_workspace_root(&workspace_root, "cep_context turn observation");
 
         let audit = match audit {
             AuditBacking::InMemory => Arc::new(
@@ -246,48 +253,6 @@ impl LancetRuntime {
     }
 }
 
-/// Project a unified [`PolicyConfig`] onto the executor-facing [`CepPolicyConfig`].
-pub fn cep_policy_from_policy_config(config: &PolicyConfig) -> CepPolicyConfig {
-    CepPolicyConfig {
-        project_root: config.project_root.clone(),
-        observation: config.observation.clone(),
-        network: config.network.clone(),
-        budget: config.budget.clone(),
-        command: config.command.clone(),
-        denied_effect_kinds: config.denied_effect_kinds.clone(),
-    }
-}
-
-/// Build the turn base envelope from policy and the enabled catalog methods.
-///
-/// Grants catalog-declared session/fetch/audit authority, using policy network
-/// hosts for fetch-capable methods; never grants workspace write or command
-/// scopes.
-pub fn base_observation_envelope(
-    project_root: &str,
-    enabled_tools: &[String],
-    policy: &CepPolicyConfig,
-) -> Result<BaseExecutionEnvelope, LancetError> {
-    let exposure = resolve_catalog_tool_exposure(
-        enabled_tools,
-        lancet_protocol::policy::AuthorityMode::Envelope,
-    )?;
-    base_observation_envelope_from_exposure(project_root, &exposure, policy)
-}
-
-fn base_observation_envelope_from_exposure(
-    project_root: &str,
-    exposure: &ToolExposure,
-    policy: &CepPolicyConfig,
-) -> Result<BaseExecutionEnvelope, LancetError> {
-    let plan = BaseAuthorityPlan::for_workspace_root(project_root).with_requirements(
-        exposure.base_authority(),
-        policy.network.allowed_hosts.iter(),
-    );
-    plan.build()
-        .map_err(|err| LancetError::Internal(format!("invalid base envelope: {err}")))
-}
-
 fn resolve_catalog_tool_exposure(
     enabled: &[String],
     mode: lancet_protocol::policy::AuthorityMode,
@@ -306,9 +271,6 @@ fn map_tool_exposure_err(err: ToolExposureError) -> LancetError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lancet_catalog::CepMethod;
-    use lancet_catalog::methods::{AuditObserve, Fetch, ObserveWorkspace, TodoWrite};
-    use lancet_protocol::Capability;
 
     #[test]
     fn runtime_config_authority_mode_defaults_to_envelope() {
@@ -319,52 +281,5 @@ mod tests {
         );
         assert!(config.execution.is_none());
         assert!(config.direct_verify.is_none());
-    }
-
-    #[test]
-    fn base_envelope_uses_catalog_descriptor_requirements() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
-        policy.network.allowed_hosts = vec!["example.com".to_string()];
-        let enabled = vec![
-            Fetch::NAME.to_string(),
-            TodoWrite::NAME.to_string(),
-            AuditObserve::NAME.to_string(),
-        ];
-
-        let envelope =
-            base_observation_envelope(dir.path().to_str().unwrap(), &enabled, &policy).unwrap();
-
-        assert!(envelope.inner.capabilities.contains(&Capability::FetchUrl {
-            host: "example.com".to_string()
-        }));
-        assert!(
-            envelope
-                .inner
-                .capabilities
-                .contains(&Capability::MutateSessionState)
-        );
-        assert!(envelope.inner.capabilities.contains(&Capability::ReadAudit));
-        assert!(envelope.validate_no_write_or_command().is_ok());
-    }
-
-    #[test]
-    fn allowed_hosts_do_not_grant_fetch_without_fetch_method() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut policy = CepPolicyConfig::defaults_for_project_root(dir.path());
-        policy.network.allowed_hosts = vec!["example.com".to_string()];
-        let enabled = vec![ObserveWorkspace::NAME.to_string()];
-
-        let envelope =
-            base_observation_envelope(dir.path().to_str().unwrap(), &enabled, &policy).unwrap();
-
-        assert!(
-            !envelope
-                .inner
-                .capabilities
-                .iter()
-                .any(|cap| matches!(cap, Capability::FetchUrl { .. }))
-        );
-        assert!(envelope.validate_no_write_or_command().is_ok());
     }
 }
