@@ -31,6 +31,9 @@ pub use promotion::{
 pub mod sqlite_graph;
 pub use sqlite_graph::SqliteSessionGraphStore;
 
+pub mod git_graph;
+pub use git_graph::GitSessionGraphStore;
+
 pub(crate) const MAX_BRANCH_NAME_LEN: usize = 128;
 
 pub type Result<T> = std::result::Result<T, SessionError>;
