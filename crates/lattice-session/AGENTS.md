@@ -19,6 +19,12 @@ records, and the SQLite-backed session graph store.
 - `src/sqlite_graph/refs.rs` owns branch, checkout, reset, and HEAD movement.
 - `src/sqlite_graph/helpers.rs` owns shared query and topology helpers.
 - `src/sqlite_graph/tests/` owns persistence and topology regression coverage.
+- `src/git_graph/mod.rs` owns the GitSessionGraphStore struct, lazy repository handle, and SessionGraphStore trait impl delegation.
+- `src/git_graph/session.rs` owns session metadata sidecar I/O (`.lattice/sessions/<id>/meta.json`), create/open/list/status logic.
+- `src/git_graph/commit.rs` owns Git tree building, commit creation, transcript reconstruction via Revwalk, and manifest serialization.
+- `src/git_graph/refs.rs` owns branch, checkout, reset, and diff via git2 ref APIs and merge_base.
+- `src/git_graph/helpers.rs` owns shared git2 tree/blob/sidecar helpers and operational state (`ops/<oid>.json`) I/O.
+- `src/git_graph/tests/` owns Git-backed persistence and topology regression coverage.
 
 ## Boundaries
 
@@ -27,6 +33,9 @@ records, and the SQLite-backed session graph store.
 - Keep branch/ref validation strict and deterministic.
 - Keep session graph SQLite separate from CEP audit SQLite in `lancet-audit`.
 - Treat commit IDs and canonical JSON hashing as durable graph contracts.
+- Git session commits live under `refs/lattice/sessions/<id>/**`; candidate refs under `refs/lattice/candidates/<id>/<turn>`. Do not add remote push refspecs for `refs/lattice/**`.
+- Mutable session metadata lives in sidecar files, never in Git objects.
+- Multi-ref promotion transactions remain in `lattice-workspace`; the Git store performs single-ref operations only.
 
 ## Recent Issues
 
@@ -46,6 +55,8 @@ records, and the SQLite-backed session graph store.
   HEAD paths when changing transcript or ref logic.
 - Add schema migration coverage before changing persisted rows or JSON columns.
 - Keep test helpers hidden and clearly non-production.
+- Keep Git store topology tests for linear, merge, diamond, branch reset, and detached HEAD paths when changing transcript or ref logic.
+- Keep sidecar I/O atomic (temp + rename) and test crash-recovery paths.
 
 ## Record Maintenance
 
