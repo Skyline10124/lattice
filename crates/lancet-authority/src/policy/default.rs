@@ -159,6 +159,7 @@ impl WorkspacePolicy {
             }
             "observe.audit" | "observe.audit_replay" => {
                 region.kinds.insert(ImpactKind::AuditObservation);
+                region.session_state_allowed = true;
             }
             _ => {}
         }
