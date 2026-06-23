@@ -228,50 +228,14 @@ pub(super) fn map_agent_event(event: AgentTurnEvent) -> TurnEvent {
             guard_stage,
             error_code,
         },
-        AgentTurnEvent::CepEnvelopeDeclared {
-            envelope_id,
-            envelope_hash,
-        } => TurnEvent::CepEnvelopeDeclared {
-            envelope_id,
-            envelope_hash,
-        },
-        AgentTurnEvent::CepEnvelopeSuperseded {
-            old_envelope_id,
-            new_envelope_id,
-            reason,
-        } => TurnEvent::CepEnvelopeSuperseded {
-            old_envelope_id,
-            new_envelope_id,
-            reason,
-        },
-        AgentTurnEvent::CepEnvelopeMissing {
-            call_id,
-            method,
-            required_for,
-        } => TurnEvent::CepEnvelopeMissing {
-            call_id,
-            method,
-            required_for,
-        },
         AgentTurnEvent::CepVerifyFailed {
             call_id,
-            envelope_id,
             verify_exit_code,
             diff_retained,
         } => TurnEvent::CepVerifyFailed {
             call_id,
-            envelope_id,
             verify_exit_code,
             diff_retained,
-        },
-        AgentTurnEvent::CepReplanRequired {
-            call_id,
-            method,
-            out_of_scope_paths,
-        } => TurnEvent::CepReplanRequired {
-            call_id,
-            method,
-            out_of_scope_paths,
         },
     }
 }

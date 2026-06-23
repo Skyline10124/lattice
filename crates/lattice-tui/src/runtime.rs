@@ -237,11 +237,7 @@ async fn execute_turn(
             | TurnEvent::TurnCommitting
             | TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepEnvelopeDeclared { .. }
-            | TurnEvent::CepEnvelopeSuperseded { .. }
-            | TurnEvent::CepEnvelopeMissing { .. }
-            | TurnEvent::CepVerifyFailed { .. }
-            | TurnEvent::CepReplanRequired { .. } => {}
+            | TurnEvent::CepVerifyFailed { .. } => {}
         }
     }
 

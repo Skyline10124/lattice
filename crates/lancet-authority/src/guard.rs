@@ -466,10 +466,10 @@ fn replan_required(target: &str, patterns: &[String]) -> CepError {
     CepError::new(
         CepErrorCode::ReplanRequired,
         format!(
-            "target '{target}' is not within active WritePath scope: {patterns:?}. \
+            "target '{target}' is not within the allowed WritePath scope: {patterns:?}. \
              A WritePath pattern matches a directory only with a trailing '/**' \
              (e.g. 'crates/foo/**'); a bare 'crates/foo' matches that exact path \
-             only. Re-declare the envelope with a pattern that covers '{target}'."
+             only. Use a pattern that covers '{target}'."
         ),
         CepErrorData::Guard(GuardErrorData {
             method: "guard.l1".into(),

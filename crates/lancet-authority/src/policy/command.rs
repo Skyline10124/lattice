@@ -321,9 +321,9 @@ fn impact_required(argv: &[String]) -> CepError {
             "Missing declared_impact for unknown command '{cmd}'. If '{cmd}' is \
              read-only, add its prefix to the profile's allowed_diagnostic_commands \
              so it is classified as diagnostic; if it mutates the workspace, declare \
-             workspace_mutation with an active envelope (RunCommand + any WritePath \
-             scope). Do not declare command_execution to make a mutating command look \
-             read-only — policy rejects that."
+             workspace_mutation (requires RunCommand + any WritePath scope). Do not \
+             declare command_execution to make a mutating command look read-only — \
+             policy rejects that."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
             method: "exec.command_run".into(),
@@ -341,8 +341,8 @@ fn impact_mismatch(argv: &[String]) -> CepError {
             "declared_impact=command_execution is too weak for unknown command '{cmd}'. \
              command_execution cannot be used to assert an unknown command is read-only. \
              If '{cmd}' is genuinely read-only, add its prefix to the profile's \
-             allowed_diagnostic_commands; otherwise declare workspace_mutation with an \
-             active envelope (RunCommand + any WritePath scope)."
+             allowed_diagnostic_commands; otherwise declare workspace_mutation \
+             (requires RunCommand + any WritePath scope)."
         ),
         CepErrorData::Guard(lancet_protocol::error::GuardErrorData {
             method: "exec.command_run".into(),

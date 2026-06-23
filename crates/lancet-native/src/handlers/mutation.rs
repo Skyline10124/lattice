@@ -93,14 +93,12 @@ async fn handle_create(
 /// Handle `mutate.create` with Guard L1 scope enforcement and verify flow.
 ///
 /// Flow:
-/// 1. Check active envelope exists -> else EnvelopeMissing
-/// 2. Extract WritePath patterns from active envelope
-/// 3. Check target path matches WritePath scope via check_write_scope
-/// 4. Check parent directory exists and target file does not exist
-/// 5. Create file using secure containment
-/// 6. If envelope has verify -> run verify
-/// 7. If verify fails -> VerifyFailed, retain diff, leave envelope valid
-/// 8. Return CreateResult
+/// 1. Check WritePath scope via check_write_scope -> else ReplanRequired
+/// 2. Check parent directory exists and target file does not exist
+/// 3. Create file using secure containment
+/// 4. If verify configured -> run verify
+/// 5. If verify fails -> VerifyFailed, retain diff
+/// 6. Return CreateResult
 async fn handle_create_as(
     params: CreateParams,
     ctx: HandlerContext,
@@ -557,7 +555,7 @@ async fn run_mutation_verify_if_configured(
                 rejection_stage: RejectionStage::VerificationFailure,
                 denial_source: "direct_verify".into(),
             });
-            emit_verify_failed(ctx, method, "", outcome.exit_code).await;
+            emit_verify_failed(ctx, method, outcome.exit_code).await;
             let spec = direct_verify_spec(verify_config);
             Err(verify_failed_error(&spec, &outcome))
         }
@@ -571,7 +569,7 @@ async fn run_mutation_verify_if_configured(
             Ok(())
         }
         Err(err) => {
-            emit_verify_failed(ctx, method, "", -1).await;
+            emit_verify_failed(ctx, method, -1).await;
             Err(err)
         }
     }
@@ -1607,7 +1605,6 @@ async fn create_file_secure(
 async fn emit_verify_failed(
     ctx: &HandlerContext,
     method: &str,
-    envelope_id: &str,
     verify_exit_code: i32,
 ) {
     ctx.events
@@ -1615,7 +1612,6 @@ async fn emit_verify_failed(
             "cep.verify_failed",
             json!({
                 "method": method,
-                "envelope_id": envelope_id,
                 "verify_exit_code": verify_exit_code,
                 "diff_retained": true,
             }),

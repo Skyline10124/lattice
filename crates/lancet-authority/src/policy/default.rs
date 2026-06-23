@@ -153,7 +153,7 @@ impl WorkspacePolicy {
                     );
                 }
             }
-            "session.todo_write" | "session.envelope" => {
+            "session.todo_write" => {
                 region.kinds.insert(ImpactKind::SessionStateMutation);
                 region.session_state_allowed = true;
             }

@@ -309,71 +309,17 @@ fn render_human_event<WOut: Write, WErr: Write>(
                 }
             }
         }
-        TurnEvent::CepEnvelopeDeclared { envelope_id, .. } => {
-            if verbose {
-                flush_before_status(out, err, state)?;
-                writeln!(err, "{} cep envelope declared {envelope_id}", "✓".green())?;
-            }
-        }
-        TurnEvent::CepEnvelopeSuperseded {
-            old_envelope_id,
-            new_envelope_id,
-            ..
-        } => {
-            if verbose {
-                flush_before_status(out, err, state)?;
-                writeln!(
-                    err,
-                    "{} cep envelope superseded {old_envelope_id} -> {new_envelope_id}",
-                    "·".dimmed()
-                )?;
-            }
-        }
-        TurnEvent::CepEnvelopeMissing {
-            method,
-            required_for,
-            ..
-        } => {
-            if verbose {
-                flush_before_status(out, err, state)?;
-                writeln!(
-                    err,
-                    "{} cep envelope missing for {method} ({required_for})",
-                    "✗".red()
-                )?;
-            }
-        }
         TurnEvent::CepVerifyFailed {
-            envelope_id,
             verify_exit_code,
             ..
         } => {
             if verbose {
                 flush_before_status(out, err, state)?;
                 if let Some(code) = verify_exit_code {
-                    writeln!(
-                        err,
-                        "{} cep verify failed {envelope_id} exit {code}",
-                        "✗".red()
-                    )?;
+                    writeln!(err, "{} cep verify failed exit {code}", "✗".red())?;
                 } else {
-                    writeln!(err, "{} cep verify failed {envelope_id}", "✗".red())?;
+                    writeln!(err, "{} cep verify failed", "✗".red())?;
                 }
-            }
-        }
-        TurnEvent::CepReplanRequired {
-            method,
-            out_of_scope_paths,
-            ..
-        } => {
-            if verbose {
-                flush_before_status(out, err, state)?;
-                writeln!(
-                    err,
-                    "{} cep replan required for {method} ({} paths)",
-                    "·".dimmed(),
-                    out_of_scope_paths.len()
-                )?;
             }
         }
     }

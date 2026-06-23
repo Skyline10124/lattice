@@ -229,35 +229,11 @@ pub enum TurnEvent {
         guard_stage: String,
         error_code: Option<String>,
     },
-    /// An envelope was declared for the current turn (CEP).
-    CepEnvelopeDeclared {
-        envelope_id: String,
-        envelope_hash: String,
-    },
-    /// An existing envelope was superseded by a new one (CEP).
-    CepEnvelopeSuperseded {
-        old_envelope_id: String,
-        new_envelope_id: String,
-        reason: Option<String>,
-    },
-    /// A mutation was attempted without an active envelope (CEP).
-    CepEnvelopeMissing {
-        call_id: u64,
-        method: String,
-        required_for: String,
-    },
     /// A verify command failed after a successful mutation (CEP).
     CepVerifyFailed {
         call_id: u64,
-        envelope_id: String,
         verify_exit_code: Option<i32>,
         diff_retained: bool,
-    },
-    /// A mutation landed outside the active envelope's scope (CEP).
-    CepReplanRequired {
-        call_id: u64,
-        method: String,
-        out_of_scope_paths: Vec<String>,
     },
 }
 

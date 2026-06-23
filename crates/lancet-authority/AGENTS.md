@@ -5,8 +5,8 @@ Crate-local guidance for `lancet-authority`.
 ## Role
 
 This crate owns CEP authority semantics: default policy, capability matching,
-command/network/observation/budget policy, Guard L1 path/scope checks, active
-envelopes, effect-region data, effect checking, effect ledger helpers, and
+command/network/observation/budget policy, Guard L1 path/scope checks,
+effect-region data, effect checking, effect ledger helpers, and
 boundary-credit validation.
 
 ## Sub-Architecture
@@ -18,7 +18,6 @@ boundary-credit validation.
   own domain-specific policy decisions.
 - `src/policy/resolved.rs` owns merged/resolved policy state.
 - `src/guard.rs` owns Guard L1 path and scope verdicts.
-- `src/envelope_store.rs` owns the active envelope store.
 - `src/effect/region.rs`, `checker.rs`, and `ledger.rs` own effect regions and
   checking.
 - `src/boundary_credit.rs` validates isolation boundary evidence.
@@ -33,9 +32,9 @@ boundary-credit validation.
 
 ## Recent Issues
 
-- FIXED M-24-04: base-envelope inputs are declared by catalog descriptors and
-  applied through `lancet-cep::BaseAuthorityPlan`; this crate remains the
-  policy/guard/effect authority implementation.
+- FIXED M-24-04: catalog descriptors declare method-local base authority
+  requirements applied through `lancet-cep::BaseAuthorityPlan`; this crate
+  remains the policy/guard/effect authority implementation.
 - WATCH M-24-01: host capability semantics must align with protocol field names
   and native effect-region matching.
 - WATCH: `mode = off` skips effect-region checks only; policy, capability,
@@ -44,7 +43,7 @@ boundary-credit validation.
 
 ## Next Actions
 
-- Keep base-envelope grant expansion outside this crate unless it becomes a
+- Keep base-authority grant expansion outside this crate unless it becomes a
   policy decision; this crate should validate capabilities, policy, guard, and
   effect semantics.
 - Keep host allow semantics synchronized across protocol capabilities, network
@@ -56,7 +55,7 @@ boundary-credit validation.
 
 ## Record Maintenance
 
-- Update `Recent Issues` and `Next Actions` when policy, guard, envelope, effect
+- Update `Recent Issues` and `Next Actions` when policy, guard, effect
   region, or boundary-credit behavior changes.
 - Record unresolved authority risks in root `FINDINGS.md`.
 - Record landed authority fixes in root `FIX.md` with tests run.

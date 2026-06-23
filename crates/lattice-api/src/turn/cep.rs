@@ -832,26 +832,9 @@ pub(crate) async fn build_envelope_turn_deps_for_test(
 /// Map a CEP transport notification into an internal agent turn event.
 pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
     let params = event.params;
-    // Envelope lifecycle events don't carry call_id; others do.
     match event.method.as_str() {
-        "cep.envelope_declared" => Some(AgentTurnEvent::CepEnvelopeDeclared {
-            envelope_id: string_param(&params, "envelope_id")?,
-            envelope_hash: string_param(&params, "envelope_hash")?,
-        }),
-        "cep.envelope_superseded" => Some(AgentTurnEvent::CepEnvelopeSuperseded {
-            old_envelope_id: string_param(&params, "old_envelope_id")?,
-            new_envelope_id: string_param(&params, "new_envelope_id")?,
-            reason: string_param(&params, "reason"),
-        }),
-        "cep.envelope_missing" => Some(AgentTurnEvent::CepEnvelopeMissing {
-            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
-            method: string_param(&params, "method")?,
-            required_for: string_param(&params, "required_for")
-                .unwrap_or_else(|| "workspace_mutation".into()),
-        }),
         "cep.verify_failed" => Some(AgentTurnEvent::CepVerifyFailed {
             call_id: params.get("call_id").and_then(|v| v.as_u64())?,
-            envelope_id: string_param(&params, "envelope_id").unwrap_or_else(|| "unknown".into()),
             verify_exit_code: params
                 .get("verify_exit_code")
                 .and_then(|v| v.as_i64())
@@ -860,19 +843,6 @@ pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<AgentTurnEvent> {
                 .get("diff_retained")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true),
-        }),
-        "cep.replan_required" => Some(AgentTurnEvent::CepReplanRequired {
-            call_id: params.get("call_id").and_then(|v| v.as_u64())?,
-            method: string_param(&params, "method")?,
-            out_of_scope_paths: params
-                .get("out_of_scope_paths")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
         }),
         _ => {
             let call_id = params.get("call_id").and_then(|v| v.as_u64())?;

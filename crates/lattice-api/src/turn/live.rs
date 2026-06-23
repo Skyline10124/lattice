@@ -198,11 +198,7 @@ fn is_cep_event(event: &TurnEvent) -> bool {
         event,
         TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepEnvelopeDeclared { .. }
-            | TurnEvent::CepEnvelopeSuperseded { .. }
-            | TurnEvent::CepEnvelopeMissing { .. }
             | TurnEvent::CepVerifyFailed { .. }
-            | TurnEvent::CepReplanRequired { .. }
     )
 }
 

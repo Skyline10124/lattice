@@ -119,11 +119,7 @@ impl RunTurnCollector {
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::CepCallStarted { .. }
             | TurnEvent::CepCallFinished { .. }
-            | TurnEvent::CepEnvelopeDeclared { .. }
-            | TurnEvent::CepEnvelopeSuperseded { .. }
-            | TurnEvent::CepEnvelopeMissing { .. }
-            | TurnEvent::CepVerifyFailed { .. }
-            | TurnEvent::CepReplanRequired { .. } => {}
+            | TurnEvent::CepVerifyFailed { .. } => {}
         }
         Ok(())
     }

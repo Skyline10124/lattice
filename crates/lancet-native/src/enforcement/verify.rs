@@ -100,7 +100,7 @@ pub fn validate_verify_command(
                 CepErrorCode::GuardDenied,
                 "verify command must be diagnostic/verification-class, not WorkspaceMutation",
                 CepErrorData::Guard(GuardErrorData {
-                    method: "session.envelope".into(),
+                    method: "verify".into(),
                     reason: "verify command classified as WorkspaceMutation".into(),
                 }),
                 Retriability::Permanent,
@@ -111,7 +111,7 @@ pub fn validate_verify_command(
                 CepErrorCode::GuardDenied,
                 "verify command is hard-denied by command policy",
                 CepErrorData::Guard(GuardErrorData {
-                    method: "session.envelope".into(),
+                    method: "verify".into(),
                     reason: "verify command classified as HardDenied".into(),
                 }),
                 Retriability::Permanent,
