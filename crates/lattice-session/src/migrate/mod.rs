@@ -22,7 +22,8 @@ mod tests;
 
 /// Options driving a one-shot migration run (D-01).
 pub struct MigrateOptions {
-    /// Path to the legacy `sessions.db` SQLite file (read-only source).
+    /// Path to the legacy SQLite session DB (read-only source). Discovered via
+    /// `find_legacy_session_db` when the caller does not override `--source`.
     pub source_db: PathBuf,
     /// Path to the standalone bare Git repository (migration target).
     /// Auto-initialized via `git2::Repository::init_bare` if absent (D-15).
@@ -32,7 +33,7 @@ pub struct MigrateOptions {
     /// Re-run equivalence checks against an already-written target without
     /// re-writing (D-12).
     pub verify_only: bool,
-    /// Physically delete the source `sessions.db` after successful migration
+    /// Physically delete the source DB after successful migration
     /// instead of archiving it (default is archive — D-18).
     pub purge_source: bool,
 }
@@ -55,23 +56,31 @@ pub struct MigrationResult {
 /// equivalence verification passes. On verification failure the source is
 /// left in place and `verification_passed` is `false` (D-12/D-18).
 pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
-    let repo = open_or_init_target(&opts.target_repo)?;
-
-    // --verify-only: skip extraction/writing, just re-check equivalence (D-12).
+    // --verify-only: re-check equivalence against an already-written target
+    // (D-12). NO auto-init — the target must already exist from a prior run.
+    // D-08-GAP2: `open_or_init_target` is deferred past this branch so
+    // verify-only never creates a target as a side effect.
     if opts.verify_only {
         // WR-01: fail loudly if the source DB is absent. After a successful run
-        // the source was archived to `sessions.db.migrated-<ts>`, so a bare
+        // the source was archived to `<db>.migrated-<ts>`, so a bare
         // `--verify-only` against the original path would have SQLite *create*
         // an empty db, extract zero sessions, and vacuously pass — recreating an
-        // empty `sessions.db` that re-trips the startup guard. Point `--source`
-        // at the archived file instead.
+        // empty db that re-trips the startup guard. Point `--source` at the
+        // archived file instead.
         if !opts.source_db.exists() {
             return Err(SessionError::Io {
-                operation: "verify-only: source db not found (point --source at the archived sessions.db.migrated-<ts>)",
+                operation: "verify-only: source db not found (point --source at the archived <db>.migrated-<ts>)",
                 path: opts.source_db.clone(),
                 source: std::io::Error::from(std::io::ErrorKind::NotFound),
             });
         }
+        // Open existing target — error if absent (no auto-init side effect).
+        let repo = git2::Repository::open(&opts.target_repo).map_err(|e| {
+            SessionError::Git(format!(
+                "verify-only: target repo not found at {}: {e} (run a full migration first)",
+                opts.target_repo.display(),
+            ))
+        })?;
         let idmap = extract::Idmap::load(&opts.target_repo)?;
         let conn = rusqlite::Connection::open(&opts.source_db).map_err(|source| {
             SessionError::Database {
@@ -111,7 +120,9 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
 
     let sessions = extract::extract_all_with_conn(&conn)?;
 
-    // --dry-run: report the plan, no writes (D-01).
+    // --dry-run: report the plan, no writes (D-01). D-08-GAP2: dry-run
+    // performs NO target filesystem access — not even an existence check or
+    // open. `open_or_init_target` is NOT called here.
     if opts.dry_run {
         let total_commits: usize = sessions.iter().map(|s| s.commits.len()).sum();
         let total_refs: usize = sessions.iter().map(|s| s.refs.len()).sum();
@@ -130,6 +141,10 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
             source_archived: None,
         });
     }
+
+    // Normal migration — NOW open/init the target (D-15). This is the only
+    // branch that may create the target repo (D-08-GAP2).
+    let repo = open_or_init_target(&opts.target_repo)?;
 
     // Load existing idmap for restartability (D-09).
     let mut idmap = extract::Idmap::load(&opts.target_repo)?;
@@ -176,11 +191,15 @@ fn archive_source(opts: &MigrateOptions) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    // D-08-GAP1: the archive name derives from the actual source filename
+    // (e.g. `session_v12.db.migrated-<ts>`). The fallback is a last-resort
+    // default only triggered by pathological paths where `file_name()` is
+    // `None`; it matches the probe's primary candidate for consistency.
     let base_name = opts
         .source_db
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "sessions.db".to_string());
+        .unwrap_or_else(|| "session.db".to_string());
 
     // WR-06: never overwrite an existing archive. At second granularity a
     // re-run within the same wall-clock second (e.g. the user restored
@@ -223,4 +242,30 @@ pub(crate) fn open_or_init_target(path: &std::path::Path) -> Result<git2::Reposi
         Err(_) => git2::Repository::init_bare(path)
             .map_err(|e| SessionError::Git(format!("init bare target repo: {e}"))),
     }
+}
+
+/// Probe `session_dir` for a legacy SQLite session DB, returning the first
+/// existing candidate in priority order (D-08-GAP1).
+///
+/// Priority: `session_v12.db` (the real legacy `SqliteSessionGraphStore`
+/// filename), `session_v11.db`, `session.db`, `sessions.db` (plural — the
+/// pre-gap-closure assumption, kept as a final fallback for hand-created
+/// test DBs). Returns `None` if no candidate exists (fresh install or
+/// already-migrated per D-18 archive semantics).
+///
+/// Uses only `Path::exists()` — no side effects, no SQLite open.
+pub fn find_legacy_session_db(session_dir: &std::path::Path) -> Option<PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "session_v12.db",
+        "session_v11.db",
+        "session.db",
+        "sessions.db",
+    ];
+    for name in CANDIDATES {
+        let candidate = session_dir.join(name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }

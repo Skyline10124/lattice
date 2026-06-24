@@ -196,8 +196,15 @@ fn cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets() {
 
 #[test]
 fn cli_cutover_session_log_missing_session_fails_with_id_in_message() {
+    // Isolate XDG_CONFIG_HOME so the migration guard does not fire on the
+    // developer's real legacy session DB (e.g. session_v12.db). D-08-GAP1:
+    // the guard now probes for the real legacy filename, so without isolation
+    // a real legacy DB would block this test with a migration prompt instead
+    // of the expected "session not found" error.
+    let tmp = tempfile::tempdir().expect("tempdir");
     let output = lattice()
         .args(["session", "log", "nonexistent-cli-cutover-id"])
+        .env("XDG_CONFIG_HOME", tmp.path())
         .output()
         .unwrap();
     assert!(

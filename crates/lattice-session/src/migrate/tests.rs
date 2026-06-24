@@ -598,3 +598,147 @@ fn no_sqlite_write_path_in_production() {
         "sqlite_graph/ directory should be deleted"
     );
 }
+
+// ─── D-08-GAP1: legacy DB filename probing ─────────────────────────────────
+
+#[test]
+fn find_legacy_session_db_probes_session_v12_db_first() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No legacy DB → None.
+    assert!(crate::migrate::find_legacy_session_db(dir.path()).is_none());
+
+    // session_v12.db alone → found.
+    let v12 = dir.path().join("session_v12.db");
+    std::fs::write(&v12, b"").unwrap();
+    assert_eq!(
+        crate::migrate::find_legacy_session_db(dir.path()),
+        Some(v12.clone())
+    );
+
+    // Add sessions.db (plural) — session_v12.db still wins (priority).
+    let plural = dir.path().join("sessions.db");
+    std::fs::write(&plural, b"").unwrap();
+    assert_eq!(
+        crate::migrate::find_legacy_session_db(dir.path()),
+        Some(v12)
+    );
+
+    // Fresh dir with only sessions.db → found (fallback works).
+    let dir2 = tempfile::tempdir().unwrap();
+    let plural2 = dir2.path().join("sessions.db");
+    std::fs::write(&plural2, b"").unwrap();
+    assert_eq!(
+        crate::migrate::find_legacy_session_db(dir2.path()),
+        Some(plural2)
+    );
+}
+
+#[test]
+fn migration_works_with_session_v12_db_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    // Use the REAL legacy filename, not the plural sessions.db.
+    let db_path = seed_sqlite_db(dir.path(), "session_v12.db");
+    let conn = Connection::open(&db_path).unwrap();
+    seed_linear(&conn, "V12", 3);
+    drop(conn);
+
+    // Verify the helper discovers it.
+    assert_eq!(
+        crate::migrate::find_legacy_session_db(dir.path()),
+        Some(db_path.clone())
+    );
+
+    let target = dir.path().join("sessions.git");
+    let result = run_migration(&migrate_opts(db_path, target.clone())).expect("migration");
+    assert!(result.verification_passed, "verification should pass for session_v12.db");
+    assert_eq!(result.commits_migrated, 3);
+
+    let repo = git2::Repository::open(&target).unwrap();
+    let ref_name = "refs/lattice/sessions/V12/main";
+    assert_eq!(count_commits_from_ref(&repo, ref_name), 3, "session_v12.db migration: 3 commits");
+
+    // The archive name should derive from the actual filename, not sessions.db.
+    assert!(
+        result.source_archived.as_ref().is_some(),
+        "source should be archived"
+    );
+    let archived = result.source_archived.unwrap();
+    assert!(
+        archived.to_string_lossy().contains("session_v12.db.migrated-"),
+        "archive name should derive from session_v12.db, got: {}",
+        archived.display()
+    );
+}
+
+// ─── D-08-GAP2: dry-run performs NO target writes ──────────────────────────
+
+#[test]
+fn dry_run_creates_no_target_skeleton() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = seed_sqlite_db(dir.path(), "session_v12.db");
+    let conn = Connection::open(&db_path).unwrap();
+    seed_linear(&conn, "DRY", 2);
+    drop(conn);
+
+    let target = dir.path().join("sessions.git");
+
+    // Pre-condition: target does not exist.
+    assert!(!target.exists(), "target should not exist before dry-run");
+
+    let opts = MigrateOptions {
+        source_db: db_path.clone(),
+        target_repo: target.clone(),
+        dry_run: true,
+        verify_only: false,
+        purge_source: false,
+    };
+    let result = run_migration(&opts).expect("dry-run");
+
+    // dry-run reports the plan but performs NO writes.
+    assert_eq!(result.sessions_migrated, 1);
+    assert_eq!(result.commits_migrated, 2);
+    assert!(!result.verification_passed, "dry-run should not verify");
+    assert!(result.source_archived.is_none(), "dry-run should not archive");
+
+    // GAP 2 core assertion: the target directory/repo was NOT created.
+    assert!(
+        !target.exists(),
+        "dry-run must NOT create the target repo skeleton (D-01 no-writes contract)"
+    );
+
+    // Source is untouched.
+    assert!(db_path.exists(), "dry-run must not touch the source DB");
+}
+
+#[test]
+fn verify_only_errors_when_target_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = seed_sqlite_db(dir.path(), "session_v12.db");
+    let conn = Connection::open(&db_path).unwrap();
+    seed_linear(&conn, "VO", 2);
+    drop(conn);
+
+    let target = dir.path().join("sessions.git");
+    assert!(!target.exists(), "target should not exist");
+
+    let opts = MigrateOptions {
+        source_db: db_path,
+        target_repo: target.clone(),
+        dry_run: false,
+        verify_only: true,
+        purge_source: false,
+    };
+    let result = run_migration(&opts);
+
+    // verify-only must error when the target is absent (no auto-init).
+    assert!(
+        result.is_err(),
+        "verify-only should error when target does not exist (no auto-init side effect)"
+    );
+    // And must NOT have created the target.
+    assert!(
+        !target.exists(),
+        "verify-only must not create the target repo when it errors"
+    );
+}

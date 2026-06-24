@@ -8,9 +8,9 @@
 //! diff/reset operations. Both SQLite and Git-backed stores are supported.
 
 use lattice_session::{
-    GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
-    PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
-    TurnCommit, TurnCommitInput, TurnLogEntry,
+    migrate::find_legacy_session_db, GitSessionGraphStore, GraphDiff, GraphHead, GraphRef,
+    GraphSession, HeadTranscript, PreparedTurnCommit, ResetResult, SessionGraphStore,
+    SessionGraphSummary, SessionStatus, TurnCommit, TurnCommitInput, TurnLogEntry,
 };
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -252,34 +252,42 @@ impl SessionApi {
     }
 }
 
-/// Startup guard for un-migrated legacy `sessions.db` (D-18, issue 1b).
+/// Startup guard for un-migrated legacy SQLite session DB (D-18, issue 1b).
 ///
 /// The sole reliable migration-completion signal is D-18's archive action:
-/// successful migration renames `sessions.db` to `sessions.db.migrated-<ts>`.
-/// If the original `sessions.db` is still present, migration has NOT completed
-/// (either never started, or crashed mid-write). The guard blocks startup with
-/// a clear message prompting `lattice session migrate`.
+/// successful migration renames the legacy DB to `<db>.migrated-<ts>`. If the
+/// original DB is still present, migration has NOT completed (either never
+/// started, or crashed mid-write). The guard blocks startup with a clear
+/// message prompting `lattice session migrate`.
+///
+/// The legacy filename is discovered via `find_legacy_session_db`, which probes
+/// `session_v12.db`, `session_v11.db`, `session.db`, `sessions.db` in priority
+/// order (D-08-GAP1). The real legacy SQLite session store used
+/// `session_v12.db`; the plural `sessions.db` was an undocumented assumption.
 ///
 /// Does NOT inspect the Git repo for commits — a crashed mid-migration may have
 /// written partial commits, so "has commits" is not a valid success signal.
 /// Uses only `Path::exists()` — no side effects, no git2 repo open (avoids
 /// triggering auto-init).
 pub fn check_migration_guard(git_repo_dir: &Path) -> std::result::Result<(), String> {
-    let legacy_db = git_repo_dir
+    // D-08-GAP1: probe for the real legacy DB filename instead of hardcoding
+    // sessions.db. The session DB lives in the parent of the git repo dir
+    // (e.g. .../lattice/sessions/sessions.git → .../lattice/sessions/).
+    let session_dir = git_repo_dir
         .parent()
-        .map(|parent| parent.join("sessions.db"))
-        .unwrap_or_else(|| Path::new("sessions.db").to_path_buf());
-    if legacy_db.exists() {
-        return Err(format!(
-            "Legacy sessions.db detected at {}. The Git session store has not been migrated. \
-             Run 'lattice session migrate --source {} --target {}' to complete migration \
-             before starting LATTICE.",
-            legacy_db.display(),
-            legacy_db.display(),
-            git_repo_dir.display(),
-        ));
-    }
-    Ok(())
+        .unwrap_or_else(|| Path::new("."));
+    let legacy_db = match find_legacy_session_db(session_dir) {
+        Some(path) => path,
+        None => return Ok(()), // no legacy DB — fresh install or already migrated
+    };
+    Err(format!(
+        "Legacy SQLite session DB detected at {}. The Git session store has not been migrated. \
+         Run 'lattice session migrate --source {} --target {}' to complete migration \
+         before starting LATTICE.",
+        legacy_db.display(),
+        legacy_db.display(),
+        git_repo_dir.display(),
+    ))
 }
 
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {

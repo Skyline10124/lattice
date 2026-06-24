@@ -13,7 +13,9 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
-use lattice_session::{MigrateOptions, migrate};
+use lattice_session::{
+    migrate::find_legacy_session_db, MigrateOptions, migrate,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -127,7 +129,7 @@ pub enum SessionAction {
     },
     /// One-shot SQLite→Git session graph migration (D-01, Phase 39).
     ///
-    /// Reads the legacy `sessions.db`, writes equivalent Git session commits
+    /// Reads the legacy SQLite session DB, writes equivalent Git session commits
     /// and refs into a standalone bare repository, verifies equivalence, then
     /// archives the source. Restartable and idempotent.
     Migrate {
@@ -138,13 +140,13 @@ pub enum SessionAction {
         /// without re-writing.
         #[arg(long)]
         verify_only: bool,
-        /// Override the source `sessions.db` path.
+        /// Override the source legacy SQLite DB path (default: auto-detected).
         #[arg(long)]
         source: Option<PathBuf>,
         /// Override the target bare repo path.
         #[arg(long)]
         target: Option<PathBuf>,
-        /// Physically delete the source `sessions.db` after successful
+        /// Physically delete the source DB after successful
         /// migration instead of archiving it (default is archive).
         #[arg(long)]
         purge_source: bool,
@@ -272,8 +274,9 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
 ///
 /// Thin caller over `lattice_session::migrate::run_migration`. Constructs
 /// `MigrateOptions` from the parsed flags + default paths, runs the pipeline,
-/// and prints the `MigrationResult`. Default source is
-/// `default_session_dir()/sessions.db`; default target is
+/// and prints the `MigrationResult`. Default source is discovered via
+/// `find_legacy_session_db(default_session_dir())` (probes session_v12.db,
+/// session_v11.db, session.db, sessions.db); default target is
 /// `default_session_dir()/sessions.git` (D-15 standalone bare repo).
 fn cmd_migrate(
     dry_run: bool,
@@ -284,7 +287,13 @@ fn cmd_migrate(
     json: bool,
 ) -> Result<std::process::ExitCode> {
     let session_dir = default_session_dir();
-    let source_db = source.unwrap_or_else(|| session_dir.join("sessions.db"));
+    // D-08-GAP1: probe for the real legacy DB filename instead of hardcoding
+    // sessions.db. If no legacy DB is found, fall back to the session_v12.db
+    // path so the downstream "source not found" error names a real filename.
+    let source_db = source.unwrap_or_else(|| {
+        find_legacy_session_db(&session_dir)
+            .unwrap_or_else(|| session_dir.join("session_v12.db"))
+    });
     let target_repo = target.unwrap_or_else(|| session_dir.join("sessions.git"));
 
     let opts = MigrateOptions {
