@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! PROV-06 supplementary tests: projection idempotence after canonicalization.
+//! Supplementary tests: projection idempotence after canonicalization.
 //!
 //! This suite proves `project_rows` is stable when applied twice to the same audit
 //! rows (modulo timestamps / PID metadata). It is **weaker** than

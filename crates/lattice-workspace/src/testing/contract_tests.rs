@@ -8,7 +8,7 @@
 //!
 //! - `tests/contract_deterministic.rs` — CI lane, no KVM, uses
 //!   [`DeterministicWorkspace`].
-//! - `tests/contract_microsandbox.rs` (future, 33-05) — KVM lane, uses
+//! - `tests/contract_microsandbox.rs` (future) — KVM lane, uses
 //!   `MicrosandboxWorkspace`.
 //!
 //! # Test fixture
@@ -74,7 +74,7 @@ pub fn minimal_upper_spec(host_repo_path: PathBuf, baseline_oid: String) -> Uppe
 ///
 /// This is the factory the production contract lane uses to run the suite from
 /// a git-ready warm template (`ImageOrTemplate::Template`) under
-/// [`EgressPolicy::Blocked`] (WS-04 / M-33-05), while the deterministic lane
+/// [`EgressPolicy::Blocked`], while the deterministic lane
 /// keeps using [`minimal_upper_spec`]'s `Image` + `Open` defaults unchanged.
 pub fn minimal_upper_spec_with(
     image_or_template: ImageOrTemplate,
@@ -119,7 +119,7 @@ pub async fn run_suite<W: Workspace>(ws: &W) {
 /// source (`ImageOrTemplate::Image` vs `Template`) and egress policy while the
 /// fixture/OID stay per-test.  This is what lets the production lane run the
 /// whole suite from a git-ready warm template under
-/// [`EgressPolicy::Blocked`](crate::EgressPolicy::Blocked) (WS-04 / M-33-05)
+/// [`EgressPolicy::Blocked`](crate::EgressPolicy::Blocked)
 /// without forking the test bodies.
 ///
 /// Panics on the first failing assertion (like a normal `#[test]`).
@@ -139,7 +139,7 @@ where
 
 // ── Individual contract tests ────────────────────────────────────────────────
 
-/// V-01 — WS-01/WS-02: `create_upper` succeeds and returns a non-empty handle.
+/// `create_upper` succeeds and returns a non-empty handle.
 async fn test_create_upper_returns_handle<W, F>(ws: &W, make_spec: F)
 where
     W: Workspace,
@@ -155,7 +155,7 @@ where
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// V-02 — WS-02: `exec_upper` captures stdout.
+/// `exec_upper` captures stdout.
 async fn test_exec_captures_stdout<W, F>(ws: &W, make_spec: F)
 where
     W: Workspace,
@@ -180,7 +180,7 @@ where
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// V-03 / T-33-01 — WS-02: host repo path does not appear in `handle.id`
+/// host repo path does not appear in `handle.id`
 /// or in `exec_upper` stdout.
 async fn test_no_lower_path_in_handle<W, F>(ws: &W, make_spec: F)
 where
@@ -218,7 +218,7 @@ where
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// V-04 — WS-03: a file committed at baseline OID exists in the Upper worktree.
+/// a file committed at baseline OID exists in the Upper worktree.
 async fn test_baseline_content<W, F>(ws: &W, make_spec: F)
 where
     W: Workspace,
@@ -246,7 +246,7 @@ where
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// V-04 — WS-03: `git rev-parse --show-toplevel` inside the Upper returns a
+/// `git rev-parse --show-toplevel` inside the Upper returns a
 /// path that exists (the Upper has its own `.git` root).
 async fn test_upper_git_root<W, F>(ws: &W, make_spec: F)
 where
@@ -277,7 +277,7 @@ where
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// V-02 / PROMO-02 — Upper `HEAD` equals the host baseline OID exactly.
+/// Upper `HEAD` equals the host baseline OID exactly.
 async fn test_exact_baseline_identity<W, F>(ws: &W, make_spec: F)
 where
     W: Workspace,
@@ -360,7 +360,7 @@ pub fn make_chained_fixture_repo() -> (tempfile::TempDir, String) {
     (dir, baseline_oid.to_string())
 }
 
-/// V-05 (det tier) — `destroy_upper` is idempotent: a second call succeeds.
+/// `destroy_upper` is idempotent: a second call succeeds.
 async fn test_destroy_is_idempotent<W, F>(ws: &W, make_spec: F)
 where
     W: Workspace,

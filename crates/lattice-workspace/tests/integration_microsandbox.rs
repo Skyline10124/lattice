@@ -11,22 +11,22 @@
 //!
 //! # Tests
 //!
-//! - `test_template_create_and_restore` (V-05 / WS-04): creates an Upper from
+//! - `test_template_create_and_restore`: creates an Upper from
 //!   a fresh image, stops it, snapshots as a template, then restores a new CoW
 //!   Upper from the snapshot and asserts exec succeeds.
 //!
-//! - `test_egress_blocked_live` (V-08 / EGRESS-01): creates an Upper with
+//! - `test_egress_blocked_live`: creates an Upper with
 //!   `EgressPolicy::Blocked` and verifies that `wget` cannot reach an external host.
 //!
-//! - `test_microsandbox_contract_suite` (WS-01/WS-02/WS-03 + WS-04 / M-33-05):
+//! - `test_microsandbox_contract_suite`:
 //!   builds a git-ready warm template, then runs the adapter-agnostic contract
 //!   suite from 33-04 against `MicrosandboxWorkspace` from
 //!   `ImageOrTemplate::Template` under `EgressPolicy::Blocked` — proving the
 //!   suite no longer needs a per-Upper `apt-get install git` (the prior >595s
 //!   timeout) and that a git baseline survives Blocked egress.
 //!
-//! - `test_git_ready_template_has_git_under_blocked_egress` (EGRESS-01 / WS-03 /
-//!   WS-04): builds a git-ready template, restores an Upper from it under
+//! - `test_git_ready_template_has_git_under_blocked_egress`: builds a git-ready
+//!   template, restores an Upper from it under
 //!   `EgressPolicy::Blocked`, and asserts `git rev-parse --show-toplevel`
 //!   exits 0 — git came from the template, not apt-get.
 //!
@@ -96,9 +96,9 @@ fn minimal_live_spec(
     }
 }
 
-// ── V-05 / WS-04: template create and restore ────────────────────────────────
+// ── template create and restore ────────────────────────────────────────────
 
-/// V-05 / WS-04: `template_create` produces a named SDK snapshot; a new Upper
+/// `template_create` produces a named SDK snapshot; a new Upper
 /// can be restored from it via `Sandbox::builder().from_snapshot()`.
 ///
 /// Flow:
@@ -140,7 +140,7 @@ async fn test_template_create_and_restore() {
     let handle = ws
         .create_upper(&spec)
         .await
-        .expect("V-05: create_upper from image must succeed on KVM host");
+        .expect("create_upper from image must succeed on KVM host");
 
     // Step 2: write a sentinel file to verify it survives into the snapshot.
     // Use /root/ not /tmp/ — /tmp may be a ramdisk volatile across snapshots.
@@ -152,10 +152,10 @@ async fn test_template_create_and_restore() {
             &["-c", "echo V05_SENTINEL > /root/v05_sentinel"],
         )
         .await
-        .expect("V-05: exec sh to write sentinel must succeed");
+        .expect("exec sh to write sentinel must succeed");
     assert_eq!(
         write_out.exit_code, 0,
-        "V-05: sentinel write must exit 0; stderr: {:?}",
+        "sentinel write must exit 0; stderr: {:?}",
         write_out.stderr
     );
 
@@ -163,10 +163,10 @@ async fn test_template_create_and_restore() {
     let snap_name = ws
         .template_create(&handle, &template_name)
         .await
-        .expect("V-05: template_create must succeed on KVM host");
+        .expect("template_create must succeed on KVM host");
     assert_eq!(
         snap_name, template_name,
-        "V-05: returned snapshot name must match"
+        "returned snapshot name must match"
     );
 
     // Step 4: restore a new CoW Upper from the snapshot.
@@ -182,20 +182,20 @@ async fn test_template_create_and_restore() {
     let restored_handle = ws
         .restore_upper(&template_name, new_name, &restored_spec)
         .await
-        .expect("V-05: restore_upper from snapshot must succeed on KVM host");
+        .expect("restore_upper from snapshot must succeed on KVM host");
 
     // Step 5: exec inside the restored Upper.
     let echo_out = ws
         .exec_upper(&restored_handle, "echo", &["restored-ok"])
         .await
-        .expect("V-05: exec_upper on restored Upper must succeed");
+        .expect("exec_upper on restored Upper must succeed");
     assert_eq!(
         echo_out.exit_code, 0,
-        "V-05: echo in restored Upper must exit 0"
+        "echo in restored Upper must exit 0"
     );
     assert!(
         echo_out.stdout.contains("restored-ok"),
-        "V-05: stdout must contain 'restored-ok'; got: {:?}",
+        "stdout must contain 'restored-ok'; got: {:?}",
         echo_out.stdout
     );
 
@@ -203,23 +203,23 @@ async fn test_template_create_and_restore() {
     let read_out = ws
         .exec_upper(&restored_handle, "cat", &["/root/v05_sentinel"])
         .await
-        .expect("V-05: cat sentinel in restored Upper must succeed");
-    assert_eq!(read_out.exit_code, 0, "V-05: cat sentinel must exit 0");
+        .expect("cat sentinel in restored Upper must succeed");
+    assert_eq!(read_out.exit_code, 0, "cat sentinel must exit 0");
     assert!(
         read_out.stdout.contains("V05_SENTINEL"),
-        "V-05: restored Upper must contain sentinel; stdout: {:?}",
+        "restored Upper must contain sentinel; stdout: {:?}",
         read_out.stdout
     );
 
     // Step 7: teardown.
     ws.destroy_upper(&restored_handle)
         .await
-        .expect("V-05: destroy_upper on restored Upper must succeed");
+        .expect("destroy_upper on restored Upper must succeed");
 }
 
-// ── V-08 / EGRESS-01: blocked egress live enforcement ───────────────────────
+// ── blocked egress live enforcement ───────────────────────────────────────
 
-/// V-08 / EGRESS-01: `EgressPolicy::Blocked` denies external host reachability
+/// `EgressPolicy::Blocked` denies external host reachability
 /// inside an Upper on a live KVM host.
 ///
 /// Uses `wget -q -O - https://example.com` which exits non-zero when the
@@ -230,7 +230,7 @@ async fn test_template_create_and_restore() {
 /// `alpine:3.19` is used here because the egress test only needs `wget` and
 /// `sh` (present in alpine by default).  `deliver_baseline` still requires
 /// `git` inside the VM — alpine does not have `git`, so `deliver_baseline` will
-/// fail at the `git init` step.  We accept this: the purpose of V-08 is to
+/// fail at the `git init` step.  We accept this: the purpose is to
 /// verify that egress enforcement fires, not to verify baseline delivery.
 /// A workaround: use a small debian image that has git, or install git in the
 /// VM first.  For simplicity, we use `python:3.12-slim` (has git + wget via apt).
@@ -256,7 +256,7 @@ async fn test_egress_blocked_live() {
     let handle = ws
         .create_upper(&spec)
         .await
-        .expect("V-08: create_upper with Blocked egress must succeed on KVM host");
+        .expect("create_upper with Blocked egress must succeed on KVM host");
 
     // python:3.12-slim has Python 3 available. Use it to attempt a network connection.
     // This avoids depending on curl/wget which may not be installed.
@@ -274,28 +274,28 @@ async fn test_egress_blocked_live() {
             ],
         )
         .await
-        .expect("V-08: exec_upper python3 must not panic (exit code may be non-zero)");
+        .expect("exec_upper python3 must not panic (exit code may be non-zero)");
 
     assert_ne!(
         out.exit_code, 0,
-        "V-08: blocked egress must cause python3 urllib to fail (exit non-zero); \
+        "blocked egress must cause python3 urllib to fail (exit non-zero); \
          stdout: {:?}, stderr: {:?}",
         out.stdout, out.stderr
     );
 
     ws.destroy_upper(&handle)
         .await
-        .expect("V-08: destroy_upper must succeed");
+        .expect("destroy_upper must succeed");
 }
 
-// ── WS-01/WS-02/WS-03 + WS-04/M-33-05: contract suite from a git-ready template ─
+// ── contract suite from a git-ready template ──────────────────────────────
 
 /// Run the adapter-agnostic contract suite (33-04) against `MicrosandboxWorkspace`
 /// from a **git-ready warm template** under `EgressPolicy::Blocked`.
 ///
-/// This is the production-adapter verification required by D-33-03 (deferred from
-/// 33-04 to 33-05) and the M-33-05 closure (gap-closure Plan 33-06).  On a KVM
-/// host, the full suite proves WS-01, WS-02, WS-03 on the real microsandbox
+/// This is the production-adapter verification required by (deferred from
+/// 33-04 to 33-05) and the closure (gap-closure Plan 33-06).  On a KVM
+/// host, the full suite proves on the real microsandbox
 /// backend — now without a per-Upper `apt-get install git` (the prior >595s
 /// timeout) and under Blocked egress (proving git survives without network).
 ///
@@ -332,9 +332,9 @@ async fn test_microsandbox_contract_suite() {
     .await;
 }
 
-// ── EGRESS-01 / WS-03 / WS-04: git root survives Blocked egress via template ───
+// ── git root survives Blocked egress via template ───────────────────────────
 
-/// EGRESS-01 / WS-03 / WS-04 (M-33-05): an Upper restored from a git-ready
+/// an Upper restored from a git-ready
 /// template has a functional `/workspace` `.git` root **even under
 /// `EgressPolicy::Blocked`**, because git came from the template rather than a
 /// per-Upper `apt-get install git` (which Blocked egress would prevent).

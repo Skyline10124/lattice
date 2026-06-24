@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 34 adapter-neutral primitive contract for [`DeterministicWorkspace`].
+//! Adapter-neutral primitive contract for [`DeterministicWorkspace`].
 
 #![cfg(feature = "test-utils")]
 
@@ -26,7 +26,7 @@ fn assert_no_root_leak(value: &str, host_repo: &str) {
 }
 
 #[tokio::test]
-async fn phase34_deterministic_primitives_contract() {
+async fn deterministic_primitives_contract() {
     let (repo, oid) = contract_tests::make_fixture_repo();
     let host_repo = repo.path().to_string_lossy().to_string();
     let ws = DeterministicWorkspace::new().expect("workspace");
@@ -85,7 +85,7 @@ async fn phase34_deterministic_primitives_contract() {
     }
 
     let exec = ExecRequest::new(
-        vec!["echo".into(), "phase34".into()],
+        vec!["echo".into(), "test-agent".into()],
         BTreeMap::new(),
         5_000,
         root.clone(),
@@ -93,13 +93,13 @@ async fn phase34_deterministic_primitives_contract() {
     .expect("exec request");
     let out = ws.exec(&handle, &exec).await.expect("exec");
     assert_no_root_leak(&out.stdout, &host_repo);
-    assert!(out.stdout.contains("phase34"));
+    assert!(out.stdout.contains("test-agent"));
 
     ws.destroy_upper(&handle).await.expect("destroy");
 }
 
 #[tokio::test]
-async fn phase34_rejects_invalid_paths() {
+async fn rejects_invalid_paths() {
     let ws = DeterministicWorkspace::new().expect("workspace");
     let (repo, oid) = contract_tests::make_fixture_repo();
     let spec = contract_tests::minimal_upper_spec(repo.path().to_owned(), oid);
@@ -119,7 +119,7 @@ async fn phase34_rejects_invalid_paths() {
 }
 
 #[tokio::test]
-async fn phase34_content_too_large_before_write() {
+async fn content_too_large_before_write() {
     let ws = DeterministicWorkspace::new().expect("workspace");
     let (repo, oid) = contract_tests::make_fixture_repo();
     let spec = contract_tests::minimal_upper_spec(repo.path().to_owned(), oid);
@@ -135,7 +135,7 @@ async fn phase34_content_too_large_before_write() {
 }
 
 #[tokio::test]
-async fn phase34_git_facts_without_bypass() {
+async fn git_facts_without_bypass() {
     let ws = DeterministicWorkspace::new().expect("workspace");
     let (repo, oid) = contract_tests::make_fixture_repo();
     let host_repo = repo.path().to_string_lossy().to_string();
@@ -152,7 +152,7 @@ async fn phase34_git_facts_without_bypass() {
 }
 
 #[tokio::test]
-async fn phase34_create_overwrite_delete_intents() {
+async fn create_overwrite_delete_intents() {
     let ws = DeterministicWorkspace::new().expect("workspace");
     let (repo, oid) = contract_tests::make_fixture_repo();
     let spec = contract_tests::minimal_upper_spec(repo.path().to_owned(), oid);

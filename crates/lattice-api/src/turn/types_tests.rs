@@ -112,7 +112,7 @@ fn old_failed_variant_removed_compile_guard() {
 }
 
 /// TurnCommitted serializes with separate `"status"` and `"disposition"` fields.
-/// Both are independent terminal dimensions (D-24).
+/// Both are independent terminal dimensions.
 #[test]
 fn turn_event_disposition_turn_committed_has_status_and_disposition() {
     let event = TurnEvent::TurnCommitted {

@@ -8,7 +8,7 @@
 //! startup compares journal state against immutable commit lookup and
 //! operational snapshot state to converge orphan, phantom, and stale entries.
 //!
-//! Follows the Phase 35 WAL durability pattern (D-13): create/append newline,
+//! Follows the WAL durability pattern: create/append newline,
 //! `sync_all`, parent fsync, tolerate only a torn final line, and durable
 //! removal.
 
@@ -221,7 +221,7 @@ impl SnapshotJournal {
     /// Durably remove the journal file (close handle, delete, fsync parent).
     pub fn remove_durable(&mut self) -> Result<(), String> {
         let path = self.path.clone();
-        // CR-03: remove the file BEFORE releasing the write handle. On Unix,
+        // remove the file BEFORE releasing the write handle. On Unix,
         // `remove_file` unlinks the directory entry while the open write handle
         // keeps the inode alive; if removal fails, the write handle stays usable
         // for `append_record`. Replacing the handle with a read-only one first

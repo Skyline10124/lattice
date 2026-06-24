@@ -1666,7 +1666,7 @@ mod tests {
         assert_eq!(err.code, CepErrorCode::PathContainment);
     }
 
-    mod phase34_direct_observation {
+    mod direct_observation {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,
@@ -1866,7 +1866,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_observation_returns_upper_not_lower() {
+        async fn direct_observation_returns_upper_not_lower() {
             let dir = TempDir::new().unwrap();
             fs::write(dir.path().join("conflict.txt"), "LOWER_CONTENT").unwrap();
             let root = dir.path().to_str().unwrap();
@@ -1893,7 +1893,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_observation_policy_denial_before_preflight() {
+        async fn direct_observation_policy_denial_before_preflight() {
             let dir = TempDir::new().unwrap();
             let root = dir.path().to_str().unwrap();
             let registry = native_registry(root);

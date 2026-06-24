@@ -127,7 +127,7 @@ impl TurnCommitStatus {
 ///
 /// Every terminal turn has both a `TurnCommitStatus` (execution outcome) and a
 /// `WorkspaceDisposition` (workspace promotion outcome). These are separate
-/// exhaustive typed values (D-18).
+/// exhaustive typed values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceDisposition {
@@ -176,7 +176,7 @@ impl WorkspaceDisposition {
 
 // ─── Lifecycle Evidence ───────────────────────────────────────────────────
 
-/// Verification execution evidence bound to a candidate OID (D-04).
+/// Verification execution evidence bound to a candidate OID.
 ///
 /// Records the verify command argv, profile hash, expected/actual exit code,
 /// pass/fail result, and the candidate OID that was verified.
@@ -239,7 +239,7 @@ pub struct TurnSnapshotRef {
     pub name: String,
 }
 
-/// Immutable logical lifecycle evidence for a terminal turn (D-29).
+/// Immutable logical lifecycle evidence for a terminal turn.
 ///
 /// Carries target ref, baseline/candidate OIDs and refs, verification evidence,
 /// retained snapshot reference, and resume linkage. Fields are optional where
@@ -328,7 +328,7 @@ pub struct TurnLogEntry {
 }
 
 impl WorkspaceDisposition {
-    /// Default for backward-compatible deserialization of pre-Phase-36 rows.
+    /// Default for backward-compatible deserialization of legacy rows.
     fn default_for_deser() -> Self {
         Self::NotApplicable
     }
@@ -421,7 +421,7 @@ pub trait SessionGraphStore: Send + Sync {
     /// Persist a precomputed turn commit with prepared identity.
     ///
     /// Uses the prepared timestamp, message IDs, and commit ID. Validates current
-    /// HEAD as CAS. Rejects a same-ID row whose payload differs (T-36-06).
+    /// HEAD as CAS. Rejects a same-ID row whose payload differs.
     fn commit_prepared_turn(&self, prepared: PreparedTurnCommit) -> crate::Result<TurnCommit>;
 
     /// Look up a single turn commit by session and commit ID.
@@ -435,7 +435,7 @@ pub trait SessionGraphStore: Send + Sync {
 
     /// Mark a commit's retained snapshot as lost (operational state only).
     ///
-    /// Must never mutate immutable commit fields or IDs (T-36-07).
+    /// Must never mutate immutable commit fields or IDs.
     fn set_snapshot_lost(&self, commit_id: &str, lost: bool) -> crate::Result<()>;
 
     /// Query snapshot-lost operational state for a commit.
@@ -532,7 +532,7 @@ pub fn canonical_turn_commit_id(
     hash_json("v1_turn_commit", &payload)
 }
 
-/// Schema version for the v2 lifecycle-aware commit payload (D-29).
+/// Schema version for the v2 lifecycle-aware commit payload.
 pub const COMMIT_PAYLOAD_SCHEMA_VERSION_V2: u32 = 2;
 
 /// Precomputed turn commit identity, produced before any storage effects.
@@ -552,7 +552,7 @@ pub struct PreparedTurnCommit {
 
 /// Compute the final immutable turn commit ID before any storage effects.
 ///
-/// Includes all D-29 logical lifecycle fields in the canonical payload.
+/// Includes all logical lifecycle fields in the canonical payload.
 /// Bumps the schema version to v2 so lifecycle-aware commits have distinct
 /// identity from v1 commits.
 pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> PreparedTurnCommit {
@@ -603,7 +603,7 @@ pub fn prepare_turn_commit(input: &TurnCommitInput, created_at: &str) -> Prepare
     }
 }
 
-/// V2 canonical turn commit ID including disposition and lifecycle evidence (D-29).
+/// V2 canonical turn commit ID including disposition and lifecycle evidence.
 fn canonical_turn_commit_id_v2(
     input: &TurnCommitInput,
     message_ids: &[String],
@@ -649,7 +649,6 @@ fn canonical_turn_commit_id_v2(
 
 /// Derive the physical snapshot name from session ID, commit ID, and nonce.
 ///
-/// Format:  (D-12, D-29).
 pub fn derive_snapshot_name(session_id: &str, commit_id: &str, nonce: u32) -> String {
     let commit_prefix: String = commit_id.chars().take(8).collect();
     format!("lattice-{}-{}-{:08x}", session_id, commit_prefix, nonce)

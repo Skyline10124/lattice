@@ -117,17 +117,17 @@ pub enum SessionAction {
         /// Commit id to reset to.
         target: String,
     },
-    /// Resume a pending turn from a cold snapshot (D-16, cold resume).
+    /// Resume a pending turn from a cold snapshot (cold resume).
     Resume {
         /// Session id containing the pending turn to resume.
         session_id: String,
     },
-    /// Prune retained snapshots scoped to a session (D-17, manual prune).
+    /// Prune retained snapshots scoped to a session (manual prune).
     PruneSnapshots {
         /// Session id whose snapshots should be pruned.
         session_id: String,
     },
-    /// One-shot SQLite→Git session graph migration (D-01, Phase 39).
+    /// One-shot SQLite→Git session graph migration.
     ///
     /// Reads the legacy SQLite session DB, writes equivalent Git session commits
     /// and refs into a standalone bare repository, verifies equivalence, then
@@ -160,7 +160,7 @@ pub async fn run(
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
     // Migrate operates below the SessionApi (direct SQLite read + Git write),
-    // so handle it before constructing the default API (D-01).
+    // so handle it before constructing the default API.
     if let SessionAction::Migrate {
         dry_run,
         verify_only,
@@ -270,14 +270,14 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
     Ok(loaded)
 }
 
-/// Run the `session migrate` subcommand (D-01, Phase 39).
+/// Run the `session migrate` subcommand.
 ///
 /// Thin caller over `lattice_session::migrate::run_migration`. Constructs
 /// `MigrateOptions` from the parsed flags + default paths, runs the pipeline,
 /// and prints the `MigrationResult`. Default source is discovered via
 /// `find_legacy_session_db(default_session_dir())` (probes session_v12.db,
 /// session_v11.db, session.db, sessions.db); default target is
-/// `default_session_dir()/sessions.git` (D-15 standalone bare repo).
+/// `default_session_dir()/sessions.git` (standalone bare repo).
 fn cmd_migrate(
     dry_run: bool,
     verify_only: bool,
@@ -287,7 +287,7 @@ fn cmd_migrate(
     json: bool,
 ) -> Result<std::process::ExitCode> {
     let session_dir = default_session_dir();
-    // D-08-GAP1: probe for the real legacy DB filename instead of hardcoding
+    // probe for the real legacy DB filename instead of hardcoding
     // sessions.db. If no legacy DB is found, fall back to the session_v12.db
     // path so the downstream "source not found" error names a real filename.
     let source_db = source.unwrap_or_else(|| {
@@ -307,7 +307,7 @@ fn cmd_migrate(
     let result = migrate::run_migration(&opts)?;
 
     if json {
-        // IN-04: build the object with serde_json so source_archived serializes
+        // build the object with serde_json so source_archived serializes
         // to a real JSON `null` (not the string "null") when absent, and any
         // path is properly escaped. Hand-built JSON could emit invalid output
         // for a path containing a quote or backslash.
@@ -734,7 +734,7 @@ fn cmd_reset_api(api: &SessionApi, session_id: &str, target: &str, json: bool) -
     Ok(())
 }
 
-/// Resume a pending turn from a cold snapshot (D-16).
+/// Resume a pending turn from a cold snapshot.
 ///
 /// Calls the typed API (`lattice_api::resume_turn`) and renders the resulting
 /// [`TurnCommit`] in JSON or human mode. Does not implement runtime logic locally.
@@ -793,7 +793,7 @@ async fn cmd_resume_api(api: &SessionApi, session_id: &str, json: bool) -> std::
     }
 }
 
-/// Prune retained snapshots scoped to a session (D-17).
+/// Prune retained snapshots scoped to a session.
 ///
 /// Calls the typed API (`lattice_api::prune_session_snapshots`) and renders
 /// the exact released/skipped/missing counts. Requires a workspace override
@@ -1182,7 +1182,7 @@ mod session_cli {
 
     #[test]
     fn migrate_subcommand_parses_with_flags() {
-        // Phase 39 D-01: `migrate` is a real subcommand with --dry-run,
+        // `migrate` is a real subcommand with --dry-run,
         // --verify-only, --source, --target, --purge-source.
         let action = try_parse(&[
             "migrate",
@@ -1348,7 +1348,7 @@ mod session_cli {
 
     #[test]
     fn project_branch_new_without_required_flag_fails() {
-        // After Phase 36-15, session new must require --project-branch.
+        // session new must require --project-branch.
         // Currently this PASSES parsing (no required flag), making this test RED.
         let action = try_parse(&["new", "--agent", "coder"]);
         assert!(

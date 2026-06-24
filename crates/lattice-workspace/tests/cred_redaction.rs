@@ -1,14 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! CRED-01: Debug redaction tests for `CredentialSpec`.
+//! Debug redaction tests for `CredentialSpec`.
 //!
 //! These tests verify that the manual `Debug` implementation on `CredentialSpec`
 //! does not expose secret values.  Pattern matches `crates/lattice-profile/
 //! src/schema.rs` lines 1488-1514 (absent-string assertion pattern).
 //!
-//! Validation rows: V-09 (`env_var_debug_does_not_contain_value`),
-//! V-10 (`file_cred_debug_does_not_contain_content`).
+//! Validation rows: (`env_var_debug_does_not_contain_value`),
+//! (`file_cred_debug_does_not_contain_content`).
 
 use lattice_workspace::{CredentialSpec, EgressPolicy, ImageOrTemplate, UpperSpec};
 
@@ -86,7 +86,7 @@ fn upper_spec_debug_via_credential_list() {
 /// Composite guard test — matches the `test_cred_debug_redaction` CI filter.
 ///
 /// Asserts that BOTH `EnvVar` and `File` credential variants redact their
-/// secret values in `Debug` output (CRED-01, V-09, V-10).
+/// secret values in `Debug` output.
 #[test]
 fn test_cred_debug_redaction() {
     // EnvVar: value must be redacted.

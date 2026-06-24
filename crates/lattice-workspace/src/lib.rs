@@ -20,15 +20,15 @@
 //! # Security Notes
 //!
 //! - [`UpperHandle`] carries only `id` + `backend`; no host paths or live SDK
-//!   handles are exposed to callers (WS-02, T-33-01).
+//!   handles are exposed to callers.
 //! - [`CredentialSpec`] implements `Debug` manually to redact secret values
-//!   from logs and traces (CRED-01, T-33-02).
+//!   from logs and traces.
 //! - [`validate_baseline_oid`] enforces hex-only 40-char format before any OID
-//!   is used in exec arguments (T-33-05).
-//!   WR-06: accepts 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
+//!   is used in exec arguments.
+//!   Accepts 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
 //! - [`apply_egress`] builds `NetworkPolicy::none().allow_domains([...])?` for
 //!   allowlist policies; there is no `NetworkPolicy::allowlist()` constructor
-//!   (T-33-03; Wave 0 A7 confirmed DNS-native resolution for allowlisted domains).
+//!   (Wave 0 A7 confirmed DNS-native resolution for allowlisted domains).
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +46,7 @@ pub use paths::{
 };
 
 // Shared git2 helpers used by both MicrosandboxWorkspace and DeterministicWorkspace.
-// Exposed as pub so downstream crates (33-04 DeterministicWorkspace) can call them.
+// Exposed as pub so downstream crates (DeterministicWorkspace) can call them.
 pub mod git;
 pub mod git_status;
 pub mod promotion;
@@ -134,7 +134,7 @@ pub enum EgressPolicy {
 
 /// Credential to inject into an Upper at creation time.
 ///
-/// # Security (CRED-01, T-33-02)
+/// # Security
 ///
 /// This type intentionally does **not** derive `Debug`.  The manual `Debug`
 /// implementation below redacts secret values so they never appear in logs,
@@ -199,16 +199,16 @@ impl std::fmt::Debug for CredentialSpec {
 ///
 /// - `host_repo_path` is used only on the host side for git-archive export; it
 ///   is **never** passed to exec argv or into any SDK builder chain visible to
-///   the model (WS-02, T-33-01).
+///   the model.
 /// - `baseline_oid` must be validated by [`validate_baseline_oid`] before use
-///   to prevent OID-based argv injection (T-33-05).
+///   to prevent OID-based argv injection.
 #[derive(Clone, Debug)]
 pub struct UpperSpec {
     /// Rootfs source: fresh OCI image or a named warm SDK snapshot.
     pub image_or_template: ImageOrTemplate,
     /// 40-character hex Git OID of the baseline commit to check out.
     /// Validated by [`validate_baseline_oid`] before first use.
-    /// WR-06: 64-character SHA-256 OIDs are also accepted.
+    /// 64-character SHA-256 OIDs are also accepted.
     pub baseline_oid: String,
     /// Host path to the git repository containing `baseline_oid`.
     /// Used only for git-archive export on the host; never passed into exec.
@@ -227,7 +227,7 @@ pub struct UpperSpec {
 
 /// Handle to a live Upper workspace.
 ///
-/// # Security (WS-02, T-33-01)
+/// # Security
 ///
 /// `UpperHandle` carries only `id` + `backend`.  No host paths, no live SDK
 /// `Sandbox` fields.  The live SDK object is held inside the workspace
@@ -246,9 +246,9 @@ pub struct UpperHandle {
 /// A  identifies a credential-bearing per-turn snapshot that preserves
 /// the entire Upper filesystem state (including ).  Unlike warm templates
 /// (which are credential-free and shared), retained snapshots are per-session and
-/// may contain injected secrets (D-11, design spec §7.3).
+/// may contain injected secrets (design spec §7.3).
 ///
-/// # Security (T-36-05, T-36-15)
+/// # Security
 ///
 /// The  is the derived physical locator ().
 /// Debug output exposes only  and ; never log snapshot content or
@@ -257,7 +257,7 @@ pub struct UpperHandle {
 pub struct SnapshotRef {
     /// The backend that owns the snapshot artifact.
     pub backend: Backend,
-    /// The derived physical snapshot name (D-12 format).
+    /// The derived physical snapshot name.
     pub name: String,
 }
 
@@ -291,7 +291,7 @@ pub enum WorkspaceError {
     #[error("git operation failed: {0}")]
     Git(String),
     /// The provided OID string is not a valid 40-character hex SHA-1.
-    /// WR-06: not a valid 40- (SHA-1) or 64- (SHA-256) character hex OID.
+    /// Not a valid 40- (SHA-1) or 64- (SHA-256) character hex OID.
     #[error("invalid baseline OID `{0}`: must be 40 or 64 hex characters")]
     InvalidOid(String),
     /// Upper HEAD does not match the requested host baseline commit OID.
@@ -318,7 +318,7 @@ pub enum WorkspaceError {
     /// Snapshot quota exceeded: cannot retain more than  pending snapshots.
     #[error("snapshot quota exceeded: {current} pending snapshots, maximum is {max}")]
     SnapshotQuotaExceeded { current: u32, max: u32 },
-    /// Invalid snapshot name (does not match D-12 format).
+    /// Invalid snapshot name (does not match the expected format).
     #[error(
         "invalid snapshot name : must match lattice-{{session}}-{{commit_hex8}}-{{nonce_hex8}}"
     )]
@@ -398,8 +398,8 @@ impl CandidateExport {
 /// Validate that `oid` is a 40- (SHA-1) or 64- (SHA-256) character hex OID.
 ///
 /// Returns [`WorkspaceError::InvalidOid`] if not.  Call this before using
-/// `baseline_oid` in any exec argv to prevent injection (T-33-05).
-/// WR-06: the previous 40-char-only check silently rejected SHA-256 repos.
+/// `baseline_oid` in any exec argv to prevent injection.
+/// The previous 40-char-only check silently rejected SHA-256 repos.
 pub fn validate_baseline_oid(oid: &str) -> Result<()> {
     let len = oid.len();
     let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());
@@ -410,9 +410,9 @@ pub fn validate_baseline_oid(oid: &str) -> Result<()> {
     }
 }
 
-// ── Snapshot name validation (D-12) ─────────────────────────────────────────
+// ── Snapshot name validation ─────────────────────────────────────────────────
 
-/// Validate that `name` matches the D-12 retained snapshot format:
+/// Validate that `name` matches the retained snapshot format:
 /// `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`.
 ///
 /// Returns `Ok(())` if valid, or [`WorkspaceError::InvalidSnapshotName`] if not.
@@ -438,10 +438,10 @@ pub fn validate_snapshot_name(name: &str) -> Result<()> {
 /// translates `NetPlan` into a concrete `microsandbox::sandbox::SandboxBuilder`
 /// call.
 ///
-/// See V-06 / V-07 for the det-tier tests.
+/// See the det-tier tests.
 // allow(dead_code): consumed in #[cfg(test)] egress_tests and in
 // microsandbox::apply_egress; both are valid callers suppressed by the linter
-// in non-test builds before 33-05 wires the full create_upper path.
+// in non-test builds before the full create_upper path is wired.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NetPlan {
@@ -456,9 +456,9 @@ pub(crate) enum NetPlan {
 /// Map an [`EgressPolicy`] to an inspectable [`NetPlan`].
 ///
 /// Pure function with no SDK types; suitable for `assert_eq!` unit tests
-/// (V-06, V-07).  The SDK call is in `microsandbox::apply_egress`.
+/// The SDK call is in `microsandbox::apply_egress`.
 // allow(dead_code): called in egress_tests (#[cfg(test)]) and in
-// microsandbox::apply_egress; suppressed before 33-05 full wiring.
+// microsandbox::apply_egress; suppressed before full wiring.
 #[allow(dead_code)]
 pub(crate) fn plan_egress(policy: &EgressPolicy) -> NetPlan {
     match policy {
@@ -489,7 +489,7 @@ pub(crate) fn plan_egress(policy: &EgressPolicy) -> NetPlan {
 /// The Upper workspace lifecycle: `create_upper`, `exec_upper`, `git_status`,
 /// `template_create`, `restore_upper`, `destroy_upper`.
 ///
-/// # Safety (exec_upper, T-33-05)
+/// # Safety (exec_upper)
 ///
 /// **Never call `sandbox.shell()` for CEP operations.**  Always use
 /// `exec_upper(handle, prog, args_slice)` — the typed argv slice eliminates
@@ -498,14 +498,14 @@ pub(crate) fn plan_egress(policy: &EgressPolicy) -> NetPlan {
 pub trait Workspace: Send + Sync {
     /// Provision an Upper workspace from `spec`.
     ///
-    /// Validates `spec.baseline_oid` before any use (T-33-05).
-    /// Applies `spec.egress` via `NetworkPolicy` (EGRESS-01).
-    /// Injects `spec.credentials` (CRED-01).
+    /// Validates `spec.baseline_oid` before any use.
+    /// Applies `spec.egress` via `NetworkPolicy`.
+    /// Injects `spec.credentials`.
     async fn create_upper(&self, spec: &UpperSpec) -> Result<UpperHandle>;
 
     /// Run `prog args` inside the Upper.
     ///
-    /// **Use an argv slice — never `shell()`** (T-33-05).
+    /// **Use an argv slice — never `shell()`**.
     async fn exec_upper(
         &self,
         handle: &UpperHandle,
@@ -533,14 +533,14 @@ pub trait Workspace: Send + Sync {
 
     /// Stop the Upper, snapshot it as a warm template, return the snapshot name.
     ///
-    /// **T-33-04:** this path must NEVER inject credentials into the snapshot;
+    /// This path must NEVER inject credentials into the snapshot;
     /// credentials are applied only on `create_upper` / `restore_upper`.
     async fn template_create(&self, source: &UpperHandle, name: &str) -> Result<String>;
 
     /// Boot a fresh CoW Upper from an existing template snapshot.
     ///
     /// Per-turn credentials (env vars, files) are applied here, not in the
-    /// snapshot (T-33-04).
+    /// snapshot.
     async fn restore_upper(
         &self,
         template_name: &str,
@@ -626,7 +626,7 @@ pub trait Workspace: Send + Sync {
         ))
     }
 
-    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+    // ── Retained snapshot lifecycle ────────────────────────────────────────────
 
     /// Retain the Upper's full filesystem state (including credentials and `.git`)
     /// as a named snapshot, then remove the live handle.
@@ -637,7 +637,7 @@ pub trait Workspace: Send + Sync {
     /// # Arguments
     ///
     /// - `handle`: the live Upper to quiesce and snapshot.
-    /// - `snapshot_name`: must match the D-12 format
+    /// - `snapshot_name`: must match the expected format
     ///   `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`.
     /// - `max_pending_snapshots`: per-session quota; the method counts existing
     ///   snapshots with the same `lattice-{session_id}-` prefix and refuses if
@@ -668,7 +668,7 @@ pub trait Workspace: Send + Sync {
     ///
     /// Creates a new live handle without deleting the source snapshot.
     /// Processes, sockets, and tmpfs do not survive — this is a cold filesystem
-    /// restart (D-15). The caller must rebuild AgentLoop and CEP runtime state.
+    /// restart. The caller must rebuild AgentLoop and CEP runtime state.
     async fn restore_retained_upper(
         &self,
         snapshot_ref: &SnapshotRef,
@@ -726,7 +726,7 @@ pub trait Workspace: Send + Sync {
     }
 }
 
-// ── Det-tier egress tests (V-06 / V-07) ──────────────────────────────────────
+// ── Det-tier egress tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod egress_tests {
@@ -734,7 +734,7 @@ mod egress_tests {
 
     #[test]
     fn blocked_maps_to_blocked_plan() {
-        // V-06: plan_egress(Blocked) == NetPlan::Blocked
+        // plan_egress(Blocked) == NetPlan::Blocked
         assert_eq!(plan_egress(&EgressPolicy::Blocked), NetPlan::Blocked);
     }
 
@@ -745,7 +745,7 @@ mod egress_tests {
 
     #[test]
     fn allowlist_propagates_domains_in_order() {
-        // V-07: plan_egress(Allowlist([a, b])) == NetPlan::Allow([a, b])
+        // plan_egress(Allowlist([a, b])) == NetPlan::Allow([a, b])
         let policy = EgressPolicy::Allowlist(vec![
             AllowlistEntry {
                 target: "api.openai.com".into(),
@@ -769,7 +769,7 @@ mod egress_tests {
     }
 }
 
-// ── OID validation tests (WR-06) ────────────────────────────────────────────
+// ── OID validation tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod oid_validation_tests {
@@ -782,7 +782,7 @@ mod oid_validation_tests {
 
     #[test]
     fn validate_baseline_oid_accepts_sha256_64_hex() {
-        // WR-06: SHA-256 (64 hex) OIDs must be accepted, not rejected.
+        // SHA-256 (64 hex) OIDs must be accepted, not rejected.
         assert!(validate_baseline_oid(&"a".repeat(64)).is_ok());
     }
 

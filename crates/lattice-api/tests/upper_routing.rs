@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 34 integration: Direct observation/mutation route through Upper only.
+//! Direct observation/mutation route through Upper only.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -155,7 +155,7 @@ fn init_git_baseline(lower: &Path, seed_file: &str, seed_content: &str) -> Strin
     index.write().expect("index write");
     let tree_id = index.write_tree().expect("tree");
     let tree = repo.find_tree(tree_id).expect("find tree");
-    let sig = Signature::now("phase34", "phase34@test").expect("sig");
+    let sig = Signature::now("test-agent", "test-agent@test").expect("sig");
     let oid = repo
         .commit(Some("HEAD"), &sig, &sig, "baseline", &tree, &[])
         .expect("commit");
@@ -250,7 +250,7 @@ fn tool_call(method: &str, arguments: Value) -> ToolCall {
 }
 
 #[tokio::test]
-async fn phase34_observation_uses_upper_relative_paths() {
+async fn observation_uses_upper_relative_paths() {
     let lower = TempDir::new().expect("lower");
     let (adapter, _ws, _handle, _audit, _runtime) =
         direct_runtime_fixture(lower.path(), "UPPER_SENTINEL").await;
@@ -286,7 +286,7 @@ async fn phase34_observation_uses_upper_relative_paths() {
 }
 
 #[tokio::test]
-async fn phase34_mutations_preserve_lower_sentinel() {
+async fn mutations_preserve_lower_sentinel() {
     let lower = TempDir::new().expect("lower");
     let (adapter, workspace, handle, _audit, _runtime) =
         direct_runtime_fixture(lower.path(), "UPPER_BASE").await;
@@ -316,7 +316,7 @@ async fn phase34_mutations_preserve_lower_sentinel() {
 }
 
 #[tokio::test]
-async fn phase34_path_denial_records_preflight_only() {
+async fn path_denial_records_preflight_only() {
     let lower = TempDir::new().expect("lower");
     let (adapter, _ws, _handle, _audit, _runtime) =
         direct_runtime_fixture(lower.path(), "UPPER").await;
@@ -376,16 +376,16 @@ fn scan_value_for_leaks(value: &Value, lower_root: &Path, secret: &str) {
 }
 
 #[tokio::test]
-async fn phase34_upper_routing_e2e() {
+async fn upper_routing_e2e() {
     use futures::StreamExt;
     use lancet_api::audit_db_path_for_project_in;
     use lancet_catalog::methods::command::Run;
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
 
-    const SECRET: &str = "phase34-credential-sentinel-value";
+    const SECRET: &str = "test-credential-sentinel-value";
     unsafe {
-        std::env::set_var("PHASE34_TEST_SECRET", SECRET);
+        std::env::set_var("TEST_SECRET", SECRET);
     }
 
     let state = TempDir::new().expect("state");
@@ -404,7 +404,7 @@ async fn phase34_upper_routing_e2e() {
         profile: AgentProfile {
             schema_version: 1,
             agent: AgentSection {
-                name: "phase34".into(),
+                name: "test-agent".into(),
                 model: "test".into(),
                 description: None,
             },
@@ -430,7 +430,7 @@ async fn phase34_upper_routing_e2e() {
                 image: Some("docker.io/library/alpine:3.19".into()),
                 egress: None,
                 credentials: vec![CredentialRef {
-                    env_var_name: "PHASE34_TEST_SECRET".into(),
+                    env_var_name: "TEST_SECRET".into(),
                 }],
                 cpus: None,
                 memory_mb: None,
@@ -455,7 +455,7 @@ async fn phase34_upper_routing_e2e() {
         "create_parents": false
     });
     let exec_args = serde_json::json!({
-        "argv": ["echo", "phase34-exec"],
+        "argv": ["echo", "test-exec"],
         "cwd": ".",
         "timeout_ms": 5000,
         "declared_impact": "command_execution"
@@ -474,7 +474,7 @@ async fn phase34_upper_routing_e2e() {
                 &create_args.to_string(),
             ))
             .push_events(tool_call_events("c3", Run::NAME, &exec_args.to_string()))
-            .push_events(final_response_events("phase34 upper routing complete"))
+            .push_events(final_response_events("upper routing complete"))
             .build(),
     );
 
@@ -484,14 +484,14 @@ async fn phase34_upper_routing_e2e() {
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
-            active_agent: "phase34".into(),
+            active_agent: "test-agent".into(),
             project_branch: target,
         })
         .expect("session")
         .session_id;
 
     let request = RunTurnRequest {
-        input: "run phase34 e2e".into(),
+        input: "run e2e".into(),
         session_id,
         loaded_profile: Some(profile),
         cancel_flag: None,
@@ -622,7 +622,7 @@ impl Workspace for FailingWorkspace {
 }
 
 #[tokio::test]
-async fn phase34_adapter_failure_has_no_lower_fallback() {
+async fn adapter_failure_has_no_lower_fallback() {
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
     use lattice_api::{CreateSessionRequest, RunTurnRequest, SessionApi, stream_turn};
@@ -643,7 +643,7 @@ async fn phase34_adapter_failure_has_no_lower_fallback() {
         profile: AgentProfile {
             schema_version: 1,
             agent: AgentSection {
-                name: "phase34".into(),
+                name: "test-agent".into(),
                 model: "test".into(),
                 description: None,
             },
@@ -677,7 +677,7 @@ async fn phase34_adapter_failure_has_no_lower_fallback() {
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
-            active_agent: "phase34".into(),
+            active_agent: "test-agent".into(),
             project_branch: target,
         })
         .expect("session")
@@ -767,9 +767,9 @@ mod microsandbox_lane {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires KVM/libkrun and configured Phase 34 image/template"]
-    async fn phase34_microsandbox_upper_routing() {
+    #[ignore = "requires KVM/libkrun and configured image/template"]
+    async fn microsandbox_upper_routing() {
         // Optional KVM evidence lane — compile-only in default CI.
-        let _ = std::env::var("PHASE34_MICROSANDBOX_IMAGE");
+        let _ = std::env::var("MICROSANDBOX_IMAGE");
     }
 }

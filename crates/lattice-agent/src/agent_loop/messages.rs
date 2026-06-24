@@ -34,7 +34,7 @@ pub(crate) fn convert_to_llm_message(msg: &GraphMessage) -> Result<lattice_llm::
     })
 }
 
-/// Append a converted message to the provider request cache (M-21).
+/// Append a converted message to the provider request cache.
 pub(crate) fn append_llm_message(
     llm_messages: &mut Vec<lattice_llm::Message>,
     msg: &GraphMessage,

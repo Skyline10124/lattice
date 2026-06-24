@@ -215,9 +215,9 @@ impl SessionApi {
     /// Persist a precomputed turn commit with prepared identity.
     ///
     /// Thin wrapper over the session store's prepared commit path.
-    /// Uses the prepared commit ID for idempotent retry (D-23).
+    /// Uses the prepared commit ID for idempotent retry.
     ///
-    /// NOTE (IN-02): Unlike `commit_turn`, this does not resolve abbreviated
+    /// NOTE: Unlike `commit_turn`, this does not resolve abbreviated
     /// session ID prefixes via `resolve_id`. The prepared commit must carry the
     /// canonical (full) session ID; callers are responsible for resolving
     /// prefixes before constructing the `PreparedTurnCommit`. This is
@@ -244,7 +244,7 @@ impl SessionApi {
     /// Query whether a commit's retained snapshot is operationally lost.
     ///
     /// Returns `None` if no metadata is recorded for the commit.
-    /// Never modifies immutable commit fields (T-36-07).
+    /// Never modifies immutable commit fields.
     pub(crate) fn get_snapshot_lost(&self, commit_id: &str) -> Result<Option<bool>> {
         self.store
             .get_snapshot_lost(commit_id)
@@ -252,9 +252,9 @@ impl SessionApi {
     }
 }
 
-/// Startup guard for un-migrated legacy SQLite session DB (D-18, issue 1b).
+/// Startup guard for un-migrated legacy SQLite session DB.
 ///
-/// The sole reliable migration-completion signal is D-18's archive action:
+/// The sole reliable migration-completion signal is the archive action:
 /// successful migration renames the legacy DB to `<db>.migrated-<ts>`. If the
 /// original DB is still present, migration has NOT completed (either never
 /// started, or crashed mid-write). The guard blocks startup with a clear
@@ -262,7 +262,7 @@ impl SessionApi {
 ///
 /// The legacy filename is discovered via `find_legacy_session_db`, which probes
 /// `session_v12.db`, `session_v11.db`, `session.db`, `sessions.db` in priority
-/// order (D-08-GAP1). The real legacy SQLite session store used
+/// order. The real legacy SQLite session store used
 /// `session_v12.db`; the plural `sessions.db` was an undocumented assumption.
 ///
 /// Does NOT inspect the Git repo for commits — a crashed mid-migration may have
@@ -270,7 +270,7 @@ impl SessionApi {
 /// Uses only `Path::exists()` — no side effects, no git2 repo open (avoids
 /// triggering auto-init).
 pub fn check_migration_guard(git_repo_dir: &Path) -> std::result::Result<(), String> {
-    // D-08-GAP1: probe for the real legacy DB filename instead of hardcoding
+    // probe for the real legacy DB filename instead of hardcoding
     // sessions.db. The session DB lives in the parent of the git repo dir
     // (e.g. .../lattice/sessions/sessions.git → .../lattice/sessions/).
     let session_dir = git_repo_dir

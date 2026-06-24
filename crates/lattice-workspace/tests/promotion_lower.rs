@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-04/V-08 managed Lower provisioning, cleanliness, and lock coverage.
+//! Managed Lower provisioning, cleanliness, and lock coverage.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

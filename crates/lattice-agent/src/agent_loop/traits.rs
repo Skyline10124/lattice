@@ -133,7 +133,7 @@ pub enum ProvisionalDecision {
     Complete {
         cleanup_exhausted: bool,
         /// Optional terminal fact appended to the transcript on completion
-        /// (CR-04): the loop appends it to `all_messages` before returning.
+        /// the loop appends it to `all_messages` before returning.
         final_message: Option<lattice_session::GraphMessage>,
     },
 }

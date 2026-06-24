@@ -98,7 +98,7 @@ pub fn build_request_json(request: &ChatRequest, resolved: &ResolvedModel) -> se
         }]);
     }
 
-    // Generation config (M-02): forward temperature and max_tokens to Gemini.
+    // Generation config: forward temperature and max_tokens to Gemini.
     let mut generation_config = serde_json::Map::new();
     if let Some(temp) = request.temperature {
         generation_config.insert("temperature".to_string(), serde_json::json!(temp));

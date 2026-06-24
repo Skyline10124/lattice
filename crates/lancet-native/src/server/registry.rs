@@ -160,7 +160,7 @@ mod tests {
         }
     }
 
-    mod phase34_routing_metadata {
+    mod routing_metadata {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend, ExecutionBackendError,
@@ -347,7 +347,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_policy_denial_precedes_adapter() {
+        fn policy_denial_precedes_adapter() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.record_rejection(RejectionRecord {
                 rejection_stage: RejectionStage::PolicyGate,
@@ -362,7 +362,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_path_denial_records_preflight_only() {
+        fn path_denial_records_preflight_only() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.record_rejection(RejectionRecord {
@@ -376,7 +376,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_backend_failure_records_both_invocations() {
+        fn backend_failure_records_both_invocations() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
@@ -391,7 +391,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_verification_failure_after_backend() {
+        fn verification_failure_after_backend() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
@@ -406,7 +406,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_success_has_no_rejection_fields() {
+        fn success_has_no_rejection_fields() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();
@@ -416,7 +416,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_host_only_omits_backend_identity() {
+        fn host_only_omits_backend_identity() {
             let ctx = test_ctx(None);
             let meta = metadata(&ctx);
             assert_eq!(meta["adapter_preflight_invoked"], false);
@@ -426,7 +426,7 @@ mod tests {
         }
 
         #[test]
-        fn phase34_invocation_flags_are_monotonic() {
+        fn invocation_flags_are_monotonic() {
             let ctx = test_ctx(Some(execution_routing()));
             ctx.mark_adapter_preflight_invoked();
             ctx.mark_backend_invoked();

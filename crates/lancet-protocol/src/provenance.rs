@@ -4,7 +4,7 @@
 //! PROV-DM–shaped provenance fragments and unsigned in-toto attestation wire types.
 //!
 //! Graph structure is projected at query/replay time from flat audit rows — these
-//! types are the stable serialization surface (PROV-01 forward-compat: no
+//! types are the stable serialization surface (forward-compat: no
 //! `deny_unknown_fields` on fragment roots).
 
 use crate::effect_types::ImpactKind;
@@ -145,7 +145,7 @@ pub struct TurnCallSummary {
     pub outcome_summary: Option<String>,
 }
 
-/// Structural turn replay output (PROV-04) — projection only, no re-execution.
+/// Structural turn replay output — projection only, no re-execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnExecutionTrace {
     pub turn_id: String,

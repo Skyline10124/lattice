@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-03/V-07 adversarial candidate export and validation coverage.
+//! Adversarial candidate export and validation coverage.
 
 #![cfg(feature = "test-utils")]
 
@@ -707,7 +707,7 @@ mod candidate_validation {
     }
 }
 
-/// Phase 36 D-04: structured verification evidence binding tests.
+/// Structured verification evidence binding tests.
 ///
 /// These tests assert that:
 /// - Empty argv or empty profile hash is invalid evidence.

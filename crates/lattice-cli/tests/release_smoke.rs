@@ -9,7 +9,7 @@
 //! Coverage: session-first execution, models --auth, resolve sonnet, session status,
 //! session log, and doctor.
 //!
-//! Threat model: T-11-20 (information disclosure), T-11-21 (tampering).
+//! Threat model: (information disclosure), (tampering).
 
 use lattice_session::SessionGraphStore;
 use std::path::{Path, PathBuf};
@@ -119,7 +119,7 @@ fn smoke_models_auth_lists_aliases_without_secrets() {
         !stdout.trim().is_empty(),
         "models --auth should produce output"
     );
-    // Must NOT contain the fake secret value (T-11-20)
+    // Must NOT contain the fake secret value
     assert!(
         !stdout.contains("sk-smoke-test-secret"),
         "models --auth must not leak secret value"
@@ -149,7 +149,7 @@ fn smoke_resolve_sonnet_json_shows_env_var_not_secret() {
         stdout.contains("ANTHROPIC_API_KEY"),
         "resolve --json should contain env var name, got:\n{stdout}"
     );
-    // Must NOT contain the secret value (T-11-20)
+    // Must NOT contain the secret value
     assert!(
         !stdout.contains("sk-smoke-resolve-secret"),
         "resolve --json must not leak secret value"
@@ -284,7 +284,7 @@ fn smoke_doctor_runs_without_leaking_secrets() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{stdout}{stderr}");
-    // Must NOT contain the fake secret value (T-11-20)
+    // Must NOT contain the fake secret value
     assert!(
         !combined.contains("sk-smoke-doctor-secret"),
         "doctor must not leak secret value"

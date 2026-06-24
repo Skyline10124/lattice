@@ -75,7 +75,7 @@ pub(crate) struct GitSessionManifest {
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
-    // Legacy-ID traceability (D-08): populated only by SQLite→Git migration.
+    // Legacy-ID traceability: populated only by SQLite→Git migration.
     // Native commits leave these as `None`; `skip_serializing_if` omits them
     // from native manifest JSON, so native commit OIDs are unchanged.
     // `deny_unknown_fields` rejects unknown JSON keys during deserialization,
@@ -103,7 +103,7 @@ pub(crate) fn session_ops_path(dir: &Path, session_id: &str, commit_oid: &str) -
     validate_session_id(session_id)?;
     // Defense-in-depth: commit_oid is used to build a filesystem path. Reject
     // anything that is not a plausible hex OID so `/` or `..` cannot escape the
-    // ops directory (WR-04).
+    // ops directory.
     if commit_oid.is_empty() || !commit_oid.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SessionError::Git(format!("invalid commit oid: {commit_oid}")));
     }
@@ -222,15 +222,15 @@ pub(crate) fn candidate_ref_name(session_id: &str, turn_id: &str) -> Result<Stri
     Ok(format!("refs/lattice/candidates/{session_id}/{turn_id}"))
 }
 
-/// Build the `turn/agent.json` blob. IN-03: single source of truth shared by
+/// Build the `turn/agent.json` blob. Single source of truth shared by
 /// the native commit path and the migration writer so the tree's agent entry
 /// stays byte-identical (and OIDs stay consistent) between both.
 pub(crate) fn build_agent_json(agent_name: &str) -> String {
     serde_json::json!({ "agent_name": agent_name }).to_string()
 }
 
-/// Build the `turn/audit.json` blob carrying lifecycle ref pointers. IN-03:
-/// single source of truth shared by the native commit path and the migration
+/// Build the `turn/audit.json` blob carrying lifecycle ref pointers. Single
+/// source of truth shared by the native commit path and the migration
 /// writer. The format must stay identical between both so migrated and natively
 /// created commits produce consistent tree content.
 pub(crate) fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
@@ -398,7 +398,7 @@ pub(crate) fn turn_log_entry_from_manifest(
 
 pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     // Use a unique temp file name to avoid collisions when two writers target
-    // the same path concurrently (WR-08). Suffix with PID + a monotonic counter
+    // the same path concurrently. Suffix with PID + a monotonic counter
     // to keep it deterministic per-process while still unique across processes.
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);

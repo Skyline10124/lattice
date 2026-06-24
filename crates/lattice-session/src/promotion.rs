@@ -1,24 +1,24 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Minimal Phase 35/36 promoted Session commit object builder.
+//! Minimal promoted Session commit object builder.
 //!
 //! Creates Git commit objects with a canonical `turn/manifest.json` tree only.
 //! Ref movement remains exclusively in the workspace-owned promotion transaction.
 //!
-//! Phase 36 extends the manifest with execution status, disposition, target ref,
+//! Extends the manifest with execution status, disposition, target ref,
 //! candidate ref, and structured verification evidence. Only the `promoted`
 //! disposition produces a Git Session object; pending/rejected/aborted remain
-//! SQLite-only (D-21).
+//! SQLite-only.
 
 use crate::graph::canonical_json_bytes;
 use crate::graph::{TurnCommitStatus, TurnVerificationEvidence};
 use crate::{Result, SessionError};
 
-/// Schema version for the Phase 35 skeleton `turn/manifest.json`.
+/// Schema version for the initial `turn/manifest.json`.
 pub const PROMOTION_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// Schema version for the Phase 36 lifecycle-aware `turn/manifest.json`.
+/// Schema version for the lifecycle-aware `turn/manifest.json`.
 pub const PROMOTION_MANIFEST_SCHEMA_VERSION_V2: u32 = 2;
 
 const LATTICE_AUTHOR_NAME: &str = "LATTICE";
@@ -27,8 +27,8 @@ const PROMOTED_DISPOSITION: &str = "promoted";
 
 /// Canonical promoted-turn manifest stored at `turn/manifest.json`.
 ///
-/// Phase 36 adds execution status, target project ref, candidate ref, and
-/// structured verification evidence to the Phase 35 skeleton.
+/// Adds execution status, target project ref, candidate ref, and
+/// structured verification evidence to the initial manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedSessionManifest {
     pub schema_version: u32,
@@ -39,19 +39,19 @@ pub struct PromotedSessionManifest {
     pub disposition: String,
     pub committed_at_unix_seconds: i64,
     pub parent_oid: Option<String>,
-    /// Phase 36: target project branch ref (e.g., `refs/heads/main`).
+    /// Target project branch ref (e.g., `refs/heads/main`).
     pub target_project_ref: String,
-    /// Phase 36: candidate ref that was promoted.
+    /// Candidate ref that was promoted.
     pub candidate_ref: Option<String>,
-    /// Phase 36: execution status string (e.g., `"completed"`).
+    /// Execution status string (e.g., `"completed"`).
     pub execution_status: String,
-    /// Phase 36: verification execution evidence, if available.
+    /// Verification execution evidence, if available.
     pub verification: Option<TurnVerificationEvidence>,
 }
 
 /// Input for creating a promoted Session commit object without moving refs.
 ///
-/// Phase 36 extends this with lifecycle evidence fields that are carried into
+/// Extends this with lifecycle evidence fields that are carried into
 /// the manifest JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotedSessionCommitInput {
@@ -61,13 +61,13 @@ pub struct PromotedSessionCommitInput {
     pub candidate_oid: String,
     pub committed_at_unix_seconds: i64,
     pub parent_session_oid: Option<git2::Oid>,
-    /// Phase 36: target project branch ref.
+    /// Target project branch ref.
     pub target_project_ref: String,
-    /// Phase 36: candidate ref that was promoted.
+    /// Candidate ref that was promoted.
     pub candidate_ref: Option<String>,
-    /// Phase 36: execution outcome of the turn.
+    /// Execution outcome of the turn.
     pub execution_status: TurnCommitStatus,
-    /// Phase 36: verification execution evidence.
+    /// Verification execution evidence.
     pub verification: Option<TurnVerificationEvidence>,
 }
 
@@ -217,7 +217,7 @@ fn validate_non_empty_id(field: &str, value: &str) -> Result<()> {
 }
 
 fn validate_git_oid(field: &str, oid: &str) -> Result<()> {
-    // WR-06: accept both SHA-1 (40 hex) and SHA-256 (64 hex) Git OIDs. The
+    // Accept both SHA-1 (40 hex) and SHA-256 (64 hex) Git OIDs. The
     // previous 40-char-only check silently rejected SHA-256 repositories.
     let len = oid.len();
     let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());

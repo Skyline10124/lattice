@@ -1,17 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Equivalence verification (D-11, D-12).
+//! Equivalence verification.
 //!
-//! Gates migration success (D-14): the source is only archived after this
-//! verifier returns `Ok(true)` (D-18). Compares topology (commit set, parent
-//! edges under the idmap, branch ref tips — SC1) and transcripts (per-branch
-//! message-by-message equivalence — SC2) between the SQLite source and the
+//! Gates migration success: the source is only archived after this
+//! verifier returns `Ok(true)`. Compares topology (commit set, parent
+//! edges under the idmap, branch ref tips) and transcripts (per-branch
+//! message-by-message equivalence) between the SQLite source and the
 //! Git target.
 //!
 //! Uses a tip-OID-direct reader (`read_transcript_from_tip`) that walks an
 //! arbitrary commit OID without checking out branches or mutating `meta.json`
-//! (D-11 recommendation, RESEARCH.md Open Question #5). This avoids the
+//! (recommendation, RESEARCH.md Open Question #5). This avoids the
 //! `head_transcript` limitation — it only walks the HEAD ref and cannot
 //! enumerate non-HEAD branches.
 
@@ -23,14 +23,14 @@ use crate::{Result, SessionError};
 
 use super::extract::{Idmap, extract_all_with_conn};
 
-/// Verify equivalence between the SQLite source and the Git target (D-11).
+/// Verify equivalence between the SQLite source and the Git target.
 ///
 /// Returns `Ok(true)` if topology and transcripts match, `Ok(false)` on any
 /// mismatch. The caller (`run_migration`) treats `false` as failure: the
-/// source is NOT archived and the command exits non-zero (D-12, D-18).
+/// source is NOT archived and the command exits non-zero.
 ///
 /// Takes `conn` and `repo` directly so it is independently re-runnable via
-/// `--verify-only` without re-running writes (D-12).
+/// `--verify-only` without re-running writes.
 pub(crate) fn verify_equivalence(
     conn: &rusqlite::Connection,
     repo: &git2::Repository,
@@ -48,7 +48,7 @@ pub(crate) fn verify_equivalence(
     Ok(true)
 }
 
-/// SC1 — Topology equivalence for one session.
+/// Topology equivalence for one session.
 fn verify_session_topology(
     repo: &git2::Repository,
     session: &super::extract::ExtractedSession,
@@ -61,7 +61,7 @@ fn verify_session_topology(
             continue;
         };
         let Some(expected_oid_str) = idmap.get(legacy_cid) else {
-            // Unreachable tip — not migrated; skip (D-04 semantics).
+            // Unreachable tip — not migrated; skip (semantics).
             continue;
         };
         let expected_oid = git2::Oid::from_str(expected_oid_str)
@@ -138,7 +138,7 @@ fn verify_session_topology(
     Ok(true)
 }
 
-/// SC2 — Transcript equivalence for one session (per branch).
+/// Transcript equivalence for one session (per branch).
 fn verify_session_transcripts(
     repo: &git2::Repository,
     session: &super::extract::ExtractedSession,
@@ -190,7 +190,7 @@ fn verify_session_transcripts(
         }
     }
 
-    // CR-02: a detached-HEAD session (head_ref=NULL, head_commit_id=Some(tip))
+    // a detached-HEAD session (head_ref=NULL, head_commit_id=Some(tip))
     // with zero or non-covering graph_refs rows has its transcript reachable
     // only from head_commit_id. The ref loop above would compare nothing and
     // return Ok(true) — a vacuous pass before the source is archived. Seed
@@ -274,7 +274,7 @@ fn collect_sqlite_transcript_from_tip(
     msgs
 }
 
-/// Tip-OID-direct reader (D-11, RESEARCH.md Open Question #5).
+/// Tip-OID-direct reader (RESEARCH.md Open Question #5).
 ///
 /// Walks the commit DAG from an arbitrary tip OID (TOPOLOGICAL|REVERSE
 /// revwalk, same as `head_transcript_impl` but starting from a given OID, not

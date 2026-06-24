@@ -27,14 +27,14 @@ pub struct AgentProfile {
     /// Upper workspace execution environment configuration.
     ///
     /// Absent `[workspace]` means no Upper is requested; the field defaults to `None`.
-    /// Older profiles without `[workspace]` still parse (EGRESS-01 / CRED-01 profile layer).
+    /// Older profiles without `[workspace]` still parse.
     #[serde(default)]
     pub workspace: Option<WorkspaceSection>,
 }
 
 // ── Workspace schema types ────────────────────────────────────────────────────
 
-/// Egress network policy for the Upper VM (EGRESS-01 profile layer).
+/// Egress network policy for the Upper VM.
 ///
 /// Controls which outbound traffic the Upper VM permits. Defaults to `open` when the
 /// `egress` field is absent from `[workspace]`.
@@ -54,7 +54,7 @@ pub enum EgressPolicyConfig {
     Allowlist,
 }
 
-/// Reference to a credential by its environment variable name (CRED-01 profile layer).
+/// Reference to a credential by its environment variable name.
 ///
 /// **Security invariant:** this type stores only the *name* of the environment variable.
 /// The resolved secret value is NEVER stored here — it is injected at turn time by the
@@ -70,11 +70,11 @@ pub struct CredentialRef {
 
 // ── Workspace lifecycle limit constants ─────────────────────────────────────
 
-/// Default number of cleanup rounds before the host exhausts the budget (D-09).
+/// Default number of cleanup rounds before the host exhausts the budget.
 /// Valid range: `1..=32`.
 pub const DEFAULT_CLEANUP_ROUNDS: u32 = 3;
 
-/// Default maximum pending snapshots per session (D-17).
+/// Default maximum pending snapshots per session.
 /// Valid range: `1..=100`.
 pub const DEFAULT_MAX_PENDING_SNAPSHOTS: u32 = 5;
 
@@ -122,7 +122,7 @@ where
 /// are non-optional `u32` with bounded defaults. Older profiles without `[workspace]`
 /// still parse and produce `AgentProfile.workspace = None`.
 ///
-/// **Security invariant (T-33-04):** credentials are turn-time injection only.
+/// **Security invariant:** credentials are turn-time injection only.
 /// This section stores only references (`CredentialRef`); resolved values are never
 /// present in profile or session snapshot data.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -157,7 +157,7 @@ pub struct WorkspaceSection {
     /// `egress` is `open` or `blocked`.
     #[serde(default)]
     pub allowed_egress_targets: Vec<String>,
-    /// Number of agent cleanup rounds before the host exhausts the budget (D-09).
+    /// Number of agent cleanup rounds before the host exhausts the budget.
     ///
     /// When the configured limit is exhausted, the cleanup callback returns `None`
     /// and the orchestrator sets disposition to `pending_worktree`.
@@ -167,7 +167,7 @@ pub struct WorkspaceSection {
         deserialize_with = "deserialize_bounded_cleanup_rounds"
     )]
     pub cleanup_rounds: u32,
-    /// Maximum number of pending retained snapshots per session (D-17).
+    /// Maximum number of pending retained snapshots per session.
     ///
     /// When the quota is exceeded, new snapshot retention is refused.
     /// Valid range: `1..=100`. Default: `5`.

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-02 exact-baseline identity contract coverage for both workspace adapters.
+//! Exact-baseline identity contract coverage for both workspace adapters.
 
 #![cfg(feature = "test-utils")]
 

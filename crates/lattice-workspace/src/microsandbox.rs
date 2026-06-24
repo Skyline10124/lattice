@@ -3,18 +3,18 @@
 
 //! microsandbox backend: libkrun microVMs driven by the `microsandbox` Rust SDK 0.5.6.
 //!
-//! # SDK-only (Plan 33-05)
+//! # SDK-only
 //!
 //! This module drives Upper workspace lifecycle exclusively through the
 //! `microsandbox` Rust SDK.  No `msb` CLI subprocess calls exist here
-//! (T-33-05: argv/shell injection mitigation).
+//! (argv/shell injection mitigation).
 //!
 //! Per-Upper sandbox handles are stored in an internal
 //! `Arc<RwLock<HashMap<String, Sandbox>>>` keyed by `UpperHandle.id`.
 //! `Sandbox: Send + Sync` was confirmed by Wave 0 assumption A1, so no
 //! `Arc<Mutex<Sandbox>>` wrapping is needed.
 //!
-//! # Egress (EGRESS-01)
+//! # Egress
 //!
 //! [`apply_egress`] maps an [`EgressPolicy`] onto a `SandboxBuilder` using
 //! `NetworkPolicy::none()` (blocked) or `NetworkPolicy::none().allow_domains(iter)?`
@@ -46,7 +46,7 @@ use crate::{
 
 /// Fixed shell command that installs `git` inside a Debian/Ubuntu-based Upper.
 ///
-/// # Security (T-33-05)
+/// # Security
 ///
 /// This is a compile-time constant with **no** interpolated user input.  It is
 /// always executed via `exec_with("sh", |e| e.args(["-c", APT_GET_GIT]))` — an
@@ -74,7 +74,7 @@ const APT_GET_GIT_TIMEOUT: Duration = Duration::from_secs(300);
 /// - Allowlisted domains are resolved DNS-natively by the SDK; no explicit DNS
 ///   rule is needed.  Rebind-protection state: not tested with private-IP targets
 ///   (Wave 0 used a public Cloudflare IP — RFC1918 protection unconfirmed).
-/// - T-33-03: using `none().allow_domains` as the deny-all baseline prevents
+/// - Using `none().allow_domains` as the deny-all baseline prevents
 ///   allowlist bypass patterns that could arise from a permissive default.
 pub(crate) fn apply_egress(
     builder: microsandbox::sandbox::SandboxBuilder,
@@ -96,7 +96,7 @@ pub(crate) fn apply_egress(
     })
 }
 
-/// Extract the session prefix from a D-12 snapshot name for quota counting.
+/// Extract the session prefix from a snapshot name for quota counting.
 ///
 /// Input:  `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`
 /// Output: `lattice-{session_id}-` (trailing dash included for exact
@@ -104,7 +104,7 @@ pub(crate) fn apply_egress(
 fn extract_session_prefix(snapshot_name: &str) -> String {
     let parts: Vec<&str> = snapshot_name.rsplitn(3, '-').collect();
     if parts.len() >= 3 {
-        // WR-03: append the trailing dash so `starts_with` matches the session
+        // Append the trailing dash so `starts_with` matches the session
         // boundary exactly, aligning with `list_retained_snapshots`'s
         // `lattice-{session_id}-` prefix and preventing a shorter session id
         // (e.g. `abc`) from counting a longer one's (`abc-extended`) snapshots.
@@ -118,7 +118,7 @@ fn extract_session_prefix(snapshot_name: &str) -> String {
 ///
 /// Per-Upper `Sandbox` handles live in an internal map keyed by `UpperHandle.id`
 /// (a UUID-derived name of the form `upper-<8hex>`).  The live SDK object is never
-/// exposed to callers — `UpperHandle` carries only `id + backend` (WS-02, T-33-01).
+/// exposed to callers — `UpperHandle` carries only `id + backend`.
 ///
 /// # Thread safety
 ///
@@ -174,7 +174,7 @@ impl MicrosandboxWorkspace {
     /// subsequent Upper restored from `name` (via `ImageOrTemplate::Template`)
     /// is git-ready without paying a per-Upper `apt-get install git` — including
     /// under [`EgressPolicy::Blocked`](crate::EgressPolicy::Blocked), where
-    /// apt-get could not reach the network at all (WS-04 / M-33-05).
+    /// apt-get could not reach the network at all.
     ///
     /// # Flow
     ///
@@ -193,7 +193,7 @@ impl MicrosandboxWorkspace {
     /// owns its full lifecycle (create → bake → stop → snapshot) and leaves no
     /// live Upper behind.
     ///
-    /// # Security (T-33-04)
+    /// # Security
     ///
     /// This method must **NEVER** call `.env()` with credential values or
     /// [`inject_file_credentials`](Self::inject_file_credentials).  The template
@@ -202,7 +202,7 @@ impl MicrosandboxWorkspace {
     /// `restore_upper`).  No `UpperSpec`/`CredentialSpec` is taken here, so there
     /// is structurally nothing to bake in.
     ///
-    /// # Security (T-33-05)
+    /// # Security
     ///
     /// The apt-get command is the fixed [`APT_GET_GIT`] literal executed through
     /// an `exec_with` argv slice — never `sandbox.shell()` and never string
@@ -219,7 +219,7 @@ impl MicrosandboxWorkspace {
             .map_err(Self::sdk_err)?;
 
         // Step 2: install git via the fixed literal (argv slice, never shell()).
-        // T-33-05: APT_GET_GIT is a compile-time constant, no user input.
+        // APT_GET_GIT is a compile-time constant, no user input.
         if let Err(e) = sandbox
             .exec_with("sh", |e| {
                 e.args(["-c", APT_GET_GIT]).timeout(APT_GET_GIT_TIMEOUT)
@@ -252,7 +252,7 @@ impl MicrosandboxWorkspace {
 
         // Step 5: save the snapshot. A4 authoritative API — Snapshot::builder(src)
         // .destination(Name(snap)).create(); there is NO Snapshot::save().
-        // INVARIANT (T-33-04): no .env() / inject_file_credentials on this path.
+        // INVARIANT: no .env() / inject_file_credentials on this path.
         Snapshot::builder(name)
             .destination(SnapshotDestination::Name(name.to_string()))
             .create()
@@ -551,13 +551,13 @@ impl MicrosandboxWorkspace {
 
     /// Inject `CredentialSpec::File` entries into the sandbox post-boot.
     ///
-    /// # Security (CRED-01, T-33-02, T-33-04)
+    /// # Security
     ///
-    /// - Never use `sandbox.shell()` — exec via argv slices only (T-33-05).
+    /// - Never use `sandbox.shell()` — exec via argv slices only.
     /// - Never log credential values — base64 encoding obfuscates content in argv
     ///   but the real protection is in `CredentialSpec`'s redacting `Debug` impl.
     /// - This function must NEVER be called from `template_create` or the template-
-    ///   build path (T-33-04): credentials must not be baked into template snapshots.
+    ///   build path: credentials must not be baked into template snapshots.
     async fn inject_file_credentials(
         sandbox: &Sandbox,
         credentials: &[CredentialSpec],
@@ -578,7 +578,7 @@ impl MicrosandboxWorkspace {
                     .exec("mkdir", ["-p", &parent])
                     .await
                     .map_err(Self::sdk_err)?;
-                // Decode base64 into guest_path via argv slice (T-33-05).
+                // Decode base64 into guest_path via argv slice.
                 // Pass payload and destination as positional args so guest paths
                 // are never interpolated into the shell command string.
                 sandbox
@@ -947,12 +947,12 @@ impl Workspace for MicrosandboxWorkspace {
     ///
     /// # Flow
     ///
-    /// 1. Validate `spec.baseline_oid` (T-33-05).
+    /// 1. Validate `spec.baseline_oid`.
     /// 2. Generate a unique name `upper-<uuid8>`.
     /// 3. Build a `SandboxBuilder` from either `.image(img)` or
     ///    `.from_snapshot(tmpl_name)` — both branches use the same builder
-    ///    for resource, egress, and env-var credential overrides (T-33-04:
-    ///    env creds on both branches; file creds post-boot only).
+    ///    for resource, egress, and env-var credential overrides (env creds
+    ///    on both branches; file creds post-boot only).
     /// 4. `apply_egress(builder, &spec.egress)?` (returns `Result`).
     /// 5. `.env(k, v)` for each `CredentialSpec::EnvVar`.
     /// 6. `.create().await?` → `Sandbox`.
@@ -960,7 +960,7 @@ impl Workspace for MicrosandboxWorkspace {
     /// 8. `inject_file_credentials` post-boot.
     /// 9. Store in internal map and return `UpperHandle`.
     async fn create_upper(&self, spec: &UpperSpec) -> Result<UpperHandle> {
-        // Security: validate OID format before any use (T-33-05).
+        // Security: validate OID format before any use.
         validate_baseline_oid(&spec.baseline_oid)?;
 
         let name = format!("upper-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
@@ -980,7 +980,7 @@ impl Workspace for MicrosandboxWorkspace {
         builder = apply_egress(builder, &spec.egress)?;
 
         // Per-turn env creds on the builder for BOTH branches.
-        // NEVER bake env creds into a template snapshot (T-33-04).
+        // NEVER bake env creds into a template snapshot.
         for cred in &spec.credentials {
             if let CredentialSpec::EnvVar { name: k, value: v } = cred {
                 builder = builder.env(k, v);
@@ -989,10 +989,10 @@ impl Workspace for MicrosandboxWorkspace {
 
         let sandbox = builder.create().await.map_err(Self::sdk_err)?;
 
-        // Deliver baseline tree inside the VM via exec (no host bind-mount — T-33-01).
+        // Deliver baseline tree inside the VM via exec (no host bind-mount).
         self.deliver_baseline(&sandbox, spec).await?;
 
-        // File credentials injected post-boot (not in template — T-33-04).
+        // File credentials injected post-boot (not in template).
         Self::inject_file_credentials(&sandbox, &spec.credentials).await?;
 
         self.sandboxes
@@ -1008,7 +1008,7 @@ impl Workspace for MicrosandboxWorkspace {
     /// Run `prog args` inside the Upper.
     ///
     /// ALWAYS uses `sandbox.exec(prog, args_slice)` — never `sandbox.shell()`
-    /// to prevent shell injection (T-33-05).
+    /// to prevent shell injection.
     async fn exec_upper(
         &self,
         handle: &UpperHandle,
@@ -1026,11 +1026,11 @@ impl Workspace for MicrosandboxWorkspace {
                 .clone()
         };
 
-        // ALWAYS exec(prog, args) — NEVER sandbox.shell(cmd_str) (T-33-05).
+        // ALWAYS exec(prog, args) — NEVER sandbox.shell(cmd_str).
         // Run in /workspace so relative paths (e.g. `cat README.md`) resolve
         // against the Upper root, matching the Workspace contract that
         // DeterministicWorkspace satisfies via Command::current_dir
-        // (V-04 test_baseline_content / test_upper_git_root). /workspace is
+        // (test_baseline_content / test_upper_git_root). /workspace is
         // always created + populated by create_upper before any exec_upper.
         let out = sandbox
             .exec_with(prog, |e| e.args(args.iter().copied()).cwd("/workspace"))
@@ -1198,7 +1198,7 @@ impl Workspace for MicrosandboxWorkspace {
 
     /// Stop the Upper and save it as a warm template snapshot.
     ///
-    /// # Security (T-33-04)
+    /// # Security
     ///
     /// This path intentionally does NOT call `inject_file_credentials` or
     /// `.env()` with credential values.  The snapshot is a shared template
@@ -1221,7 +1221,7 @@ impl Workspace for MicrosandboxWorkspace {
         // MUST stop before snapshot — a running sandbox snapshot captures dirty state.
         sandbox.stop().await.map_err(Self::sdk_err)?;
 
-        // INVARIANT (T-33-04): this path NEVER injects credentials.
+        // INVARIANT: this path NEVER injects credentials.
         // Snapshot::builder(src_name).destination(Name(snap)).create() — A4 authoritative API.
         Snapshot::builder(&source.id)
             .destination(SnapshotDestination::Name(name.to_string()))
@@ -1234,7 +1234,7 @@ impl Workspace for MicrosandboxWorkspace {
 
     /// Boot a fresh CoW Upper from an existing template snapshot.
     ///
-    /// # Security (T-33-04)
+    /// # Security
     ///
     /// Per-turn credentials (env vars via `.env()`, files via
     /// `inject_file_credentials`) are applied here, NOT in the template snapshot.
@@ -1257,7 +1257,7 @@ impl Workspace for MicrosandboxWorkspace {
 
         builder = apply_egress(builder, &spec.egress)?;
 
-        // Per-turn env creds ONLY here — never baked into the template snapshot (T-33-04).
+        // Per-turn env creds ONLY here — never baked into the template snapshot.
         for cred in &spec.credentials {
             if let CredentialSpec::EnvVar { name: k, value: v } = cred {
                 builder = builder.env(k, v);
@@ -1266,7 +1266,7 @@ impl Workspace for MicrosandboxWorkspace {
 
         let sandbox = builder.create().await.map_err(Self::sdk_err)?;
 
-        // File creds injected post-boot (not in template — T-33-04).
+        // File creds injected post-boot (not in template).
         Self::inject_file_credentials(&sandbox, &spec.credentials).await?;
 
         self.sandboxes
@@ -1339,7 +1339,7 @@ impl Workspace for MicrosandboxWorkspace {
         self.find_files_guest(&sandbox, request).await
     }
 
-    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+    // ── Retained snapshot lifecycle ────────────────────────────────────────────
 
     /// Retain the Upper's full disk state as a named snapshot via the SDK.
     ///
@@ -1352,7 +1352,7 @@ impl Workspace for MicrosandboxWorkspace {
         snapshot_name: &str,
         max_pending_snapshots: u32,
     ) -> Result<SnapshotRef> {
-        // Validate D-12 name format before any effect (T-36-05).
+        // Validate name format before any effect.
         validate_snapshot_name(snapshot_name)?;
 
         // Quota check: count existing snapshots with the same session prefix.
@@ -1380,7 +1380,7 @@ impl Workspace for MicrosandboxWorkspace {
         // Sync filesystem before stopping.
         let _ = sandbox.exec("sync", Vec::<String>::new()).await;
 
-        // Stop the sandbox — a snapshot must be taken from a stopped VM (D-15).
+        // Stop the sandbox — a snapshot must be taken from a stopped VM.
         if let Err(e) = sandbox.stop().await {
             // Cannot restore: sandbox.stop() consumes the running state.
             // Log the error but don't put a dead sandbox back in the map.
@@ -1409,7 +1409,7 @@ impl Workspace for MicrosandboxWorkspace {
     /// Restore a cold Upper from a retained SDK snapshot.
     ///
     /// Uses `Sandbox::builder(new).from_snapshot(name)` with current resource,
-    /// egress, and credential settings. This is a cold process restart (D-15).
+    /// egress, and credential settings. This is a cold process restart.
     async fn restore_retained_upper(
         &self,
         snapshot_ref: &SnapshotRef,
@@ -1433,7 +1433,7 @@ impl Workspace for MicrosandboxWorkspace {
 
         builder = apply_egress(builder, &spec.egress)?;
 
-        // Per-turn env creds on the builder (not baked in the snapshot — T-33-04).
+        // Per-turn env creds on the builder (not baked in the snapshot).
         for cred in &spec.credentials {
             if let CredentialSpec::EnvVar { name: k, value: v } = cred {
                 builder = builder.env(k, v);
@@ -1458,7 +1458,7 @@ impl Workspace for MicrosandboxWorkspace {
 
     /// Check whether a retained snapshot exists via SDK `Snapshot::open`.
     ///
-    /// Security (T-36-15): only the snapshot name and existence boolean are
+    /// Security: only the snapshot name and existence boolean are
     /// exposed; no content or credentials.
     async fn retained_snapshot_exists(&self, snapshot_ref: &SnapshotRef) -> Result<bool> {
         match Snapshot::open(&snapshot_ref.name).await {
@@ -1470,7 +1470,7 @@ impl Workspace for MicrosandboxWorkspace {
     /// List all retained snapshot names matching the session prefix.
     ///
     /// Uses `Snapshot::list()` (indexed snapshots) filtered by prefix.
-    /// Security (T-36-15): only names are returned, not content.
+    /// Security: only names are returned, not content.
     async fn list_retained_snapshots(&self, session_id_prefix: &str) -> Result<Vec<String>> {
         let prefix = format!("lattice-{session_id_prefix}-");
         let handles = Snapshot::list().await.map_err(Self::sdk_err)?;

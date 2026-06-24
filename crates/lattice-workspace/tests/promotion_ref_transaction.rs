@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-05 atomic three-ref promotion transaction coverage.
+//! Atomic three-ref promotion transaction coverage.
 
 use std::collections::BTreeMap;
 use std::path::Path;

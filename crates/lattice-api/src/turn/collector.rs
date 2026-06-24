@@ -68,7 +68,7 @@ impl RunTurnCollector {
                 if finish_reason == "stop" || finish_reason == "length" {
                     self.assistant_output = std::mem::take(&mut self.round_tokens);
                 } else {
-                    // WR-02: preserve assistant content emitted alongside
+                    // preserve assistant content emitted alongside
                     // tool_calls by accumulating it into `assistant_output`
                     // before clearing the round buffer. A subsequent
                     // stop/length round overwrites with the final answer, but
@@ -310,7 +310,7 @@ mod tests {
         );
     }
 
-    /// WR-02: content emitted alongside tool_calls must not be silently
+    /// content emitted alongside tool_calls must not be silently
     /// discarded when the turn ends on a tool_calls round (no final stop).
     #[test]
     fn tool_call_round_content_preserved_when_turn_ends_on_tool_calls() {
@@ -348,7 +348,7 @@ mod tests {
         ])
         .unwrap();
 
-        // Without the WR-02 accumulation, `assistant_output` would be empty
+        // Without the accumulation, `assistant_output` would be empty
         // because the tool_calls branch cleared `round_tokens` and no stop
         // round ever overwrote it.
         assert_eq!(

@@ -121,7 +121,7 @@ impl GitSessionGraphStore {
         // The earlier head_oid check is a non-atomic read; the actual ref
         // mutation must re-verify the current target before writing, otherwise
         // a concurrent process could move the ref between the check and the
-        // force update, silently losing the other writer's commit (CR-01).
+        // force update, silently losing the other writer's commit.
         let ref_name = super::helpers::session_ref_name(session_id, &branch)?;
         match repo.find_reference(&ref_name) {
             Ok(mut existing) => {
@@ -293,7 +293,7 @@ impl GitSessionGraphStore {
         let manifest_bytes = read_tree_blob(&repo, &commit, "turn/manifest.json")?;
         let manifest = parse_manifest(&manifest_bytes)?;
         // Enforce session ownership: a commit from session A must not be
-        // returned when queried with session B's ID (WR-05).
+        // returned when queried with session B's ID.
         if manifest.session_id != session_id {
             return Ok(None);
         }
@@ -308,7 +308,7 @@ impl GitSessionGraphStore {
         let mut turn = turn_commit_from_manifest_and_oid(oid, &manifest);
         // Read the full profile snapshot JSON from the commit tree so that
         // consumers relying on `profile_snapshot_json` (replay, audit) get the
-        // real payload instead of an empty string (WR-07).
+        // real payload instead of an empty string.
         let profile_bytes = read_tree_blob(&repo, &commit, "turn/profile.json")?;
         let profile_json = String::from_utf8(profile_bytes)
             .map_err(|e| SessionError::Git(format!("profile.json not utf8: {e}")))?;

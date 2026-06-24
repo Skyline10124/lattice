@@ -65,10 +65,10 @@ pub use types::{
 use lattice_workspace::promotion::{PromotionLimits, PromotionOutcome, VerificationResult};
 use lattice_workspace::{UpperHandle, Workspace};
 
-/// Phase 35 compatibility: export from the Upper workspace, then promote.
+/// Compatibility: export from the Upper workspace, then promote.
 ///
-/// Phase 36 lifecycle orchestration should export the candidate once before
-/// verification and call [`promote_preexported_candidate`] directly (D-02/D-05).
+/// Lifecycle orchestration should export the candidate once before
+/// verification and call [`promote_preexported_candidate`] directly.
 pub async fn promote_verified_candidate(
     workspace: &dyn Workspace,
     upper: &UpperHandle,

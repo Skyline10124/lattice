@@ -18,7 +18,7 @@ pub struct RefComponent(String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedRefName(String);
 
-/// The three refs updated together during promotion (D-07).
+/// The three refs updated together during promotion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromotionRefs {
     pub project_ref: ValidatedRefName,
@@ -110,7 +110,7 @@ impl ValidatedRefName {
 }
 
 impl PromotionRefs {
-    /// Construct the three D-07 refs from a project branch and validated IDs.
+    /// Construct the three refs from a project branch and validated IDs.
     pub fn new(
         branch: &str,
         session_id: &RefComponent,
@@ -407,7 +407,7 @@ fn validate_branch_component(branch: &str) -> Result<(), RefTransactionError> {
 }
 
 fn validate_git_oid(field: &'static str, oid: &str) -> Result<(), RefTransactionError> {
-    // WR-06: accept 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
+    // Accept 40- (SHA-1) or 64- (SHA-256) character hex OIDs.
     let len = oid.len();
     let is_hex = !oid.is_empty() && oid.chars().all(|c| c.is_ascii_hexdigit());
     if is_hex && (len == 40 || len == 64) {

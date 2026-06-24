@@ -260,7 +260,7 @@ impl AgentLoop {
                 };
             }
 
-            // Call the LLM (M-21: reuse incrementally maintained provider cache).
+            // Call the LLM (reuse incrementally maintained provider cache).
             let chat_request = lattice_llm::ChatRequest {
                 messages: llm_messages.clone(),
                 tools: request.tool_definitions.clone(),
@@ -570,7 +570,7 @@ impl AgentLoop {
                                     cleanup_exhausted,
                                     final_message,
                                 }) => {
-                                    // CR-04: persist the hook's terminal fact
+                                    // persist the hook's terminal fact
                                     // (e.g. the final workspace-dirty state that
                                     // caused cleanup exhaustion) into the
                                     // transcript before terminating the loop.

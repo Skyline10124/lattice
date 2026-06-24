@@ -79,7 +79,7 @@ fn malicious_handler_caught() {
     );
 }
 
-// ── M-24-03 regression: WritePath glob pattern ────────────────────────
+// ── regression: WritePath glob pattern ────────────────────────────────
 
 #[test]
 fn create_glob_pattern_within_region() {

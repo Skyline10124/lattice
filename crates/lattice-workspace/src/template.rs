@@ -6,7 +6,7 @@
 //! The SDK owns snapshot bytes under `~/.microsandbox/snapshots/`; LATTICE only
 //! tracks the name, lockfile hash (for staleness detection), and creation time.
 //!
-//! # T-33-04 invariant
+//! # Invariant
 //!
 //! Template build must **never** call `.env()` or inject file credentials.
 //! Credentials are applied only on the per-turn `create_upper` / `restore_upper`
@@ -49,7 +49,7 @@ impl WarmTemplate {
     /// with `git` baked in, so every Upper restored from it has `git` available
     /// without a per-Upper `apt-get install git` — including under
     /// [`EgressPolicy::Blocked`](crate::EgressPolicy::Blocked), where apt-get
-    /// could not reach the network at all (WS-04 / M-33-05).
+    /// could not reach the network at all.
     pub fn git_ready_snapshot_name_for_project(project_hash: &str) -> String {
         format!("proj-{project_hash}-git-ready-template")
     }

@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Migration test suite: SC1 topology, SC2 transcript, SC3 restartability,
-//! SC4 no-SQLite-in-production, D-08 native OID stability.
+//! Migration test suite: topology, transcript, restartability,
+//! no-SQLite-in-production, native OID stability.
 //!
 //! Fixtures build SQLite session DBs via direct SQL INSERTs into the five
 //! source tables (sqlite_graph/ is deleted; RESEARCH.md is the DDL reference).
@@ -216,7 +216,7 @@ fn seed_branched(conn: &Connection, session_id: &str) -> Vec<String> {
 }
 
 /// Seed a reset session: 3 commits on main, then reset main ref to c1.
-/// c2 and c3 become unreachable (D-04).
+/// c2 and c3 become unreachable.
 fn seed_reset(conn: &Connection, session_id: &str) -> Vec<String> {
     insert_session(conn, session_id, Some("Reset test"), Some("main"), None, "main");
     let c1 = format!("{session_id}-c1");
@@ -263,7 +263,7 @@ fn count_commits_from_ref(repo: &git2::Repository, ref_name: &str) -> usize {
     walk.count()
 }
 
-// ─── SC1: Topology equivalence ─────────────────────────────────────────────
+// ─── Topology equivalence ─────────────────────────────────────────────
 
 #[test]
 fn topology_equivalence_linear() {
@@ -316,11 +316,11 @@ fn topology_equivalence_reset() {
 
     let repo = git2::Repository::open(&target).unwrap();
     let main_ref = "refs/lattice/sessions/C/main";
-    // D-04: only c1 is reachable after reset; c2/c3 are orphans, not migrated.
+    // only c1 is reachable after reset; c2/c3 are orphans, not migrated.
     assert_eq!(count_commits_from_ref(&repo, main_ref), 1, "reset should leave only 1 reachable commit");
 }
 
-// ─── SC2: Transcript equivalence ───────────────────────────────────────────
+// ─── Transcript equivalence ───────────────────────────────────────────
 
 #[test]
 fn transcript_equivalence_linear() {
@@ -367,7 +367,7 @@ fn transcript_equivalence_linear() {
     }
 }
 
-// ─── SC3: Restartability ───────────────────────────────────────────────────
+// ─── Restartability ───────────────────────────────────────────────────
 
 #[test]
 fn restart_idempotent() {
@@ -425,10 +425,10 @@ fn count_all_commit_objects(repo: &git2::Repository) -> usize {
     count
 }
 
-/// IN-01 / SC3: simulate an *interrupted* run by writing only a subset of a
+/// simulate an *interrupted* run by writing only a subset of a
 /// session's commits (with a fresh idmap that records just those), then run the
 /// full migration against the same source. The completed run must reach all 5
-/// commits with no duplicate commit objects — exercising the WR-05 self-healing
+/// commits with no duplicate commit objects — exercising the self-healing
 /// skip and the content-addressed restart guarantee, which `restart_idempotent`
 /// (two full runs) does not cover.
 #[test]
@@ -483,7 +483,7 @@ fn restart_recovers_from_partial_write() {
     );
 }
 
-// ─── D-08: Native OID stability ────────────────────────────────────────────
+// ─── Native OID stability ────────────────────────────────────────────
 
 #[test]
 fn native_manifest_oid_stable() {
@@ -539,7 +539,7 @@ fn native_manifest_oid_stable() {
     let manifest_bytes = read_tree_blob(&repo, &commit, "turn/manifest.json").expect("read manifest");
     let manifest = parse_manifest(&manifest_bytes).expect("parse manifest");
 
-    // D-08: native commits have no legacy fields.
+    // native commits have no legacy fields.
     assert!(manifest.legacy_session_id.is_none(), "native commit should have no legacy_session_id");
     assert!(manifest.legacy_commit_id.is_none(), "native commit should have no legacy_commit_id");
 
@@ -555,7 +555,7 @@ fn native_manifest_oid_stable() {
     );
 }
 
-// ─── SC4: No SQLite write path in production ───────────────────────────────
+// ─── No SQLite write path in production ───────────────────────────────
 
 #[test]
 fn no_sqlite_write_path_in_production() {
@@ -599,7 +599,7 @@ fn no_sqlite_write_path_in_production() {
     );
 }
 
-// ─── D-08-GAP1: legacy DB filename probing ─────────────────────────────────
+// ─── legacy DB filename probing ─────────────────────────────────────────
 
 #[test]
 fn find_legacy_session_db_probes_session_v12_db_first() {
@@ -671,7 +671,7 @@ fn migration_works_with_session_v12_db_filename() {
     );
 }
 
-// ─── D-08-GAP2: dry-run performs NO target writes ──────────────────────────
+// ─── dry-run performs NO target writes ──────────────────────────────────
 
 #[test]
 fn dry_run_creates_no_target_skeleton() {
@@ -704,7 +704,7 @@ fn dry_run_creates_no_target_skeleton() {
     // GAP 2 core assertion: the target directory/repo was NOT created.
     assert!(
         !target.exists(),
-        "dry-run must NOT create the target repo skeleton (D-01 no-writes contract)"
+        "dry-run must NOT create the target repo skeleton (no-writes contract)"
     );
 
     // Source is untouched.

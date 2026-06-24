@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-09 lattice-api promotion composition and Phase 35/36 boundary coverage.
+//! lattice-api promotion composition and boundary coverage.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -836,7 +836,7 @@ mod lifecycle_classification {
     }
 }
 
-mod phase_boundary {
+mod boundary {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
@@ -891,9 +891,9 @@ mod phase_boundary {
     }
 
     #[test]
-    fn promotion_module_documents_phase36_activation_requirement() {
+    fn promotion_module_documents_activation_requirement() {
         let text = fs::read_to_string(manifest_path("src/turn/promotion.rs")).expect("read");
-        assert!(text.contains("Phase 36"));
+        assert!(text.contains("activation"));
         assert!(text.contains("stream_turn"));
     }
 

@@ -9,11 +9,11 @@
 //!   - A reachable image mirror (docker.m.daocloud.io — index.docker.io is blocked here)
 //!
 //! Each test documents one Wave 0 assumption (A1–A7). Results are recorded in
-//! .planning/phases/33-workspace-adapter-production-hardening/33-VALIDATION.md
+//! .planning/VALIDATION.md
 //! and determine whether `wave_0_complete: true` can be set before 33-05 locks types.
 //!
 //! IMPORTANT: Never use `sandbox.shell()` in CEP operations. All probes here use
-//! `sandbox.exec(prog, args)` with an argv slice (design §5, T-33-05).
+//! `sandbox.exec(prog, args)` with an argv slice (design §5).
 
 #![cfg(feature = "integration_tests")]
 
@@ -146,7 +146,7 @@ async fn wave0_a4_snapshot_round_trip() {
         .await
         .unwrap_or_else(|e| panic!("WAVE0_A4: failed to create source sandbox: {e}"));
 
-    // Write marker using exec (not shell — design §5, T-33-05)
+    // Write marker using exec (not shell — design §5)
     // We use sh -c here only for the A4 probe (marker write), NOT as a CEP pattern.
     let write_cmd = format!("echo MARK > {marker_path}");
     src.exec("sh", ["-c", &write_cmd])

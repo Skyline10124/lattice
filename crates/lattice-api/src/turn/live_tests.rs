@@ -554,7 +554,7 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
     );
     assert_eq!(committed_messages[1].role, "assistant");
 
-    // No prior transcript messages are duplicated (COMM-01)
+    // No prior transcript messages are duplicated
     // Since this is the first turn, there should be exactly user + agent messages
     let user_count = committed_messages
         .iter()
@@ -565,7 +565,7 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
         "commit should contain exactly one user message (delta only)"
     );
 
-    // Commit message is <= 72 chars (COMM-04)
+    // Commit message is <= 72 chars
     assert!(
         log[0].commit_message.len() <= 72,
         "commit message should be <= 72 chars, got: {} ('{}')",
@@ -573,7 +573,7 @@ async fn stream_turn_live_with_agent_commit_stores_delta_only() {
         log[0].commit_message
     );
 
-    // ── Second turn: prove delta-only (COMM-01 multi-turn) ───────────────
+    // ── Second turn: prove delta-only ───────────────
     // A second turn on the same session must commit only its own delta,
     // not replay the first turn's messages into the commit.
     let session3 = make_session(dir.path());
@@ -861,7 +861,7 @@ async fn stream_turn_live_with_agent_receiver_drop_does_not_cancel() {
 }
 
 /// Many small token events to fill the bounded public channel when the
-/// consumer stops reading after `TurnStarted` (M-19b).
+/// consumer stops reading after `TurnStarted`.
 fn flood_token_events(count: usize) -> Vec<LlmEvent> {
     let mut events: Vec<LlmEvent> = (0..count)
         .map(|i| LlmEvent::Token {
@@ -881,7 +881,7 @@ fn flood_token_events(count: usize) -> Vec<LlmEvent> {
 
 #[tokio::test]
 async fn stream_turn_live_with_agent_slow_observer_still_commits() {
-    // M-19b: a consumer that stops reading must not block commit.
+    // a consumer that stops reading must not block commit.
     let dir = tempfile::tempdir().unwrap();
     let session = make_session(dir.path());
     let client = FakeStreamingLlmClient::builder()
@@ -912,5 +912,5 @@ async fn stream_turn_live_with_agent_slow_observer_still_commits() {
         }
     })
     .await
-    .expect("turn must commit despite slow observer (M-19b)");
+    .expect("turn must commit despite slow observer");
 }

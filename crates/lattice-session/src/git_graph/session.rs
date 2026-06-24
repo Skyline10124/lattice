@@ -178,7 +178,7 @@ pub(super) fn enumerate_session_branches(
         // Active agent name is not stored per ref; we leave it empty here and
         // callers may enrich it from meta if needed.
         //
-        // NOTE (IN-01): `updated_at` reflects the time of enumeration, not the
+        // NOTE: `updated_at` reflects the time of enumeration, not the
         // time the ref was last updated. Git does not expose per-ref last-write
         // timestamps without parsing the reflog, and the reflog may be absent
         // in bare or shared repositories. Callers that need the true

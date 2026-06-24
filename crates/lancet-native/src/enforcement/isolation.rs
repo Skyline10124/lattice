@@ -157,7 +157,7 @@ impl SupervisorSetupStatus {
     }
 }
 
-/// Stable status for the Phase 29 minimal mount-view setup.
+/// Stable status for the minimal mount-view setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MinimalMountViewStatus {
     NotAttempted,
@@ -691,7 +691,7 @@ impl CommandBoundaryPreflight {
 }
 
 /// Evaluate command isolation against the current host probe without claiming
-/// physical protection unless later supervisor phases provide applied evidence.
+/// physical protection unless later supervisor stages provide applied evidence.
 pub fn evaluate_command_boundary_preflight(
     config: &CommandIsolationRuntimeConfig,
 ) -> CommandBoundaryPreflight {

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 36 D-14: pin/load/idempotency/reachability/retry tests for
+//! Pin/load/idempotency/reachability/retry tests for
 //! pending-promotion candidate durability.
 
 use std::path::{Path, PathBuf};

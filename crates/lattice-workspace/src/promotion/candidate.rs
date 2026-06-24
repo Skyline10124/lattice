@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 
 use super::PromotionError;
 
-/// Host default promotion resource limits (Phase 35 resolved constants).
+/// Host default promotion resource limits (resolved constants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionLimits {
     pub max_artifact_bytes: u64,
@@ -33,7 +33,7 @@ impl Default for PromotionLimits {
     }
 }
 
-/// Caller-supplied verification evidence with structured binding (D-04).
+/// Caller-supplied verification evidence with structured binding.
 ///
 /// Use [`VerificationResult::new`] to construct; the constructor rejects
 /// empty argv, empty profile hash, and incoherent pass/exit semantics.
@@ -149,7 +149,7 @@ pub fn validate_candidate(
         });
     }
 
-    // D-04: evidence binding validation before any bundle import or Lower effect.
+    // Evidence binding validation before any bundle import or Lower effect.
     if verification.candidate_oid != export.candidate_oid() {
         return Err(PromotionError::VerificationMismatch {
             expected: export.candidate_oid().to_owned(),
@@ -271,7 +271,7 @@ fn enumerate_objects(
 
     let mut rev_out = rev_list.stdout.take().expect("rev-list stdout");
     let mut cat_in = cat_file.stdin.take().expect("cat-file stdin");
-    // WR-04: capture the pipe-copy result so an early cat-file death (or a
+    // Capture the pipe-copy result so an early cat-file death (or a
     // copy/panic) is not silently discarded. A truncated pipe that still
     // exits 0 would otherwise produce incomplete object enumeration and could
     // let an over-limit candidate pass validation.
@@ -609,7 +609,7 @@ fn run_git(
     }
 }
 
-/// A candidate durably pinned by a repository ref (D-14).
+/// A candidate durably pinned by a repository ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinnedCandidate {
     pub candidate_oid: String,
@@ -771,7 +771,7 @@ pub fn load_pinned_candidate(
 }
 
 /// Rebuild a [`ValidatedCandidate`] from a pinned candidate ref with fresh
-/// verification evidence. Performs all Phase 35 ancestry/object/hazard/limit
+/// verification evidence. Performs all ancestry/object/hazard/limit
 /// checks without requiring a bundle.
 pub fn prepare_pinned(
     repository_path: &Path,
@@ -795,7 +795,7 @@ pub fn prepare_pinned(
             }
         })?;
 
-    // D-04: evidence binding check.
+    // Evidence binding check.
     if verification.candidate_oid != candidate_oid {
         return Err(PromotionError::VerificationMismatch {
             expected: candidate_oid.clone(),

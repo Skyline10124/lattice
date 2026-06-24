@@ -311,7 +311,7 @@ fn run_params(argv: Vec<&str>, impact: Option<ImpactKind>) -> RunParams {
     }
 }
 
-// ── Ported phase34_direct_command tests (top-level) ──────────────────────────
+// ── Direct command tests (top-level) ─────────────────────────────────────────
 
 #[tokio::test]
 async fn direct_command_routes_backend_only() {

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Catalog methods declare the capability *kind* as a const. In a Direct-only
 /// world, `RequiredCapability` is the catalog-level kind — no pattern resolution
-/// or concrete `Capability` construction is needed (D-04).
+/// or concrete `Capability` construction is needed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RequiredCapability {

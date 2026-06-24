@@ -87,7 +87,7 @@ impl GitStatusEntry {
     /// Format a structured JSON workspace-dirty fact from entries.
     ///
     /// Uses JSON serialization/escaping so hostile filenames (quotes, newlines,
-    /// braces) cannot inject another record into the fact (T-36-14).
+    /// braces) cannot inject another record into the fact.
     pub fn workspace_dirty_fact(entries: &[GitStatusEntry]) -> String {
         let entry_values: Vec<serde_json::Value> = entries
             .iter()

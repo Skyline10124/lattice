@@ -261,7 +261,7 @@ pub fn resolve_upper_config(
     } else {
         resolve_explicit_image_or_template(image)?
     };
-    // Use the injected baseline OID when provided (D-27, T-36-20); fall back
+    // Use the injected baseline OID when provided; fall back
     // to repository HEAD only for non-preflight paths.
     let baseline = match baseline_oid {
         Some(oid) => oid.to_owned(),

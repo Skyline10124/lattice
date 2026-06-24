@@ -55,7 +55,7 @@ pub fn project_rows(rows: &[AuditRow]) -> ProvGraphFragment {
     fragment
 }
 
-/// Build a turn-level execution trace (PROV-04 structural replay).
+/// Build a turn-level execution trace (structural replay).
 pub fn project_turn_trace(turn_id: &str, rows: &[AuditRow]) -> TurnExecutionTrace {
     let runtime = rows
         .first()

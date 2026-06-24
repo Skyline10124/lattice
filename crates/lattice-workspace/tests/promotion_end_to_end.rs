@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-01 through V-08 integrated promotion orchestration coverage.
+//! Integrated promotion orchestration coverage.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -320,7 +320,7 @@ mod promotion_commit_failures {
 
     #[test]
     fn existing_candidate_ref_with_same_oid_succeeds_via_verify() {
-        // D-14: already-pinned candidate participates as verify in transaction.
+        // already-pinned candidate participates as verify in transaction.
         let fx = CandidateFixture::with_change(b"cand\n");
         fx.ready();
         Command::new("git")

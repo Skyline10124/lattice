@@ -567,7 +567,7 @@ mod verify_tests {
         assert_eq!(outcome.exit_code, 1);
     }
 
-    mod phase34_direct_verify {
+    mod direct_verify {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecOutput, ExecRequest, ExecutionBackend, ExecutionBackendError,
@@ -763,7 +763,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_uses_backend_argv_env_timeout_cwd() {
+        async fn direct_verify_uses_backend_argv_env_timeout_cwd() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -797,7 +797,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_omitted_cwd_uses_project_root_sentinel() {
+        async fn direct_verify_omitted_cwd_uses_project_root_sentinel() {
             let policy = default_policy();
             let config = DirectVerifyConfig {
                 argv: vec!["echo".into(), "root".into()],
@@ -827,7 +827,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_cwd_preflight_denial_before_exec() {
+        async fn direct_verify_cwd_preflight_denial_before_exec() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             *spy.resolve_result.lock().unwrap() = Some(Ok(PathFacts {
@@ -867,7 +867,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_cancellation_before_exec() {
+        async fn direct_verify_cancellation_before_exec() {
             let policy = default_policy();
             let (execution, _spy) = routing_with_spy();
             let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -891,7 +891,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_nonzero_expected_exit_is_failure_outcome() {
+        async fn direct_verify_nonzero_expected_exit_is_failure_outcome() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             *spy.exec_result.lock().unwrap() = Some(Ok(ExecOutput {
@@ -926,7 +926,7 @@ mod verify_tests {
         }
 
         #[tokio::test]
-        async fn phase34_direct_verify_adapter_error_is_distinct_from_verify_failure() {
+        async fn direct_verify_adapter_error_is_distinct_from_verify_failure() {
             let policy = default_policy();
             let (execution, spy) = routing_with_spy();
             *spy.exec_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
@@ -957,7 +957,7 @@ mod verify_tests {
             std::sync::atomic::AtomicBool::new(false);
 
         #[tokio::test]
-        async fn phase34_direct_verify_never_invokes_host_run_verify() {
+        async fn direct_verify_never_invokes_host_run_verify() {
             HOST_VERIFY_SENTINEL.store(false, std::sync::atomic::Ordering::SeqCst);
             struct HostVerifyGuard;
             impl Drop for HostVerifyGuard {

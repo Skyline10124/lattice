@@ -72,7 +72,7 @@ impl GitSessionGraphStore {
     /// Acquire a locked handle to the repository, opening it on first access.
     ///
     /// If `Repository::open` fails (the directory has no Git repository yet),
-    /// auto-initializes a bare repo in-place (D-15/D-19). This is the
+    /// auto-initializes a bare repo in-place. This is the
     /// fresh-install safety net: after the SQLite store is retired, a new
     /// install with no pre-existing repo auto-creates one on first session
     /// instead of crashing. Existing installs and tests that pre-init a

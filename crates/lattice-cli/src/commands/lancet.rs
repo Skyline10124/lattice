@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn lancet_status_preserves_phase29_applied_boundary_diagnostics() {
+    fn lancet_status_preserves_applied_boundary_diagnostics() {
         let _xdg = ScopedXdgStateHome::new();
         let dir = TempDir::new().unwrap();
         seed_command_boundary_audit_db(

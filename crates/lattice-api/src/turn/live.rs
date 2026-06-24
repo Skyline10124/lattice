@@ -9,7 +9,7 @@
 //! [`TurnEvent`] values through a bounded channel before committing.
 //!
 //! The spawned task classifies the terminal outcome using the lifecycle state
-//! machine (D-25/D-26), ensuring every committed turn carries an explicit
+//! machine, ensuring every committed turn carries an explicit
 //! `(status, disposition)` pair.
 
 use std::collections::{HashSet, VecDeque};
@@ -111,7 +111,7 @@ fn is_streaming_delta(event: &TurnEvent) -> bool {
     )
 }
 
-/// Best-effort public observer sink (M-19b).
+/// Best-effort public observer sink.
 struct ObserverSink {
     sender: mpsc::Sender<TurnEvent>,
     gave_up: bool,
@@ -202,7 +202,7 @@ fn is_cep_event(event: &TurnEvent) -> bool {
     )
 }
 
-/// Classify an agent result into a typed lifecycle outcome (D-25/D-26).
+/// Classify an agent result into a typed lifecycle outcome.
 ///
 /// For the current non-promotion flow (no candidate export, no workspace
 /// verification), the classification is:
@@ -242,7 +242,7 @@ pub(super) fn classify_live_outcome(
 /// the final event, closing the stream.
 ///
 /// The committed outcome carries an explicit `(status, disposition)` pair
-/// classified by [`classify_live_outcome`] (D-25/D-26).
+/// classified by [`classify_live_outcome`].
 async fn run_live_turn_task(
     session: SessionApi,
     prepared: PreparedTurn,
@@ -346,7 +346,7 @@ async fn run_live_turn_task(
     }
     ordered_events.finish(&mut observer).await;
 
-    // 6a. Classify the lifecycle outcome BEFORE resource teardown (D-25/D-26).
+    // 6a. Classify the lifecycle outcome BEFORE resource teardown.
     let outcome = classify_live_outcome(&agent_result, false);
 
     runtime.shutdown().await;
@@ -386,7 +386,7 @@ async fn run_live_turn_task(
         profile_snapshot_json: prepared.profile_snapshot_json,
     };
 
-    // WR-05: pass the classified disposition (D-25/D-26) and lifecycle evidence
+    // pass the classified disposition and lifecycle evidence
     // explicitly so build_commit_input cannot silently default them. The live
     // path attaches no TurnLifecycleEvidence at this point (it is populated by
     // the promotion/finalize path); pass None to preserve prior behavior.

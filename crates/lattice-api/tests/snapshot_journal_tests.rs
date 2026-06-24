@@ -1,14 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 36 Plan 13: Snapshot journal crash-safety tests.
+//! Snapshot journal crash-safety tests.
 //!
 //! Covers:
 //! - `journal_*`: WAL create/append/fsync/parse, torn-line tolerance.
 //! - `journal_recovery_*`: crash-window convergence at each fault point.
 //! - `journal_orphan_*`: no-commit snapshot removal.
 //! - `journal_phantom_*`: missing committed snapshot marks operational loss.
-//! - `resource_matrix_*`: D-14 retain/release/destroy/none per disposition.
+//! - `resource_matrix_*`: retain/release/destroy/none per disposition.
 
 use std::collections::HashMap;
 use std::fs;
@@ -28,7 +28,7 @@ use lattice_session::{TurnCommitStatus, WorkspaceDisposition};
 
 fn test_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("phase36-snapshot-journal-tests")
+        .join("snapshot-journal-tests")
         .join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -431,7 +431,7 @@ fn journal_parser_rejects_missing_header() {
     assert!(err.contains("header") || err.contains("Header"));
 }
 
-// ── Resource matrix tests (D-14 finalization) ────────────────────────────────
+// ── Resource matrix tests (finalization) ────────────────────────────────
 
 #[test]
 fn resource_matrix_pending_worktree_retains_snapshot() {
@@ -748,7 +748,7 @@ fn resource_matrix_promoted_retry_uses_same_commit_id() {
 
 #[test]
 fn resource_matrix_d14_retained_count_matches() {
-    // D-14 retention rule assertion: exactly these dispositions retain snapshots.
+    // retention rule assertion: exactly these dispositions retain snapshots.
     let retain_dispositions = [
         WorkspaceDisposition::PendingWorktree,
         WorkspaceDisposition::PendingVerification,

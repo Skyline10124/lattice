@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 36 Plan 11: branch-source and exact-baseline tests.
+//! branch-source and exact-baseline tests.
 //!
 //! Validates that:
 //! - `resolve_turn_target` reads `project_target_branch` from the Session
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lattice_api::{TurnTargetError, resolve_turn_target};
-use lattice_session::{SessionGraphStore, GitSessionGraphStore};
+use lattice_session::{GitSessionGraphStore, SessionGraphStore};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -22,7 +22,7 @@ use lattice_session::{SessionGraphStore, GitSessionGraphStore};
 
 fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
-        .join("lattice-api-phase36-11-tests")
+        .join("lattice-api-turn-target-tests")
         .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     dir
@@ -107,14 +107,9 @@ fn branch_source_missing_project_target_branch_fails() {
     store
         .create_session("sess-no-branch", None, "coder", "main")
         .expect("create");
-    // Clear the branch via direct SQL to simulate pre-Phase-36 legacy row.
-    {
-        // We cannot access the raw connection, so we create the session
-        // normally and rely on the test for None path via a different route.
-    }
 
     // Since we can't easily create a session with None project_target_branch
-    // through the public API (Phase 36-01 made it required), we test the
+    // through the public API, we test the
     // error path by constructing a GraphSession with None directly.
     // For this integration test, we confirm that resolve_turn_target
     // correctly rejects None via a mock session approach.

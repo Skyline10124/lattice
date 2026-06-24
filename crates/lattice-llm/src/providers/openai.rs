@@ -216,7 +216,7 @@ impl OpenAiSseParser {
                 {
                     // BTreeMap iterates in key order, so ToolCallEnd is
                     // emitted in tool-call-index order rather than the
-                    // arbitrary HashMap iteration order (L-03).
+                    // arbitrary HashMap iteration order.
                     let drained = std::mem::take(&mut self.tool_call_ids);
                     for (_, id) in drained {
                         events.push(LlmEvent::ToolCallEnd { id });

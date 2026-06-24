@@ -3,17 +3,17 @@
 
 //! Callable managed-Lower preflight and verified promotion composition.
 //!
-//! Phase 35 exposed [`prepare_promotion_target`] and [`promote_verified_candidate`] as
+//! Exposes [`prepare_promotion_target`] and [`promote_verified_candidate`] as
 //! explicit host entry points. They are **not** invoked from [`super::stream_turn`];
-//! Phase 36 must supply snapshot-bound verification and disposition ordering before
+//! callers must supply snapshot-bound verification and disposition ordering before
 //! automatic lifecycle activation.
 //!
-//! Phase 36 adds [`promote_preexported_candidate`] which accepts a caller-owned
+//! Adds [`promote_preexported_candidate`] which accepts a caller-owned
 //! [`CandidateExport`] and never calls `Workspace::export_candidate` internally.
 //! It also adds [`PromotionLifecycleError`] for typed error classification and
 //! [`retry_pinned_candidate`] for resuming promotion from a pinned candidate ref.
 //!
-//! Phase 36 Plan 11 adds [`TurnTargetError`] and [`resolve_turn_target`] which
+//! Adds [`TurnTargetError`] and [`resolve_turn_target`] which
 //! resolve the managed project target from Session metadata before Upper construction.
 
 use std::fmt;
@@ -53,7 +53,7 @@ pub struct PromotionSessionMetadata {
     pub committed_at_unix_seconds: i64,
 }
 
-/// Typed turn-target resolution failure (D-27, T-36-11).
+/// Typed turn-target resolution failure.
 ///
 /// Produced when the Session-scoped project target cannot be resolved to a
 /// managed Lower. These failures occur before any Upper adapter call.
@@ -113,7 +113,7 @@ impl std::error::Error for TurnTargetError {}
 ///
 /// Reads `project_target_branch` from the Session and passes it to
 /// [`prepare_promotion_target`]. Does not use Session HEAD, current checkout,
-/// or repository default branch (D-27).
+/// or repository default branch.
 ///
 /// Returns typed failures for missing metadata, nonexistent branches, or
 /// branches attached to other worktrees before any Upper adapter call.
@@ -154,7 +154,7 @@ pub fn resolve_turn_target(
     })
 }
 
-/// Typed promotion failure classification for lifecycle disposition selection (D-14, D-26).
+/// Typed promotion failure classification for lifecycle disposition selection.
 ///
 /// Preserves candidate facts where applicable so callers can pin, retry, or
 /// release without re-deriving error context.
@@ -267,7 +267,7 @@ pub fn prepare_promotion_target(
 /// Prepare and commit a pre-exported candidate through the Session object callback.
 ///
 /// Accepts a caller-owned [`CandidateExport`] and never calls
-/// `Workspace::export_candidate` internally (D-02/D-05). The candidate OID is
+/// `Workspace::export_candidate` internally. The candidate OID is
 /// captured before consuming the export so errors retain exact lifecycle facts.
 ///
 /// Requires caller-supplied [`VerificationResult`] evidence; this module never
@@ -275,7 +275,7 @@ pub fn prepare_promotion_target(
 ///
 /// On promotion failure, errors are classified through [`PromotionLifecycleError`].
 /// For temporary blocks, the candidate is pinned before returning so retry is
-/// always possible (T-36-10).
+/// always possible.
 pub async fn promote_preexported_candidate(
     target: &PromotionTurnTarget,
     metadata: &PromotionSessionMetadata,
@@ -341,7 +341,7 @@ pub async fn promote_preexported_candidate(
 /// Retry promotion from a previously pinned candidate.
 ///
 /// Uses [`prepare_pinned`] to re-validate the candidate from its ref without
-/// requiring a bundle or Upper workspace (D-14). The same Session object
+/// requiring a bundle or Upper workspace. The same Session object
 /// callback and transaction path as [`promote_preexported_candidate`] are used.
 pub async fn retry_pinned_candidate(
     target: &PromotionTurnTarget,
@@ -412,7 +412,7 @@ pub async fn retry_pinned_candidate(
 /// Classify a promotion error and pin the candidate if the error is a temporary block.
 ///
 /// For temporary blocks (Lower dirty, recoverable journal), pins the candidate
-/// before returning so retry is always possible (T-36-10). If pinning fails,
+/// before returning so retry is always possible. If pinning fails,
 /// returns an Internal error.
 fn classify_and_pin(
     target: &PromotionTurnTarget,
@@ -423,7 +423,7 @@ fn classify_and_pin(
     let lifecycle = PromotionLifecycleError::from_promotion_error(err);
     match lifecycle {
         PromotionLifecycleError::TemporarilyBlocked { .. } => {
-            // Pin the candidate before returning (D-14, T-36-10).
+            // Pin the candidate before returning.
             let session_id = RefComponent::parse("session_id", &metadata.session_id);
             let turn_id = RefComponent::parse("turn_id", &metadata.turn_id);
 

@@ -3,8 +3,8 @@
 
 //! Direct-mode process execution utilities.
 //!
-//! Relocated from `executor::shell` as part of the supervisor retirement
-//! (Phase 37 D-18). These helpers implement bounded stream reading, command
+//! Relocated from `executor::shell` as part of the supervisor retirement.
+//! These helpers implement bounded stream reading, command
 //! input validation, cwd resolution, and the Direct-mode `execute_argv`
 //! function with explicit kill+reap on all termination paths.
 

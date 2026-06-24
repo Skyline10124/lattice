@@ -140,7 +140,7 @@ pub fn prepare_from_validated(
     })
 }
 
-/// Commit is the only API that writes managed Lower (D-01/D-02).
+/// Commit is the only API that writes managed Lower.
 pub fn commit<F>(
     prepared: PreparedPromotion,
     make_session_commit: F,
@@ -185,7 +185,7 @@ where
         });
     }
 
-    // D-14: if candidate ref already exists, verify it matches (pinned retry path).
+    // If candidate ref already exists, verify it matches (pinned retry path).
     let existing_candidate_oid = resolve_ref(
         lower.repository_path(),
         prepared.refs.candidate_ref.as_str(),

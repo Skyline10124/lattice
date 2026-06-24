@@ -4,11 +4,11 @@
 //! Resume eligibility classification, cold-restore/pinned-retry services,
 //! and explicit manual snapshot pruning.
 //!
-//! This module implements the resume and prune API for Phase 36 Plan 14.
+//! This module implements the resume and prune API.
 //!
 //! # Resume
 //!
-//! Only three pending dispositions are eligible for resume (D-14, D-15, D-16):
+//! Only three pending dispositions are eligible for resume:
 //! - `PendingWorktree` and `PendingVerification` → cold snapshot restore.
 //! - `PendingPromotion` → pinned candidate retry (no snapshot required).
 //!
@@ -16,7 +16,7 @@
 //!
 //! # Prune
 //!
-//! Explicit manual snapshot pruning scoped to a single Session (D-17).
+//! Explicit manual snapshot pruning scoped to a single Session.
 //! No automatic, TTL, size-based, or cross-Session garbage collection.
 
 use std::sync::Arc;
@@ -30,7 +30,7 @@ use crate::session::{ApiError, SessionApi};
 
 /// How a pending turn should be resumed.
 ///
-/// Classified from the current disposition and lifecycle evidence (D-14–D-16).
+/// Classified from the current disposition and lifecycle evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeMode {
     /// Cold snapshot restore: `PendingWorktree` or `PendingVerification`.
@@ -107,7 +107,7 @@ impl std::fmt::Debug for ResumeTurnRequest {
 
 // ─── Prune Types ───────────────────────────────────────────────────────────
 
-/// Manual snapshot prune request (D-17).
+/// Manual snapshot prune request.
 ///
 /// `workspace_override` allows tests to inject a deterministic adapter;
 /// production uses the API-owned Microsandbox workspace.
@@ -143,7 +143,7 @@ pub struct SnapshotPruneResult {
 /// evidence.
 ///
 /// Returns the [`ResumeMode`] for eligible pending dispositions, or a typed
-/// [`ResumeError`] for ineligible ones. Never mutates the commit (T-36-08).
+/// [`ResumeError`] for ineligible ones. Never mutates the commit.
 ///
 /// # Classification rules
 ///
@@ -195,7 +195,7 @@ pub fn resolve_resume_mode(turn: &TurnCommit) -> Result<ResumeMode, ResumeError>
         }
 
         // ── Rejected dispositions ─────────────────────────────────────────
-        // WR-07: each ineligible variant is matched explicitly (no catch-all),
+        // each ineligible variant is matched explicitly (no catch-all),
         // so adding a new WorkspaceDisposition variant forces a compile error
         // here and a deliberate resume-eligibility decision instead of
         // silently matching the new variant as "unsupported".
@@ -224,13 +224,13 @@ pub fn resolve_resume_mode(turn: &TurnCommit) -> Result<ResumeMode, ResumeError>
 
 /// Format current time as RFC3339 UTC string.
 fn format_rfc3339_utc() -> String {
-    // WR-01: delegate to chrono instead of hand-rolling Gregorian calendar
+    // delegate to chrono instead of hand-rolling Gregorian calendar
     // arithmetic from epoch seconds. `SecondsFormat::Secs` + `use_z = true`
     // reproduces the previous `YYYY-MM-DDTHH:MM:SSZ` output exactly.
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Resume a pending turn as a new immutable linked turn (D-15, D-16, D-22).
+/// Resume a pending turn as a new immutable linked turn.
 ///
 /// Opens the Session, looks up the current HEAD turn commit, classifies
 /// eligibility via [`resolve_resume_mode`], and creates a new terminal commit
@@ -244,7 +244,7 @@ fn format_rfc3339_utc() -> String {
 /// through the promotion path. The resulting commit carries the resume
 /// linkage.
 ///
-/// The prior commit is never modified (T-36-08 immutability).
+/// The prior commit is never modified.
 pub async fn resume_turn(
     api: &SessionApi,
     request: ResumeTurnRequest,
@@ -263,7 +263,7 @@ pub async fn resume_turn(
         .get_turn_commit(&session.session_id, &head_commit_id)?
         .ok_or_else(|| ApiError::Internal(format!("HEAD commit '{head_commit_id}' not found")))?;
 
-    // CR-02: reject resume of a commit that is itself a resume linkage commit.
+    // reject resume of a commit that is itself a resume linkage commit.
     // The source's lifecycle carries `resumes_turn_oid` only on commits produced
     // by `resume_turn` itself; resuming such a commit would create an unbounded
     // resume→resume chain where each new commit reuses the pending disposition.
@@ -310,7 +310,7 @@ pub async fn resume_turn(
         }
     })?;
 
-    // 4. Build new lifecycle evidence with resumes_turn_oid (D-22).
+    // 4. Build new lifecycle evidence with resumes_turn_oid.
     let source_lifecycle = source_turn
         .lifecycle
         .clone()
@@ -353,11 +353,11 @@ pub async fn resume_turn(
     api.commit_prepared_turn(prepared)
 }
 
-/// Prune retained snapshots for a single Session (D-17).
+/// Prune retained snapshots for a single Session.
 ///
 /// Lists only the addressed Session's derived snapshot prefix, preserves
 /// active/pending referenced snapshots, releases unreferenced ones
-/// idempotently. Never modifies immutable commit evidence (T-36-23).
+/// idempotently. Never modifies immutable commit evidence.
 ///
 /// # Scope fence
 ///
@@ -379,7 +379,7 @@ pub async fn prune_session_snapshots(
     // Collect the snapshot names still referenced by pending (resumable) turn
     // commits in this session. Pruning must preserve these so pending turns
     // (PendingWorktree / PendingVerification) remain resumable — releasing a
-    // snapshot a pending turn depends on is a data-loss risk (CR-01).
+    // snapshot a pending turn depends on is a data-loss risk.
     let log = api
         .log(&request.session_id)
         .map_err(|e| ApiError::Internal(format!("log: {e}")))?;
@@ -402,7 +402,7 @@ pub async fn prune_session_snapshots(
         })
         .collect();
 
-    // List retained snapshots scoped to this session (T-36-23).
+    // List retained snapshots scoped to this session.
     let names = workspace
         .list_retained_snapshots(&request.session_id)
         .await
@@ -418,7 +418,7 @@ pub async fn prune_session_snapshots(
             name: name.clone(),
         };
 
-        // Preserve snapshots still referenced by pending turns (CR-01).
+        // Preserve snapshots still referenced by pending turns.
         if pending_snapshot_names.contains(&name) {
             skipped.push(name);
             continue;

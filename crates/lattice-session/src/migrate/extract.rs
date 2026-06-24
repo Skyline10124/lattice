@@ -1,10 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Self-contained SQLite source extractor (D-03, D-04, D-06).
+//! Self-contained SQLite source extractor.
 //!
 //! Reads all five legacy SQLite tables via a direct `rusqlite::Connection` —
-//! NOT through the `SessionGraphStore` trait (D-03). The trait's `log` and
+//! NOT through the `SessionGraphStore` trait. The trait's `log` and
 //! `head_transcript` are HEAD-anchored and miss reset-orphans, non-HEAD tips,
 //! and full message ordinals; a self-contained extractor is also what lets
 //! `sqlite_graph/` be deleted in Plan 07.
@@ -13,7 +13,7 @@
 //! `sqlite_graph/helpers.rs:collect_reachable_commits_topological` because that
 //! directory is deleted in Plan 07. The walk covers the reachable closure of
 //! every `graph_refs.commit_id` tip plus each session's `head_commit_id`
-//! (D-04) — not just HEAD.
+//! — not just HEAD.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -41,7 +41,7 @@ pub(crate) struct ExtractedSession {
     pub created_at: String,
     pub updated_at: String,
     pub refs: Vec<ExtractedRef>,
-    /// Commits in parents-before-children order (D-05 write order).
+    /// Commits in parents-before-children order (write order).
     pub commits: Vec<ExtractedCommit>,
 }
 
@@ -74,11 +74,11 @@ pub(crate) struct ExtractedCommit {
     pub snapshot_lost: bool,
 }
 
-/// Persistent legacy SHA-256 `commit_id` → new Git OID map (D-06, D-09).
+/// Persistent legacy SHA-256 `commit_id` → new Git OID map.
 ///
 /// Checkpointed at `<target_repo>/.lattice/migration/idmap.json` so a restart
 /// skips commits already written (content-addressed determinism + idempotent
-/// refs make re-runs converge — D-09).
+/// refs make re-runs converge).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Idmap {
     #[serde(default)]
@@ -131,7 +131,7 @@ fn idmap_path(target_repo: &Path) -> std::path::PathBuf {
 /// Extract every session with its refs and topologically-ordered commits.
 ///
 /// `run_migration` and `verify_equivalence` both own their connection and call
-/// this directly (IN-02: the path-opening `extract_all` variant had no callers
+/// this directly (the path-opening `extract_all` variant had no callers
 /// and was removed).
 pub(crate) fn extract_all_with_conn(conn: &Connection) -> Result<Vec<ExtractedSession>> {
     let session_rows = read_session_rows(conn)?;
@@ -244,7 +244,7 @@ fn read_ref_rows(conn: &Connection, session_id: &str) -> Result<Vec<ExtractedRef
     Ok(out)
 }
 
-/// D-04: the reachable closure seeds = every ref tip plus the session HEAD.
+/// The reachable closure seeds = every ref tip plus the session HEAD.
 fn collect_tips(session: &SessionRow, refs: &[ExtractedRef]) -> Vec<String> {
     let mut tips: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -263,7 +263,7 @@ fn collect_tips(session: &SessionRow, refs: &[ExtractedRef]) -> Vec<String> {
     tips
 }
 
-/// Topological walk over all tips (D-04). Iterative DFS with Enter/Exit frames
+/// Topological walk over all tips. Iterative DFS with Enter/Exit frames
 /// and cycle detection — copied from
 /// `sqlite_graph/helpers.rs:collect_reachable_commits_topological` (lines
 /// 209-252). Parents are visited in `parents_json` array order (first parent
@@ -411,7 +411,7 @@ fn read_commit(conn: &Connection, session_id: &str, commit_id: &str) -> Result<E
     let messages = load_messages(conn, session_id, &message_ids)?;
     let snapshot_lost = read_snapshot_lost(conn, commit_id)?;
 
-    // WR-03: strict-decode lifecycle to fail closed on malformed data (matches
+    // strict-decode lifecycle to fail closed on malformed data (matches
     // sqlite_graph/commit.rs:decode_lifecycle_json). Propagate the error at the
     // extraction boundary with commit context — `let _ =` previously discarded
     // the Result, defeating the "fail closed" intent. The writer still consumes

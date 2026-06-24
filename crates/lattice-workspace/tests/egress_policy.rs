@@ -4,7 +4,7 @@
 //! Public-surface smoke tests for `EgressPolicy` / `AllowlistEntry`.
 //!
 //! These tests verify that public types are constructible from downstream
-//! crates.  Mapping-correctness tests (V-06 / V-07) live in `src/lib.rs`
+//! crates.  Mapping-correctness tests live in `src/lib.rs`
 //! under `#[cfg(test)] mod egress_tests` where `plan_egress` (pub(crate))
 //! and the inspectable `NetPlan` are in scope.
 //!
@@ -13,22 +13,22 @@
 //! Do NOT test `plan_egress` or `NetPlan` here — those are `pub(crate)` and
 //! not visible from an integration test crate.  Do NOT claim that a particular
 //! `EgressPolicy` produces a particular SDK `NetworkPolicy` state — that is
-//! V-08 live on the KVM integration lane.
+//! live on the KVM integration lane.
 
 use lattice_workspace::{AllowlistEntry, EgressPolicy};
 
 /// Composite egress public-surface test — matches the `test_egress` CI filter.
 ///
 /// Verifies that all three `EgressPolicy` variants are publicly constructible
-/// from a downstream crate.  Mapping correctness (V-06/V-07) is tested in
+/// from a downstream crate.  Mapping correctness is tested in
 /// `src/lib.rs#egress_tests` where `plan_egress` + `NetPlan` are in scope.
 #[test]
 fn test_egress_variants_constructible() {
-    // V-06 public-surface variant: Blocked is constructible.
+    // public-surface variant: Blocked is constructible.
     let blocked = EgressPolicy::Blocked;
     assert!(matches!(blocked, EgressPolicy::Blocked));
 
-    // V-07 public-surface variant: Allowlist with entries is constructible.
+    // public-surface variant: Allowlist with entries is constructible.
     let allowlist = EgressPolicy::Allowlist(vec![
         AllowlistEntry {
             target: "api.openai.com".into(),

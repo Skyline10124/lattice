@@ -5,12 +5,12 @@
 //! the complete independent outcome classification matrix, and crash-safe
 //! disposition finalization.
 //!
-//! This module centralizes lifecycle ordering and classification (D-25/D-26).
+//! This module centralizes lifecycle ordering and classification.
 //! Every terminal condition maps to an explicit `(TurnCommitStatus,
 //! WorkspaceDisposition, ResourceAction)` triple — no error-string inference.
 //!
 //! [`finalize_turn`] orchestrates the journal → retain/release → commit →
-//! journal-complete sequence for each disposition (D-13/D-14).
+//! journal-complete sequence for each disposition.
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ pub enum ResourceAction {
 /// Turn lifecycle outcome: the terminal classification of a complete turn.
 ///
 /// Every stage maps to an explicit `(status, disposition, resource_action)`
-/// triple (D-26, T-36-18). Disposition is never derived from error strings.
+/// triple. Disposition is never derived from error strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnLifecycleOutcome {
     /// Execution status (completed / error / cancelled).
@@ -69,7 +69,7 @@ pub struct UnfinalizedTurn {
     pub upper_handle: Option<UpperHandle>,
 }
 
-/// Workspace-dirty hook for same-loop provisional completion (D-06..D-10).
+/// Workspace-dirty hook for same-loop provisional completion.
 ///
 /// Owns an `Arc<dyn Workspace>` and one `UpperHandle`. When the agent loop
 /// reaches a non-tool-call final response, the hook checks workspace
@@ -83,7 +83,7 @@ pub struct UnfinalizedTurn {
 /// - **Error:** propagates as a string error (becomes `AgentTurnStatus::Error`).
 ///
 /// The hook never auto-commits, restores, resets, removes, or discards Upper
-/// paths (D-08).
+/// paths.
 pub struct WorkspaceDirtyHook {
     workspace: Arc<dyn Workspace>,
     handle: UpperHandle,
@@ -165,7 +165,7 @@ impl ProvisionalCompletionHook for WorkspaceDirtyHook {
         if self.dirty_rounds >= self.max_cleanup_rounds {
             // Exhausted: return Complete with cleanup_exhausted=true and carry
             // the final workspace-dirty fact as `final_message` so the loop
-            // appends it to the transcript (CR-04). This preserves the
+            // appends it to the transcript. This preserves the
             // diagnostic evidence of what was dirty when cleanup was exhausted
             // — critical for understanding a PendingWorktree disposition.
             return Ok(ProvisionalDecision::Complete {
@@ -183,7 +183,7 @@ impl ProvisionalCompletionHook for WorkspaceDirtyHook {
 /// Executes the verification argv inside the live Upper, constructs a
 /// `VerificationResult`, and checks post-export HEAD stability.
 ///
-/// Returns `None` if verification config is absent (D-28: pending_verification,
+/// Returns `None` if verification config is absent (pending_verification,
 /// no fabricated evidence).
 ///
 /// Returns the `VerificationResult` if verification was executed, regardless
@@ -197,7 +197,7 @@ pub async fn run_terminal_verification(
     expected_exit_code: i32,
 ) -> Result<Option<lattice_workspace::promotion::VerificationResult>, String> {
     let Some(argv) = verify_argv else {
-        // D-28: no verify config → pending_verification, no evidence.
+        // no verify config → pending_verification, no evidence.
         return Ok(None);
     };
 
@@ -238,7 +238,7 @@ pub async fn run_terminal_verification(
 
 /// Classify a lifecycle failure into a typed outcome.
 ///
-/// Centralizes all stage-to-outcome mapping (D-26, T-36-18). Never derives
+/// Centralizes all stage-to-outcome mapping. Never derives
 /// disposition from generic error strings or solely from agent status.
 pub fn classify_lifecycle_failure(
     status: TurnCommitStatus,
@@ -385,7 +385,7 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 // ─── Durable Finalization ───────────────────────────────────────────────────
 
 /// Orchestrate crash-safe journal, retain/release, and commit for a terminal
-/// turn outcome (D-13, D-14).
+/// turn outcome.
 ///
 /// The exact order per resource action:
 /// - **Retain:** journal intent → retain snapshot → journal retained → commit →
@@ -395,8 +395,8 @@ pub fn outcome_workspace_less() -> TurnLifecycleOutcome {
 /// - **Destroy:** destroy Upper → commit.
 /// - **None:** commit only.
 ///
-/// For `pending_conflict`: no snapshot is ever retained (D-14).
-/// Never rewrites a committed lifecycle row (T-36-07).
+/// For `pending_conflict`: no snapshot is ever retained.
+/// Never rewrites a committed lifecycle row.
 ///
 /// `prepared_commit_id` is the pre-allocated commit identity (UUID) used
 /// consistently across all journal records so they group as a single entry
@@ -417,7 +417,7 @@ pub fn finalize_turn(
 ) -> Result<String, String> {
     let commit_id = match outcome.resource_action {
         ResourceAction::Retain => {
-            // D-13: journal intent BEFORE snapshot creation.
+            // journal intent BEFORE snapshot creation.
             journal.append_record(SnapshotJournalRecord::Intent {
                 session_id: session_id.to_string(),
                 prepared_commit_id: prepared_commit_id.to_string(),
@@ -445,7 +445,7 @@ pub fn finalize_turn(
             cid
         }
         ResourceAction::ReleaseAfterCandidatePin => {
-            // D-14: candidate pin is durable before release (caller prerequisite).
+            // candidate pin is durable before release (caller prerequisite).
             // Release the snapshot now.
             if reconciler.snapshot_exists(snapshot_name)? {
                 reconciler.release_snapshot(snapshot_name)?;
@@ -461,7 +461,7 @@ pub fn finalize_turn(
         }
         ResourceAction::None => {
             // No resource action; just commit.
-            // For pending_conflict: D-14 says NO snapshot is retained.
+            // For pending_conflict: NO snapshot is retained.
             commit_fn(outcome, snapshot_name)?
         }
     };
@@ -469,7 +469,7 @@ pub fn finalize_turn(
     Ok(commit_id)
 }
 
-/// Commit a promoted outcome with one retry on failure (D-23).
+/// Commit a promoted outcome with one retry on failure.
 ///
 /// The promotion ref transaction is authoritative. If the first SQLite commit
 /// fails, the exact same `commit_fn` is retried once. After a second failure,
@@ -485,7 +485,7 @@ pub fn commit_promoted_with_retry(
     match commit_fn(outcome, snapshot_name) {
         Ok(id) => Ok(id),
         Err(first_error) => {
-            // D-23: retry once with the same prepared commit.
+            // retry once with the same prepared commit.
             match commit_fn(outcome, snapshot_name) {
                 Ok(id) => Ok(id),
                 Err(second_error) => Err(format!(

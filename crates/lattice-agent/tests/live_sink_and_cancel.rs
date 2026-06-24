@@ -692,7 +692,7 @@ async fn scenario_04_receiver_drop_does_not_cancel_turn() {
 
     let (tx, rx) = tokio::sync::mpsc::channel::<AgentTurnEvent>(8);
     // Drop the receiver before any send has happened. Live mirror uses
-    // non-blocking `try_send` (M-19a); the turn must still complete normally.
+    // non-blocking `try_send`; the turn must still complete normally.
     drop(rx);
 
     let result = loop_inst.run_turn_live(make_request("hello"), tx).await;
@@ -755,7 +755,7 @@ async fn scenario_04b_full_live_channel_without_drain_completes() {
     });
 
     let (tx, _rx) = tokio::sync::mpsc::channel::<AgentTurnEvent>(4);
-    // Receiver exists but is never read — channel fills; M-19a must not block.
+    // Receiver exists but is never read — channel fills; must not block.
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),

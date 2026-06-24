@@ -18,7 +18,7 @@
 //! [`DeterministicWorkspace::requested_policy`]) but does **not** enforce
 //! network blocking — commands run on the host network.  Contract tests
 //! assert the policy is *recorded*, not that the host network is blocked.
-//! Live enforcement is verified on the KVM integration lane (V-08).
+//! Live enforcement is verified on the KVM integration lane.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ pub struct DeterministicWorkspace {
     handles: Arc<RwLock<HashMap<String, PathBuf>>>,
     policies: Arc<RwLock<HashMap<String, EgressPolicy>>>,
     /// Retained snapshot store: snapshot name → directory path.
-    /// Distinct from warm templates; may contain credential state (D-11).
+    /// Distinct from warm templates; may contain credential state.
     retained: Arc<RwLock<HashMap<String, PathBuf>>>,
 }
 
@@ -182,7 +182,7 @@ impl Workspace for DeterministicWorkspace {
     /// Copy the handle's directory to a named sibling under `base_dir`.
     ///
     /// The template name is returned (mirrors `Workspace::template_create`
-    /// semantics).  Credentials are **not** captured in the copy (T-33-04).
+    /// semantics).  Credentials are **not** captured in the copy.
     async fn template_create(&self, source: &UpperHandle, name: &str) -> Result<String> {
         let src_dir = self
             .handles
@@ -297,7 +297,7 @@ impl Workspace for DeterministicWorkspace {
         crate::primitives::find_files_tree(&dir, request)
     }
 
-    // ── Retained snapshot lifecycle (D-11, D-15, D-17) ────────────────────────
+    // ── Retained snapshot lifecycle ────────────────────────────────────────────
 
     async fn retain_upper(
         &self,
@@ -305,7 +305,7 @@ impl Workspace for DeterministicWorkspace {
         snapshot_name: &str,
         max_pending_snapshots: u32,
     ) -> Result<SnapshotRef> {
-        // Validate D-12 name format before any effect.
+        // Validate name format before any effect.
         validate_snapshot_name(snapshot_name)?;
 
         // Extract session prefix from snapshot name for quota counting.
@@ -383,7 +383,7 @@ impl Workspace for DeterministicWorkspace {
             });
         }
 
-        // Copy into a fresh handle directory (cold restore, D-15).
+        // Copy into a fresh handle directory (cold restore).
         let uid = uuid::Uuid::new_v4().simple().to_string();
         let dest = self.base_dir.path().join(&uid);
         copy_dir_all(&retained_dir, &dest).map_err(WorkspaceError::Io)?;
@@ -437,20 +437,20 @@ impl Workspace for DeterministicWorkspace {
     }
 }
 
-/// Extract the session prefix from a D-12 snapshot name for quota counting.
+/// Extract the session prefix from a snapshot name for quota counting.
 ///
 /// Input:  `lattice-{session_id}-{commit_hex8}-{nonce_hex8}`
 /// Output: `lattice-{session_id}-` (trailing dash included for exact
 /// session-boundary prefix matching).
 ///
-/// This matches the `lattice-{session_id}-` prefix used in D-17 quota enforcement.
+/// This matches the `lattice-{session_id}-` prefix used in quota enforcement.
 fn extract_session_prefix(snapshot_name: &str) -> String {
     // Format: lattice-{session_id}-{8hex}-{8hex}
     // Strip the last two segments: -{nonce_hex8} and -{commit_hex8}
     let parts: Vec<&str> = snapshot_name.rsplitn(3, '-').collect();
     if parts.len() >= 3 {
         // parts[0] = nonce_hex8, parts[1] = commit_hex8, parts[2] = lattice-{session_id}
-        // WR-03: include the trailing dash so `starts_with` matches the session
+        // Include the trailing dash so `starts_with` matches the session
         // boundary exactly (matching the documented `lattice-{session_id}-`
         // prefix and `list_retained_snapshots`), preventing a shorter session
         // id from counting a longer one's snapshots.

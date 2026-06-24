@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold (OBS-05).
+//! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold.
 
 use crate::method::CepMethod;
 use lancet_protocol::RequiredCapability;

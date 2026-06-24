@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 36 Plan 12: Turn lifecycle state machine tests.
+//! Turn lifecycle state machine tests.
 //!
 //! Covers:
 //! - `cleanup*`: WorkspaceDirtyHook behavior (clean, dirty, exhausted, error).
@@ -182,7 +182,7 @@ async fn cleanup_exhaustion_yields_completed_pending_worktree() {
                 cleanup_exhausted,
                 "exhaustion must set cleanup_exhausted=true"
             );
-            // CR-04: the final workspace-dirty fact must be carried so the
+            // the final workspace-dirty fact must be carried so the
             // transcript records what was dirty when cleanup was exhausted.
             assert!(
                 final_message.is_some(),
@@ -811,7 +811,7 @@ async fn outcome_matrix_retention_only_pending_worktree_and_verify_retain() {
     assert_eq!(rejected.resource_action, ResourceAction::Destroy);
 }
 
-/// Dirty fact uses structured JSON with typed entries (T-36-03).
+/// Dirty fact uses structured JSON with typed entries.
 #[test]
 fn workspace_dirty_fact_structured_json() {
     let entries = vec![GitStatusEntry {

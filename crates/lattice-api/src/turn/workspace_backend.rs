@@ -379,7 +379,7 @@ impl ExecutionBackend for WorkspaceExecutionBackend {
                 .git_status(&handle)
                 .await
                 .map_err(Self::map_error)?;
-            // Consume typed entries directly — no line-based parsing (D-08).
+            // Consume typed entries directly — no line-based parsing.
             let mut out = Vec::new();
             for entry in &status.entries {
                 let path = NativeWorkspacePath::parse(&entry.path).map_err(|err| {

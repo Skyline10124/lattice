@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Concurrent commit safety (CR-01 fix).
+//! Concurrent commit safety.
 //!
 //! Two concurrent `commit_prepared_turn` calls to the same branch with the
 //! same expected parent do not silently overwrite each other. The second

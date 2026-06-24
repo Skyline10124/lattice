@@ -671,7 +671,7 @@ pub(crate) async fn build_production_turn_deps(
             .map_err(|err| ApiError::Internal(format!("resolve external audit path: {err}")))?
     };
 
-    // Phase 36 Plan 11: pass None for baseline_oid to maintain backward compatibility.
+    // Pass None for baseline_oid to maintain backward compatibility.
     // Future lifecycle orchestration will inject the preflight baseline from
     // resolve_turn_target when Upper-backed turns are activated.
     let upper_config = resolve_upper_config(loaded_profile, Path::new(project_root), enabled_tools, None)
@@ -1265,7 +1265,7 @@ mod cep_context_profile_policy {
 }
 
 #[cfg(test)]
-mod phase34_turn_wiring {
+mod turn_wiring {
     use super::*;
     use lancet_api::audit_db_path_for_project_in;
     use lancet_audit::{AuditOutcome, CallAuditMetadata};
@@ -1303,7 +1303,7 @@ mod phase34_turn_wiring {
     }
 
     #[tokio::test]
-    async fn phase34_external_audit_preserves_lower() {
+    async fn external_audit_preserves_lower() {
         let state = TempDir::new().unwrap();
         unsafe {
             std::env::set_var("XDG_STATE_HOME", state.path());
@@ -1384,7 +1384,7 @@ mod phase34_turn_wiring {
     }
 
     #[tokio::test]
-    async fn phase34_upper_lifecycle_host_only_has_no_lease() {
+    async fn upper_lifecycle_host_only_has_no_lease() {
         let dir = TempDir::new().unwrap();
         let llm: Arc<dyn lattice_agent::LlmClient> =
             Arc::new(FakeStreamingLlmClient::builder().build());

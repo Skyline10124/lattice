@@ -1,13 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Phase 36 Plan 14: Resume and prune tests.
+//! Resume and prune tests.
 //!
 //! Covers:
-//! - `eligibility`: resolve_resume_mode classification (T-36-08).
-//! - `target`: project target branch validation for resume (D-27).
-//! - `cold_resume`: new linked turn with resumes_turn_oid (D-15, D-16, D-22).
-//! - `prune`: explicit manual snapshot pruning (D-17, T-36-23).
+//! - `eligibility`: resolve_resume_mode classification.
+//! - `target`: project target branch validation for resume.
+//! - `cold_resume`: new linked turn with resumes_turn_oid.
+//! - `prune`: explicit manual snapshot pruning.
 
 use std::sync::Arc;
 
@@ -253,7 +253,7 @@ mod target {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
-            .join("lattice-api-phase36-14-tests")
+            .join("lattice-api-resume-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         dir
@@ -409,7 +409,7 @@ mod prune {
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir()
-            .join("lattice-api-phase36-14-prune-tests")
+            .join("lattice-api-resume-prune-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         dir

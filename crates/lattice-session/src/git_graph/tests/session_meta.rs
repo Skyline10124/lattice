@@ -107,7 +107,7 @@ fn test_status_empty_session() {
 
 #[test]
 fn test_repo_auto_init_bare_on_fresh_dir() {
-    // D-15/D-19: a fresh install with no pre-existing Git repo must
+    // A fresh install with no pre-existing Git repo must
     // auto-initialize a bare repo on first access instead of crashing.
     // This is the safety net for after Plan 07 deletes SessionApi::sqlite().
     let dir = temp_dir("auto_init_bare");

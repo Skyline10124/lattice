@@ -7,8 +7,8 @@
 //! `retain_upper`, `restore_retained_upper`, `retained_snapshot_exists`,
 //! `list_retained_snapshots`, and `release_retained_snapshot`.
 //!
-//! Validates D-11 (distinct from warm templates), D-12 (name format),
-//! D-15 (cold restore preserves filesystem state), D-17 (quota).
+//! Validates (distinct from warm templates), (name format),
+//! (cold restore preserves filesystem state), (quota).
 //!
 //! This file is compiled whenever `--features=test-utils` is present.
 //! It does NOT require the `integration_tests` feature.
@@ -19,10 +19,10 @@ use lattice_workspace::testing::DeterministicWorkspace;
 use lattice_workspace::testing::contract_tests::{make_fixture_repo, minimal_upper_spec};
 use lattice_workspace::{Backend, SnapshotRef, Workspace, WorkspaceError};
 
-/// Default per-session quota used in tests (matches D-17 default of 5).
+/// Default per-session quota used in tests (matches default of 5).
 const DEFAULT_QUOTA: u32 = 5;
 
-/// Build a valid D-12 snapshot name from session/commit/nonce parts.
+/// Build a valid snapshot name from session/commit/nonce parts.
 fn make_snapshot_name(session_id: &str, commit_hex8: &str, nonce_hex8: &str) -> String {
     format!("lattice-{session_id}-{commit_hex8}-{nonce_hex8}")
 }

@@ -63,8 +63,8 @@ test-utils = []
 integration_tests = ["test-utils"]
 
 [[test]]
-name = "phase34_primitives"
-path = "tests/phase34_primitives.rs"
+name = "workspace_primitives"
+path = "tests/workspace_primitives.rs"
 required-features = ["test-utils"]
 
 [[test]]

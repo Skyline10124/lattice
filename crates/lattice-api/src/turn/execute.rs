@@ -34,10 +34,10 @@ pub(super) struct TurnCommitContext {
 /// result. Shared by the live turn path to ensure commit construction stays
 /// consistent.
 ///
-/// WR-05: `disposition` and `lifecycle` are required parameters (not hardcoded
+/// `disposition` and `lifecycle` are required parameters (not hardcoded
 /// defaults) so a new call site cannot silently produce a commit with
 /// `NotApplicable` / no lifecycle evidence. The caller owns the lifecycle
-/// classification (D-25/D-26) and must pass both explicitly.
+/// classification and must pass both explicitly.
 pub(super) fn build_commit_input(
     user_input: &str,
     ctx: &TurnCommitContext,

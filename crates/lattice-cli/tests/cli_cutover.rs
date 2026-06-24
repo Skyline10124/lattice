@@ -106,7 +106,7 @@ fn cli_cutover_rejects_unknown_command_with_clap_error() {
     );
 }
 
-// ─── Resolve secret safety (T-10-01) ─────────────────────────────────────────
+// ─── Resolve secret safety ───────────────────────────────────────────────────
 
 #[test]
 fn cli_cutover_resolve_json_excludes_secret_value() {
@@ -143,7 +143,7 @@ fn cli_cutover_resolve_json_excludes_secret_value() {
     );
 }
 
-// ─── Models --auth text safety (T-10-01) ─────────────────────────────────────
+// ─── Models --auth text safety ───────────────────────────────────────────────
 
 #[test]
 fn cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets() {
@@ -192,12 +192,12 @@ fn cli_cutover_models_auth_one_alias_per_line_without_icons_or_secrets() {
     );
 }
 
-// ─── Session log missing session (T-10-03, T-10-05) ──────────────────────────
+// ─── Session log missing session ─────────────────────────────────────────────
 
 #[test]
 fn cli_cutover_session_log_missing_session_fails_with_id_in_message() {
     // Isolate XDG_CONFIG_HOME so the migration guard does not fire on the
-    // developer's real legacy session DB (e.g. session_v12.db). D-08-GAP1:
+    // developer's real legacy session DB (e.g. session_v12.db).
     // the guard now probes for the real legacy filename, so without isolation
     // a real legacy DB would block this test with a migration prompt instead
     // of the expected "session not found" error.

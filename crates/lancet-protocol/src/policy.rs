@@ -20,13 +20,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-// ── Relocated from envelope.rs (D-01/D-05) ──────────────────────────────────
+// ── Relocated from envelope.rs ─────────────────────────────────────────────
 
 /// CEP enforcement mode.
 ///
 /// Retained as effect-region mode control. It survives the Envelope removal
-/// because effect-region checking is a separate axis from authority mode
-/// (D-05).
+/// because effect-region checking is a separate axis from authority mode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CepMode {

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold stubs (OBS-05).
+//! Feature-gated `workspace.inspect` / `workspace.navigate` scaffold stubs.
 
 use crate::server::registry::{HandlerContext, MethodRegistry};
 use lancet_catalog::CepMethod;

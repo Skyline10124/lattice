@@ -4,8 +4,8 @@
 //! Deterministic contract suite — CI lane, no KVM required.
 //!
 //! Runs the adapter-agnostic [`contract_tests::run_suite`] against
-//! [`DeterministicWorkspace`], covering WS-01 / WS-02 / WS-03 / SC5
-//! validation rows V-01 through V-05.
+//! [`DeterministicWorkspace`], covering SC5
+//! validation rows.
 //!
 //! This file is compiled whenever `--features=test-utils` is present.
 //! It does NOT require the `integration_tests` feature.
@@ -17,7 +17,7 @@ use lattice_workspace::testing::DeterministicWorkspace;
 use lattice_workspace::testing::contract_tests;
 
 /// Main contract gate: run the full adapter-agnostic suite against
-/// `DeterministicWorkspace`.  Covers V-01..V-05 (det tier).
+/// `DeterministicWorkspace`.  Covers (det tier).
 #[tokio::test]
 async fn test_deterministic_contract_suite() {
     let ws = DeterministicWorkspace::new().expect("DeterministicWorkspace::new");
@@ -60,7 +60,7 @@ async fn test_deterministic_policy_is_recorded() {
     ws.destroy_upper(&handle).await.unwrap();
 }
 
-/// Ensure handle.id does not contain the host repo path (T-33-01 / WS-02).
+/// Ensure handle.id does not contain the host repo path.
 /// Duplicates test_no_lower_path_in_handle from run_suite but is kept here
 /// as an explicit named test for CI reporting clarity.
 #[tokio::test]

@@ -4,11 +4,11 @@
 use super::*;
 use lattice_session::WorkspaceDisposition;
 
-// ─── Stream timeout constants (L-18-03) ───────────────────────────
+// ─── Stream timeout constants ───────────────────────────────────
 
 #[test]
 fn stream_timeout_constant_is_5_minutes() {
-    // STREAM_TIMEOUT_SECS must be 300 (5 minutes) per L-18-03 spec
+    // STREAM_TIMEOUT_SECS must be 300 (5 minutes)
     const EXPECTED_TIMEOUT: u64 = 300;
     assert_eq!(EXPECTED_TIMEOUT, STREAM_TIMEOUT_SECS);
 }
@@ -451,7 +451,7 @@ fn render_json_event_emits_no_ansi_escapes() {
     render_json_event(&event, &mut buf).unwrap();
     assert!(
         !buf.contains(&0x1B),
-        "JSON output must not contain ANSI ESC bytes (D-B6 / D-D3)"
+        "JSON output must not contain ANSI ESC bytes"
     );
 }
 
@@ -504,10 +504,10 @@ fn render_human_status_line_after_partial_token_inserts_stderr_newline() {
     let mut err2 = Vec::new();
     render_human_event(&event, &mut state, &mut out, &mut err2, false).unwrap();
 
-    // D-B3: err must start with \n (the mid-token newline trick)
+    // err must start with \n (the mid-token newline trick)
     assert!(
         err2.starts_with(b"\n"),
-        "stderr should begin with newline after mid-token status line (D-B3); got: {:?}",
+        "stderr should begin with newline after mid-token status line; got: {:?}",
         String::from_utf8_lossy(&err2)
     );
 }
@@ -535,15 +535,15 @@ fn flush_before_status_resets_mid_token_flag_after_first_status() {
         TurnEvent::TurnCommitting,
     ];
     let (out, err, _state) = fake_event_loop(events, false);
-    // stdout: "foo\n" (token + D-B4 final newline)
+    // stdout: "foo\n" (token + final newline)
     assert!(out.starts_with(b"foo\n"));
-    // stderr: only ONE leading \n (from the first status event's D-B3 trick),
+    // stderr: only ONE leading \n (from the first status event's trick),
     // not three (from each of the three status events).
     let err_str = String::from_utf8(err).unwrap();
     let leading_newlines = err_str.chars().take_while(|c| *c == '\n').count();
     assert_eq!(
         leading_newlines, 1,
-        "only one D-B3 newline trick, not duplicates; got: {:?}",
+        "only one newline trick, not duplicates; got: {:?}",
         err_str
     );
 }
@@ -626,7 +626,7 @@ fn render_human_turn_started_silent_default() {
     render_human_event(&event, &mut state, &mut out, &mut err, false).unwrap();
     assert!(
         err.is_empty(),
-        "TurnStarted should be silent in non-verbose human mode (D-C2)"
+        "TurnStarted should be silent in non-verbose human mode"
     );
 }
 
@@ -711,7 +711,7 @@ fn verbose_epilogue_usage_from_state_not_committed() {
     assert!(err_str.contains("30 tok (prompt: 20, completion: 10)"));
 }
 
-// ─── D-A4 exit-code matrix (Task 6) ────────────────────────────
+// ─── exit-code matrix (Task 6) ────────────────────────────
 
 #[test]
 fn exit_code_from_state_covers_all_da4_rows() {
@@ -787,7 +787,7 @@ fn exit_code_from_state_covers_all_da4_rows() {
 // ─── Sequence test helpers ────────────────────────────────────
 
 /// Drive a Vec<TurnEvent> through the human renderer with Vec<u8>
-/// writers, applying D-B4 final-newline policy, and return the
+/// writers, applying final-newline policy, and return the
 /// captured stdout bytes, stderr bytes, and accumulated state.
 fn fake_event_loop(events: Vec<TurnEvent>, verbose: bool) -> (Vec<u8>, Vec<u8>, RunRenderState) {
     let mut state = RunRenderState::default();
@@ -798,7 +798,7 @@ fn fake_event_loop(events: Vec<TurnEvent>, verbose: bool) -> (Vec<u8>, Vec<u8>, 
             .expect("render_human_event must succeed against Vec<u8> writers");
         apply_event_to_state(event, &mut state);
     }
-    // Mirror run_inner D-B4 final-stdout-newline policy.
+    // Mirror run_inner final-stdout-newline policy.
     if state.tokens_emitted_without_newline {
         use std::io::Write;
         writeln!(&mut out).expect("final newline must succeed against Vec<u8>");
@@ -862,14 +862,14 @@ fn seq_happy_path_human() {
     ];
     let (out, err, state) = fake_event_loop(events, false);
     // stdout = TokenDelta concatenation; " world\n" ends with \n,
-    // so D-B4 final-newline logic does NOT append an extra \n.
+    // so final-newline logic does NOT append an extra \n.
     assert_eq!(s(&out), "Hello world\n");
     // stderr contains committing, commit id, completed status
     let err_str = s(&err);
     assert!(err_str.contains("committing"));
     assert!(err_str.contains("C1"));
     assert!(err_str.contains("completed"));
-    // D-C2: non-verbose hides reasoning and model-finished
+    // non-verbose hides reasoning and model-finished
     assert!(!err_str.contains("reasoning"));
     assert!(!err_str.contains("model finished"));
     // Exit code = SUCCESS
@@ -948,7 +948,7 @@ fn seq_trailing_token_newline_emitted() {
         },
     ];
     let (out, _err, _state) = fake_event_loop(events, false);
-    // D-B4: "foo" does not end with \n, so fake_event_loop appends one
+    // "foo" does not end with \n, so fake_event_loop appends one
     assert_eq!(s(&out), "foo\n");
 }
 
@@ -964,13 +964,13 @@ fn seq_token_then_status_inserts_stderr_newline() {
         },
     ];
     let (out, err, _state) = fake_event_loop(events, false);
-    // D-B4: "foo" has no trailing newline, so helper appends one to stdout
+    // "foo" has no trailing newline, so helper appends one to stdout
     assert_eq!(&out[..], b"foo\n");
-    // D-B3: stderr starts with \n (mid-token newline trick)
+    // stderr starts with \n (mid-token newline trick)
     let err_str = s(&err);
     assert!(
         err_str.starts_with('\n'),
-        "stderr should begin with newline after mid-token status line (D-B3); got: {err_str:?}"
+        "stderr should begin with newline after mid-token status line; got: {err_str:?}"
     );
     // After the leading \n, stderr contains tool name
     assert!(err_str.contains("tool"));
@@ -998,7 +998,7 @@ fn seq_multiround_usage_sums_into_state() {
         },
     ];
     let (_out, err, state) = fake_event_loop(events, true);
-    // D-A3: usage_total is summed across two ModelFinished events
+    // usage_total is summed across two ModelFinished events
     assert_eq!(
         state.usage_total,
         Some(TurnUsageSummary {
@@ -1007,7 +1007,7 @@ fn seq_multiround_usage_sums_into_state() {
             total_tokens: 30,
         })
     );
-    // D-C3: verbose epilogue uses state.usage_total, NOT TurnCommitted
+    // verbose epilogue uses state.usage_total, NOT TurnCommitted
     let mut epilogue_err = err;
     render_verbose_epilogue(&state, &mut epilogue_err).unwrap();
     let epilogue_str = s(&epilogue_err);
@@ -1051,7 +1051,7 @@ fn seq_tool_failure_renders_summary() {
     assert!(err_str.contains("120 chars"));
     assert!(err_str.contains("permission denied"));
     assert!(err_str.contains("✗"));
-    // D-A4: tool failure inside a successful turn does NOT change exit code
+    // tool failure inside a successful turn does NOT change exit code
     // Terminal status comes from TurnCommitted.
     assert_eq!(
         format!("{:?}", exit_code_from_state(&state)),
@@ -1084,18 +1084,18 @@ fn seq_turn_failed_then_commit_drains_stream() {
     ];
     let (_out, err, state) = fake_event_loop(events, false);
     let err_str = s(&err);
-    // D-A6 stream-drain proof: stderr contains the TurnFailed message
+    // stream-drain proof: stderr contains the TurnFailed message
     assert!(err_str.contains("failed"));
     assert!(err_str.contains("provider error"));
-    // And ALSO the post-terminal commit events (D-A6: must drain past terminal)
+    // And ALSO the post-terminal commit events (must drain past terminal)
     assert!(err_str.contains("committing"));
     assert!(err_str.contains("C"));
-    assert!(err_str.contains("error")); // D-B2: lowercase status
+    assert!(err_str.contains("error")); // lowercase status
     // State accumulated correctly
     assert!(state.last_terminal.is_some());
     assert_eq!(state.last_status, Some(RunTurnStatus::Error));
     assert!(state.last_commit.is_some());
-    // D-A4 row 2: TurnCommitted{Error} -> exit 1
+    // row 2: TurnCommitted{Error} -> exit 1
     assert_ne!(
         format!("{:?}", exit_code_from_state(&state)),
         format!("{:?}", std::process::ExitCode::SUCCESS)
@@ -1118,7 +1118,7 @@ fn seq_commit_failed_renders_reason() {
     // CommitFailed renders the failure glyph and reason
     assert!(err_str.contains("commit failed"));
     assert!(err_str.contains("parent mismatch"));
-    // D-A4 row 4: CommitFailed -> exit 1
+    // row 4: CommitFailed -> exit 1
     assert_ne!(
         format!("{:?}", exit_code_from_state(&state)),
         format!("{:?}", std::process::ExitCode::SUCCESS)
@@ -1142,7 +1142,7 @@ fn seq_stream_ends_without_terminal_is_protocol_violation() {
     // No terminal event arrived
     assert!(state.last_terminal.is_none());
     assert!(state.last_commit.is_none());
-    // D-A4 row 7: stream ended without terminal or commit -> exit 1
+    // row 7: stream ended without terminal or commit -> exit 1
     assert_ne!(
         format!("{:?}", exit_code_from_state(&state)),
         format!("{:?}", std::process::ExitCode::SUCCESS)
@@ -1235,28 +1235,28 @@ fn seq_jsonl_round_trips_every_variant() {
         );
     }
 
-    // D-D3 / D-B6: stdout contains zero ESC (0x1B) bytes
+    // stdout contains zero ESC (0x1B) bytes
     assert!(
         !out.contains(&0x1B),
-        "JSONL output must not contain ANSI ESC bytes (D-D3 / D-B6)"
+        "JSONL output must not contain ANSI ESC bytes"
     );
 
     // No human chrome substrings in JSONL output
     assert!(
         !out_str.contains("·") && !out_str.contains("✓") && !out_str.contains("✗"),
-        "JSONL must not contain human chrome glyphs (D-D3)"
+        "JSONL must not contain human chrome glyphs"
     );
     assert!(
         !out_str.contains("reasoning:"),
         "JSONL must not contain human-format 'reasoning:' prefix"
     );
 
-    // D-D3 (clarification): JSONL IS the raw public TurnEvent stream,
+    // JSONL IS the raw public TurnEvent stream,
     // so ReasoningDelta IS emitted as a normal JSONL line even though
     // it's hidden from human stderr
     assert!(
         out_str.contains("\"type\":\"reasoning_delta\""),
-        "JSONL must contain reasoning_delta as a normal JSONL line (D-D3 raw-stream contract)"
+        "JSONL must contain reasoning_delta as a normal JSONL line (raw-stream contract)"
     );
 }
 
@@ -1286,15 +1286,15 @@ fn seq_reasoning_hidden_default_in_human() {
         out_str.starts_with("ab"),
         "stdout should start with 'ab' (TokenDelta concatenation); got: {out_str:?}"
     );
-    // D-C2: stderr does not contain reasoning or thinking text
+    // stderr does not contain reasoning or thinking text
     let err_str = s(&err);
     assert!(
         !err_str.contains("reasoning"),
-        "stderr must not contain 'reasoning' in non-verbose mode (D-C2)"
+        "stderr must not contain 'reasoning' in non-verbose mode"
     );
     assert!(
         !err_str.contains("thinking"),
-        "stderr must not contain 'thinking' in non-verbose mode (D-C2)"
+        "stderr must not contain 'thinking' in non-verbose mode"
     );
 }
 
@@ -1324,14 +1324,14 @@ fn seq_reasoning_visible_in_verbose() {
         out_str.starts_with("ab"),
         "stdout should start with 'ab'; got: {out_str:?}"
     );
-    // D-C3: verbose stderr contains reasoning text
+    // verbose stderr contains reasoning text
     let err_str = s(&err);
     assert!(
         err_str.contains("thinking"),
-        "verbose stderr must contain 'thinking' (D-C3)"
+        "verbose stderr must contain 'thinking'"
     );
     assert!(
         err_str.contains("reasoning"),
-        "verbose stderr must contain 'reasoning' (D-C3)"
+        "verbose stderr must contain 'reasoning'"
     );
 }

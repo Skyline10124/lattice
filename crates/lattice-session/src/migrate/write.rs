@@ -1,19 +1,19 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dedicated git2 migration writer (D-05, D-07, D-09, D-10).
+//! Dedicated git2 migration writer.
 //!
 //! Creates Git commit objects on arbitrary idmap-remapped parents by calling
 //! `repo.commit(None, ...)` directly — bypassing the CAS-enforcing prepared
-//! commit path, which cannot express multi-branch or arbitrary-parent writes
-//! (D-05). Reuses the proven Phase 38 tree helpers (`build_turn_tree`,
+//! commit path, which cannot express multi-branch or arbitrary-parent writes.
+//! Reuses the proven tree helpers (`build_turn_tree`,
 //! `build_root_tree`, `serialize_manifest`, `messages_to_jsonl`) and the
 //! idempotent ref-creation pattern from `git_graph/commit.rs:165-175`.
 //!
-//! Write order (D-10): commit objects → refs → sidecars → idmap fsync.
-//! No backend marker is written (D-13: no marker in the no-compat model).
+//! Write order: commit objects → refs → sidecars → idmap fsync.
+//! No backend marker is written (no marker in the no-compat model).
 //! The source is not archived here — `run_migration` archives only after
-//! verification passes (D-18).
+//! verification passes.
 
 use std::path::Path;
 
@@ -35,7 +35,7 @@ pub(crate) struct WriteStats {
     pub refs_migrated: usize,
 }
 
-/// Run the full D-10 write order against `repo` for all extracted sessions.
+/// Run the full write order against `repo` for all extracted sessions.
 ///
 /// `target_repo_path` is the bare-repo directory (used for sidecar paths and
 /// the idmap checkpoint location at `<target_repo>/.lattice/migration/idmap.json`).
@@ -47,13 +47,13 @@ pub(crate) fn write_migration(
 ) -> Result<WriteStats> {
     let mut stats = WriteStats::default();
 
-    // Step 1 — commit objects (D-05, D-06). Topological order is already
+    // Step 1 — commit objects. Topological order is already
     // guaranteed by the extractor (parents before children), so writing each
     // session's commits in their extracted order is correct.
     for session in sessions {
         for commit in &session.commits {
-            // Restartability (D-09): skip commits already written, but only if
-            // the object actually exists. WR-05: the idmap may survive a crash
+            // Restartability: skip commits already written, but only if
+            // the object actually exists. the idmap may survive a crash
             // that lost the object (interrupted write before the end-of-run
             // idmap.save, or an externally-damaged loose object). Trusting
             // membership alone would later build refs pointing at a missing
@@ -75,33 +75,33 @@ pub(crate) fn write_migration(
         stats.sessions_migrated += 1;
     }
 
-    // Step 2 — refs (D-07, D-09). After ALL commit objects so refs always
+    // Step 2 — refs. After ALL commit objects so refs always
     // resolve (Pitfall #3).
     for session in sessions {
         write_session_refs(repo, session, idmap, &mut stats)?;
     }
 
-    // Step 3 — sidecars (D-07): meta.json per session + ops/<oid>.json per
+    // Step 3 — sidecars: meta.json per session + ops/<oid>.json per
     // commit with snapshot_lost.
     for session in sessions {
         write_session_sidecars(repo, target_repo_path, session, idmap)?;
     }
 
-    // Step 4 — idmap checkpoint (D-09). Atomic write so a crash mid-migration
+    // Step 4 — idmap checkpoint. Atomic write so a crash mid-migration
     // leaves the previous checkpoint intact.
     idmap.save(target_repo_path)?;
 
     Ok(stats)
 }
 
-/// Create a single Git commit object on idmap-remapped parents (D-05, D-06).
+/// Create a single Git commit object on idmap-remapped parents.
 fn write_commit_object(
     repo: &git2::Repository,
     session: &ExtractedSession,
     commit: &ExtractedCommit,
     idmap: &Idmap,
 ) -> Result<git2::Oid> {
-    // Remap parents through the idmap (D-06). Topological order guarantees
+    // Remap parents through the idmap. Topological order guarantees
     // every parent is already in the idmap.
     let parent_oids: Vec<String> = commit
         .parent_ids
@@ -143,7 +143,7 @@ fn write_commit_object(
         candidate_oid: lifecycle.as_ref().and_then(|lc| lc.candidate_oid.clone()),
         candidate_ref: lifecycle.as_ref().and_then(|lc| lc.candidate_ref.clone()),
         target_project_ref: lifecycle.as_ref().map(|lc| lc.target_project_ref.clone()),
-        // WR-04: propagate serialization failure instead of silently coercing a
+        // propagate serialization failure instead of silently coercing a
         // populated field to `null`, which would fold a corrupted (but stable)
         // value into the deterministic manifest tree. OID-neutral on success:
         // `Some(v).transpose()? == Some(v)` matches the old `unwrap_or(Null)`
@@ -192,7 +192,7 @@ fn write_commit_object(
         .map_err(|e| SessionError::Git(format!("find root tree: {e}")))?;
 
     // Signature from the SQLite created_at timestamp — matches
-    // git_graph/commit.rs:95-99 so OIDs are deterministic (D-09).
+    // git_graph/commit.rs:95-99 so OIDs are deterministic.
     let ts = chrono::DateTime::parse_from_rfc3339(&commit.created_at)
         .map_err(|e| SessionError::Git(format!("parse commit timestamp: {e}")))?
         .timestamp();
@@ -212,14 +212,14 @@ fn write_commit_object(
     }
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
-    // D-05: repo.commit(None, ...) — update_ref=None; refs written separately.
+    // repo.commit(None, ...) — update_ref=None; refs written separately.
     let commit_oid = repo
         .commit(None, &sig, &sig, &commit.commit_message, &root_tree, &parent_refs)
         .map_err(|e| SessionError::Git(format!("create migrated commit: {e}")))?;
     Ok(commit_oid)
 }
 
-/// Write session refs and candidate refs idempotently (D-07, D-09).
+/// Write session refs and candidate refs idempotently.
 fn write_session_refs(
     repo: &git2::Repository,
     session: &ExtractedSession,
@@ -244,7 +244,7 @@ fn write_session_refs(
             let oid = git2::Oid::from_str(new_oid_str)
                 .map_err(|e| SessionError::Git(format!("parse candidate oid: {e}")))?;
             let cand_ref = candidate_ref_name(&session.session_id, &turn_id)?;
-            // WR-02: turn_id is the first 16 hex of the SQLite commit_id, so two
+            // turn_id is the first 16 hex of the SQLite commit_id, so two
             // distinct commits in one session sharing that prefix map to the
             // same candidate ref. `create_ref_idempotent` treats Exists as
             // success, silently dropping the second candidate. Detect the
@@ -284,7 +284,7 @@ fn write_branch_ref(
         return Ok(());
     };
     let Some(new_oid_str) = idmap.get(legacy_cid) else {
-        // The ref tip was not in the reachable closure (D-04 only migrates
+        // The ref tip was not in the reachable closure (only migrates
         // reachable commits). Skip rather than fail — matches the
         // "unreachable commits are not migrated" semantics.
         return Ok(());
@@ -297,8 +297,8 @@ fn write_branch_ref(
     Ok(())
 }
 
-/// Idempotent ref creation — `ErrorCode::Exists` is OK (D-09, Phase 38
-/// candidate-ref pattern from commit.rs:165-175).
+/// Idempotent ref creation — `ErrorCode::Exists` is OK (candidate-ref
+/// pattern from commit.rs:165-175).
 fn create_ref_idempotent(
     repo: &git2::Repository,
     name: &str,
@@ -312,8 +312,7 @@ fn create_ref_idempotent(
     }
 }
 
-/// Write per-session `meta.json` and per-commit `ops/<oid>.json` sidecars
-/// (D-07).
+/// Write per-session `meta.json` and per-commit `ops/<oid>.json` sidecars.
 fn write_session_sidecars(
     _repo: &git2::Repository,
     target_repo_path: &Path,
@@ -322,7 +321,7 @@ fn write_session_sidecars(
 ) -> Result<()> {
     // meta.json with head_branch/head_commit_id from the SQLite session HEAD.
     //
-    // CR-01: only claim a branch HEAD when that branch's ref was actually
+    // only claim a branch HEAD when that branch's ref was actually
     // written, i.e. `session.refs` has a row named `head_ref` whose `commit_id`
     // is in the idmap (so `write_branch_ref` created the ref). Otherwise leave
     // `head_branch = None` so `resolve_head_oid` (git_graph/session.rs) falls

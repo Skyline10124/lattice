@@ -699,7 +699,7 @@ async fn parent_exists_direct(auth: &MutationAuthorization, path: &str) -> Resul
 
 /// Walk ancestor directories of `relative_path` via the Upper backend, returning
 /// the list of missing ancestors.  All filesystem probing goes through
-/// `ExecutionBackend::resolve_path` — never the host filesystem (D-02).
+/// `ExecutionBackend::resolve_path` — never the host filesystem.
 async fn missing_parent_dirs_direct(
     auth: &MutationAuthorization,
     relative_path: &str,
@@ -2425,7 +2425,7 @@ mod edit_tests {
     }
 
     #[tokio::test]
-    async fn phase34_direct_mutation_create_uses_backend_only() {
+    async fn direct_mutation_create_uses_backend_only() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_str().unwrap();
         let registry = mutation_registry();

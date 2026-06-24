@@ -108,7 +108,7 @@ fn build_endpoint_url(resolved: &ResolvedModel) -> String {
 
 /// Per-request provider parser state. Each `stream_sse_response` call
 /// owns its own parser, preventing state leakage across concurrent or
-/// sequential requests on the same tokio worker thread (H-01).
+/// sequential requests on the same tokio worker thread.
 enum ProviderParser {
     OpenAi(providers::openai::OpenAiSseParser),
     Anthropic(providers::anthropic::AnthropicSseParser),

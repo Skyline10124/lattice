@@ -31,7 +31,7 @@ use tokio::time;
 
 use lattice_api::{LoadedAgentProfile, RunTurnRequest, RunTurnStatus, TurnEvent, TurnUsageSummary};
 
-/// Stream idle timeout in seconds (L-18-03).
+/// Stream idle timeout in seconds.
 pub(crate) const STREAM_TIMEOUT_SECS: u64 = 300;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TerminalSignal {
@@ -47,10 +47,10 @@ enum CommitSignal {
 }
 
 /// Accumulated state from a live `TurnEvent` stream, used to derive
-/// the CLI exit code after the stream drains (D-A3 / D-A4).
+/// the CLI exit code after the stream drains.
 ///
 /// `usage_total` is summed across multiple `ModelFinished` events;
-/// `TurnCommitted` is NOT a usage source (D-A3).
+/// `TurnCommitted` is NOT a usage source.
 #[derive(Debug, Default)]
 struct RunRenderState {
     last_terminal: Option<TerminalSignal>,
@@ -65,7 +65,7 @@ struct RunRenderState {
     tool_finished_count: usize,
 }
 
-/// Update `RunRenderState` from each `TurnEvent` variant (D-A3).
+/// Update `RunRenderState` from each `TurnEvent` variant.
 fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
     match event {
         TurnEvent::TurnStarted {
@@ -125,7 +125,7 @@ fn apply_event_to_state(event: &TurnEvent, state: &mut RunRenderState) {
     }
 }
 
-/// Derive exit code from accumulated stream signals (D-A4 rows 1-7).
+/// Derive exit code from accumulated stream signals (rows 1-7).
 ///
 /// Row 8 (ApiError::NotFound -> exit 2) and Row 9 (ApiError::Internal -> exit 1)
 /// are handled in `run_inner` before the stream starts.
@@ -152,10 +152,10 @@ fn exit_code_from_state(state: &RunRenderState) -> std::process::ExitCode {
     std::process::ExitCode::from(1)
 }
 
-/// Render a `TurnEvent` as one JSONL line on `out` (D-D1).
+/// Render a `TurnEvent` as one JSONL line on `out`.
 ///
 /// Each call emits exactly one `serde_json::to_string` line followed
-/// by `\n` via `writeln!`. No ANSI escapes are produced (D-B6 / D-D3).
+/// by `\n` via `writeln!`. No ANSI escapes are produced.
 fn render_json_event<W: std::io::Write>(event: &TurnEvent, out: &mut W) -> std::io::Result<()> {
     let line = serde_json::to_string(event).map_err(std::io::Error::other)?;
     writeln!(out, "{}", line)
@@ -165,8 +165,8 @@ fn render_json_event<W: std::io::Write>(event: &TurnEvent, out: &mut W) -> std::
 ///
 /// `TokenDelta` content goes to `out`; all status/lifecycle lines go to `err`.
 /// Before writing any status line to `err`, if `state.tokens_emitted_without_newline`
-/// is true, the mid-token newline trick is applied: flush `out`, emit `\n` on `err`
-/// (D-B3). This function does not mutate `state` — `apply_event_to_state` owns that.
+/// is true, the mid-token newline trick is applied: flush `out`, emit `\n` on `err`.
+/// This function does not mutate `state` — `apply_event_to_state` owns that.
 fn render_human_event<WOut: Write, WErr: Write>(
     event: &TurnEvent,
     state: &mut RunRenderState,
@@ -326,7 +326,7 @@ fn render_human_event<WOut: Write, WErr: Write>(
     Ok(())
 }
 
-/// Apply mid-token newline trick (D-B3): if stdout has emitted tokens
+/// Apply mid-token newline trick: if stdout has emitted tokens
 /// without a trailing newline, flush stdout and emit `\n` on stderr so
 /// the status line begins on its own row in mixed-stream terminals.
 fn flush_before_status<WOut: Write, WErr: Write>(
@@ -342,7 +342,7 @@ fn flush_before_status<WOut: Write, WErr: Write>(
     Ok(())
 }
 
-/// Render the verbose epilogue after the stream drains (D-C3).
+/// Render the verbose epilogue after the stream drains.
 ///
 /// Emits dimmed labels for populated state fields on stderr only:
 /// session, commit, status, usage (from RunRenderState.usage_total, NOT TurnCommitted),
@@ -438,7 +438,7 @@ async fn run_inner(
         workspace_override: None,
     };
 
-    // D-A1: drive stream_turn; lattice-api owns Cep runtime construction
+    // drive stream_turn; lattice-api owns Cep runtime construction
     let mut stream = match lattice_api::stream_turn(session_api, request).await {
         Ok(s) => s,
         Err(lattice_api::ApiError::NotFound(id)) => {
@@ -474,7 +474,7 @@ async fn run_inner(
         }
     };
 
-    // D-A6: drain the stream to completion; never break on a terminal event
+    // drain the stream to completion; never break on a terminal event
     let mut state = RunRenderState::default();
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -510,13 +510,13 @@ async fn run_inner(
         apply_event_to_state(&event, &mut state);
     }
 
-    // D-B4: final stdout newline (human mode only; JSONL already terminates each line)
+    // final stdout newline (human mode only; JSONL already terminates each line)
     if !json && state.tokens_emitted_without_newline {
         writeln!(out)?;
     }
     out.flush()?;
 
-    // D-C3: verbose epilogue after stream drains
+    // verbose epilogue after stream drains
     if !json && verbose {
         render_verbose_epilogue(&state, &mut err)?;
     }

@@ -3,7 +3,7 @@
 
 //! Effective-boundary credit attribution.
 //!
-//! This module is Phase 28's compile-time/test-time guardrail: command
+//! This module is the compile-time/test-time guardrail: command
 //! boundary credit must be attributed to the primitive that actually earns it.
 //! Native code may add constructors for the evidence marker types only at the
 //! corresponding Linux execution path.
@@ -41,7 +41,7 @@ pub struct MountNamespaceApplied {
 
 impl MountNamespaceApplied {
     /// Construct mount-namespace evidence only after the supervisor has entered
-    /// the child mount namespace. This is not enough to claim the Phase 29
+    /// the child mount namespace. This is not enough to claim the
     /// minimal filesystem view by itself.
     pub fn from_supervisor_mount_namespace_success() -> Self {
         Self { _private: () }
@@ -130,7 +130,7 @@ impl EffectiveBoundaryCredit {
         build_physically_bounded(BoundaryDimension::Filesystem, evidence.primitive())
     }
 
-    /// Phase 29 filesystem credit from native supervisor evidence requires both
+    /// Filesystem credit from native supervisor evidence requires both
     /// mount-namespace setup and minimal mount-view setup. The native metadata
     /// builder must also emit `mount_view_status=applied` with this credit.
     pub fn filesystem_physically_bounded_from_supervisor_minimal_mount_view_success(

@@ -9,7 +9,7 @@
 //!
 //! DNS rebinding: hostnames are resolved at request time and pinned with
 //! `reqwest::RequestBuilder::resolve` so a second lookup cannot redirect to
-//! a private address after validation (M-04).
+//! a private address after validation.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 

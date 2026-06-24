@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! V-06 materialization and journal recovery crash matrix.
+//! Materialization and journal recovery crash matrix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

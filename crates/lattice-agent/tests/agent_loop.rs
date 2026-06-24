@@ -390,7 +390,7 @@ async fn agent_loop_second_llm_round_includes_tool_result_in_request() {
     assert_eq!(
         second.messages[2].tool_call_id.as_deref(),
         Some("call_1"),
-        "second-round request must include prior tool result (M-21)"
+        "second-round request must include prior tool result"
     );
 }
 
