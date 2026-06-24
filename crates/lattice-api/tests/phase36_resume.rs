@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use lattice_api::{ResumeError, ResumeMode, resolve_resume_mode};
 use lattice_session::{
-    SessionGraphStore, SqliteSessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
+    SessionGraphStore, GitSessionGraphStore, TurnCommit, TurnCommitInput, TurnCommitStatus,
     TurnLifecycleEvidence, TurnSnapshotIdentity, TurnSnapshotRef, TurnVerificationEvidence,
     WorkspaceDisposition,
 };
@@ -305,7 +305,7 @@ mod target {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let _baseline = init_repo(&dir, "main");
 
-        let store = SqliteSessionGraphStore::new(&dir);
+        let store = GitSessionGraphStore::new(&dir);
         let session = store
             .create_session("sess-x", None, "coder", "nonexistent")
             .expect("create session");
@@ -563,7 +563,7 @@ mod prune {
 
         let session_id = "sess_pending";
         let snapshot_name = "lattice-sess_pending-abcd1234-00000001";
-        let store = SqliteSessionGraphStore::new(&session_dir);
+        let store = GitSessionGraphStore::new(&session_dir);
         store
             .create_session(session_id, None, "coder", "main")
             .expect("create session");
@@ -608,7 +608,7 @@ mod prune {
             .await
             .expect("retain pending snapshot");
 
-        let api = lattice_api::SessionApi::sqlite(&session_dir);
+        let api = lattice_api::SessionApi::git(&session_dir);
         let result = lattice_api::prune_session_snapshots(
             &api,
             lattice_api::PruneSnapshotsRequest {

@@ -308,7 +308,7 @@ mod session_graph {
     }
 
     fn api(dir_name: &str) -> SessionApi {
-        SessionApi::sqlite(temp_dir(dir_name))
+        SessionApi::git(temp_dir(dir_name))
     }
 
     use lattice_session::test_helpers::{assistant_msg, user_msg};

@@ -43,7 +43,7 @@ fn seed_session(temp_home: &Path, session_id: &str) {
     let session_dir = temp_home.join(".config").join("lattice").join("sessions");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
 
-    let store = lattice_session::SqliteSessionGraphStore::new(&session_dir);
+    let store = lattice_session::GitSessionGraphStore::new(&session_dir);
     store
         .create_session(session_id, Some("Smoke test session"), "default", "main")
         .expect("create session");

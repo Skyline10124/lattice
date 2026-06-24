@@ -102,9 +102,10 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
     init_test_git_repo(&root);
 
-    let sessions_path = root.join("sessions");
-    let session_api = SessionApi::sqlite(&sessions_path);
-    let store: Box<dyn SessionGraphStore> = Box::new(lattice_session::SqliteSessionGraphStore::new(&sessions_path));
+    let sessions_path = root.join("sessions.git");
+    std::fs::create_dir_all(&sessions_path).unwrap();
+    let session_api = SessionApi::git(&sessions_path);
+    let store: Box<dyn SessionGraphStore> = Box::new(lattice_session::GitSessionGraphStore::new(&sessions_path));
     store
         .create_session(TEST_SESSION_ID, None, "test", "main")
         .expect("create default test session");

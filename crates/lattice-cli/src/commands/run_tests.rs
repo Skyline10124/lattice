@@ -145,7 +145,7 @@ impl lattice_agent::agent_loop::LlmClient for StubLlmClient {
 #[tokio::test]
 async fn run_integration_commits_existing_session() {
     let temp = tempfile::tempdir().unwrap();
-    let session_api = lattice_api::SessionApi::sqlite(temp.path());
+    let session_api = lattice_api::SessionApi::git(temp.path());
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
@@ -184,7 +184,7 @@ async fn run_integration_commits_existing_session() {
 #[tokio::test]
 async fn run_integration_missing_session_returns_not_found() {
     let temp = tempfile::tempdir().unwrap();
-    let session_api = lattice_api::SessionApi::sqlite(temp.path());
+    let session_api = lattice_api::SessionApi::git(temp.path());
     let llm = std::sync::Arc::new(StubLlmClient);
 
     let request = lattice_api::RunTurnRequest {
@@ -251,7 +251,7 @@ async fn tool_executor_uses_workspace_root_not_profile_package_dir() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(profile_dir.join("agent.toml"), "[agent]\nname = \"test\"\n").unwrap();
 
-    let session_api = lattice_api::SessionApi::sqlite(ws.join("sessions"));
+    let session_api = lattice_api::SessionApi::git(ws.join("sessions"));
     let created = session_api
         .create_session(lattice_api::CreateSessionRequest {
             label: None,

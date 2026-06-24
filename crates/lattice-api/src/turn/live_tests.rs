@@ -40,7 +40,7 @@ impl lattice_agent::ToolCallExecutor for NoOpToolExecutor {
 }
 
 fn make_session(dir: &std::path::Path) -> SessionApi {
-    let api = SessionApi::sqlite(dir);
+    let api = SessionApi::git(dir);
     let _ = api
         .store()
         .create_session(TEST_SESSION_ID, None, "test", "main");

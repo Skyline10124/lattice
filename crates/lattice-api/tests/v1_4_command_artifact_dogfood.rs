@@ -171,7 +171,7 @@ async fn v1_4_command_artifact_dogfood() {
     let session_dir = tempfile::tempdir().expect("session dir");
     let sessions_path = session_dir.path().join("sessions");
     let target = create_unattached_target_branch(&ws.root, "lattice-target-dogfood");
-    let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
+    let session_id = lattice_api::SessionApi::git(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -204,7 +204,7 @@ async fn v1_4_command_artifact_dogfood() {
     );
 
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_v1_4_request(&ws, &session_id, fake_llm),
     )
     .await

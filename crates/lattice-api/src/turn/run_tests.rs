@@ -282,7 +282,7 @@ async fn run_turn_commits_parent_from_initial_transcript() {
     let first_commit_id = first.commit_id.clone();
     let session_id = first.session_id.clone();
 
-    let session_api = SessionApi::sqlite(&fixture.sessions_path);
+    let session_api = SessionApi::git(&fixture.sessions_path);
     let llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())

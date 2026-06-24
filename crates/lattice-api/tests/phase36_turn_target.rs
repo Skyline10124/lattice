@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lattice_api::{TurnTargetError, resolve_turn_target};
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_session::{SessionGraphStore, GitSessionGraphStore};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -90,7 +90,7 @@ fn git_create_branch(dir: &Path, branch: &str) {
 
 #[allow(dead_code)]
 fn api(dir_name: &str) -> lattice_api::SessionApi {
-    lattice_api::SessionApi::sqlite(temp_dir(dir_name))
+    lattice_api::SessionApi::git(temp_dir(dir_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ fn api(dir_name: &str) -> lattice_api::SessionApi {
 fn branch_source_missing_project_target_branch_fails() {
     // A Session without project_target_branch must produce MissingProjectBranch.
     let store_dir = temp_dir("branch_missing");
-    let store = SqliteSessionGraphStore::new(&store_dir);
+    let store = GitSessionGraphStore::new(&store_dir);
 
     // Create a session then manually clear the branch to simulate legacy data.
     store
@@ -151,7 +151,7 @@ fn branch_source_missing_project_target_branch_fails() {
 fn branch_source_reads_session_project_target_branch() {
     // resolve_turn_target must use the Session's persisted project_target_branch.
     let store_dir = temp_dir("branch_reads");
-    let store = SqliteSessionGraphStore::new(&store_dir);
+    let store = GitSessionGraphStore::new(&store_dir);
 
     store
         .create_session("sess-reads", None, "coder", "feature/my-target")
@@ -189,7 +189,7 @@ fn branch_source_nonexistent_branch_fails() {
     // A session pointing to a branch that does not exist in the repository
     // must produce BranchNotFound, never reach Upper adapter setup.
     let store_dir = temp_dir("branch_nonexistent");
-    let store = SqliteSessionGraphStore::new(&store_dir);
+    let store = GitSessionGraphStore::new(&store_dir);
 
     store
         .create_session("sess-noexist", None, "coder", "nonexistent-branch")
@@ -221,7 +221,7 @@ fn branch_source_attached_branch_fails() {
     // A branch already checked out at a non-managed worktree must produce
     // BranchAlreadyAttached.
     let store_dir = temp_dir("branch_attached");
-    let store = SqliteSessionGraphStore::new(&store_dir);
+    let store = GitSessionGraphStore::new(&store_dir);
 
     store
         .create_session("sess-attached", None, "coder", "main")
@@ -249,7 +249,7 @@ fn branch_source_graph_head_ignored() {
     // Even if the session graph checks out a different branch, the target
     // comes from project_target_branch.
     let store_dir = temp_dir("branch_head_ignored");
-    let store = SqliteSessionGraphStore::new(&store_dir);
+    let store = GitSessionGraphStore::new(&store_dir);
 
     store
         .create_session("sess-head", None, "coder", "feature/stable")

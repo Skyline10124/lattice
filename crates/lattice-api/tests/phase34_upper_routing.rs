@@ -480,7 +480,7 @@ async fn phase34_upper_routing_e2e() {
 
     let target = create_unattached_target_branch(lower.path(), "lattice-target-e2e");
     let sessions_path = lower.path().join("sessions");
-    let session_api = SessionApi::sqlite(&sessions_path);
+    let session_api = SessionApi::git(&sessions_path);
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
@@ -673,7 +673,7 @@ async fn phase34_adapter_failure_has_no_lower_fallback() {
     let fake_llm: Arc<dyn LlmClient> = Arc::new(FakeStreamingLlmClient::builder().build());
     let target = create_unattached_target_branch(lower.path(), "lattice-target-fail");
     let sessions_path = lower.path().join("sessions");
-    let session_api = SessionApi::sqlite(&sessions_path);
+    let session_api = SessionApi::git(&sessions_path);
     let session_id = session_api
         .create_session(CreateSessionRequest {
             label: None,
@@ -737,7 +737,7 @@ async fn generated_profiles_are_executable_host_only() {
             system_prompt: profile.prompt.system.clone().unwrap_or_default(),
         };
         let sessions_path = dir.path().join("sessions");
-        let session_api = SessionApi::sqlite(&sessions_path);
+        let session_api = SessionApi::git(&sessions_path);
         let session_id = session_api
             .create_session(CreateSessionRequest {
                 label: None,

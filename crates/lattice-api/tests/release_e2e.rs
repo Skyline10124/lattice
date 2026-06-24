@@ -21,7 +21,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_session::{SessionGraphStore, GitSessionGraphStore};
 
 // ── Streaming event helpers ──────────────────────────────────────────────────
 
@@ -253,7 +253,7 @@ async fn release_e2e_criterion_8() {
     let target = create_unattached_target_branch(&ws.root, "lattice-target-release");
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_id = lattice_api::SessionApi::sqlite(&sessions_path)
+    let session_id = lattice_api::SessionApi::git(&sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -263,7 +263,7 @@ async fn release_e2e_criterion_8() {
         .session_id;
 
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_release_e2e_request(
             &ws,
             "Run release criterion-8 sequence",
@@ -291,7 +291,7 @@ async fn release_e2e_criterion_8() {
     // Verified via mutate.edit tool outcomes in section 6 below.
 
     // ── 3. Session has exactly one commit ────────────────────────────────
-    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let store = GitSessionGraphStore::new(&sessions_path);
     let log = store
         .log(&result.session_id)
         .expect("session log must be readable");

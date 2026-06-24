@@ -418,9 +418,9 @@ async fn run_inner(
         );
     }
 
-    // Build SessionApi backed by SQLite
+    // Build SessionApi backed by Git session graph.
     let session_dir = crate::commands::session::default_session_dir();
-    let session_api = lattice_api::SessionApi::sqlite(session_dir);
+    let session_api = lattice_api::SessionApi::git(session_dir);
 
     let request = RunTurnRequest {
         input: prompt,

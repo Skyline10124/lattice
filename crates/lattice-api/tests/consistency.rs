@@ -19,7 +19,7 @@ use lattice_api::{
 };
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore, WorkspaceDisposition};
+use lattice_session::{SessionGraphStore, GitSessionGraphStore, WorkspaceDisposition};
 
 #[derive(Debug, PartialEq)]
 struct DurableTurnObservation {
@@ -31,7 +31,7 @@ struct DurableTurnObservation {
 }
 
 fn last_terminal_reason(
-    session_store: &SqliteSessionGraphStore,
+    session_store: &GitSessionGraphStore,
     session_id: &str,
 ) -> Option<String> {
     session_store
@@ -42,7 +42,7 @@ fn last_terminal_reason(
 }
 
 fn last_usage(
-    session_store: &SqliteSessionGraphStore,
+    session_store: &GitSessionGraphStore,
     session_id: &str,
 ) -> Option<TurnUsageSummary> {
     session_store
@@ -61,7 +61,7 @@ fn last_usage(
 }
 
 fn observe_durable_turn(
-    session_store: &SqliteSessionGraphStore,
+    session_store: &GitSessionGraphStore,
     session_id: &str,
     status: RunTurnStatus,
 ) -> DurableTurnObservation {
@@ -155,7 +155,7 @@ enabled = {enabled:?}{workspace}
 }
 
 fn create_default_session(sessions_path: &std::path::Path) -> String {
-    SessionApi::sqlite(sessions_path)
+    SessionApi::git(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -217,8 +217,8 @@ async fn assert_run_equals_collector(
 ) {
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::git(&stream_sessions_path);
     let stream_session_id = create_default_session(&stream_sessions_path);
     let stream_request = make_request(
         ws,
@@ -238,7 +238,7 @@ async fn assert_run_equals_collector(
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session = SessionApi::git(&run_sessions_path);
     let run_session_id = create_default_session(&run_sessions_path);
     let run_request = make_request(ws, input, &run_session_id, llm_with_events(llm_events));
     let run_result = run_turn(run_session, run_request)
@@ -318,8 +318,8 @@ async fn consistency_error_after_partial_token() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::git(&stream_sessions_path);
     let stream_session_id = create_default_session(&stream_sessions_path);
     let stream_request = make_request(
         &ws,
@@ -338,7 +338,7 @@ async fn consistency_error_after_partial_token() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session = SessionApi::git(&run_sessions_path);
     let run_session_id = create_default_session(&run_sessions_path);
     let run_request = make_request(
         &ws,
@@ -407,8 +407,8 @@ async fn consistency_tool_call_path() {
     let all_events = vec![round1_events.clone(), round2_events.clone()];
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::git(&stream_sessions_path);
     let stream_session_id = create_default_session(&stream_sessions_path);
     let stream_request = make_request(
         &ws,
@@ -427,7 +427,7 @@ async fn consistency_tool_call_path() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session = SessionApi::git(&run_sessions_path);
     let run_session_id = create_default_session(&run_sessions_path);
     let run_request = make_request(
         &ws,
@@ -465,7 +465,7 @@ async fn stream_turn_emits_activity_before_commit() {
 
     let session_dir = tempfile::tempdir().unwrap();
     let sessions_path = session_dir.path().join("sessions");
-    let session_api = SessionApi::sqlite(&sessions_path);
+    let session_api = SessionApi::git(&sessions_path);
     let llm = llm_with_events(streaming_events);
     let session_id = create_default_session(&sessions_path);
     let request = make_request(&ws, "hi", &session_id, llm);
@@ -518,8 +518,8 @@ async fn consistency_completed_disposition_parity() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::git(&stream_sessions_path);
     let stream_session_id = create_default_session(&stream_sessions_path);
     let stream_request = make_request(
         &ws,
@@ -555,7 +555,7 @@ async fn consistency_completed_disposition_parity() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session = SessionApi::git(&run_sessions_path);
     let run_session_id = create_default_session(&run_sessions_path);
     let run_request = make_request(
         &ws,
@@ -587,8 +587,8 @@ async fn consistency_error_disposition_parity() {
 
     let stream_dir = tempfile::tempdir().unwrap();
     let stream_sessions_path = stream_dir.path().join("sessions");
-    let stream_store = SqliteSessionGraphStore::new(&stream_sessions_path);
-    let stream_session = SessionApi::sqlite(&stream_sessions_path);
+    let stream_store = GitSessionGraphStore::new(&stream_sessions_path);
+    let stream_session = SessionApi::git(&stream_sessions_path);
     let stream_session_id = create_default_session(&stream_sessions_path);
     let stream_request = make_request(
         &ws,
@@ -609,7 +609,7 @@ async fn consistency_error_disposition_parity() {
 
     let run_dir = tempfile::tempdir().unwrap();
     let run_sessions_path = run_dir.path().join("sessions");
-    let run_session = SessionApi::sqlite(&run_sessions_path);
+    let run_session = SessionApi::git(&run_sessions_path);
     let run_session_id = create_default_session(&run_sessions_path);
     let run_request = make_request(
         &ws,

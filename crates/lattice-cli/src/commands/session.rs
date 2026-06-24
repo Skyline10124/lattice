@@ -34,7 +34,7 @@ pub(crate) fn default_session_dir() -> PathBuf {
 }
 
 fn session_api() -> SessionApi {
-    SessionApi::sqlite(default_session_dir())
+    SessionApi::git(default_session_dir())
 }
 
 #[derive(Subcommand)]
@@ -1693,8 +1693,8 @@ mod d25_scoped_session {
 
         // 2. The production path uses SessionApi (positive proof of migration).
         assert!(
-            source.contains("SessionApi::sqlite(default_session_dir())"),
-            "session_api() should construct SessionApi"
+            source.contains("SessionApi::git(default_session_dir())"),
+            "session_api() should construct SessionApi via git backend"
         );
         assert!(
             source.contains("fn run_with_api(api: &SessionApi,"),
@@ -1718,7 +1718,7 @@ mod project_branch_tests {
             .join("lattice-cli-project-branch-tests")
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
-        SessionApi::sqlite(dir)
+        SessionApi::git(dir)
     }
 
     #[test]

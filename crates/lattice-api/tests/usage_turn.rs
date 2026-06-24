@@ -17,7 +17,7 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_api::{RunTurnRequest, RunTurnStatus, TurnEvent};
 use lattice_llm::{LlmEvent, TokenUsage};
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
-use lattice_session::{SessionGraphStore, SqliteSessionGraphStore};
+use lattice_session::{SessionGraphStore, GitSessionGraphStore};
 
 // ── Streaming event helpers ─────────────────────────────────────────────────
 
@@ -136,7 +136,7 @@ fn create_default_session(sessions_path: &std::path::Path) -> String {
 }
 
 fn create_session_with_branch(sessions_path: &std::path::Path, branch: &str) -> String {
-    lattice_api::SessionApi::sqlite(sessions_path)
+    lattice_api::SessionApi::git(sessions_path)
         .create_session(lattice_api::CreateSessionRequest {
             label: None,
             active_agent: "default".to_string(),
@@ -197,7 +197,7 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
     let session_id = create_session_with_branch(&sessions_path, &target);
 
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Read src/lib.rs", &session_id, fake_llm),
     )
     .await
@@ -219,7 +219,7 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         .expect("should have an observe.workspace tool result");
     assert!(tool_result.output_len > 0, "tool output must be non-empty");
 
-    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let store = GitSessionGraphStore::new(&sessions_path);
     let transcript = store
         .head_transcript(&result.session_id)
         .expect("head_transcript");
@@ -231,7 +231,7 @@ async fn usage_run_turn_can_read_workspace_file_with_default_profile() {
         "committed tool message must contain workspace file content"
     );
 
-    let verify_api = lattice_api::SessionApi::sqlite(&sessions_path);
+    let verify_api = lattice_api::SessionApi::git(&sessions_path);
     let log = verify_api
         .log(&result.session_id)
         .expect("log must succeed");
@@ -253,7 +253,7 @@ async fn usage_stream_turn_model_started_includes_routed_provider() {
     let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Hello", &session_id, fake_llm),
     )
     .await
@@ -297,7 +297,7 @@ async fn rejects_profile_disabled_command_run() {
     let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Try exec.command_run", &session_id, fake_llm),
     )
     .await
@@ -357,7 +357,7 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
     let sessions_path = session_dir.path().join("sessions");
     let session_id = create_session_with_branch(&sessions_path, &target);
     let result = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Change the answer to 42", &session_id, fake_llm),
     )
     .await
@@ -376,7 +376,7 @@ async fn usage_run_turn_can_edit_workspace_file_and_commit() {
 
     assert_eq!(result.status, RunTurnStatus::Completed);
 
-    let verify_api = lattice_api::SessionApi::sqlite(&sessions_path);
+    let verify_api = lattice_api::SessionApi::git(&sessions_path);
     let log = verify_api
         .log(&result.session_id)
         .expect("log must succeed");
@@ -410,19 +410,19 @@ async fn usage_resume_session_includes_previous_turn_context() {
     let session_id = create_session_with_branch(&sessions_path, &target);
 
     let result1 = lattice_api::run_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Hello", &session_id, fake_llm.clone()),
     )
     .await
     .expect("turn 1 must succeed");
     assert_eq!(result1.status, RunTurnStatus::Completed);
     let request2 = make_request(&ws, "Follow up", &session_id, fake_llm);
-    let result2 = lattice_api::run_turn(lattice_api::SessionApi::sqlite(&sessions_path), request2)
+    let result2 = lattice_api::run_turn(lattice_api::SessionApi::git(&sessions_path), request2)
         .await
         .expect("turn 2 must succeed");
     assert_eq!(result2.status, RunTurnStatus::Completed);
 
-    let store = SqliteSessionGraphStore::new(&sessions_path);
+    let store = GitSessionGraphStore::new(&sessions_path);
     let transcript = store
         .head_transcript(&session_id)
         .expect("head_transcript after turn 2");
@@ -441,7 +441,7 @@ async fn usage_resume_session_includes_previous_turn_context() {
         "transcript must include first turn assistant message"
     );
 
-    let verify_api = lattice_api::SessionApi::sqlite(&sessions_path);
+    let verify_api = lattice_api::SessionApi::git(&sessions_path);
     let log = verify_api.log(&session_id).expect("log must succeed");
     assert_eq!(log.len(), 2, "session log should have 2 commits");
 
@@ -531,7 +531,7 @@ async fn public_https_policy_requires_fetch_capability() {
     let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Fetch example.com", &session_id, fake_llm),
     )
     .await
@@ -592,7 +592,7 @@ async fn rejects_profile_disabled_web_fetch() {
     let session_id = create_default_session(&sessions_path);
 
     let events: Vec<TurnEvent> = lattice_api::stream_turn(
-        lattice_api::SessionApi::sqlite(&sessions_path),
+        lattice_api::SessionApi::git(&sessions_path),
         make_request(&ws, "Try fetch.web", &session_id, fake_llm),
     )
     .await
