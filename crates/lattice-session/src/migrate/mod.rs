@@ -17,6 +17,9 @@ pub(crate) mod extract;
 pub(crate) mod verify;
 pub(crate) mod write;
 
+#[cfg(test)]
+mod tests;
+
 /// Options driving a one-shot migration run (D-01).
 pub struct MigrateOptions {
     /// Path to the legacy `sessions.db` SQLite file (read-only source).
