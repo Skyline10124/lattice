@@ -104,3 +104,35 @@ fn test_status_empty_session() {
     assert_eq!(status.commit_count, 0);
     assert!(status.branches.is_empty());
 }
+
+#[test]
+fn test_repo_auto_init_bare_on_fresh_dir() {
+    // D-15/D-19: a fresh install with no pre-existing Git repo must
+    // auto-initialize a bare repo on first access instead of crashing.
+    // This is the safety net for after Plan 07 deletes SessionApi::sqlite().
+    let dir = temp_dir("auto_init_bare");
+    // Intentionally do NOT call setup_git_repo — dir does not exist yet.
+    let store = GitSessionGraphStore::new(&dir);
+
+    // First session creation triggers repo() which auto-inits the bare repo.
+    store
+        .create_session("sess-auto-init", None, "coder", "main")
+        .expect("create session on fresh bare repo");
+
+    // The session is usable: a follow-up open succeeds and a commit lands.
+    let session = store.open_session("sess-auto-init").expect("open");
+    assert_eq!(session.session_id, "sess-auto-init");
+
+    let messages = vec![
+        crate::test_helpers::user_msg("hello"),
+        crate::test_helpers::assistant_msg("hi"),
+    ];
+    let input = super::commit_input(
+        "sess-auto-init",
+        Vec::new(),
+        messages,
+        crate::graph::TurnCommitStatus::Completed,
+    );
+    let commit = store.commit_turn(input).expect("commit turn");
+    assert!(!commit.commit_id.is_empty());
+}

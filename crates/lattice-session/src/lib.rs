@@ -34,6 +34,9 @@ pub use sqlite_graph::SqliteSessionGraphStore;
 pub mod git_graph;
 pub use git_graph::GitSessionGraphStore;
 
+pub mod migrate;
+pub use migrate::{MigrateOptions, MigrationResult, run_migration};
+
 pub(crate) const MAX_BRANCH_NAME_LEN: usize = 128;
 
 pub type Result<T> = std::result::Result<T, SessionError>;

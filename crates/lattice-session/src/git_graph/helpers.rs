@@ -75,6 +75,16 @@ pub(crate) struct GitSessionManifest {
     pub usage: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_reason: Option<String>,
+    // Legacy-ID traceability (D-08): populated only by SQLite→Git migration.
+    // Native commits leave these as `None`; `skip_serializing_if` omits them
+    // from native manifest JSON, so native commit OIDs are unchanged.
+    // `deny_unknown_fields` rejects unknown JSON keys during deserialization,
+    // but new Rust fields with `#[serde(default)]` deserialize to `None` when
+    // absent from old JSON, so this addition is forward-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_commit_id: Option<String>,
     pub commit_message: String,
     pub timestamp: String,
 }

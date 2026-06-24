@@ -21,7 +21,7 @@ use crate::graph::{
 use crate::{Result, SessionError};
 
 mod commit;
-mod helpers;
+pub(crate) mod helpers;
 mod refs;
 mod session;
 
@@ -70,11 +70,34 @@ impl GitSessionGraphStore {
     }
 
     /// Acquire a locked handle to the repository, opening it on first access.
+    ///
+    /// If `Repository::open` fails (the directory has no Git repository yet),
+    /// auto-initializes a bare repo in-place (D-15/D-19). This is the
+    /// fresh-install safety net: after the SQLite store is retired, a new
+    /// install with no pre-existing repo auto-creates one on first session
+    /// instead of crashing. Existing installs and tests that pre-init a
+    /// non-bare repo are unaffected — `open` succeeds and `init_bare` never
+    /// runs.
     pub(crate) fn repo(&self) -> Result<RepoHandle<'_>> {
         let mut guard = self.repo.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
-            let repo = git2::Repository::open(&self.dir)
-                .map_err(|e| SessionError::Git(format!("open repository: {e}")))?;
+            let repo = match git2::Repository::open(&self.dir) {
+                Ok(r) => r,
+                Err(open_err) => {
+                    // open failed — try to init_bare as a fallback for fresh
+                    // installs. If init_bare also fails, surface the original
+                    // open error (more diagnostic for the common "not a git
+                    // repo" case where the user pointed at the wrong path).
+                    match git2::Repository::init_bare(&self.dir) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return Err(SessionError::Git(format!(
+                                "open repository: {open_err}"
+                            )))
+                        }
+                    }
+                }
+            };
             *guard = Some(repo);
         }
         Ok(RepoHandle { guard })

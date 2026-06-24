@@ -482,6 +482,8 @@ pub(super) fn build_manifest_from_prepared(prepared: &PreparedTurnCommit) -> Git
             .as_ref()
             .map(|u| serde_json::to_value(u).unwrap_or(serde_json::Value::Null)),
         terminal_reason: commit.terminal_reason.clone(),
+        legacy_session_id: None,
+        legacy_commit_id: None,
         commit_message: commit.commit_message.clone(),
         timestamp: commit.created_at.clone(),
     }
