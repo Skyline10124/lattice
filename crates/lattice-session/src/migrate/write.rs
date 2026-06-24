@@ -17,12 +17,11 @@
 
 use std::path::Path;
 
-use crate::graph::TurnLifecycleEvidence;
 use crate::git_graph::helpers::{
     LATTICE_AUTHOR_EMAIL, LATTICE_AUTHOR_NAME, MANIFEST_SCHEMA_VERSION, GitSessionManifest,
-    atomic_write, build_root_tree, build_turn_tree, candidate_ref_name, messages_to_jsonl,
-    serialize_manifest, session_ref_name, write_ops_state, write_session_meta, OperationalState,
-    SessionMetadata,
+    build_agent_json, build_audit_json, build_root_tree, build_turn_tree, candidate_ref_name,
+    messages_to_jsonl, serialize_manifest, session_ref_name, write_ops_state, write_session_meta,
+    OperationalState, SessionMetadata,
 };
 use crate::{Result, SessionError};
 
@@ -53,10 +52,21 @@ pub(crate) fn write_migration(
     // session's commits in their extracted order is correct.
     for session in sessions {
         for commit in &session.commits {
-            if idmap.get(&commit.commit_id).is_some() {
-                // Restartability (D-09): already written. Skip.
-                stats.commits_migrated += 1;
-                continue;
+            // Restartability (D-09): skip commits already written, but only if
+            // the object actually exists. WR-05: the idmap may survive a crash
+            // that lost the object (interrupted write before the end-of-run
+            // idmap.save, or an externally-damaged loose object). Trusting
+            // membership alone would later build refs pointing at a missing
+            // object. Confirm with find_commit; if the entry is stale, fall
+            // through and re-derive deterministically (cheap, same OID).
+            if let Some(oid_str) = idmap.get(&commit.commit_id) {
+                if let Ok(oid) = git2::Oid::from_str(oid_str) {
+                    if repo.find_commit(oid).is_ok() {
+                        stats.commits_migrated += 1;
+                        continue;
+                    }
+                }
+                // idmap entry is stale/corrupt — re-derive below.
             }
             let oid = write_commit_object(repo, session, commit, idmap)?;
             idmap.insert(commit.commit_id.clone(), oid.to_string());
@@ -133,14 +143,23 @@ fn write_commit_object(
         candidate_oid: lifecycle.as_ref().and_then(|lc| lc.candidate_oid.clone()),
         candidate_ref: lifecycle.as_ref().and_then(|lc| lc.candidate_ref.clone()),
         target_project_ref: lifecycle.as_ref().map(|lc| lc.target_project_ref.clone()),
+        // WR-04: propagate serialization failure instead of silently coercing a
+        // populated field to `null`, which would fold a corrupted (but stable)
+        // value into the deterministic manifest tree. OID-neutral on success:
+        // `Some(v).transpose()? == Some(v)` matches the old `unwrap_or(Null)`
+        // success branch byte-for-byte; only the failure path now errors.
         snapshot_ref: lifecycle
             .as_ref()
             .and_then(|lc| lc.snapshot_ref.as_ref())
-            .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)),
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| SessionError::Git(format!("serialize snapshot_ref: {e}")))?,
         verification: lifecycle
             .as_ref()
             .and_then(|lc| lc.verification.as_ref())
-            .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null)),
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| SessionError::Git(format!("serialize verification: {e}")))?,
         resumes_turn_oid,
         usage: commit
             .usage_json
@@ -155,7 +174,7 @@ fn write_commit_object(
 
     let manifest_bytes = serialize_manifest(&manifest)?;
     let messages_jsonl = messages_to_jsonl(&commit.messages)?;
-    let agent_json = serde_json::json!({ "agent_name": commit.agent_name }).to_string();
+    let agent_json = build_agent_json(&commit.agent_name);
     let profile_json = commit.profile_snapshot_json.clone();
     let audit_json = build_audit_json(&lifecycle);
 
@@ -225,7 +244,28 @@ fn write_session_refs(
             let oid = git2::Oid::from_str(new_oid_str)
                 .map_err(|e| SessionError::Git(format!("parse candidate oid: {e}")))?;
             let cand_ref = candidate_ref_name(&session.session_id, &turn_id)?;
-            create_ref_idempotent(repo, &cand_ref, oid, "lattice migration candidate")?;
+            // WR-02: turn_id is the first 16 hex of the SQLite commit_id, so two
+            // distinct commits in one session sharing that prefix map to the
+            // same candidate ref. `create_ref_idempotent` treats Exists as
+            // success, silently dropping the second candidate. Detect the
+            // collision: an existing ref must already point at the expected OID
+            // (true idempotency); a different target is a hard error.
+            match repo.find_reference(&cand_ref) {
+                Ok(existing) if existing.target() == Some(oid) => {}
+                Ok(_) => {
+                    return Err(SessionError::Git(format!(
+                        "candidate ref {cand_ref} turn_id collision: already pinned to a different OID"
+                    )));
+                }
+                Err(e) if e.code() == git2::ErrorCode::NotFound => {
+                    create_ref_idempotent(repo, &cand_ref, oid, "lattice migration candidate")?;
+                }
+                Err(e) => {
+                    return Err(SessionError::Git(format!(
+                        "find candidate ref {cand_ref}: {e}"
+                    )));
+                }
+            }
             stats.refs_migrated += 1;
         }
     }
@@ -281,7 +321,20 @@ fn write_session_sidecars(
     idmap: &Idmap,
 ) -> Result<()> {
     // meta.json with head_branch/head_commit_id from the SQLite session HEAD.
-    let head_branch = session.head_ref.clone();
+    //
+    // CR-01: only claim a branch HEAD when that branch's ref was actually
+    // written, i.e. `session.refs` has a row named `head_ref` whose `commit_id`
+    // is in the idmap (so `write_branch_ref` created the ref). Otherwise leave
+    // `head_branch = None` so `resolve_head_oid` (git_graph/session.rs) falls
+    // through to the detached `head_commit_id` instead of returning `Ok(None)`
+    // for a dangling ref — which would make the migrated session look empty.
+    // The normal case (head_ref="main" with a written "main" ref) is unchanged.
+    let head_branch = session.head_ref.as_ref().and_then(|name| {
+        let written = session.refs.iter().any(|r| {
+            &r.name == name && r.commit_id.as_ref().is_some_and(|c| idmap.get(c).is_some())
+        });
+        written.then(|| name.clone())
+    });
     let head_commit_id = session
         .head_commit_id
         .as_ref()
@@ -316,24 +369,3 @@ fn write_session_sidecars(
     }
     Ok(())
 }
-
-/// Build the audit.json blob — mirrors `git_graph/commit.rs:build_audit_json`
-/// (private to that module). The audit blob carries lifecycle ref pointers
-/// for the tree's `turn/audit.json` entry.
-fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
-    match lifecycle {
-        Some(lc) => serde_json::json!({
-            "target_project_ref": lc.target_project_ref,
-            "baseline_oid": lc.baseline_oid,
-            "candidate_oid": lc.candidate_oid,
-            "candidate_ref": lc.candidate_ref,
-        })
-        .to_string(),
-        None => "{}".to_string(),
-    }
-}
-
-// `atomic_write` is re-exported above for the idmap checkpoint path; keep the
-// import live even if the direct call in this module is only via `idmap.save`.
-#[allow(unused_imports)]
-use atomic_write as _atomic_write;

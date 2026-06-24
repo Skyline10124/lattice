@@ -407,6 +407,82 @@ fn restart_idempotent() {
     assert_eq!(count_commits_from_ref(&repo2, ref_name), 5, "restart: still 5 commits, no duplicates");
 }
 
+/// Count every commit object in the repository's object database, regardless
+/// of reachability. A duplicate-write bug would inflate this beyond the
+/// reachable set.
+fn count_all_commit_objects(repo: &git2::Repository) -> usize {
+    let odb = repo.odb().expect("odb");
+    let mut count = 0usize;
+    odb.foreach(|oid| {
+        if let Ok((_len, kind)) = odb.read_header(*oid) {
+            if kind == git2::ObjectType::Commit {
+                count += 1;
+            }
+        }
+        true
+    })
+    .expect("odb foreach");
+    count
+}
+
+/// IN-01 / SC3: simulate an *interrupted* run by writing only a subset of a
+/// session's commits (with a fresh idmap that records just those), then run the
+/// full migration against the same source. The completed run must reach all 5
+/// commits with no duplicate commit objects — exercising the WR-05 self-healing
+/// skip and the content-addressed restart guarantee, which `restart_idempotent`
+/// (two full runs) does not cover.
+#[test]
+fn restart_recovers_from_partial_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = seed_sqlite_db(dir.path(), "sessions.db");
+    let conn = Connection::open(&db_path).unwrap();
+    seed_linear(&conn, "P", 5);
+
+    let target = dir.path().join("sessions.git");
+    let repo = crate::migrate::open_or_init_target(&target).expect("init target");
+
+    // Partial write: extract, truncate to the first 2 commits (topological
+    // order guarantees these are the earliest), and write them with a fresh
+    // idmap. This mimics a crash after 2 objects were written.
+    let sessions = crate::migrate::extract::extract_all_with_conn(&conn).expect("extract");
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].commits.len(), 5);
+    let mut partial = sessions[0].clone();
+    partial.commits.truncate(2);
+    // Drop refs/head so the partial write does not create the final ref tip —
+    // only the 2 commit objects land, like a crash mid-Step-1.
+    partial.refs.clear();
+    partial.head_commit_id = None;
+    partial.head_ref = None;
+
+    let mut idmap = crate::migrate::extract::Idmap::default();
+    crate::migrate::write::write_migration(&repo, std::slice::from_ref(&partial), &mut idmap, &target)
+        .expect("partial write");
+    idmap.save(&target).expect("save partial idmap");
+    assert_eq!(count_all_commit_objects(&repo), 2, "partial run wrote 2 commit objects");
+
+    drop(conn);
+
+    // Full run against the same source. Must converge to 5 reachable commits
+    // with no duplicate objects (the 2 pre-written commits are reused).
+    let result = run_migration(&migrate_opts(db_path, target.clone())).expect("full migration");
+    assert!(result.verification_passed, "verification should pass after recovery");
+    assert_eq!(result.commits_migrated, 5);
+
+    let repo2 = git2::Repository::open(&target).unwrap();
+    let ref_name = "refs/lattice/sessions/P/main";
+    assert_eq!(
+        count_commits_from_ref(&repo2, ref_name),
+        5,
+        "recovery: ref reaches all 5 commits"
+    );
+    assert_eq!(
+        count_all_commit_objects(&repo2),
+        5,
+        "recovery: exactly 5 commit objects, no duplicates from the partial write"
+    );
+}
+
 // ─── D-08: Native OID stability ────────────────────────────────────────────
 
 #[test]

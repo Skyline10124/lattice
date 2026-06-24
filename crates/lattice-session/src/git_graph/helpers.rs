@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::graph::{
-    canonical_json_bytes, GraphMessage, PreparedTurnCommit, TurnLogEntry,
+    canonical_json_bytes, GraphMessage, PreparedTurnCommit, TurnLifecycleEvidence, TurnLogEntry,
 };
 use crate::{Result, SessionError};
 
@@ -220,6 +220,30 @@ pub(crate) fn candidate_ref_name(session_id: &str, turn_id: &str) -> Result<Stri
     validate_session_id(session_id)?;
     validate_turn_id(turn_id)?;
     Ok(format!("refs/lattice/candidates/{session_id}/{turn_id}"))
+}
+
+/// Build the `turn/agent.json` blob. IN-03: single source of truth shared by
+/// the native commit path and the migration writer so the tree's agent entry
+/// stays byte-identical (and OIDs stay consistent) between both.
+pub(crate) fn build_agent_json(agent_name: &str) -> String {
+    serde_json::json!({ "agent_name": agent_name }).to_string()
+}
+
+/// Build the `turn/audit.json` blob carrying lifecycle ref pointers. IN-03:
+/// single source of truth shared by the native commit path and the migration
+/// writer. The format must stay identical between both so migrated and natively
+/// created commits produce consistent tree content.
+pub(crate) fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
+    match lifecycle {
+        Some(lc) => serde_json::json!({
+            "target_project_ref": lc.target_project_ref,
+            "baseline_oid": lc.baseline_oid,
+            "candidate_oid": lc.candidate_oid,
+            "candidate_ref": lc.candidate_ref,
+        })
+        .to_string(),
+        None => "{}".to_string(),
+    }
 }
 
 pub(crate) fn build_turn_tree(

@@ -59,6 +59,19 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
 
     // --verify-only: skip extraction/writing, just re-check equivalence (D-12).
     if opts.verify_only {
+        // WR-01: fail loudly if the source DB is absent. After a successful run
+        // the source was archived to `sessions.db.migrated-<ts>`, so a bare
+        // `--verify-only` against the original path would have SQLite *create*
+        // an empty db, extract zero sessions, and vacuously pass — recreating an
+        // empty `sessions.db` that re-trips the startup guard. Point `--source`
+        // at the archived file instead.
+        if !opts.source_db.exists() {
+            return Err(SessionError::Io {
+                operation: "verify-only: source db not found (point --source at the archived sessions.db.migrated-<ts>)",
+                path: opts.source_db.clone(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
         let idmap = extract::Idmap::load(&opts.target_repo)?;
         let conn = rusqlite::Connection::open(&opts.source_db).map_err(|source| {
             SessionError::Database {
@@ -71,6 +84,17 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
             verification_passed: passed,
             source_archived: None,
             ..Default::default()
+        });
+    }
+
+    // WR-01: fail clearly when the source is missing instead of having SQLite
+    // create an empty db, migrate zero sessions, and then archive a
+    // freshly-created empty file.
+    if !opts.source_db.exists() {
+        return Err(SessionError::Io {
+            operation: "migrate: source db not found",
+            path: opts.source_db.clone(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
         });
     }
 
@@ -152,16 +176,38 @@ fn archive_source(opts: &MigrateOptions) -> Result<Option<PathBuf>> {
         return Ok(None);
     }
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let mut archived = opts.source_db.clone();
-    let mut name = archived
+    let base_name = opts
+        .source_db
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "sessions.db".to_string());
-    name.push_str(&format!(".migrated-{ts}"));
-    archived.set_file_name(name);
+
+    // WR-06: never overwrite an existing archive. At second granularity a
+    // re-run within the same wall-clock second (e.g. the user restored
+    // sessions.db and re-ran) would otherwise clobber an earlier backup via
+    // std::fs::rename — the opposite of the data-safety intent. If the
+    // timestamped name already exists, append a numeric uniquifier.
+    let candidate = |suffix: Option<usize>| -> PathBuf {
+        let mut p = opts.source_db.clone();
+        let name = match suffix {
+            None => format!("{base_name}.migrated-{ts}"),
+            Some(n) => format!("{base_name}.migrated-{ts}.{n}"),
+        };
+        p.set_file_name(name);
+        p
+    };
+    let mut archived = candidate(None);
+    let mut n = 1;
+    while archived.exists() {
+        archived = candidate(Some(n));
+        n += 1;
+    }
+
     std::fs::rename(&opts.source_db, &archived).map_err(|source| SessionError::Io {
         operation: "archiving source db",
-        path: opts.source_db.clone(),
+        // WR-06: point at the destination so "exists/permission" diagnostics
+        // name the archive file, not the source.
+        path: archived.clone(),
         source,
     })?;
     Ok(Some(archived))

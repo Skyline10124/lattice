@@ -142,7 +142,7 @@ fn git_store_diff_reports_unique_commits_per_side() {
         "base commit must not appear in only_in_to",
     );
 
-    // from/to commit ids echo the requested targets.
-    assert_eq!(diff.from_commit_id, "main");
-    assert_eq!(diff.to_commit_id, "feature");
+    // from/to commit ids are the resolved OIDs of the requested refs.
+    assert_eq!(diff.from_commit_id, main_only_oid, "from should be main tip OID");
+    assert_eq!(diff.to_commit_id, feature_only_oid, "to should be feature tip OID");
 }

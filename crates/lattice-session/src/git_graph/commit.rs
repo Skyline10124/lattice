@@ -74,9 +74,9 @@ impl GitSessionGraphStore {
         let manifest = build_manifest_from_prepared(&prepared);
         let manifest_bytes = serialize_manifest(&manifest)?;
         let messages_jsonl = super::helpers::messages_to_jsonl(&prepared.messages)?;
-        let agent_json = serde_json::json!({ "agent_name": commit.agent_name }).to_string();
+        let agent_json = super::helpers::build_agent_json(&commit.agent_name);
         let profile_json = commit.profile_snapshot_json.clone();
-        let audit_json = build_audit_json(&commit.lifecycle);
+        let audit_json = super::helpers::build_audit_json(&commit.lifecycle);
 
         let turn_tree_oid = build_turn_tree(
             &repo,
@@ -335,19 +335,6 @@ impl GitSessionGraphStore {
             None => return Ok(None),
         };
         read_ops_state(&self.dir, &session_id, commit_id).map(|opt| opt.map(|s| s.snapshot_lost))
-    }
-}
-
-fn build_audit_json(lifecycle: &Option<TurnLifecycleEvidence>) -> String {
-    match lifecycle {
-        Some(lc) => serde_json::json!({
-            "target_project_ref": lc.target_project_ref,
-            "baseline_oid": lc.baseline_oid,
-            "candidate_oid": lc.candidate_oid,
-            "candidate_ref": lc.candidate_ref,
-        })
-        .to_string(),
-        None => "{}".to_string(),
     }
 }
 

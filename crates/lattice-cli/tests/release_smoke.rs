@@ -42,8 +42,10 @@ fn temp_home(prefix: &str) -> PathBuf {
 fn seed_session(temp_home: &Path, session_id: &str) {
     let session_dir = temp_home.join(".config").join("lattice").join("sessions");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
+    let git_repo_dir = session_dir.join("sessions.git");
+    std::fs::create_dir_all(&git_repo_dir).expect("create git repo dir");
 
-    let store = lattice_session::GitSessionGraphStore::new(&session_dir);
+    let store = lattice_session::GitSessionGraphStore::new(&git_repo_dir);
     store
         .create_session(session_id, Some("Smoke test session"), "default", "main")
         .expect("create session");

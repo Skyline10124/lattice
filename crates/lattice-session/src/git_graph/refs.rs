@@ -147,8 +147,8 @@ impl GitSessionGraphStore {
         let only_in_to = collect_unique_commits(&repo, to_oid, lca_oid)?;
 
         Ok(GraphDiff {
-            from_commit_id: from.to_string(),
-            to_commit_id: to.to_string(),
+            from_commit_id: from_oid.to_string(),
+            to_commit_id: to_oid.to_string(),
             common_ancestor_id,
             only_in_from,
             only_in_to,

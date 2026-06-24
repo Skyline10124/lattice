@@ -298,20 +298,21 @@ fn cmd_migrate(
     let result = migrate::run_migration(&opts)?;
 
     if json {
-        // Machine-readable JSONL line.
-        let archived = result
-            .source_archived
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "null".to_string());
-        println!(
-            "{{\"sessions_migrated\":{},\"commits_migrated\":{},\"refs_migrated\":{},\"verification_passed\":{},\"source_archived\":\"{}\"}}",
-            result.sessions_migrated,
-            result.commits_migrated,
-            result.refs_migrated,
-            result.verification_passed,
-            archived,
-        );
+        // IN-04: build the object with serde_json so source_archived serializes
+        // to a real JSON `null` (not the string "null") when absent, and any
+        // path is properly escaped. Hand-built JSON could emit invalid output
+        // for a path containing a quote or backslash.
+        let value = serde_json::json!({
+            "sessions_migrated": result.sessions_migrated,
+            "commits_migrated": result.commits_migrated,
+            "refs_migrated": result.refs_migrated,
+            "verification_passed": result.verification_passed,
+            "source_archived": result
+                .source_archived
+                .as_ref()
+                .map(|p| p.to_string_lossy()),
+        });
+        println!("{}", serde_json::to_string(&value)?);
     } else {
         println!("sessions migrated: {}", result.sessions_migrated);
         println!("commits migrated:  {}", result.commits_migrated);
@@ -1695,17 +1696,19 @@ mod d25_scoped_session {
             }
         }
 
-        // 2. No SessionApi::sqlite or SqliteSessionGraphStore in production code.
+        // 2. No legacy SQLite session store symbols in production code.
         // Build search strings dynamically to avoid matching this very assertion.
         let sqlite_call = format!("SessionApi::{}(", "sqlite");
         let sqlite_store = format!("{}GraphStore", "SqliteSession");
         assert!(
             !source.contains(&sqlite_call),
-            "SessionApi::sqlite should not exist in production code"
+            "{} should not exist in production code",
+            sqlite_call
         );
         assert!(
             !source.contains(&sqlite_store),
-            "SqliteSessionGraphStore should not exist in production code"
+            "{} should not exist in production code",
+            sqlite_store
         );
 
         // 3. The production path uses SessionApi::git (positive proof of migration).

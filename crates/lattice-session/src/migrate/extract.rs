@@ -49,10 +49,7 @@ pub(crate) struct ExtractedSession {
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedRef {
     pub name: String,
-    pub kind: String,
     pub commit_id: Option<String>,
-    pub active_agent_name: String,
-    pub updated_at: String,
 }
 
 /// A legacy `graph_commits` row with its messages loaded and ordered by
@@ -60,9 +57,7 @@ pub(crate) struct ExtractedRef {
 #[derive(Debug, Clone)]
 pub(crate) struct ExtractedCommit {
     pub commit_id: String,
-    pub session_id: String,
     pub parent_ids: Vec<String>,
-    pub message_ids: Vec<String>,
     pub agent_name: String,
     pub profile_snapshot_hash: String,
     pub profile_snapshot_json: String,
@@ -135,16 +130,9 @@ fn idmap_path(target_repo: &Path) -> std::path::PathBuf {
 
 /// Extract every session with its refs and topologically-ordered commits.
 ///
-/// Opens its own `rusqlite::Connection` against `source_db` (D-03). The
-/// connection is read-only by convention (the extractor never writes).
-pub(crate) fn extract_all(source_db: &Path) -> Result<Vec<ExtractedSession>> {
-    let conn = Connection::open(source_db).map_err(|source| SessionError::Database {
-        path: source_db.to_path_buf(),
-        source,
-    })?;
-    extract_all_with_conn(&conn)
-}
-
+/// `run_migration` and `verify_equivalence` both own their connection and call
+/// this directly (IN-02: the path-opening `extract_all` variant had no callers
+/// and was removed).
 pub(crate) fn extract_all_with_conn(conn: &Connection) -> Result<Vec<ExtractedSession>> {
     let session_rows = read_session_rows(conn)?;
     let mut out = Vec::with_capacity(session_rows.len());
@@ -228,7 +216,7 @@ fn read_session_rows(conn: &Connection) -> Result<Vec<SessionRow>> {
 fn read_ref_rows(conn: &Connection, session_id: &str) -> Result<Vec<ExtractedRef>> {
     let mut stmt = conn
         .prepare(
-            "SELECT name, kind, commit_id, active_agent_name, updated_at
+            "SELECT name, commit_id
              FROM graph_refs WHERE session_id=?1",
         )
         .map_err(|source| SessionError::Database {
@@ -239,10 +227,7 @@ fn read_ref_rows(conn: &Connection, session_id: &str) -> Result<Vec<ExtractedRef
         .query_map(params![session_id], |row| {
             Ok(ExtractedRef {
                 name: row.get(0)?,
-                kind: row.get(1)?,
-                commit_id: row.get(2)?,
-                active_agent_name: row.get(3)?,
-                updated_at: row.get(4)?,
+                commit_id: row.get(1)?,
             })
         })
         .map_err(|source| SessionError::Database {
@@ -426,16 +411,18 @@ fn read_commit(conn: &Connection, session_id: &str, commit_id: &str) -> Result<E
     let messages = load_messages(conn, session_id, &message_ids)?;
     let snapshot_lost = read_snapshot_lost(conn, commit_id)?;
 
-    // Strict-decode lifecycle to fail closed on malformed data (matches
-    // sqlite_graph/commit.rs:decode_lifecycle_json). The decoded value is
-    // validated here; the writer consumes lifecycle_json directly.
-    let _ = decode_lifecycle_json(&lifecycle_json);
+    // WR-03: strict-decode lifecycle to fail closed on malformed data (matches
+    // sqlite_graph/commit.rs:decode_lifecycle_json). Propagate the error at the
+    // extraction boundary with commit context — `let _ =` previously discarded
+    // the Result, defeating the "fail closed" intent. The writer still consumes
+    // `lifecycle_json` directly, so the decoded value itself is not threaded.
+    decode_lifecycle_json(&lifecycle_json).map_err(|e| {
+        SessionError::Git(format!("commit {commit_id}: malformed lifecycle_json: {e}"))
+    })?;
 
     Ok(ExtractedCommit {
         commit_id: commit_id.to_string(),
-        session_id: session_id.to_string(),
         parent_ids,
-        message_ids,
         agent_name,
         profile_snapshot_hash,
         profile_snapshot_json,
