@@ -57,7 +57,13 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
     // --verify-only: skip extraction/writing, just re-check equivalence (D-12).
     if opts.verify_only {
         let idmap = extract::Idmap::load(&opts.target_repo)?;
-        let passed = verify::verify_equivalence(&opts.source_db, &repo, &idmap)?;
+        let conn = rusqlite::Connection::open(&opts.source_db).map_err(|source| {
+            SessionError::Database {
+                path: opts.source_db.clone(),
+                source,
+            }
+        })?;
+        let passed = verify::verify_equivalence(&conn, &repo, &idmap)?;
         return Ok(MigrationResult {
             verification_passed: passed,
             source_archived: None,
@@ -104,8 +110,8 @@ pub fn run_migration(opts: &MigrateOptions) -> Result<MigrationResult> {
     // Write (D-10 order).
     let stats = write::write_migration(&repo, &sessions, &mut idmap, &opts.target_repo)?;
 
-    // Verify (D-11/D-14). Plan 04 fills the verifier; the stub returns Ok(true).
-    let passed = verify::verify_equivalence(&opts.source_db, &repo, &idmap)?;
+    // Verify (D-11/D-14). Real verifier from Plan 04.
+    let passed = verify::verify_equivalence(&conn, &repo, &idmap)?;
     if !passed {
         // D-12/D-18: do NOT archive the source on verification failure.
         return Ok(MigrationResult {
