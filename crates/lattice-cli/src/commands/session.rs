@@ -13,6 +13,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use colored::Colorize;
 use lattice_api::{CreateSessionRequest, GraphHead, OpenSessionRequest, SessionApi};
+use lattice_session::{MigrateOptions, migrate};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Lattice config root (`$XDG_CONFIG_HOME` or platform config dir).
@@ -119,6 +120,30 @@ pub enum SessionAction {
         /// Session id whose snapshots should be pruned.
         session_id: String,
     },
+    /// One-shot SQLite→Git session graph migration (D-01, Phase 39).
+    ///
+    /// Reads the legacy `sessions.db`, writes equivalent Git session commits
+    /// and refs into a standalone bare repository, verifies equivalence, then
+    /// archives the source. Restartable and idempotent.
+    Migrate {
+        /// Read + plan only; perform no writes to the target repo.
+        #[arg(long)]
+        dry_run: bool,
+        /// Re-run equivalence checks against an already-written target
+        /// without re-writing.
+        #[arg(long)]
+        verify_only: bool,
+        /// Override the source `sessions.db` path.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Override the target bare repo path.
+        #[arg(long)]
+        target: Option<PathBuf>,
+        /// Physically delete the source `sessions.db` after successful
+        /// migration instead of archiving it (default is archive).
+        #[arg(long)]
+        purge_source: bool,
+    },
 }
 
 /// Run the `session` command.
@@ -127,6 +152,19 @@ pub async fn run(
     json: bool,
     verbose: bool,
 ) -> Result<std::process::ExitCode> {
+    // Migrate operates below the SessionApi (direct SQLite read + Git write),
+    // so handle it before constructing the default API (D-01).
+    if let SessionAction::Migrate {
+        dry_run,
+        verify_only,
+        source,
+        target,
+        purge_source,
+    } = action
+    {
+        return cmd_migrate(dry_run, verify_only, source, target, purge_source, json);
+    }
+
     let api = session_api();
     match action {
         SessionAction::New {
@@ -203,6 +241,11 @@ pub(crate) fn run_with_api(api: &SessionApi, action: SessionAction, json: bool) 
                 "resume and prune-snapshots require the async dispatcher"
             ));
         }
+        SessionAction::Migrate { .. } => {
+            return Err(anyhow::anyhow!(
+                "session migrate is handled by the async production runner"
+            ));
+        }
     }
     Ok(())
 }
@@ -218,6 +261,70 @@ fn load_agent_checked(agent: &str) -> Result<lattice_api::LoadedAgentProfile> {
         ));
     }
     Ok(loaded)
+}
+
+/// Run the `session migrate` subcommand (D-01, Phase 39).
+///
+/// Thin caller over `lattice_session::migrate::run_migration`. Constructs
+/// `MigrateOptions` from the parsed flags + default paths, runs the pipeline,
+/// and prints the `MigrationResult`. Default source is
+/// `default_session_dir()/sessions.db`; default target is
+/// `default_session_dir()/sessions.git` (D-15 standalone bare repo).
+fn cmd_migrate(
+    dry_run: bool,
+    verify_only: bool,
+    source: Option<PathBuf>,
+    target: Option<PathBuf>,
+    purge_source: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    let session_dir = default_session_dir();
+    let source_db = source.unwrap_or_else(|| session_dir.join("sessions.db"));
+    let target_repo = target.unwrap_or_else(|| session_dir.join("sessions.git"));
+
+    let opts = MigrateOptions {
+        source_db,
+        target_repo,
+        dry_run,
+        verify_only,
+        purge_source,
+    };
+
+    let result = migrate::run_migration(&opts)?;
+
+    if json {
+        // Machine-readable JSONL line.
+        let archived = result
+            .source_archived
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "null".to_string());
+        println!(
+            "{{\"sessions_migrated\":{},\"commits_migrated\":{},\"refs_migrated\":{},\"verification_passed\":{},\"source_archived\":\"{}\"}}",
+            result.sessions_migrated,
+            result.commits_migrated,
+            result.refs_migrated,
+            result.verification_passed,
+            archived,
+        );
+    } else {
+        println!("sessions migrated: {}", result.sessions_migrated);
+        println!("commits migrated:  {}", result.commits_migrated);
+        println!("refs migrated:     {}", result.refs_migrated);
+        println!("verification:      {}", if result.verification_passed { "passed" } else { "failed" });
+        match &result.source_archived {
+            Some(path) => println!("source archived:   {}", path.display()),
+            None if purge_source => println!("source purged"),
+            None => println!("source:            (not archived)"),
+        }
+    }
+
+    if result.verification_passed {
+        Ok(std::process::ExitCode::SUCCESS)
+    } else {
+        // Verification failure (or dry-run) — non-zero so scripts can detect.
+        Ok(std::process::ExitCode::from(1))
+    }
 }
 
 fn cmd_new_api(
@@ -1054,13 +1161,41 @@ mod session_cli {
     }
 
     #[test]
-    fn reject_old_subcommand_migrate() {
-        assert!(try_parse(&["migrate"]).is_err());
+    fn reject_old_subcommand_rm() {
+        assert!(try_parse(&["rm"]).is_err());
     }
 
     #[test]
-    fn reject_old_subcommand_rm() {
-        assert!(try_parse(&["rm"]).is_err());
+    fn migrate_subcommand_parses_with_flags() {
+        // Phase 39 D-01: `migrate` is a real subcommand with --dry-run,
+        // --verify-only, --source, --target, --purge-source.
+        let action = try_parse(&[
+            "migrate",
+            "--dry-run",
+            "--verify-only",
+            "--source",
+            "/tmp/s.db",
+            "--target",
+            "/tmp/r.git",
+            "--purge-source",
+        ]);
+        match action {
+            Ok(SessionAction::Migrate {
+                dry_run,
+                verify_only,
+                source,
+                target,
+                purge_source,
+            }) => {
+                assert!(dry_run);
+                assert!(verify_only);
+                assert_eq!(source.as_deref(), Some(std::path::Path::new("/tmp/s.db")));
+                assert_eq!(target.as_deref(), Some(std::path::Path::new("/tmp/r.git")));
+                assert!(purge_source);
+            }
+            Ok(_) => panic!("expected Migrate, got a different variant"),
+            Err(e) => panic!("expected Migrate, got parse error: {e}"),
+        }
     }
 
     #[test]
