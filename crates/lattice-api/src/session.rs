@@ -10,9 +10,9 @@
 use lattice_session::{
     GitSessionGraphStore, GraphDiff, GraphHead, GraphRef, GraphSession, HeadTranscript,
     PreparedTurnCommit, ResetResult, SessionGraphStore, SessionGraphSummary, SessionStatus,
-    SqliteSessionGraphStore, TurnCommit, TurnCommitInput, TurnLogEntry,
+    TurnCommit, TurnCommitInput, TurnLogEntry,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::turn::promotion::PromotionLifecycleError;
@@ -62,12 +62,6 @@ pub struct SessionApi {
 impl SessionApi {
     pub fn new(store: Box<dyn SessionGraphStore>) -> Self {
         Self { store }
-    }
-
-    pub fn sqlite(dir: impl Into<PathBuf>) -> Self {
-        Self {
-            store: Box::new(SqliteSessionGraphStore::new(dir)),
-        }
     }
 
     pub fn git(dir: impl Into<PathBuf>) -> Self {
@@ -256,6 +250,36 @@ impl SessionApi {
             .get_snapshot_lost(commit_id)
             .map_err(map_session_error)
     }
+}
+
+/// Startup guard for un-migrated legacy `sessions.db` (D-18, issue 1b).
+///
+/// The sole reliable migration-completion signal is D-18's archive action:
+/// successful migration renames `sessions.db` to `sessions.db.migrated-<ts>`.
+/// If the original `sessions.db` is still present, migration has NOT completed
+/// (either never started, or crashed mid-write). The guard blocks startup with
+/// a clear message prompting `lattice session migrate`.
+///
+/// Does NOT inspect the Git repo for commits — a crashed mid-migration may have
+/// written partial commits, so "has commits" is not a valid success signal.
+/// Uses only `Path::exists()` — no side effects, no git2 repo open (avoids
+/// triggering auto-init).
+pub fn check_migration_guard(git_repo_dir: &Path) -> std::result::Result<(), String> {
+    let legacy_db = git_repo_dir
+        .parent()
+        .map(|parent| parent.join("sessions.db"))
+        .unwrap_or_else(|| Path::new("sessions.db").to_path_buf());
+    if legacy_db.exists() {
+        return Err(format!(
+            "Legacy sessions.db detected at {}. The Git session store has not been migrated. \
+             Run 'lattice session migrate --source {} --target {}' to complete migration \
+             before starting LATTICE.",
+            legacy_db.display(),
+            legacy_db.display(),
+            git_repo_dir.display(),
+        ));
+    }
+    Ok(())
 }
 
 fn map_session_error(e: lattice_session::SessionError) -> ApiError {

@@ -27,7 +27,7 @@ pub use lattice_workspace::promotion::PinnedCandidate;
 pub use lattice_workspace::promotion::{PromotionLimits, PromotionOutcome, VerificationResult};
 pub use models::{ModelInfo, init_logging, list_models, resolve_model};
 pub use profile::{LoadedAgentProfile, load_agent_profile_path, resolve_named_agent_profile};
-pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi};
+pub use session::{ApiError, CreateSessionRequest, OpenSessionRequest, SessionApi, check_migration_guard};
 pub use turn::{
     LifecycleFailureKind, PromotionLifecycleError, PromotionSessionMetadata, PromotionTurnTarget,
     PruneSnapshotsRequest, ResourceAction, ResumeError, ResumeMode, ResumeTurnRequest,

@@ -28,9 +28,6 @@ pub use promotion::{
     create_promoted_session_commit, manifest_json_canonical_bytes,
 };
 
-pub mod sqlite_graph;
-pub use sqlite_graph::SqliteSessionGraphStore;
-
 pub mod git_graph;
 pub use git_graph::GitSessionGraphStore;
 

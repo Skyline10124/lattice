@@ -33,7 +33,12 @@ fn required_project_branch(project_branch: Option<&str>) -> Result<&str> {
 }
 
 pub async fn run(options: TuiOptions) -> Result<std::process::ExitCode> {
-    let session_api = SessionApi::sqlite(options.session_dir.clone());
+    let git_repo_path = options.session_dir.join("sessions.git");
+    if let Err(msg) = lattice_api::check_migration_guard(&git_repo_path) {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
+    let session_api = SessionApi::git(git_repo_path.clone());
     let session = match &options.session_id {
         Some(session_id) => session_api
             .open_session(OpenSessionRequest {
@@ -143,7 +148,8 @@ async fn execute_turn(
         );
     }
 
-    let session_api = SessionApi::sqlite(options.session_dir.clone());
+    let git_repo_path = options.session_dir.join("sessions.git");
+    let session_api = SessionApi::git(git_repo_path);
     let request = RunTurnRequest {
         input: prompt.to_string(),
         session_id: session_id.to_string(),

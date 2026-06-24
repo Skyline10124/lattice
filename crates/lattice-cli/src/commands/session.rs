@@ -33,8 +33,13 @@ pub(crate) fn default_session_dir() -> PathBuf {
     lattice_config_dir().join("lattice").join("sessions")
 }
 
-fn session_api() -> SessionApi {
-    SessionApi::git(default_session_dir())
+fn session_api() -> Result<SessionApi> {
+    let git_repo_path = default_session_dir().join("sessions.git");
+    if let Err(msg) = lattice_api::check_migration_guard(&git_repo_path) {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
+    Ok(SessionApi::git(git_repo_path))
 }
 
 #[derive(Subcommand)]
@@ -165,7 +170,7 @@ pub async fn run(
         return cmd_migrate(dry_run, verify_only, source, target, purge_source, json);
     }
 
-    let api = session_api();
+    let api = session_api()?;
     match action {
         SessionAction::New {
             agent,
@@ -1416,12 +1421,12 @@ mod d25_scoped_session {
     use super::*;
     use lattice_api::SessionApi;
     use lattice_session::{
-        GraphMessage, SessionGraphStore, SqliteSessionGraphStore, TurnCommitInput, TurnCommitStatus,
+        GraphMessage, GitSessionGraphStore, SessionGraphStore, TurnCommitInput, TurnCommitStatus,
     };
 
     /// Seed a session with N committed turns using the graph store directly.
     fn seed_session(
-        store: &SqliteSessionGraphStore,
+        store: &GitSessionGraphStore,
         session_id: &str,
         n: usize,
         label: Option<&str>,
@@ -1481,11 +1486,11 @@ mod d25_scoped_session {
     /// Returns (tempdir guard, SessionApi, sess-a commit ids, sess-b commit ids).
     fn setup_two_sessions() -> (tempfile::TempDir, SessionApi, Vec<String>, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
-        let store = SqliteSessionGraphStore::new(dir.path());
+        let store = GitSessionGraphStore::new(dir.path());
         let commits_a = seed_session(&store, "sess-a", 3, Some("Session A"));
         let commits_b = seed_session(&store, "sess-b", 3, Some("Session B"));
         drop(store);
-        let api = SessionApi::sqlite(dir.path());
+        let api = SessionApi::git(dir.path());
         (dir, api, commits_a, commits_b)
     }
 
@@ -1684,16 +1689,28 @@ mod d25_scoped_session {
                 );
                 if trimmed.contains("SessionStore")
                     && !trimmed.contains("SessionGraphStore")
-                    && !trimmed.contains("SqliteSessionGraphStore")
                 {
                     panic!("legacy SessionStore trait import found: {}", trimmed);
                 }
             }
         }
 
-        // 2. The production path uses SessionApi (positive proof of migration).
+        // 2. No SessionApi::sqlite or SqliteSessionGraphStore in production code.
+        // Build search strings dynamically to avoid matching this very assertion.
+        let sqlite_call = format!("SessionApi::{}(", "sqlite");
+        let sqlite_store = format!("{}GraphStore", "SqliteSession");
         assert!(
-            source.contains("SessionApi::git(default_session_dir())"),
+            !source.contains(&sqlite_call),
+            "SessionApi::sqlite should not exist in production code"
+        );
+        assert!(
+            !source.contains(&sqlite_store),
+            "SqliteSessionGraphStore should not exist in production code"
+        );
+
+        // 3. The production path uses SessionApi::git (positive proof of migration).
+        assert!(
+            source.contains("SessionApi::git("),
             "session_api() should construct SessionApi via git backend"
         );
         assert!(
