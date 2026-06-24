@@ -145,7 +145,7 @@ pub(crate) fn extract_all(source_db: &Path) -> Result<Vec<ExtractedSession>> {
     extract_all_with_conn(&conn)
 }
 
-fn extract_all_with_conn(conn: &Connection) -> Result<Vec<ExtractedSession>> {
+pub(crate) fn extract_all_with_conn(conn: &Connection) -> Result<Vec<ExtractedSession>> {
     let session_rows = read_session_rows(conn)?;
     let mut out = Vec::with_capacity(session_rows.len());
     for srow in session_rows {
