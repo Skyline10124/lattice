@@ -36,18 +36,6 @@ const GREP_MAX_DEPTH: u32 = 32;
 const DEFAULT_GREP_LIMIT: usize = 200;
 const DEFAULT_LIST_LIMIT: usize = 200;
 
-#[cfg(test)]
-pub(crate) const BACKEND_SAFETY_NET_TEST_PATH: &str = "__cep_backend_safety_net__";
-
-#[cfg(test)]
-fn check_backend_safety_net(path: &str) -> Option<CepError> {
-    if path == BACKEND_SAFETY_NET_TEST_PATH {
-        Some(lancet_authority::policy::observation::backend_safety_net_denial(path))
-    } else {
-        None
-    }
-}
-
 /// Register the native `observe.workspace` handler.
 pub fn register_workspace_observation_methods(
     registry: &mut MethodRegistry,

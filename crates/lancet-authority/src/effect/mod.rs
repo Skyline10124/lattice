@@ -27,36 +27,3 @@ pub use ledger::{
     ObservedLineChangeKind, ObservedScope,
 };
 pub use region::{AuthorizedEffectRegion, EffectiveEffect};
-
-#[cfg(test)]
-pub(crate) fn shared_test_policy() -> crate::policy::CepPolicyConfig {
-    use crate::policy::BudgetLimits;
-    use crate::policy::command::CommandPolicy;
-    use crate::policy::network::NetworkPolicyConfig;
-    use crate::policy::observation::ObservationPolicyConfig;
-    use std::path::PathBuf;
-
-    crate::policy::CepPolicyConfig {
-        project_root: PathBuf::from("/project"),
-        observation: ObservationPolicyConfig {
-            allowed_roots: vec![PathBuf::from("/project")],
-            max_single_read_bytes: 10_000_000,
-            max_turn_observation_bytes: 10_000_000,
-            max_grep_matches: 1000,
-            max_list_entries: 1000,
-            max_find_paths: 1000,
-            max_todo_ops: 100,
-        },
-        network: NetworkPolicyConfig::safe_defaults(),
-        budget: BudgetLimits {
-            max_single_read_bytes: 10_000_000,
-            max_turn_observation_bytes: 10_000_000,
-            max_grep_matches: 1000,
-            max_list_entries: 1000,
-            max_find_paths: 1000,
-            max_todo_ops: 100,
-        },
-        command: CommandPolicy::defaults(),
-        denied_effect_kinds: Default::default(),
-    }
-}

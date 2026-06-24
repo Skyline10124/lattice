@@ -1948,7 +1948,6 @@ mod create_tests {
         let registry = mutation_registry();
         let backend = Arc::new(CreateSpyBackend::default());
         let ctx = direct_ctx_with_write_paths(root, backend, &["src/**"]);
-        let durable = ctx.durable_metadata.clone();
 
         let params = CreateParams {
             path: "README.md".into(),

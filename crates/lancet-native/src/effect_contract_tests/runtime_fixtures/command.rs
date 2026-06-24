@@ -13,8 +13,6 @@ use lancet_protocol::effect_types::ImpactKind;
 
 pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<RuntimeEffectScenario>
 {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = setup_tempdir_with_files();
     let root = std::fs::canonicalize(dir.path())
         .unwrap()
@@ -64,34 +62,6 @@ pub(in crate::effect_contract_tests) fn command_run_runtime_effects() -> Vec<Run
             command_mutation_region(&root),
         ),
     ));
-
-    let timeout_script = dir.path().join("poc_timeout.sh");
-    std::fs::write(
-        &timeout_script,
-        "#!/bin/sh\ntouch src/timeout.txt\nsleep 2\n",
-    )
-    .unwrap();
-    let mut perms = std::fs::metadata(&timeout_script).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&timeout_script, perms).unwrap();
-    let script_allowlist: Vec<String> = vec!["./poc_timeout.sh".into()];
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
 
     scenarios
 }

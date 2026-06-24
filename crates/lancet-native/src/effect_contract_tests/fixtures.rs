@@ -24,7 +24,7 @@ pub(super) fn declare_active_envelope(_ctx: &crate::server::registry::HandlerCon
     // Envelope authority removed; this is now a no-op.
 }
 
-pub(super) fn observation_region(root: &str) -> AuthorizedEffectRegion {
+pub(super) fn observation_region(_root: &str) -> AuthorizedEffectRegion {
     let mut kinds = std::collections::BTreeSet::new();
     kinds.insert(ImpactKind::WorkspaceObservation);
     AuthorizedEffectRegion {
@@ -39,7 +39,7 @@ pub(super) fn observation_region(root: &str) -> AuthorizedEffectRegion {
     }
 }
 
-pub(super) fn mutation_region(root: &str) -> AuthorizedEffectRegion {
+pub(super) fn mutation_region(_root: &str) -> AuthorizedEffectRegion {
     let mut kinds = std::collections::BTreeSet::new();
     kinds.insert(ImpactKind::WorkspaceMutation);
     AuthorizedEffectRegion {

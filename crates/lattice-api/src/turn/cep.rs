@@ -935,7 +935,6 @@ fn extract_json_field_path(err: &serde_json::Error) -> Option<String> {
 #[cfg(test)]
 mod cep_context_profile_policy {
     use super::*;
-    use lancet_catalog::methods::command::RunParams;
     use lancet_protocol::policy::CepMode;
     use lancet_protocol::policy::{
         PolicyAuditContext, PolicyAuthorityInput, PolicyBudgetSnapshot, PolicyDecision, PolicyHook,

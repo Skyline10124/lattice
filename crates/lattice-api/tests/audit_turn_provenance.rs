@@ -20,7 +20,6 @@ use lattice_api::{RunTurnRequest, RunTurnStatus};
 use lattice_llm::LlmEvent;
 use lattice_profile::{DiscoveryPaths, LoadedAgentProfile, ProfileSource};
 use lattice_workspace::testing::DeterministicWorkspace;
-use serde_json::Value;
 use tempfile::TempDir;
 
 fn tool_call_events(id: &str, name: &str, args: &str) -> Vec<LlmEvent> {

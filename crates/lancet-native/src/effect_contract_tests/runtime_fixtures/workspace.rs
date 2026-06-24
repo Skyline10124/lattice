@@ -158,24 +158,6 @@ pub(in crate::effect_contract_tests) fn create_runtime_effects() -> Vec<RuntimeE
         ),
     ));
 
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-
-    let (ctx, _rx, _) = build_test_context(
-        &root,
-        vec![],
-        NetworkPolicyConfig::safe_defaults(),
-    );
-
     scenarios
 }
 

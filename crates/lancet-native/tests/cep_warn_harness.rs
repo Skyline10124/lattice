@@ -285,7 +285,6 @@ fn find_repo_root() -> PathBuf {
 // ── Report generator ─────────────────────────────────────────────────────────
 
 async fn generate_warn_report() -> String {
-    use std::collections::BTreeSet;
 
     // ── Overreach-capable canonical methods ──────────────────────────────
 

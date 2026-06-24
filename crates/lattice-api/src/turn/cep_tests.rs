@@ -346,11 +346,8 @@ async fn turn_runtime_constructs_one_adapter_per_turn() {
 #[cfg(test)]
 mod cep_native_registry {
     use super::*;
-    use lancet_catalog::methods::audit::{AuditObserve, AuditReplay};
-    use lancet_catalog::methods::external::Fetch;
-    use lancet_catalog::methods::session::TodoWrite;
+    use lancet_catalog::methods::audit::AuditReplay;
     use lancet_native::SEMANTIC_STAGE_NATIVE;
-    use lattice_profile::LancetNetworkSection;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -408,14 +405,12 @@ mod attestation_and_dispatch {
     use lancet_catalog::methods::audit::{AuditReplay, AuditReplayParams};
     use lancet_catalog::methods::session::TodoWrite;
     use lancet_native::canonicalize_in_toto_statement;
-    use lancet_protocol::effect_types::ImpactKind;
 
     use lattice_agent::LlmClient;
     use lattice_agent::testing::FakeStreamingLlmClient;
-    use lattice_llm::{FunctionCall, ToolCall};
     use tempfile::TempDir;
 
-    use crate::turn::cep::{CepExecutorAdapter, build_envelope_turn_deps_for_test};
+    use crate::turn::cep::build_envelope_turn_deps_for_test;
     use lancet_api::store_turn_attestation;
 
     #[tokio::test]

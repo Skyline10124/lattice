@@ -545,7 +545,7 @@ mod tests {
             authority: PolicyAuthorityInput,
             audit_context: audit_ctx(),
         };
-        let resolved = resolver.resolve(&input).unwrap();
+        let _resolved = resolver.resolve(&input).unwrap();
     }
 
     #[test]
