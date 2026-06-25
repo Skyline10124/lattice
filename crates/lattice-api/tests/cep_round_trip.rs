@@ -512,7 +512,7 @@ async fn production_adapter(
     if allow_localhost {
         policy_config.network.allowed_hosts = vec!["127.0.0.1".into(), "localhost".into()];
     }
-    // Direct mode: allow all writes under the project root (empty deny list)
+    // Allow all writes under the project root (empty deny list)
     // and echo as a diagnostic command.
     policy_config.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],

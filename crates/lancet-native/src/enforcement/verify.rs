@@ -184,7 +184,7 @@ pub fn validate_verify_command(
     Ok(())
 }
 
-/// Normalize a Direct verify profile config into one Upper [`ExecRequest`].
+/// Normalize a Verify profile config into one Upper [`ExecRequest`].
 pub fn normalize_verify_config_request(
     config: &VerifyConfig,
     policy: &CommandPolicy,
@@ -192,7 +192,7 @@ pub fn normalize_verify_config_request(
     if config.argv.is_empty() {
         return Err(CepError::new(
             CepErrorCode::SchemaMismatch,
-            "direct verify argv must not be empty",
+            "verify argv must not be empty",
             CepErrorData::Validation(ValidationErrorData {
                 field: "verify.argv".into(),
                 reason: "must not be empty".into(),
@@ -207,7 +207,7 @@ pub fn normalize_verify_config_request(
         EffectiveImpact::WorkspaceMutation => {
             return Err(CepError::new(
                 CepErrorCode::GuardDenied,
-                "direct verify command must be diagnostic/verification-class, not WorkspaceMutation",
+                "verify command must be diagnostic/verification-class, not WorkspaceMutation",
                 CepErrorData::Guard(GuardErrorData {
                     method: "verify".into(),
                     reason: "verify command classified as WorkspaceMutation".into(),
@@ -218,7 +218,7 @@ pub fn normalize_verify_config_request(
         EffectiveImpact::HardDenied => {
             return Err(CepError::new(
                 CepErrorCode::GuardDenied,
-                "direct verify command is hard-denied by command policy",
+                "verify command is hard-denied by command policy",
                 CepErrorData::Guard(GuardErrorData {
                     method: "verify".into(),
                     reason: "verify command classified as HardDenied".into(),
@@ -242,7 +242,7 @@ pub fn normalize_verify_config_request(
     .map_err(|_| {
         CepError::new(
             CepErrorCode::SchemaMismatch,
-            "direct verify argv must not be empty",
+            "verify argv must not be empty",
             CepErrorData::Validation(ValidationErrorData {
                 field: "verify.argv".into(),
                 reason: "must not be empty".into(),
@@ -268,7 +268,7 @@ pub async fn run_verify_with_backend(
     if cancellation.is_cancelled() {
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
-            "direct verify cancelled before adapter preflight",
+            "verify cancelled before adapter preflight",
             CepErrorData::Execution(ExecutionErrorData {
                 command: config.argv.join(" "),
                 exit_code: None,
@@ -294,7 +294,7 @@ pub async fn run_verify_with_backend(
     if cancellation.is_cancelled() {
         return Err(CepError::new(
             CepErrorCode::ExecutionFailed,
-            "direct verify cancelled before backend execution",
+            "verify cancelled before backend execution",
             CepErrorData::Execution(ExecutionErrorData {
                 command: config.argv.join(" "),
                 exit_code: None,
@@ -359,7 +359,7 @@ fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError
     match err {
         ExecutionBackendError::Path(path_err) => CepError::new(
             CepErrorCode::PathContainment,
-            format!("direct verify cwd rejected: {path_err}"),
+            format!("verify cwd rejected: {path_err}"),
             CepErrorData::Validation(ValidationErrorData {
                 field: "verify.cwd".into(),
                 reason: path_err.to_string(),
@@ -368,7 +368,7 @@ fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError
         ),
         ExecutionBackendError::Unavailable { message } => CepError::new(
             CepErrorCode::ExecutionFailed,
-            format!("direct verify backend unavailable: {message}"),
+            format!("verify backend unavailable: {message}"),
             CepErrorData::Execution(ExecutionErrorData {
                 command,
                 exit_code: None,
@@ -378,7 +378,7 @@ fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError
         ),
         ExecutionBackendError::ExecutionFailed { message } => CepError::new(
             CepErrorCode::ExecutionFailed,
-            format!("direct verify backend execution failed: {message}"),
+            format!("verify backend execution failed: {message}"),
             CepErrorData::Execution(ExecutionErrorData {
                 command,
                 exit_code: None,
@@ -388,7 +388,7 @@ fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError
         ),
         ExecutionBackendError::ContentTooLarge => CepError::new(
             CepErrorCode::ExecutionFailed,
-            "direct verify output exceeded configured limits",
+            "verify output exceeded configured limits",
             CepErrorData::Execution(ExecutionErrorData {
                 command,
                 exit_code: None,
@@ -398,7 +398,7 @@ fn verify_backend_error(argv: &[String], err: ExecutionBackendError) -> CepError
         ),
         ExecutionBackendError::Timeout => CepError::new(
             CepErrorCode::ExecutionFailed,
-            "direct verify timed out",
+            "verify timed out",
             CepErrorData::Execution(ExecutionErrorData {
                 command,
                 exit_code: None,

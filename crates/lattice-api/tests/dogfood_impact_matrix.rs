@@ -251,7 +251,7 @@ async fn build_production_config(
 
     let mut policy_cfg =
         PolicyConfig::defaults_for_project_root(std::path::Path::new(canonical_root).to_path_buf());
-    // Direct mode: allow all writes under the project root (empty deny list)
+    // Allow all writes under the project root (empty deny list)
     // and echo as a diagnostic command.
     policy_cfg.workspace = WorkspacePolicy {
         denied_write_patterns: vec![],

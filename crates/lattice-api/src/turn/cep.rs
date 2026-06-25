@@ -1042,7 +1042,7 @@ mod cep_context_profile_policy {
     }
 
     #[test]
-    fn direct_verify_from_profile_lowers_typed_argv() {
+    fn verify_config_from_profile_lowers_typed_argv() {
         let dir = TempDir::new().unwrap();
         let cep = LancetSection {
             verify: Some(LancetVerifySection {

@@ -47,12 +47,6 @@ mod effect_contract_tests;
 #[cfg(test)]
 mod public_api_tests {
     /// ```compile_fail
-    /// use lancet_native::DirectToolExecutor;
-    /// let _ = DirectToolExecutor::for_project_root(".");
-    /// ```
-    const _DIRECT_TOOL_EXECUTOR_NOT_PUBLIC: () = ();
-
-    /// ```compile_fail
     /// use lancet_native::ToolExecutor;
     /// ```
     const _TOOL_EXECUTOR_NOT_PUBLIC: () = ();

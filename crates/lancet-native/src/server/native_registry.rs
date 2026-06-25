@@ -383,5 +383,5 @@ mod cep_native_registry_tests {
     }
 
     // The backend_safety_net test was removed: the safety net was an
-    // envelope-era concept that is no longer wired in Direct mode.
+    // envelope-era concept that is no longer wired.
 }

@@ -19,7 +19,7 @@ fn project_config() -> PolicyConfig {
     config
 }
 
-fn direct_input(method: &str, params: serde_json::Value) -> PolicyInput {
+fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
     PolicyInput {
         method: method.into(),
         params,
@@ -39,11 +39,11 @@ fn direct_input(method: &str, params: serde_json::Value) -> PolicyInput {
 }
 
 #[test]
-fn direct_allows_observation_without_denied_patterns() {
+fn allows_observation_without_denied_patterns() {
     let mut config = project_config();
     config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
-    let input = direct_input(
+    let input = policy_input(
         "observe.workspace",
         json!({"mode": "read_file", "path": "src/a.rs"}),
     );
@@ -51,12 +51,12 @@ fn direct_allows_observation_without_denied_patterns() {
 }
 
 #[test]
-fn direct_allows_mutation_with_no_denied_patterns() {
+fn allows_mutation_with_no_denied_patterns() {
     // Blacklist semantics: no denied patterns → all paths allowed
     let mut config = project_config();
     config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
-    let input = direct_input(
+    let input = policy_input(
         "mutate.create",
         json!({"path": "src/new.rs", "content": "x"}),
     );
@@ -64,9 +64,9 @@ fn direct_allows_mutation_with_no_denied_patterns() {
 }
 
 #[test]
-fn direct_allows_mutation_not_in_deny_list() {
+fn allows_mutation_not_in_deny_list() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = direct_input(
+    let input = policy_input(
         "mutate.create",
         json!({"path": "src/new.rs", "content": "x"}),
     );
@@ -75,9 +75,9 @@ fn direct_allows_mutation_not_in_deny_list() {
 }
 
 #[test]
-fn direct_denies_diagnostic_command_argv() {
+fn denies_diagnostic_command_argv() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = direct_input(
+    let input = policy_input(
         "exec.command_run",
         json!({"argv": ["sh", "-c", "rm -rf /"], "declared_impact": "diagnostic"}),
     );
@@ -91,9 +91,9 @@ fn direct_denies_diagnostic_command_argv() {
 }
 
 #[test]
-fn direct_allows_diagnostic_command() {
+fn allows_diagnostic_command() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = direct_input(
+    let input = policy_input(
         "exec.command_run",
         json!({"argv": ["echo", "ok"], "declared_impact": "diagnostic"}),
     );
@@ -101,12 +101,12 @@ fn direct_allows_diagnostic_command() {
 }
 
 #[test]
-fn direct_allows_workspace_mutating_command_with_blacklist() {
+fn allows_workspace_mutating_command_with_blacklist() {
     // Blacklist semantics: no denied patterns → workspace-mutating command allowed
     let mut config = project_config();
     config.workspace.denied_write_patterns.clear();
     let hook = DefaultPolicyHook::new(config);
-    let input = direct_input(
+    let input = policy_input(
         "exec.command_run",
         json!({"argv": ["cargo", "build"], "declared_impact": "workspace_mutation"}),
     );
@@ -114,12 +114,12 @@ fn direct_allows_workspace_mutating_command_with_blacklist() {
 }
 
 #[test]
-fn direct_denies_network_host() {
+fn denies_network_host() {
     let mut config = project_config();
     config.network.allowed_hosts = vec!["allowed.example".into()];
     config.network.allow_public_https = false;
     let hook = DefaultPolicyHook::new(config);
-    let input = direct_input("fetch.web", json!({"url": "https://evil.example/page"}));
+    let input = policy_input("fetch.web", json!({"url": "https://evil.example/page"}));
     assert!(matches!(
         hook.decide(&input),
         PolicyDecision::Denied {
@@ -130,9 +130,9 @@ fn direct_denies_network_host() {
 }
 
 #[test]
-fn direct_denies_observation_budget_exhausted() {
+fn denies_observation_budget_exhausted() {
     let hook = DefaultPolicyHook::new(project_config());
-    let mut input = direct_input(
+    let mut input = policy_input(
         "observe.workspace",
         json!({"mode": "read_file", "path": "src/a.rs"}),
     );
@@ -150,9 +150,9 @@ fn direct_denies_observation_budget_exhausted() {
 }
 
 #[test]
-fn direct_denies_todo_budget_exhausted() {
+fn denies_todo_budget_exhausted() {
     let hook = DefaultPolicyHook::new(project_config());
-    let mut input = direct_input("session.todo_write", json!({"todos": []}));
+    let mut input = policy_input("session.todo_write", json!({"todos": []}));
     input.audit_context.budget_snapshot.todo_ops_used = 10;
     assert!(matches!(
         hook.decide(&input),
@@ -164,9 +164,9 @@ fn direct_denies_todo_budget_exhausted() {
 }
 
 #[test]
-fn direct_decision_is_deterministic() {
+fn decision_is_deterministic() {
     let hook = DefaultPolicyHook::new(project_config());
-    let input = direct_input("mutate.edit", json!({"path": "src/lib.rs", "edits": []}));
+    let input = policy_input("mutate.edit", json!({"path": "src/lib.rs", "edits": []}));
     let first = hook.decide_with_evidence(&input);
     let second = hook.decide_with_evidence(&input);
     assert_eq!(first.decision, second.decision);

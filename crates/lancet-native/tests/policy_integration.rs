@@ -6,7 +6,7 @@
 //! Constructs `PolicyInput` values with budget snapshots, runs
 //! `DefaultPolicyHook`, and covers command, network, workspace, and budget
 //! policy interactions end to end. Authority is sourced via the unit
-//! `PolicyAuthorityInput` (Direct mode is the sole path).
+//! `PolicyAuthorityInput` (the sole execution path).
 
 use std::path::PathBuf;
 
@@ -48,17 +48,17 @@ fn policy_input(method: &str, params: serde_json::Value) -> PolicyInput {
     }
 }
 
-// ── End-to-end: observe.workspace read_file allowed in Direct mode ──────────
+// ── End-to-end: observe.workspace read_file allowed ──────────
 
 #[test]
-fn integration_read_file_allowed_in_direct_mode() {
+fn integration_read_file_allowed() {
     let hook = DefaultPolicyHook::new(test_config());
     let input = policy_input(
         "observe.workspace",
         json!({"mode": "read_file", "path": "src/main.rs"}),
     );
     let decision = hook.decide(&input);
-    // In Direct mode, observation is allowed by default policy.
+    // Observation is allowed by default policy.
     assert!(
         matches!(decision, PolicyDecision::Allowed),
         "expected Allowed, got {decision:?}"

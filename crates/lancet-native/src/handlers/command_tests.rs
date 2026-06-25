@@ -241,7 +241,7 @@ fn routing_with_spy() -> (ExecutionRouting, Arc<CommandSpyBackend>) {
     (routing, spy)
 }
 
-fn direct_policy_config(root: &std::path::Path) -> lancet_authority::policy::default::PolicyConfig {
+fn policy_config(root: &std::path::Path) -> lancet_authority::policy::default::PolicyConfig {
     let mut config = lancet_authority::policy::default::PolicyConfig::defaults_for_project_root(
         root.to_path_buf(),
     );
@@ -254,11 +254,11 @@ fn direct_policy_config(root: &std::path::Path) -> lancet_authority::policy::def
     config
 }
 
-fn direct_ctx_with_policy(root: &str, routing: ExecutionRouting) -> HandlerContext {
-    direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Off)
+fn ctx_with_policy(root: &str, routing: ExecutionRouting) -> HandlerContext {
+    ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Off)
 }
 
-fn direct_ctx_with_policy_mode(
+fn ctx_with_policy_mode(
     root: &str,
     routing: ExecutionRouting,
     cep_mode: lancet_protocol::policy::CepMode,
@@ -266,7 +266,7 @@ fn direct_ctx_with_policy_mode(
     let (mut ctx, _, _) = test_ctx(root);
     ctx.execution = routing;
     ctx.cep_mode = cep_mode;
-    let config = direct_policy_config(std::path::Path::new(root));
+    let config = policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
         config.clone(),
     ));
@@ -313,12 +313,12 @@ fn run_params(argv: Vec<&str>, impact: Option<ImpactKind>) -> RunParams {
 // ── Direct command tests (top-level) ─────────────────────────────────────────
 
 #[tokio::test]
-async fn direct_command_routes_backend_only() {
+async fn command_routes_backend_only() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let result = dispatch_direct(
@@ -338,12 +338,12 @@ async fn direct_command_routes_backend_only() {
 }
 
 #[tokio::test]
-async fn direct_command_preserves_argv() {
+async fn command_preserves_argv() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let token = "spaces and; metacharacters".to_string();
 
     dispatch_direct(
@@ -364,12 +364,12 @@ async fn direct_command_preserves_argv() {
 }
 
 #[tokio::test]
-async fn direct_command_policy_denial_precedes_adapter() {
+async fn command_policy_denial_precedes_adapter() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -393,7 +393,7 @@ async fn direct_command_policy_denial_precedes_adapter() {
 }
 
 #[tokio::test]
-async fn direct_command_cwd_denial_preflight_only() {
+async fn command_cwd_denial_preflight_only() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -407,7 +407,7 @@ async fn direct_command_cwd_denial_preflight_only() {
         byte_size: None,
         canonical_under_workspace: true,
     }));
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -433,7 +433,7 @@ async fn direct_command_cwd_denial_preflight_only() {
 }
 
 #[tokio::test]
-async fn direct_command_backend_failure_no_fallback() {
+async fn command_backend_failure_no_fallback() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let sentinel = dir.path().join("lower-sentinel.txt");
@@ -445,7 +445,7 @@ async fn direct_command_backend_failure_no_fallback() {
     *spy.exec_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
         message: "adapter blew up".into(),
     }));
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -466,12 +466,12 @@ async fn direct_command_backend_failure_no_fallback() {
 }
 
 #[tokio::test]
-async fn direct_command_root_cwd_passes_write_scope_preflight() {
+async fn command_root_cwd_passes_write_scope_preflight() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
 
     dispatch_direct(
         &registry,
@@ -491,12 +491,12 @@ async fn direct_command_root_cwd_passes_write_scope_preflight() {
 }
 
 #[tokio::test]
-async fn direct_command_cwd_outside_write_region_denied() {
+async fn command_cwd_outside_write_region_denied() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -528,11 +528,11 @@ async fn verify_config_root_cwd_passes_write_scope_preflight() {
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
 
-    let config = direct_policy_config(std::path::Path::new(root));
+    let config = policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
         config.clone(),
     ));
-    let mut ctx = direct_ctx_with_policy(root, routing);
+    let mut ctx = ctx_with_policy(root, routing);
     ctx.policy_hook = hook.clone();
     ctx.default_policy_hook = Some(hook);
     ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
@@ -570,11 +570,11 @@ async fn verify_config_uses_same_backend() {
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
 
-    let config = direct_policy_config(std::path::Path::new(root));
+    let config = policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
         config.clone(),
     ));
-    let mut ctx = direct_ctx_with_policy(root, routing);
+    let mut ctx = ctx_with_policy(root, routing);
     ctx.policy_hook = hook.clone();
     ctx.default_policy_hook = Some(hook);
     ctx.cep_context = Arc::new(CepTurnContext::from_policy(config.to_cep_policy_config()));
@@ -600,14 +600,14 @@ async fn verify_config_uses_same_backend() {
 }
 
 #[tokio::test]
-async fn direct_command_out_of_scope_denied() {
+async fn command_out_of_scope_denied() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
     set_spy_changed_paths(&spy, vec!["src/out.rs"]);
     let mut ctx =
-        direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
+        ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-should-not-run".into()],
         cwd: WorkspacePath::project_root(),
@@ -640,14 +640,14 @@ async fn direct_command_out_of_scope_denied() {
 }
 
 #[tokio::test]
-async fn direct_command_in_scope_proceeds() {
+async fn command_in_scope_proceeds() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
     set_spy_changed_paths(&spy, vec!["lib.rs"]);
     let mut ctx =
-        direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
+        ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-ok".into()],
         cwd: WorkspacePath::project_root(),
@@ -670,13 +670,13 @@ async fn direct_command_in_scope_proceeds() {
 }
 
 #[tokio::test]
-async fn direct_command_enforce_per_path_effects_pass() {
+async fn command_enforce_per_path_effects_pass() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
     set_spy_changed_paths(&spy, vec!["lib.rs"]);
-    let ctx = direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
+    let ctx = ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     let ledger = ctx.effect_ledger.clone();
     let authorized = ctx.authorized_region.clone();
 
@@ -712,12 +712,12 @@ async fn direct_command_enforce_per_path_effects_pass() {
 }
 
 #[tokio::test]
-async fn direct_command_no_changed_paths_records_command_only() {
+async fn command_no_changed_paths_records_command_only() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
+    let ctx = ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     let ledger = ctx.effect_ledger.clone();
 
     dispatch_direct(
@@ -744,7 +744,7 @@ async fn direct_command_no_changed_paths_records_command_only() {
 }
 
 #[tokio::test]
-async fn direct_command_changed_paths_error_denies() {
+async fn command_changed_paths_error_denies() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -752,7 +752,7 @@ async fn direct_command_changed_paths_error_denies() {
     *spy.changed_paths_result.lock().unwrap() = Some(Err(ExecutionBackendError::ExecutionFailed {
         message: "git status failed".into(),
     }));
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -774,14 +774,14 @@ async fn direct_command_changed_paths_error_denies() {
 // ── New Direct-mode coverage tests ───────────────────────────────────────────
 
 #[tokio::test]
-async fn direct_command_classifies_diagnostic_when_impact_undeclared() {
+async fn command_classifies_diagnostic_when_impact_undeclared() {
     // `echo` is in the allowed_diagnostic_commands allowlist; with no
     // declared_impact the classifier should treat it as Diagnostic.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let result = dispatch_direct(&registry, ctx, run_params(vec!["echo", "hi"], None))
@@ -795,12 +795,12 @@ async fn direct_command_classifies_diagnostic_when_impact_undeclared() {
 }
 
 #[tokio::test]
-async fn direct_command_classifies_workspace_mutation_when_declared() {
+async fn command_classifies_workspace_mutation_when_declared() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let result = dispatch_direct(
@@ -817,14 +817,14 @@ async fn direct_command_classifies_workspace_mutation_when_declared() {
 }
 
 #[tokio::test]
-async fn direct_command_hard_denied_records_denial_metadata() {
+async fn command_hard_denied_records_denial_metadata() {
     // `sh -c` is in the default denied_commands list — must be hard-denied
     // before any adapter/backend invocation.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -842,21 +842,21 @@ async fn direct_command_hard_denied_records_denial_metadata() {
     assert!(spy.exec_calls.lock().unwrap().is_empty());
     let meta = routing_metadata(&durable);
     // denial_source metadata is recorded for policy-denied commands.
-    // In Direct mode, `sh -c` is rejected by the inline shell policy before
+    // `sh -c` is rejected by the inline shell policy before
     // the hard-deny check, so denial_source is "cep_policy".
     assert_eq!(meta["denial_source"], "cep_policy");
     assert_eq!(meta["backend_invoked"], false);
 }
 
 #[tokio::test]
-async fn direct_command_cwd_denial_records_guard_l1_rejection() {
+async fn command_cwd_denial_records_guard_l1_rejection() {
     // A cwd inside .git must be rejected at the adapter preflight stage with
     // a guard_l1 denial_source and AdapterPreflight rejection_stage.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     let err = dispatch_direct(
@@ -900,7 +900,7 @@ async fn verify_config_failure_records_verification_rejection() {
     }));
 
     let mut ctx =
-        direct_ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
+        ctx_with_policy_mode(root, routing, lancet_protocol::policy::CepMode::Enforce);
     ctx.verify_config = Some(VerifyConfig {
         argv: vec!["echo".into(), "verify-fail".into()],
         cwd: WorkspacePath::project_root(),
@@ -924,14 +924,14 @@ async fn verify_config_failure_records_verification_rejection() {
 }
 
 #[tokio::test]
-async fn direct_command_records_effect_ledger_on_success() {
+async fn command_records_effect_ledger_on_success() {
     // A successful diagnostic command must record a CommandExecution effect
     // in the ledger.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let ledger = ctx.effect_ledger.clone();
 
     dispatch_direct(
@@ -955,14 +955,14 @@ async fn direct_command_records_effect_ledger_on_success() {
 }
 
 #[tokio::test]
-async fn direct_command_execution_metadata_includes_boundary_fields() {
+async fn command_execution_metadata_includes_boundary_fields() {
     // The durable metadata for a successful command must include
     // backend_invoked, policy_enforced, and byte-count fields.
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
     let durable = ctx.durable_metadata.clone();
 
     dispatch_direct(
@@ -981,7 +981,7 @@ async fn direct_command_execution_metadata_includes_boundary_fields() {
 }
 
 #[tokio::test]
-async fn direct_command_backend_unavailable_when_no_execution_routing() {
+async fn command_backend_unavailable_when_no_execution_routing() {
     // With execution = None (host-only), the handler must error before
     // invoking any backend.
     let dir = tempfile::TempDir::new().unwrap();
@@ -1005,12 +1005,12 @@ async fn direct_command_backend_unavailable_when_no_execution_routing() {
 }
 
 #[tokio::test]
-async fn direct_command_empty_argv_rejected_at_schema() {
+async fn command_empty_argv_rejected_at_schema() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
 
     let err = dispatch_direct(
         &registry,
@@ -1030,12 +1030,12 @@ async fn direct_command_empty_argv_rejected_at_schema() {
 }
 
 #[tokio::test]
-async fn direct_command_env_nul_value_rejected_at_schema() {
+async fn command_env_nul_value_rejected_at_schema() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
     let (routing, _spy) = routing_with_spy();
-    let ctx = direct_ctx_with_policy(root, routing);
+    let ctx = ctx_with_policy(root, routing);
 
     let mut env = BTreeMap::new();
     env.insert("BAD".into(), "value\0with-nul".into());
@@ -1058,7 +1058,7 @@ async fn direct_command_env_nul_value_rejected_at_schema() {
 }
 
 #[tokio::test]
-async fn direct_command_cancellation_aborts_before_backend() {
+async fn command_cancellation_aborts_before_backend() {
     let dir = tempfile::TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     let registry = native_command_registry(root);
@@ -1066,7 +1066,7 @@ async fn direct_command_cancellation_aborts_before_backend() {
     let (mut ctx, _, cancel_tx) = test_ctx(root);
     ctx.execution = routing;
     ctx.cep_mode = lancet_protocol::policy::CepMode::Off;
-    let config = direct_policy_config(std::path::Path::new(root));
+    let config = policy_config(std::path::Path::new(root));
     let hook = Arc::new(lancet_authority::policy::default::DefaultPolicyHook::new(
         config.clone(),
     ));

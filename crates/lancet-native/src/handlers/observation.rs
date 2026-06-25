@@ -1644,7 +1644,7 @@ mod tests {
         assert_eq!(err.code, CepErrorCode::PathContainment);
     }
 
-    mod direct_observation {
+    mod observation_tests {
         use super::*;
         use crate::execution_backend::{
             DirectoryEntry, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,

@@ -597,7 +597,7 @@ impl DefaultPolicyHook {
 
     /// Pure decision function on resolved facts.
     ///
-    /// Direct mode: enabled-method → command → network → budget → workspace write region.
+    /// Policy: enabled-method → command → network → budget → workspace write region.
     fn decide_resolved(
         &self,
         resolved: &super::resolved::ResolvedPolicyInput,
@@ -844,7 +844,7 @@ mod tests {
         }
     }
 
-    // ── Test 1: observe.workspace read_file allowed in direct mode ──────
+    // ── Test 1: observe.workspace read_file allowed ──────
 
     #[test]
     fn default_hook_allows_workspace_read_file() {

@@ -158,14 +158,14 @@ fn make_release_e2e_request(
 // ── Release criterion-8 test ──────────────────────────────────────────────────
 
 // Single `run_turn` driving exec.command_run → mutate.edit → mutate.edit → Done(stop)
-// under Direct mode (no envelope declare).
+// without envelope declaration.
 //
 // Asserts:
 // 1. Turn completes with status=Completed.
 // 2. Upper-backed edits are verified via tool outcomes (section 6).
 // 3. Session has exactly one commit in the graph.
 // 4. On-disk attestation has correct in-toto subject / predicate / materials.
-// 5. Audit rows are in exec.command_run → edit → edit order (Direct mode).
+// 5. Audit rows are in exec.command_run → edit → edit order.
 // 6. Both mutate.edit tool results succeed without profile verify configured.
 
 /// Create an unattached branch at the current HEAD without checking it out.
@@ -181,7 +181,7 @@ fn create_unattached_target_branch(root: &std::path::Path, name: &str) -> String
 #[tokio::test]
 async fn release_e2e_criterion_8() {
     let initial_content = "pub fn answer() -> i32 { 1 }";
-    let bad_content = "pub fn answer() -> i32 { 2 }"; // Direct mode: no profile verify, edit succeeds
+    let bad_content = "pub fn answer() -> i32 { 2 }"; // No profile verify configured, edit succeeds
     let good_content = "pub fn answer() -> i32 { 42 } // RELEASE_E2E_OK"; // verify passes
 
     let ws = setup_release_e2e_workspace(initial_content);
@@ -192,7 +192,7 @@ async fn release_e2e_criterion_8() {
         blake3::hash(initial_content.as_bytes()).to_hex()
     );
 
-    // Edit 1: apply bad content (no profile verify in Direct mode).
+    // Edit 1: apply bad content (no profile verify configured).
     let bad_edit_args = serde_json::json!({
         "path": "src/lib.rs",
         "expected_hash": hash1,
@@ -221,7 +221,7 @@ async fn release_e2e_criterion_8() {
         "declared_impact": "command_execution"
     });
 
-    // ── Build FakeStreamingLlmClient with 4 rounds (Direct mode) ─────
+    // ── Build FakeStreamingLlmClient with 4 rounds ─────
     let fake_llm: Arc<dyn LlmClient> = Arc::new(
         FakeStreamingLlmClient::builder()
             // Round 1: exec.command_run
@@ -399,7 +399,7 @@ async fn release_e2e_criterion_8() {
         "first edit must precede second edit in audit; order: {methods:?}"
     );
 
-    // ── 6. Tool results: both edits succeed without profile verify in Direct mode ─
+    // ── 6. Tool results: both edits succeed without profile verify ─
     let edit_results: Vec<_> = result
         .tool_results
         .iter()
