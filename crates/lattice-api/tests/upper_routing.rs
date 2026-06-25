@@ -223,7 +223,6 @@ async fn direct_runtime_fixture(
         project_root: lower.to_path_buf(),
         enabled_tools: vec![ObserveWorkspace::NAME.into(), Create::NAME.into()],
         policy,
-        command_isolation: Default::default(),
         cep_mode: lancet_protocol::policy::CepMode::Enforce,
         audit: AuditBacking::File(audit_dir.path().join("audit.db")),
         model_id: "test".into(),

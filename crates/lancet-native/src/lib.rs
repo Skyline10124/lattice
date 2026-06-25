@@ -19,10 +19,6 @@ pub mod provenance {
 }
 mod server;
 
-pub use enforcement::isolation::{
-    HostProbeEntry, HostProbeReport, MissingRequiredBoundary, probe_host_capabilities,
-    unavailable_required_boundaries,
-};
 pub use execution_backend::{
     DirectVerifyConfig, DirectVerifyConfigError, DirectoryEntry, ExecOutput, ExecRequest,
     ExecRequestError, ExecutionBackend, ExecutionBackendError, ExecutionRouting, FindRequest,

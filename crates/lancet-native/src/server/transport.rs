@@ -3,7 +3,6 @@
 
 //! Native CEP server lifecycle layered on dispatch transport.
 
-use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
 use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use crate::server::registry::{HandlerContext, MethodRegistry, build_routing_metadata};
@@ -38,8 +37,6 @@ pub struct ServerRunConfig {
     pub default_policy_hook: Option<Arc<DefaultPolicyHook>>,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
-    /// Independent command physical-boundary runtime configuration.
-    pub command_isolation: CommandIsolationRuntimeConfig,
     /// Optional Upper execution routing; `None` for host-only.
     pub execution: Option<ExecutionRouting>,
     /// Immutable Direct-mode verify configuration from runtime setup.
@@ -64,7 +61,6 @@ impl ServerRunConfig {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode: CepMode::Off,
-            command_isolation: CommandIsolationRuntimeConfig::default(),
             execution: None,
             direct_verify: None,
         }
@@ -118,7 +114,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         policy_hook,
         default_policy_hook,
         cep_mode,
-        command_isolation,
         execution,
         direct_verify,
     } = config;
@@ -167,7 +162,6 @@ async fn handle_request(registry: MethodRegistry, call: ServerCall, config: Serv
         audit_context: Arc::clone(&audit_context),
         audit: Arc::clone(&audit),
         cep_mode: cep_mode.clone(),
-        command_isolation,
         execution: execution.clone(),
         direct_verify: direct_verify.clone(),
         routing_invocation: routing_invocation.clone(),

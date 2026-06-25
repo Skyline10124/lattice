@@ -281,8 +281,6 @@ mod cep_native_registry_tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

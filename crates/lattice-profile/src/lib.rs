@@ -21,10 +21,9 @@ pub use error::ProfileError;
 pub use load::{LoadedAgentProfile, load_agent_profile};
 pub use schema::{
     AgentProfile, AgentSection, CredentialRef, DEFAULT_CLEANUP_ROUNDS,
-    DEFAULT_MAX_PENDING_SNAPSHOTS, EgressPolicyConfig, LancetCommandIsolationSection,
-    LancetCommandSection, LancetIsolationMode, LancetIsolationSection, LancetLandlockBehavior,
-    LancetNetworkSection, LancetObservationSection, LancetPolicySection, LancetProjectRootSection,
-    LancetSection, LancetUnsupportedHostBehavior, LancetVerifySection,
+    DEFAULT_MAX_PENDING_SNAPSHOTS, EgressPolicyConfig,
+    LancetCommandSection, LancetNetworkSection, LancetObservationSection, LancetPolicySection,
+    LancetProjectRootSection, LancetSection, LancetVerifySection,
     LancetWorkspacePolicySection, LlmRetrySection, LlmSection, PromptSection, ToolsSection,
     WorkspaceSection,
 };

@@ -1163,8 +1163,6 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                command_isolation:
-                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 execution: Some(ExecutionRouting {
                     backend,
                     upper: UpperContext {
@@ -1333,8 +1331,6 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             execution: Some(ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
@@ -1389,8 +1385,6 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             execution: Some(ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
@@ -1638,8 +1632,6 @@ mod tests {
             })),
             audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
             cep_mode: lancet_protocol::policy::CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             execution: Some(ExecutionRouting {
                 backend: Arc::new(HostFsBackend::new(root)),
                 upper: UpperContext {
@@ -1851,8 +1843,6 @@ mod tests {
                 })),
                 audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit")),
                 cep_mode: lancet_protocol::policy::CepMode::Off,
-                command_isolation:
-                    crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
                 execution: Some(ExecutionRouting {
                     backend,
                     upper: UpperContext {

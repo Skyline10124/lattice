@@ -111,8 +111,6 @@ mod scaffold_tests {
             })),
             audit: Arc::new(CepAuditStore::in_memory().expect("audit store")),
             cep_mode: CepMode::Off,
-            command_isolation:
-                crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
             execution: None,
             direct_verify: None,
             routing_invocation: crate::execution_backend::RoutingInvocationState::default(),

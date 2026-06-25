@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use lancet_authority::policy::default::PolicyConfig;
-use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 use lancet_native::{DirectVerifyConfig, ExecutionRouting};
 use lancet_protocol::policy::CepMode;
 use sha2::{Digest, Sha256};
@@ -105,8 +104,8 @@ impl AuditBacking {
 ///
 /// Policy is supplied as fully-resolved LANCET-native types: this crate does not
 /// know about any host application's configuration schema. Translating an
-/// application profile into [`PolicyConfig`] / [`CommandIsolationRuntimeConfig`]
-/// is the host's responsibility, keeping LANCET decoupled from LATTICE.
+/// application profile into [`PolicyConfig`] is the host's responsibility,
+/// keeping LANCET decoupled from LATTICE.
 ///
 /// `project_root` is the runtime workspace root used for the base observation
 /// envelope and audit DB path. The guard's effective root travels inside
@@ -119,8 +118,6 @@ pub struct LancetRuntimeConfig {
     pub enabled_tools: Vec<String>,
     /// Fully-resolved authority/policy configuration.
     pub policy: PolicyConfig,
-    /// Command physical-boundary isolation configuration.
-    pub command_isolation: CommandIsolationRuntimeConfig,
     /// CEP enforcement mode.
     pub cep_mode: CepMode,
     /// Audit store backing.
@@ -147,7 +144,6 @@ impl LancetRuntimeConfig {
             project_root,
             enabled_tools: Vec::new(),
             policy,
-            command_isolation: CommandIsolationRuntimeConfig::default(),
             cep_mode: CepMode::Enforce,
             audit: AuditBacking::InMemory,
             model_id: String::new(),

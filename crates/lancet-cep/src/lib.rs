@@ -27,11 +27,11 @@ pub use lancet_dispatch::{
     ServerCall, ServerRuntime, call_cancelled, duplicate_registration, wire_code_for_error,
 };
 pub use lancet_protocol::{
-    BoundaryDimension, BoundaryPrimitive, CEP_TURN_ATTESTATION_PREDICATE_TYPE,
+    CEP_TURN_ATTESTATION_PREDICATE_TYPE,
     CepError, CepErrorCode, CepErrorData, CepErrorFamily, CepMode,
-    EffectDecl, EffectKindSet, EffectScopeKind, EffectiveBoundaryEntry, EffectiveBoundaryReport,
-    EffectiveBoundaryStatus, ErrorObject,
-    FailureSemantics, GuardVerdict, HostProbeEntry, HostProbeReport, HostProbeStatus, Id,
+    EffectDecl, EffectKindSet, EffectScopeKind,
+    ErrorObject,
+    FailureSemantics, GuardVerdict, Id,
     ImpactKind, InTotoStatement, InTotoSubjectDescriptor, Notification,
     OverlayBehavior, PolicyActionRequired, PolicyAuditContext, PolicyBudgetSnapshot,
     PolicyDecision, PolicyHook, PolicyInput, PolicyReasonCode, ProvActivity, ProvAgent, ProvEntity,

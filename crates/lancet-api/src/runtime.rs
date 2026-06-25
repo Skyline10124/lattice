@@ -124,7 +124,6 @@ impl LancetRuntime {
             project_root,
             enabled_tools,
             policy,
-            command_isolation,
             cep_mode,
             audit,
             model_id,
@@ -180,7 +179,6 @@ impl LancetRuntime {
             policy_hook: default_hook.clone(),
             default_policy_hook: Some(default_hook),
             cep_mode,
-            command_isolation,
             execution,
             direct_verify,
         };

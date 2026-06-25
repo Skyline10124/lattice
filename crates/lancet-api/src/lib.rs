@@ -20,9 +20,9 @@
 //! # Decoupling boundary
 //!
 //! Policy is supplied as fully-resolved LANCET-native types ([`PolicyConfig`],
-//! [`CommandIsolationRuntimeConfig`], [`CepMode`]). This crate has no knowledge
-//! of any application's configuration schema; translating an application profile
-//! into policy is the host's responsibility.
+//! [`CepMode`]). This crate has no knowledge of any application's configuration
+//! schema; translating an application profile into policy is the host's
+//! responsibility.
 //!
 //! The remaining LATTICE coupling in the LANCET stack is URL/DNS security
 //! helpers reused from `lattice-llm`; CEP tool definitions are owned by
@@ -54,14 +54,14 @@ pub use config::{
     audit_db_path_for_project_in, audit_state_root, project_storage_key,
 };
 pub use doctor::{
-    LancetDoctorGate, LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
+    LancetDoctorOutput, LancetDoctorRequest, run_doctor_checks,
 };
 pub use error::{LancetError, LancetResult};
 pub use runtime::{
     DEFAULT_CHANNEL_CAPACITY, LancetRuntime, LancetRuntimeParts, LancetServer, ServerLifecycle,
 };
 pub use status::{
-    LancetRecentCallEntry, LancetStatusOutput, collect_status, collect_status_with_probe,
+    LancetRecentCallEntry, LancetStatusOutput, collect_status,
 };
 
 // --- Curated re-exports: types that appear in this crate's public signatures,
@@ -72,12 +72,10 @@ pub use lancet_authority::policy::default::PolicyConfig;
 pub use lancet_authority::{CepPolicyConfig, CepTurnContext};
 pub use lancet_cep::ToolDefinition;
 pub use lancet_dispatch::{CepClient, CepTransport};
-pub use lancet_native::enforcement::isolation::CommandIsolationRuntimeConfig;
 pub use lancet_native::{
     AuditQueryFilters, CepAuditContext, CepAuditStore, DirectVerifyConfig, ExecutionRouting,
-    MethodRegistry, MissingRequiredBoundary, ServerRunConfig, register_production_method_registry,
+    MethodRegistry, ServerRunConfig, register_production_method_registry,
 };
 pub use lancet_protocol::{
-    BoundaryDimension, BoundaryPrimitive, CepError, EffectiveBoundaryStatus, HostProbeEntry,
-    HostProbeReport, HostProbeStatus,
+    CepError,
 };

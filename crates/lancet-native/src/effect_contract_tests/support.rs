@@ -429,7 +429,6 @@ pub fn build_test_context(
         })),
         audit: Arc::new(crate::audit::CepAuditStore::in_memory().expect("audit store")),
         cep_mode: lancet_protocol::policy::CepMode::Off,
-        command_isolation: crate::enforcement::isolation::CommandIsolationRuntimeConfig::default(),
 
         execution: Some(ExecutionRouting {
             backend: Arc::new(SupportFsBackend::new(root)),

@@ -3,7 +3,6 @@
 
 //! Native handler context and registry type binding.
 
-use crate::enforcement::isolation::CommandIsolationRuntimeConfig;
 use crate::execution_backend::{DirectVerifyConfig, ExecutionRouting, RoutingInvocationState};
 use crate::server::call_durable_metadata::CallDurableMetadata;
 use lancet_audit::{CepAuditContext, CepAuditStore, RejectionRecord};
@@ -49,7 +48,6 @@ pub struct HandlerContext {
     pub audit_context: Arc<RwLock<CepAuditContext>>,
     pub audit: Arc<CepAuditStore>,
     pub cep_mode: CepMode,
-    pub command_isolation: CommandIsolationRuntimeConfig,
     /// Optional Upper execution routing; `None` for host-only.
     pub execution: Option<ExecutionRouting>,
     /// Immutable Direct-mode verify configuration from runtime setup.
@@ -72,7 +70,6 @@ impl std::fmt::Debug for HandlerContext {
             .field("default_policy_hook", &self.default_policy_hook)
             .field("audit_context", &self.audit_context)
             .field("cep_mode", &self.cep_mode)
-            .field("command_isolation", &self.command_isolation)
             .field(
                 "execution",
                 &self.execution.as_ref().map(|_| "<ExecutionRouting>"),
@@ -324,7 +321,6 @@ mod tests {
                 audit_context: Arc::new(RwLock::new(CepAuditContext::default())),
                 audit: Arc::new(CepAuditStore::in_memory().expect("audit")),
                 cep_mode: CepMode::Off,
-                command_isolation: CommandIsolationRuntimeConfig::default(),
                 execution,
                 direct_verify: None,
                 routing_invocation: RoutingInvocationState::default(),
